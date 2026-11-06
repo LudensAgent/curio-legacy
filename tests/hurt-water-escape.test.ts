@@ -21,7 +21,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 const flush = async () => { for (let i = 0; i < 6; i++) await setImmediate(); };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function fixture(t: TestContext, skill: 'press_keys' | 'surface') {
+function fixture(t: TestContext, skill: 'press_keys' | 'swim_path') {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
@@ -39,7 +39,7 @@ function fixture(t: TestContext, skill: 'press_keys' | 'surface') {
   return { adapter, arbiter, bus, mind, pending };
 }
 
-async function startWaterTask(t: TestContext, skill: 'press_keys' | 'surface') {
+async function startWaterTask(t: TestContext, skill: 'press_keys' | 'swim_path') {
   const w = fixture(t, skill);
   const events: { type: string; msg: string }[] = [];
   w.bus.on('event', (e: { type: string; msg: string }) => events.push(e));
@@ -47,13 +47,13 @@ async function startWaterTask(t: TestContext, skill: 'press_keys' | 'surface') {
   const hostile: EntityInfo = { id: 7, name: 'drowned', kind: 'hostile', pos: { x: w.adapter.pos.x + 1, y: w.adapter.pos.y, z: w.adapter.pos.z }, dist: 1 };
   w.adapter.entities = [hostile];
   w.mind.tick();
-  const started = w.arbiter.start({ skill, args: skill === 'press_keys' ? { keys: { jump: true }, ms: 10000 } : {} }, 'llm');
+  const started = w.arbiter.start({ skill, args: skill === 'press_keys' ? { keys: { jump: true }, ms: 10000 } : { mode: 'surface' } }, 'llm');
   if ('error' in started) assert.fail(started.error);
   await flush();
   return { ...w, events };
 }
 
-for (const skill of ['press_keys', 'surface'] as const) test(`hurt while in water does not cancel ${skill}`, async (t) => {
+for (const skill of ['press_keys', 'swim_path'] as const) test(`hurt while in water does not cancel ${skill}`, async (t) => {
   const w = await startWaterTask(t, skill);
   w.bus.publish('hurt', 'P1', '受到伤害', { around: '身体碰着 water、drowned 在 1 格' });
   await sleep(850);

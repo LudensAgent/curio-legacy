@@ -66,7 +66,7 @@ test('下矿时把归档里的深矿道也摆出来，不能只给 live 的浅�
   t.after(close);
   assert.match(user.content, /历史归档的旧矿道/);
   assert.match(user.content, /psg_deep_archive（最低 y-27，30 个脚点）/);
-  assert.match(user.content, /follow_passage \{"to":"deepest","id":"<记录ID>"\}/);
+  assert.match(user.content, /plan_route \{"source":"history","pathId":"<记录ID>"\}/);
 });
 
 test('活动只说沿矿道往下时，仍给出往最深处走的下一步', (t) => {
@@ -155,7 +155,7 @@ test('下一步脚/头可走但下方不是实心时，只报支撑格事实与�
   assert.ok(line, '要给出下方支撑格的事实');
   assert.match(line, /下一步落脚点下方是 air，没有地板/);
   assert.doesNotMatch(line, /你应该|建议先去|必须/);
-  assert.match(line, /follow_passage \{"to":"deepest","dig":true\}.*会消耗方块和工具耐久/);
+  assert.match(line, /mine_cell \/ excavate_run 清开.*plan_route \{"source":"history","pathId":"<记录ID>"\}/);
 });
 
 test('下一步脚/头可走且下方是实心时，保持可以直接走过去', (t) => {
@@ -214,7 +214,7 @@ test('下界找要塞/开平巷时给旧道的水平最远口径，而不是只�
   });
   t.after(close);
   assert.match(user.content, /水平最远/, '下界找要塞需要水平延伸事实');
-  assert.match(user.content, /follow_passage \{"to":"farthest"/, '要给出往远处走的显式入口');
+  assert.match(user.content, /plan_route \{"source":"history","pathId":"<记录ID>"\}/, '要给出沿记录路线往远处走的显式入口');
   assert.doesNotMatch(user.content, /往最深处走的下一步/, '找要塞/平巷不能只给最深方向');
 });
 

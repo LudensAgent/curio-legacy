@@ -47,7 +47,7 @@ test('代码里照判定的写法读 args.args.y 也读得到调用参数', asyn
 test('dig-down-to-depth v11：声明了 y，判定拿调用方给的 y 核对', () => {
   const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'skills', 'dig-down-to-depth');
   const md = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
-  const b = JSON.parse(md.match(/```behavior\n([\s\S]*?)\n```/)![1]);
+  const b = JSON.parse(md.match(/```behavior\r?\n([\s\S]*?)\r?\n```/)![1]);
   assert.equal(b.version, 11);
   assert.deepEqual(Object.keys(b.args), ['y']);
   assert.match(b.verify, /args\.args\.y/);

@@ -15,7 +15,7 @@ test('code skills can verify mounted state and read structured success and failu
     const before = await api.state();
     const mounted = await api.act('interact', { entity: 41 });
     const after = await api.state();
-    const failed = await api.act('ride', { to: '30,0' });
+    const failed = await api.act('boat_path', { to: '30,0' });
     return { before: before.riding, after: after.riding,
       entityId: mounted.data.entityId, mounted: mounted.data.mounted, position: mounted.data.pos,
       failedOk: failed.ok, failure: failed.code, moved: failed.data.moved, stillRiding: failed.data.riding };

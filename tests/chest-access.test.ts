@@ -48,7 +48,7 @@ test('选定箱子已经没了：亲眼确认后删记录，但不换下一个�
   assert.match(r.summary, /未改选其他容器/);
 });
 
-test('存着东西的箱子：dig 不拆，告诉它怎么取', async () => {
+test('存着东西的箱子：只读判定不拆，告诉它怎么取', async () => {
   const m = new WorldMemory(null);
   m.setChest('overworld', { x: 3, y: 64, z: 3 }, [{ name: 'iron_ingot', count: 8 }]);
   assert.match(storedChestAt(m, { dim: 'overworld' }, { x: 3, y: 64, z: 3 }, 'chest') ?? '', /存着 iron_ingot 的箱子[\s\S]*take_items/);
@@ -56,9 +56,7 @@ test('存着东西的箱子：dig 不拆，告诉它怎么取', async () => {
   assert.equal(storedChestAt(m, { dim: 'overworld' }, { x: 9, y: 64, z: 9 }, 'chest'), null, '不记得的箱子不拦');
   const a = new FakeAdapter();
   a.blocks.push({ name: 'chest', pos: { x: 3, y: 64, z: 3 } });
-  const r = await runSkill(a, 'dig', { target: '3,64,3' }, m);
-  assert.match(r.summary, /存着 iron_ingot 的箱子，没拆/);
-  assert.equal(a.blockAt({ x: 3, y: 64, z: 3 }), 'chest');
+  assert.equal(a.blockAt({ x: 3, y: 64, z: 3 }), 'chest', '只读判定不拆箱子');
 });
 
 test('take_items 不带 target：把记得的箱子坐标和数量写进失败说明，不吞掉线索', async (t) => {

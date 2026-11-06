@@ -35,7 +35,7 @@ test('基础动作可以组合出“造船过河”：放船 → 坐上去 → �
   r = await run('interact', { entity: 'boat' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(a.state().riding, 'boat');
-  r = await run('ride', { direction: 'E', distance: 80 });
+  r = await run('boat_path', { direction: 'E', distance: 80 });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.docked, true, '按水面航线停靠到对岸');
   assert.equal(a.state().riding, 'boat', '下船由下一步明确选择');
@@ -54,7 +54,7 @@ test('基础动作的失败会给出可理解的原因', async () => {
   r = await run('use_item', { item: 'oak_boat', on: 'water' });
   assert.equal(r.failureCode, 'NOT_FOUND');
   assert.match(r.summary, /看不见可以对着用的 water/);
-  r = await run('ride', { direction: 'N' });
+  r = await run('boat_path', { direction: 'N' });
   assert.match(r.summary, /没有在乘坐/);
 });
 

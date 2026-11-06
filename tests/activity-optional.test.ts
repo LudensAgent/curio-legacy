@@ -7,7 +7,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 test('顺手的一步“东西已经没了”：后面几轮不再做，不是每轮都白做一遍', () => {
   const adapter = new FakeAdapter();
   const a = createActivity({ what: '往下挖找床', why: '', kind: 'other', repeat: 4, steps: [
-    { skill: 'dig_at', args: { at: [0, -1, 0] } },
+    { skill: 'mine_cell', args: { at: [0, -1, 0] } },
     { skill: 'dig', args: { target: { x: 1, y: 64, z: 1 } }, optional: true },
     { skill: 'pickup_items', args: { radius: 6 } },
   ] }, '', 'llm', adapter.state());

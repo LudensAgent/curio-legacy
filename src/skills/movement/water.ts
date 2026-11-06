@@ -41,10 +41,10 @@ export const swimPath: Skill<SwimArgs> = {
     if (args.mode === 'surface') return surface.run(ctx, { ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}) });
     const target = ctx.adapter.blockAt(args.xyz!);
     if (target !== null && args.mode === 'dry_shore' && WATER.has(target)) {
-      return fail('BAD_ARGS', `目标是水中 ${target}，不是干岸；要游到水中点用 mode:"water_point"`, { target: args.xyz });
+      return fail('BAD_ARGS', `目标是水中 ${target}，不是干岸；要游到水中点用 mode:"water_point"`, { target: args.xyz, unsupportedTarget: target });
     }
     if (target !== null && args.mode === 'water_point' && !WATER.has(target)) {
-      return fail('BAD_ARGS', `目标格是 ${target}，不是水中点；要上岸用 mode:"dry_shore"`, { target: args.xyz });
+      return fail('BAD_ARGS', `目标格是 ${target}，不是水中点；要上岸用 mode:"dry_shore"`, { target: args.xyz, unsupportedTarget: target });
     }
     // 旧 swimTo 已有 water_point/dry_shore 的完成语义；这里只把参数收窄到明确的 xyz。
     return swimTo.run(ctx, { xyz: args.xyz!, ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}) });

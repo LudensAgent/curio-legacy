@@ -34,18 +34,18 @@ test('waterCrossingHint：不近水（也不在水里）不提示', () => {
   assert.equal(waterCrossingHint(P(false, null), S([{ name: 'cobblestone', count: 20 }])), null);
 });
 
-test('waterCrossingHint：在水里时把 swim_to 的水路与脚坐标口径贴到现场', () => {
+test('waterCrossingHint：在水里时把 swim_path 的水路与脚坐标口径贴到现场', () => {
   const hint = waterCrossingHint(P(true, null), S([]));
   assert.ok(hint);
-  assert.match(hint!, /swim_to \{"xyz":\[脚坐标\]\}/);
+  assert.match(hint!, /swim_path \{"mode":"dry_shore","xyz":\[脚坐标\]\}/);
   assert.match(hint!, /沿已看到的水路绕行（不挖不垫）/);
   assert.match(hint!, /bx\+0\.5, by\+1, bz\+0\.5/);
 });
 
-test('waterCrossingHint：只站在水边（身体不在水里）不给 swim_to 上岸口径', () => {
+test('waterCrossingHint：只站在水边（身体不在水里）不给 swim_path 上岸口径', () => {
   const hint = waterCrossingHint(P(false, { layers: { 'u0': ['~~'] } }), S([]));
   assert.ok(hint);
-  assert.doesNotMatch(hint!, /swim_to/);
+  assert.doesNotMatch(hint!, /swim_path/);
 });
 
 test('waterCrossingHint：在水边给出从水里直接上岸的高度机制事实', () => {

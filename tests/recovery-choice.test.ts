@@ -10,8 +10,8 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-recovery-'));
 const noSenses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
-const when = { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } };
-const failure = { skill: 'goto', code: 'PATH_NOT_FOUND' };
+const when = { after_failure: { skill: ['walk_path'], code: ['PATH_NOT_FOUND'] } };
+const failure = { skill: 'walk_path', code: 'PATH_NOT_FOUND' };
 
 function setup() {
   const engine = new BehaviorEngine(new SkillBook(BUILTIN_SKILLS_DIR, tmp()), new FakeAdapter(), null, new EventBus(), noSenses);

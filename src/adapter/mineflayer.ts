@@ -1008,7 +1008,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     throwIfAborted(opts.signal);
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
-    if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 ride 操控它前进`);
+    if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 boat_path 操控它前进`);
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = cornerSafe(Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements));

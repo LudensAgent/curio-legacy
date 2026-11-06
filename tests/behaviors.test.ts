@@ -53,10 +53,10 @@ test('触发条件：只认能感觉到的事，写错给出中文说明；身�
   const vision = new Vision(adapter);
   assert.match((validatePredicate({ teleport: true }) as any).error, /不认识的条件/);
   assert.match((validatePredicate({ cell: { at: [9, 0, 0], is: 'solid' } }) as any).error, /cell\.at/);
-  const p = validatePredicate({ after_failure: { skill: 'goto', code: 'PATH_NOT_FOUND|STUCK' }, cell: [{ at: [1, 0, 0], is: 'solid' }, { at: [1, 1, 0], is: 'open' }] });
+  const p = validatePredicate({ after_failure: { skill: 'walk_path', code: 'PATH_NOT_FOUND|STUCK' }, cell: [{ at: [1, 0, 0], is: 'solid' }, { at: [1, 1, 0], is: 'open' }] });
   assert.ok(!('error' in p));
   if ('error' in p) return;
-  const s = senseNow(adapter, vision, null, { skill: 'goto', code: 'STUCK' });
+  const s = senseNow(adapter, vision, null, { skill: 'walk_path', code: 'STUCK' });
   assert.equal(s.facing, 'E');
   assert.ok(evalPredicate(p, s));
   assert.ok(!evalPredicate(p, senseNow(adapter, vision, null, { skill: 'craft', code: 'STUCK' })), '别的动作失败不算');
@@ -77,7 +77,7 @@ test('写技能：动作和参数要合法；太宽的自动条件、换掉保�
   assert.ok(!('error' in validateBehavior({ name: 'lava-choose', description: '在岩浆里自主选择反应', when: { in_lava: true }, steps: [{ skill: 'look_around' }], overrides: ['lava'] }, adapter)));
   assert.match((validateBehavior({ name: 'nest', description: '套娃技能', steps: [{ skill: 'use_skill', args: { name: 'a' } }] }, adapter) as any).error, /不能再调用技能/);
   const v = validateBehavior({ name: 'Pillar From Skeletons', description: '血少被骷髅射时垫高', when: { hp_below: 8, hostile: { name: 'skeleton', within: 16 } },
-    steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'any' }, if: { cell: { at: [0, 2, 0], is: 'air' } } }], overrides: ['low-hp-flee'] }, adapter);
+    steps: [{ skill: 'pillar_one', args: { item: 'any' }, if: { cell: { at: [0, 2, 0], is: 'air' } } }], overrides: ['low-hp-flee'] }, adapter);
   assert.ok(!('error' in v) && v.name === 'pillar-from-skeletons');
 });
 
@@ -87,7 +87,7 @@ for (const liquid of ['water', 'lava'] as const) test(`自学技能可在${liqui
   adapter.inLava = liquid === 'lava';
   adapter.oxygen = 7;
   const starts: Step[] = [];
-  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0,
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0,
     note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
   const arbiter = { paused: false, info: () => current, on() {}, off() {},
     start: (step: Step, source: TaskSource) => {
@@ -113,7 +113,7 @@ test('救命类候选技能在要命条件下也会自动接手（以 trial 试�
   adapter.inv.set('oak_planks', 2);
   const skeleton: Senses = { ...noSenses, perceivedEntities: () => [{ id: 1, name: 'skeleton', kind: 'hostile', dist: 12, pos: { x: 12, y: 64, z: 0 } } as EntityInfo] };
   const starts: Step[] = [];
-  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
   const arbiter = { paused: false, info: () => current, on() {}, off() {},
     start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
   const book = new SkillBook(null, tmp());
@@ -134,7 +134,7 @@ test('副手装备的盾会让贴身防御候选自动接管（has 不再只数�
   const adapter = new FakeAdapter(), bus = new EventBus();
   const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 3, name: 'zombie', kind: 'hostile', dist: 1.3, perception: 'seen', pos: { x: 1.3, y: 64, z: 0 } } as EntityInfo] };
   const starts: Step[] = [];
-  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
   const arbiter = { paused: false, info: () => current, on() {}, off() {},
     start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
   const book = new SkillBook(null, tmp());
@@ -159,7 +159,7 @@ test('advisory 只压被降级的版本：同名候选改写后重新获得自�
   adapter.hp = 10;
   const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 4, name: 'zombie', kind: 'hostile', dist: 2, perception: 'seen', pos: { x: 2, y: 64, z: 0 } } as EntityInfo] };
   const starts: Step[] = [];
-  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
   const arbiter = { paused: false, info: () => current, on() {}, off() {},
     start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
   const book = new SkillBook(null, tmp());
@@ -294,7 +294,7 @@ test('自动技能接手：条件成立时由身体去做，并且能换掉它�
   assert.equal(starts.at(-1)?.skill, 'flee', '没学过时：天生的本能是逃');
   current = null;
   const w = engine.write({ name: 'pillar-from-skeletons', description: '血少被骷髅盯上就垫高', when: { hp_below: 8, hostile: { name: 'skeleton', within: 16 }, has: 'cobblestone' },
-    steps: [{ skill: 'place_at', args: { at: [0, 0, 0], item: 'cobblestone' } }], priority: 70, overrides: ['low-hp-flee'] });
+    steps: [{ skill: 'pillar_one', args: { item: 'cobblestone' } }], priority: 70, overrides: ['low-hp-flee'] });
   assert.ok(w.ok && w.mode === 'auto', JSON.stringify(w));
   now += 10_000;
   reflex.tick();
@@ -386,7 +386,7 @@ function minimalCtx(adapter: FakeAdapter, memory: WorldMemory, perception: Perce
 test('想起来：按关键词从做过的事、日记和技能书里挑出相关的；半颗心不会显示成 0', () => {
   const memory = new WorldMemory(null);
   const self = new SelfModel(null);
-  self.record({ id: 'r1', what: '挖阶梯回地面', kind: 'explore', outcome: 'stuck', summary: '迈不到 [1,1,0]：目标格上方是 oak_leaves', durationSec: 5, gained: {}, lost: {}, at: Date.now() - 60_000, signature: 'dig_at>step', failures: 1 });
+  self.record({ id: 'r1', what: '挖阶梯回地面', kind: 'explore', outcome: 'stuck', summary: '迈不到 [1,1,0]：目标格上方是 oak_leaves', durationSec: 5, gained: {}, lost: {}, at: Date.now() - 60_000, signature: 'mine_cell>move_step', failures: 1 });
   self.record({ id: 'r2', what: '砍橡木', kind: 'gather', outcome: 'done', summary: '采集了 8 个 oak_log', durationSec: 40, gained: { oak_log: 8 }, lost: {}, at: Date.now(), signature: 'gather:oak_log', failures: 0 });
   self.writeDiary('在雪地边上被骷髅射死了', 'overworld', [0, 64, 0]);
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
@@ -453,9 +453,9 @@ test('反射不再把自己从掩体里拽出去：封好的坑里不跑；在�
   const sealed = reflexWorld(t, ({ x, y, z }) => (x === 0 && z === 0 && (y === 64 || y === 65)) ? 'air' : 'stone');
   sealed.reflex.tick();
   assert.equal(sealed.starts.length, 0, '封好的坑里不出去');
-  // 正在原地垫高（place_at），没被打到：不跑
+  // 正在原地垫高（pillar_one），没被打到：不跑
   const open = reflexWorld(t, ({ y }) => y < 64 ? 'stone' : 'air');
-  open.setTask('place_at');
+  open.setTask('pillar_one');
   open.reflex.tick();
   assert.equal(open.starts.length, 0, '在挖三填一时不被拽走');
   open.bus.publish('hurt', 'P2', '受到伤害');
@@ -470,14 +470,14 @@ test('反射不再把自己从掩体里拽出去：封好的坑里不跑；在�
 
 test('写技能：恢复类必须写清是哪个动作失败；技能声明的参数没给时 use_skill 当场说清', (t) => {
   const adapter = new FakeAdapter();
-  assert.match((validateBehavior({ name: 'fix-all', description: '什么失败都挖一下', when: { after_failure: {} }, steps: [{ skill: 'dig_at', args: { at: [1, 0, 0] } }] }, adapter) as any).error, /哪个动作失败/);
+  assert.match((validateBehavior({ name: 'fix-all', description: '什么失败都挖一下', when: { after_failure: {} }, steps: [{ skill: 'mine_cell', args: { at: [1, 0, 0] } }] }, adapter) as any).error, /哪个动作失败/);
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, adapter, null, new EventBus(), noSenses);
   setBehaviorRegistry(engine);
   t.after(() => setBehaviorRegistry(null));
   assert.match((SKILLS.use_skill.validate({ name: 'local-path' }, adapter) as any).error, /args\.target/);
   assert.ok(SKILLS.use_skill.validate({ name: 'local-path', args: { target: '4,64,0' } }, adapter).ok);
-  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'goto', args: { target: '4,64,0' }, target: { x: 4, y: 64, z: 0 } } }, adapter).ok, '恢复时由失败的那一步提供原参数和绝对目标');
+  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'walk_path', args: { routeId: 'rt_1' }, target: { x: 4, y: 64, z: 0 } } }, adapter).ok, '恢复时由失败的那一步提供原参数和绝对目标');
 });
 
 test('身边方块图附带算好的落脚点和能放方块的格子', async () => {

@@ -100,13 +100,10 @@ export class ExperienceMiner {
       if (![...g].some((f) => needed.has(f))) continue;
       chain.unshift(t);
       needed = new Set([...[...needed].filter((f) => !g.has(f)), ...fam(t.used)]);
-      // 采集前专门去找它的那段 explore 也是做法的一部分（看见目标就停，所以不会白走）
-      const prev = this.trace[i - 1];
-      if (t.skill === 'gather' && prev?.ok && prev.skill === 'explore' && prev.args.until) chain.unshift(prev);
     }
     const steps: SimpleStep[] = [];
     for (const t of chain) {
-      if (!['gather', 'explore', 'craft', 'smelt', 'hunt', 'take_items'].includes(t.skill)) continue;
+      if (!['gather', 'craft', 'smelt', 'hunt', 'take_items'].includes(t.skill)) continue;
       const skill = SKILLS[t.skill];
       if (!skill) return null;
       const v = validateSkill(skill, t.args, this.adapter);

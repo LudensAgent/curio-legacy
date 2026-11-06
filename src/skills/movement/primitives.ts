@@ -235,9 +235,13 @@ export const mineCell: Skill<MineArgs> = {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
     if (typeof facing !== 'string') return { ok: false, error: String(facing) };
-    const xyz = a.xyz ?? a.abs ?? a.world;
-    if (xyz !== undefined) {
-      return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz: xyz as Vec3Like, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(typeof a.tool === 'string' ? { tool: a.tool } : {}) } };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-1, 3], r: 2 });
+      if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能挖到的范围：${rel}；先走近` };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(typeof a.tool === 'string' ? { tool: a.tool } : {}) } };
     }
     const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
@@ -277,8 +281,11 @@ export const mineCell: Skill<MineArgs> = {
     const before = seenBefore;
     if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing, pos));
-    const wet = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
-      .map(([dx, dy, dz]) => ({ pos: { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }, name: adapter.blockAt({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }) ?? '' }))
+    const neighborPositions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
+      .map(([dx, dy, dz]) => ({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }));
+    const seenNeighbors = visibleCells(ctx, neighborPositions);
+    const wet = neighborPositions
+      .map((p) => ({ pos: p, name: seenNeighbors.get(`${p.x},${p.y},${p.z}`) ?? '' }))
       .filter((n) => LIQUID_BLOCKS.has(n.name));
     const blocked = wet.filter((w) => /lava/.test(w.name) ? !args.lava : !args.wet);
     if (blocked.length) {
@@ -286,9 +293,20 @@ export const mineCell: Skill<MineArgs> = {
     }
     let fallFacts: { below: string | null; drop: number | null; fallRisk: string } | undefined;
     if (digsSupport) {
-      const { drop, landing } = dropBelow(adapter, pos);
-      if (drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
-        fallFacts = { below: landing, drop, fallRisk: drop === 0 ? '下方没有已确认的落点' : `下方 ${drop} 格是 ${landing}` };
+      // 只按本次实际观察评估脚下落差；未看清的格子不能借 adapter.blockAt 补全。
+      const belowPositions = [1, 2, 3].map((d) => ({ x: pos.x, y: pos.y - d, z: pos.z }));
+      const seenBelow = visibleCells(ctx, belowPositions);
+      let drop = 0, landing: string | null = null, unknown = false;
+      for (const [i, p] of belowPositions.entries()) {
+        const name = seenBelow.get(`${p.x},${p.y},${p.z}`);
+        if (name === undefined) { unknown = true; break; }
+        if (LIQUID_BLOCKS.has(name)) { landing = name; drop = i + 1; break; }
+        if (!AIR.has(name) && !isSoftBlock(name)) { landing = name; drop = i + 1; break; }
+      }
+      if (unknown || drop === 0 || LIQUID_BLOCKS.has(landing ?? '')) {
+        fallFacts = unknown
+          ? { below: null, drop: null, fallRisk: '下方 3 格内未看清落点' }
+          : { below: landing, drop: drop === 0 ? null : drop, fallRisk: drop === 0 ? '下方 3 格内未见落点' : `下方 ${drop} 格是 ${landing}` };
         if (!args.fall) return fail('BAD_ARGS', `[${args.at}] 挖的是脚下支撑块：${fallFacts.fallRisk}，没有往下挖；确认接受风险写 fall:true`, { ...after(ctx, args.facing, pos), ...fallFacts });
       }
     }
@@ -336,8 +354,14 @@ export const placeCell: Skill<PlaceArgs> = {
     if (!item) return { ok: false, error: 'place_cell 需要 item（方块名）' };
     if (!/^[a-z0-9_]{1,80}$/.test(item) || !adapter.isKnownItem(item)) return { ok: false, error: `未知方块：${item}` };
     if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是实体，不是方块` };
-    const xyz = a.xyz ?? a.abs ?? a.world;
-    if (xyz !== undefined) return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz: xyz as Vec3Like, item } };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-2, 3], r: 2 });
+      if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能放置的范围：${rel}；先走近` };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, item } };
+    }
     const at = parseRel(relValue(a), { f: 2, u: [-2, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
     return { ok: true, args: { at, facing: facing as Facing, item } };
@@ -385,8 +409,14 @@ export const placeSupport: Skill<SupportArgs> = {
     const item = String(a.item ?? a.block ?? 'any').trim().replace(/^minecraft:/, '');
     if (item !== 'any' && (!/^[a-z0-9_]{1,80}$/.test(item) || !adapter.isKnownItem(item))) return { ok: false, error: `item 需要已知方块名或 "any"` };
     if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是实体，不是方块` };
-    const xyz = a.xyz ?? a.abs ?? a.world;
-    if (xyz !== undefined) return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz: xyz as Vec3Like, item } };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-2, 3], r: 2 });
+      if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能放置的范围：${rel}；先走近` };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, item } };
+    }
     const at = parseRel(relValue(a), { f: 2, u: [-2, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
     return { ok: true, args: { at, facing: facing as Facing, item } };
@@ -507,7 +537,7 @@ export const pillarOne: Skill<{ item?: string }> = {
     const r = await adapter.pillarUp(names, ctx.signal);
     if (!r.ok) {
       const code = r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : r.reason === 'OCCUPIED' || String(r.reason).startsWith('BLOCKED:') ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED';
-      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, ...(r.clearance ? { pillarClearance: r.clearance } : {}), ...after(ctx, 'N') });
+      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, ...(r.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}), ...after(ctx, 'N') });
     }
     const state = adapter.state();
     const end = feetCell(state.pos);

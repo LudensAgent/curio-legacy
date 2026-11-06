@@ -38,7 +38,7 @@ test('欲望：死亡掉落物还在 → 最优先回去捡', () => {
   p.death_recovery = { dir: 'NW', dist: 40, lost: 'stone_pickaxe×1、oak_log×12', seconds_left: 200 };
   const r = plan(p);
   assert.equal(r.goal, '回去捡回掉落物');
-  assert.deepEqual(r.steps.map((s: any) => s.skill), ['goto', 'pickup_items']);
+  assert.deepEqual(r.steps.map((s: any) => s.skill), ['resolve_target']);
   assert.equal(r.steps[0].args.target, 'death');
 });
 
@@ -162,15 +162,15 @@ test('技能库：学会组合技能、可执行、拒绝非法定义、低成�
   const memory = new WorldMemory(null);
   const lib = new SkillLibrary(null, a, memory, new EventBus());
   assert.equal(lib.learn({ name: 'Bad Name', steps: [] }).ok, false);
-  assert.equal(lib.learn({ name: 'loop_me', steps: [{ skill: 'unstuck' }, { skill: 'wander' }] }).ok, false);
-  const r = lib.learn({ name: 'scan_and_wander', description: '环顾后走走', steps: [{ skill: 'look_around', args: { seconds: 2 } }, { skill: 'wander', args: { radius: 4 } }] });
+  assert.equal(lib.learn({ name: 'loop_me', steps: [{ skill: 'unstuck' }, { skill: 'wait', args: { seconds: 1 } }] }).ok, false);
+  const r = lib.learn({ name: 'scan_and_step', description: '环顾后走走', steps: [{ skill: 'look_around', args: { seconds: 2 } }, { skill: 'wait', args: { seconds: 1 } }] });
   assert.ok(r.ok);
-  assert.ok(SKILLS['macro:scan_and_wander']);
-  const { o } = await runSkill(a, 'macro:scan_and_wander', {}, memory);
+  assert.ok(SKILLS['macro:scan_and_step']);
+  const { o } = await runSkill(a, 'macro:scan_and_step', {}, memory);
   assert.equal(o.result.status, 'succeeded', o.result.summary);
-  for (let i = 0; i < 3; i++) memory.recordSkill('macro:scan_and_wander', 'failed', 'ERROR');
+  for (let i = 0; i < 3; i++) memory.recordSkill('macro:scan_and_step', 'failed', 'ERROR');
   lib.prune();
-  assert.equal(SKILLS['macro:scan_and_wander'], undefined, '成功率低应被淘汰');
+  assert.equal(SKILLS['macro:scan_and_step'], undefined, '成功率低应被淘汰');
 });
 
 test('偷懒：空手砍了很多木头且很慢 → 效率洞察建议做斧头，规则目标会先做斧头', () => {

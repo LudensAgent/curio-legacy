@@ -7,6 +7,7 @@ import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
+import type { BlockObservation } from '../src/adapter/types.ts';
 import type { Senses } from '../src/skills/types.ts';
 
 const require = createRequire(import.meta.url);
@@ -49,7 +50,7 @@ function fixture(t: TestContext) {
     observeBlocks: (positions) => positions.map((pos: any) => {
       const s = [...stones.values()].find((b) => Math.floor(b.position.x) === pos.x && Math.floor(b.position.y) === pos.y && Math.floor(b.position.z) === pos.z);
       return s ? { name: 'stone', pos: s.position } : { name: 'air', pos };
-    }),
+    }) as unknown as BlockObservation[],
   };
   const arbiter = new Arbiter(adapter, memory, bus, senses);
   const advance = async (ms: number) => {

@@ -74,7 +74,7 @@ function parseStep(step: string): { skill: string; target: string } {
 }
 const GATHER_STEP = /^(gather|collect)$/;
 const USE_SKILL_STEP = /^use_skill$/;
-const MINING_STEP = /^(excavate_path|dig_at|dig)$/;
+const MINING_STEP = /^(excavate_run|mine_cell)$/;
 const WOOD_STEP_TOKENS = new Set(['log', 'wood', 'stem', 'hyphae', 'bamboo']);
 const hasWoodTarget = (target: string) => stepTokens(target).some((t) => WOOD_STEP_TOKENS.has(t));
 const hasOreTarget = (target: string) => ORE_GAIN.test(target) || stepTokens(target).includes('ore');

@@ -16,8 +16,8 @@ export function normalizeStep(raw: unknown): unknown {
   const { skill, args, ...rest } = raw as Record<string, unknown>;
   let name = typeof skill === 'string' ? skill.trim() : skill;
   let a: unknown = args;
-  // 原子动作把坐标直接当 args 写：{"skill":"dig_at","args":[0,2,0]}，place_at 还可能把方块名接在后面 [0,3,0,"dirt"]
-  if (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((n) => Number.isInteger(n))) {
+  // 相对格子动作把坐标直接当 args 写：{"skill":"mine_cell","args":[0,2,0]}，place_cell 还可能把方块名接在后面 [0,3,0,"dirt"]
+  if (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((n) => Number.isInteger(n)) && ['mine_cell', 'place_cell', 'place_support', 'move_step'].includes(String(name))) {
     a = { at: a.slice(0, 3), ...(typeof a[3] === 'string' ? { item: a[3] } : {}) };
   }
   const noArgs = a === undefined || a === null || typeof a !== 'object' || Array.isArray(a) || !Object.keys(a).length;
@@ -126,7 +126,7 @@ export function ruleProposal(p0: Percept, memory?: WorldMemory, current?: { skil
         thought: `刚才「${prop.goal}」没成功（${failed[failed.length - 1].summary}），先换个方向探索，回头再试。`,
         goal: `换个地方：向 ${dir} 探索`,
         goal_type: 'explore',
-        steps: [{ skill: 'explore', args: { direction: dir, distance: 64 } }],
+        steps: [dir === 'auto' ? { skill: 'look_around', args: { seconds: 4 } } : { skill: 'resolve_target', args: { target: `${dir} 64` } }],
       };
     }
   }
@@ -152,6 +152,11 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
   const animals = (p.vision?.seen_entities ?? []).filter((e) => ['cow', 'pig', 'sheep', 'chicken', 'rabbit'].includes(e.name));
 
   const mk = (thought: string, goal: string, goal_type: string, steps: Step[], extra: Record<string, unknown> = {}) => ({ thought, goal, goal_type, steps, ...extra });
+  // 旧 explore/goto 已移除：规则兜底只解析目标或环顾，具体走法由 Agent 用 plan_route → walk_path 决定。
+  const seek = (target: string): Step => ({ skill: 'resolve_target', args: { target } });
+  const scout = (dir: string, distance: number): Step =>
+    dir && dir !== 'auto' ? seek(`${dir} ${Math.max(1, Math.min(200, Math.round(distance)))}`) : { skill: 'look_around' };
+  const bestDir = () => Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'N';
 
   const vis = p.vision;
   const sweptRecently = vis?.last_look_around_s != null && vis.last_look_around_s < 90;
@@ -160,7 +165,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
 
   if (mostlyWater && vis?.nearest_land && vis.nearest_land.dist > 3) {
     return mk(`周围都是水，${vis.nearest_land.dir} 方向 ${vis.nearest_land.dist} 格外能看到陆地，先上岸。`, '游回陆地', 'survive', [
-      { skill: 'explore', args: { direction: vis.nearest_land.dir, distance: Math.min(160, Math.max(24, vis.nearest_land.dist + 6)) } },
+      scout(vis.nearest_land.dir, Math.min(160, Math.max(24, vis.nearest_land.dist + 6))),
     ]);
   }
   if (mostlyWater && !sweptRecently) return mk('四周都是水，先环顾一圈看看陆地在哪。', '环顾四周寻找陆地', 'investigate', [{ skill: 'look_around' }]);
@@ -173,7 +178,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
         return mk(`${t.seen === 'now' ? '看到' : '记得'} ${t.dir ?? ''} 方向 ${t.nearest} 格外有树，先去砍几块原木。`, '收集原木', 'gather', [{ skill: 'gather', args: { block: 'log', count: 5 } }]);
       }
       if (logs + planks / 4 < 3 && !sweptRecently) return mk('眼前没看到树，先环顾一圈。', '环顾四周寻找树木', 'investigate', [{ skill: 'look_around' }]);
-      if (logs + planks / 4 < 3) return mk('环顾过了，附近看不到树，去别处找找。', '寻找树木', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
+      if (logs + planks / 4 < 3) return mk('环顾过了，附近看不到树，去别处找找。', '寻找树木', 'explore', [scout(bestDir(), 48)]);
       return mk('有木头了，做一把木镐（木板、木棍、工作台会自动补做）。', '制作木镐', 'craft', [{ skill: 'craft', args: { item: 'wooden_pickaxe', count: 1 } }]);
     }
     if (cobble < 3) return mk('有木镐了，去挖点圆石做石镐。', '收集圆石', 'gather', [{ skill: 'gather', args: { block: 'stone', count: 6 } }]);
@@ -186,8 +191,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       case 'recover': {
         const dr = p.death_recovery!;
         return mk(`死亡时掉落的东西（${dr.lost}）记录在 ${dr.dir} ${dr.dist} 格外，当前状态未知。`, '回去捡回掉落物', 'survive', [
-          { skill: 'goto', args: { target: 'death' } },
-          { skill: 'pickup_items', args: { radius: 12 } },
+          seek('death'),
         ]);
       }
       case 'survive':
@@ -198,11 +202,11 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       case 'eat':
         if (st.food > 0 && p.self.food < 18) return mk('有点饿了，吃点东西（饱食度高才会回血）。', '进食', 'survive', [{ skill: 'eat' }]);
         if (animals.length && !night) return mk(`肚子饿，背包没吃的，那边有 ${animals[0].name}，去猎点肉。`, '打猎补充食物', 'gather', [{ skill: 'hunt', args: { animal: animals[0].name, count: 2 } }, { skill: 'eat' }]);
-        if (!night && p.self.food <= 10) return mk('饿了又没看到动物，去开阔的地方找找。', '寻找动物', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 64 } }]);
+        if (!night && p.self.food <= 10) return mk('饿了又没看到动物，去开阔的地方找找。', '寻找动物', 'explore', [scout(bestDir(), 64)]);
         return null;
       case 'rest':
         if (st.hasBed || bedPlaced) return night ? mk('天黑了，睡一觉跳过夜晚。', '睡觉过夜', 'rest', [{ skill: 'sleep' }]) : null;
-        if (homeBuilt && p.exploration.base && p.exploration.base.dist > 6) return mk('天要黑了，回小屋待着。', '回家过夜', 'rest', [{ skill: 'goto', args: { target: 'base' } }]);
+        if (homeBuilt && p.exploration.base && p.exploration.base.dist > 6) return mk('天要黑了，回小屋待着。', '回家过夜', 'rest', [seek('base')]);
         if (night && st.blocks >= 1 && !p.self.inWater) return mk('没有床也没房子，挖个坑躲一晚。', '挖坑过夜', 'rest', [{ skill: 'shelter', args: { until: 'day' } }]);
         return null;
       case 'light': {
@@ -243,7 +247,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
         return null;
       case 'curiosity': {
         const c = p.curiosities[0];
-        return mk(`之前看见 ${c.dir} 方向有 ${c.what}，去看看是什么。`, `调查 ${c.what}`, 'investigate', [{ skill: 'explore', args: { direction: c.dir, distance: Math.min(160, Math.max(24, c.dist)) } }]);
+        return mk(`之前看见 ${c.dir} 方向有 ${c.what}，去看看是什么。`, `调查 ${c.what}`, 'investigate', [scout(c.dir, Math.min(160, Math.max(24, c.dist)))]);
       }
       case 'stockpile':
         if (st.logs < 16 && logNearby) return mk('多囤点木头，省得以后来回跑。', '囤积木材', 'gather', [{ skill: 'gather', args: { block: 'log', count: 12 } }]);
@@ -263,7 +267,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       }
       case 'expedition': {
         if (night || !(d.suggest ?? '').startsWith('expedition')) return null;
-        const [dir] = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0] ?? ['auto'];
+        const dir = bestDir();
         return mk(`家里安顿好了，去 ${dir} 方向远行看看，沿途留路标。`, `远征 ${dir}`, 'explore', [{ skill: 'expedition', args: { direction: dir, distance: 240 } }]);
       }
       case 'novelty': {
@@ -274,8 +278,8 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
       }
       case 'explore': {
         if (night) return null;
-        const [bestDir] = Object.entries(p.exploration.noveltyByDir).sort((a, b) => b[1] - a[1])[0] ?? ['auto'];
-        return mk(`去 ${bestDir} 方向看看没去过的地方。`, `向 ${bestDir} 探索`, 'explore', [{ skill: 'explore', args: { direction: bestDir, distance: 80 } }]);
+        const east = bestDir();
+        return mk(`去 ${east} 方向看看没去过的地方。`, `向 ${east} 探索`, 'explore', [scout(east, 80)]);
       }
       default:
         return null;
@@ -286,5 +290,5 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
     const r = act(d);
     if (r) return r;
   }
-  return toolsChain() ?? mk('四处走走看看。', '闲逛观察', 'explore', [{ skill: 'explore', args: { direction: 'auto', distance: 48 } }]);
+  return toolsChain() ?? mk('四处走走看看。', '闲逛观察', 'explore', [scout(bestDir(), 48)]);
 }

@@ -25,7 +25,7 @@ test('pause cancels the active task and gates reflex and all new task sources un
   const { adapter, bus, vision, arbiter } = setup();
   adapter.speed = 1;
   const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   arbiter.setPaused(true);
   assert.equal((await done).result.status, 'cancelled');
   adapter.inLava = true;

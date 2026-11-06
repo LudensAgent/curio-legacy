@@ -216,37 +216,7 @@ test('代码技能 api.useSkill 保留嵌套 data 外壳', async (t) => {
   assert.equal(parsed.marker, 7, '嵌套失败的结构化事实不能被压成 ok/code/summary');
 });
 
-test('新 taskId/planVersion 复用同一份爬升额度，不重置已确认进展', async (t) => {
-  const w = setup();
-  t.after(w.close);
-  const seen: unknown[] = [];
-  SKILLS.test_climb_budget = stub('test_climb_budget', async (ctx) => {
-    seen.push(ctx.climb);
-    assert.ok(ctx.climb, '必须收到父委托的额度账本');
-    ctx.climb.spent += 1;
-    return fail('STUCK', '本次又完成一格，条件还没满足', { goalReached: false });
-  });
-  t.after(() => { delete SKILLS.test_climb_budget; });
-
-  const budget = { height: 18, spent: 0, startY: 64 };
-  const first = startTask(w.arbiter, { skill: 'test_climb_budget' }, 'llm', { planId: 'climb_plan', stepId: 'st_climb', climb: budget });
-  const firstDone = await w.next();
-  const second = startTask(w.arbiter, { skill: 'test_climb_budget' }, 'llm', { planId: 'climb_plan', stepId: 'st_climb', climb: budget });
-  await w.next();
-
-  assert.notEqual(first.id, second.id, '自动续跑会得到新 taskId');
-  assert.equal(second.planVersion, first.planVersion + 1);
-  assert.equal(seen[0], budget);
-  assert.equal(seen[1], budget, '新 taskId 继续用同一份账本，而不是从 0 起算');
-  assert.equal(budget.spent, 2);
-  const end = w.ends.get(second.id)!;
-  assert.equal(end.planId, 'climb_plan');
-  assert.equal(end.stepId, 'st_climb');
-  assert.deepEqual(end.budget.climb, { height: 18, spent: 2, startY: 64 });
-  assert.equal(firstDone.result.failureCode, 'STUCK');
-});
-
-test('use_skill 嵌套步骤不能延长父委托 deadline；自动插步带 origin 与授权链', async (t) => {
+test('use_skill 嵌套步骤不能延长父委托 deadline', async (t) => {
   const adapter = new FakeAdapter();
   const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
@@ -265,24 +235,6 @@ test('use_skill 嵌套步骤不能延长父委托 deadline；自动插步带 ori
   assert.ok(nestedDeadline > 0);
   assert.ok(nestedDeadline <= parentDeadline, '嵌套步骤只能缩短、不能延长父 deadline');
 
-  // 执行辅助自动插入的清障步骤：保留 execution_helper 来源和原 climb_up 授权。
-  const climbActivity = createActivity({ what: '爬升', why: '', kind: 'other', repeat: 1,
-    steps: [{ skill: 'climb_up', args: { height: 3, untilSky: false } }] }, '', 'llm', adapter.state());
-  const climbStep = nextStep(climbActivity)!;
-  climbActivity.stepStart = { pos: { x: 0, y: 64, z: 0 } };
-  const verdict = afterStep(climbActivity, climbStep,
-    fail('STUCK', '头顶被挡', { failureCause: 'PILLAR_CLEARANCE', pillarClearance: { cells: [{ at: [0, 2, 0] }] } }), 10, adapter.state());
-  assert.equal(verdict.kind, 'continue');
-  const inserted = climbActivity.steps[0];
-  assert.equal(inserted.skill, 'dig_at');
-  assert.equal(inserted.origin, 'execution_helper');
-  assert.equal(inserted.authorizedBy?.skill, 'climb_up');
-  assert.equal(inserted.authorizedBy?.stepId, climbStep.id);
-
-  // 下一个任务从 insert 的步骤取得同样的归因字段。
-  const handed = nextStep(climbActivity)!;
-  assert.equal(handed.origin, 'execution_helper');
-  assert.equal(handed.authorizedBy?.skill, 'climb_up');
 });
 
 test('直接工具、宏和代码技能产生同一套 task_end 字段', async (t) => {

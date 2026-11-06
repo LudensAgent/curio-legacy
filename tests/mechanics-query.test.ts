@@ -5,7 +5,7 @@ import { SKILLS } from '../src/skills/index.ts';
 
 test('empty mechanics query exposes only registered general operations with exact interfaces, without changing the registry', () => {
   const before = Object.keys(SKILLS), result = queryMechanics('', 20);
-  for (const name of ['use_item', 'interact', 'ride', 'dismount', 'dig', 'craft', 'look_around']) assert.ok(result.mechanics.some((entry) => entry.primitive === name));
+  for (const name of ['use_item', 'interact', 'boat_path', 'dismount', 'mine_cell', 'craft', 'look_around']) assert.ok(result.mechanics.some((entry) => entry.primitive === name));
   assert.equal(result.mechanics.some((entry) => ['boat', 'build', 'farm', 'expedition'].includes(entry.primitive)), false);
   for (const entry of result.mechanics) {
     assert.equal(entry.kind, 'primitive');
@@ -19,11 +19,11 @@ test('empty mechanics query exposes only registered general operations with exac
 });
 
 test('mechanics search handles bilingual actions and exact names while keeping composites explicit and unknown abilities absent', () => {
-  for (const query of ['拆除方块', 'break a block', 'dig']) assert.equal(queryMechanics(query, 1).mechanics[0]?.primitive, 'dig', query);
+  for (const query of ['拆除方块', 'break a block', 'dig']) assert.equal(queryMechanics(query, 1).mechanics[0]?.primitive, 'mine_cell', query);
   assert.equal(queryMechanics('右键实体', 1).mechanics[0]?.primitive, 'interact');
   assert.equal(queryMechanics('place blocks', 1).mechanics[0]?.primitive, 'use_item');
   const navigation = queryMechanics('boat', 1).mechanics[0];
-  assert.equal(navigation?.primitive, 'ride'); assert.equal(navigation?.kind, 'primitive');
+  assert.equal(navigation?.primitive, 'boat_path'); assert.equal(navigation?.kind, 'primitive');
   assert.equal(SKILLS.boat, undefined);
   assert.deepEqual(queryMechanics('quantum telekinesis 999').mechanics, []);
   assert.equal(queryMechanics('use_item', 1).mechanics[0]?.parameters, SKILLS.use_item.argsDoc);

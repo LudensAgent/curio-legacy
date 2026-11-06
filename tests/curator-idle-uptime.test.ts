@@ -187,7 +187,7 @@ test('主动维护技能没有失败证据时不按闲置收起，有失败证�
   const w = setup(t);
   const proactive = { ...definition, name: 'top-up-torches', description: '火把少了就补到箱子里', when: { food_below: 8 } };
   const failedProactive = { ...definition, name: 'plant-surplus-saplings', description: '树苗多了就种到附近空地', when: { food_below: 7 } };
-  const failedRecovery = { ...definition, name: 'retry-goto-after-path-failure', when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } } };
+  const failedRecovery = { ...definition, name: 'retry-walk-after-path-failure', when: { after_failure: { skill: ['walk_path'], code: ['PATH_NOT_FOUND'] } } };
   for (const skill of [proactive, failedProactive, failedRecovery]) assert.ok(w.engine.write(skill).ok, skill.name);
   assert.equal(w.engine.get(proactive.name)?.mode, 'auto');
   assert.equal(w.engine.get(failedRecovery.name)?.mode, 'recover');

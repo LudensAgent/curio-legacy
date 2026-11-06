@@ -179,16 +179,16 @@ test('专注：点子和疑问不能当主目标；抄回来的清单格式会�
 
 test('老毛病：同一个动作因为同一种原因一再失败（吃亏程度看不出来，因为天天如此），攒到几次就拿着归好类的原因去学', async (t) => {
   const { reasonOf, RECURRING } = await import('../src/codeskills/smith.ts');
-  assert.deepEqual(reasonOf('[llm] step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：目标格是 stone；目标格上方是 dirt（会碰头）'), ['目标格是 stone', '目标格上方是 dirt（会碰头）']);
+  assert.deepEqual(reasonOf('[llm] move_step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：目标格是 stone；目标格上方是 dirt（会碰头）'), ['目标格是 stone', '目标格上方是 dirt（会碰头）']);
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(BUILTIN_SKILLS_DIR, tmp());
   const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
   const asked: string[] = [];
-  const planner = { autonomous: true, noteInvalid() {}, complete: async (m: any[]) => { asked.push(m[0].content + '\n' + m[1].content); return { text: JSON.stringify({ skill: { name: 'pad-then-step', description: '迈不过去因为脚下踩不住时先垫一块', when: { after_failure: { skill: 'step', code: 'PATH_NOT_FOUND' } }, steps: [{ skill: 'place_at', args: { at: [1, 0, 0] } }] } }), latencyMs: 5 }; } };
+  const planner = { autonomous: true, noteInvalid() {}, complete: async (m: any[]) => { asked.push(m[0].content + '\n' + m[1].content); return { text: JSON.stringify({ skill: { name: 'pad-then-step', description: '迈不过去因为脚下踩不住时先垫一块', when: { after_failure: { skill: 'move_step', code: 'PATH_NOT_FOUND' } }, steps: [{ skill: 'place_cell', args: { at: [1, 0, 0], item: 'cobblestone' } }] } }), latencyMs: 5 }; } };
   const smith = new SkillSmith(planner as any, engine, book, bus, () => adapter.state());
   smith.start(1_000_000);
   t.after(() => smith.stop());
-  const fail = (why: string) => bus.publish('task_end', 'P1', `[llm] step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：${why}`, { status: 'failed', skill: 'step', failureCode: 'PATH_NOT_FOUND', source: 'llm' });
+  const fail = (why: string) => bus.publish('task_end', 'P1', `[llm] move_step → failed(PATH_NOT_FOUND)：迈不到 [1,1,0]：${why}`, { status: 'failed', skill: 'move_step', failureCode: 'PATH_NOT_FOUND', source: 'llm' });
   fail('目标格脚下是 空气，往下 3 格内也没有落脚处（踩不住）');
   bus.publish('task_end', 'P1', '[llm] craft → failed(MISSING_MATERIALS)：缺木板', { status: 'failed', skill: 'craft', failureCode: 'MISSING_MATERIALS', source: 'llm' });
   fail('目标格脚下是 空气，往下 3 格内也没有落脚处（踩不住）');
@@ -209,7 +209,7 @@ test('老毛病：同一个动作因为同一种原因一再失败（吃亏程�
 
 test('一再重复的同一串动作：心智一步步指挥做了好几遍，就去练成一个技能（看一看、等一等不算）', async (t) => {
   const { findRepeat } = await import('../src/codeskills/smith.ts');
-  const stair = ['dig_at {"at":[1,1,0]}', 'dig_at {"at":[1,2,0]}', 'step {"at":[1,1,0]}'];
+  const stair = ['mine_cell {"at":[1,1,0]}', 'mine_cell {"at":[1,2,0]}', 'move_step {"at":[1,1,0]}'];
   assert.deepEqual(findRepeat([...stair, ...stair, 'look_around {}', ...stair])?.times, 3);
   assert.equal(findRepeat([...stair, ...stair]), null, '两遍还不算');
   assert.equal(findRepeat(['glance {}', 'wait {}', 'glance {}', 'wait {}', 'glance {}', 'wait {}']), null);
@@ -222,13 +222,13 @@ test('一再重复的同一串动作：心智一步步指挥做了好几遍，�
   smith.start(1_000_000);
   t.after(() => smith.stop());
   const act = (skill: string, args: object, facing = 'E') => bus.publish('task_start', 'P2', `[llm] ${skill}`, { skill, args: { ...args, facing }, source: 'llm' });
-  for (let i = 0; i < 3; i++) { act('dig_at', { at: [1, 1, 0] }, i % 2 ? 'N' : 'E'); act('dig_at', { at: [1, 2, 0] }); act('step', { at: [1, 1, 0] }); }
+  for (let i = 0; i < 3; i++) { act('mine_cell', { at: [1, 1, 0] }, i % 2 ? 'N' : 'E'); act('mine_cell', { at: [1, 2, 0] }); act('move_step', { at: [1, 1, 0] }); }
   // 身体自己（反射）做的不算心智指挥
-  bus.publish('task_start', 'P2', '[reflex] place_at', { skill: 'place_at', args: {}, source: 'reflex' });
+  bus.publish('task_start', 'P2', '[reflex] place_cell', { skill: 'place_cell', args: {}, source: 'reflex' });
   await flush();
   assert.equal(asked.length, 1);
   assert.match(asked[0], /同一串动作重复了好几遍/);
-  assert.match(asked[0], /dig_at.*dig_at.*step.*3 遍/);
+  assert.match(asked[0], /mine_cell.*mine_cell.*move_step.*3 遍/);
 });
 
 test('来回拉锯：两个技能交替接手就先让不那么管用的歇一会儿；一个技能一再打断手上同一件事就告诉心智和整理的', async (t) => {

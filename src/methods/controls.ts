@@ -4,8 +4,8 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 
 /** Buttons and queries, rather than a list of activities the player ought to do. */
 export const BASIC_CONTROLS = [
-  'look_around', 'goto', 'inspect_block', 'use_item', 'interact_block', 'interact', 'hit_entity',
-  'look', 'dig', 'dig_at', 'step', 'place_at', 'pickup_items', 'craft', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'eat', 'ride', 'dismount', 'climb_up', 'assess_landings', 'descend', 'wait',
+  'look_around', 'resolve_target', 'plan_route', 'walk_path', 'inspect_block', 'use_item', 'interact_block', 'interact', 'hit_entity',
+  'look', 'excavate_run', 'mine_cell', 'move_step', 'place_cell', 'place_support', 'pillar_one', 'pickup_items', 'craft', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'eat', 'boat_path', 'dismount', 'assess_landings', 'descend_to', 'swim_path', 'wait',
   'query_resource', 'method_catalog', 'experiment_method', 'record_ability_gap',
 ] as const;
 

@@ -34,11 +34,11 @@ test('a rejected parameter records the validator detail', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   t.after(() => memory.close());
   const draft = validateDraft({ what: '出发', steps: [
-    { skill: 'travel', args: {}, optional: true },
+    { skill: 'plan_route', args: { mode: 'swim' }, optional: true },
     { skill: 'look_around', args: { seconds: 3 } },
   ] }, adapter, memory, []);
   assert.ok(!('error' in draft));
-  assert.match(draft.dropped?.[0] ?? '', /to 需要 x,z/);
+  assert.match(draft.dropped?.[0] ?? '', /to 需要绝对坐标/);
 });
 
 test('a required candidate skill without explicit trial rejects the whole activity', (t) => {

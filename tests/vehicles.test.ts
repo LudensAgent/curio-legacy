@@ -27,26 +27,26 @@ const mount = async (a: FakeAdapter) => {
   await a.interactEntity(5, null, new AbortController().signal);
 };
 
-test('ride requires an explicit mount and never prepares a boat or spends materials', async () => {
+test('boat_path requires an explicit mount and never prepares a boat or spends materials', async () => {
   const a = new FakeAdapter();
   lake(a);
   a.inv.set('oak_boat', 1); a.inv.set('oak_log', 8);
   const { run } = setup(a);
-  const result = await run('ride', { direction: 'E' });
+  const result = await run('boat_path', { direction: 'E' });
   assert.equal(result.failureCode, 'BAD_ARGS');
   assert.deepEqual(a.actions, []);
   assert.equal(a.inv.get('oak_boat'), 1);
   assert.equal(a.inv.get('oak_log'), 8);
-  assert.equal(SKILLS.boat, undefined);
+  assert.equal(SKILLS.ride, undefined, '旧 ride 入口不再注册');
 });
 
-test('ride follows a bending water route and stays mounted at a water destination', async () => {
+test('boat_path follows a bending water route and stays mounted at a water destination', async () => {
   const a = new FakeAdapter();
   for (let x = 4; x <= 22; x++) for (let z = -2; z <= 2; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } });
   for (let x = 18; x <= 22; x++) for (let z = -30; z < -2; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } });
   await mount(a);
   const { run } = setup(a);
-  const result = await run('ride', { to: '20,-28' });
+  const result = await run('boat_path', { to: '20,-28' });
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.arrived, true);
   assert.equal(result.data?.stopReason, 'arrived');
@@ -57,13 +57,13 @@ test('ride follows a bending water route and stays mounted at a water destinatio
   assert.ok(!a.actions.some((action) => /^(craft|use|attack):/.test(action)));
 });
 
-test('ride docks at a low bank without dismounting; dismount is a separate directed action', async () => {
+test('boat_path docks at a low bank without dismounting; dismount is a separate directed action', async () => {
   const a = new FakeAdapter();
   lake(a);
   for (let x = 41; x <= 70; x++) for (let z = -3; z <= 0; z++) for (const y of [64, 65]) a.blocks.push({ name: 'dirt', pos: { x, y, z } });
   await mount(a);
   const { run } = setup(a);
-  const result = await run('ride', { to: '60,-2' });
+  const result = await run('boat_path', { to: '60,-2' });
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.arrived, false, 'docking is not arrival at the land destination');
   assert.equal(result.data?.docked, true);
@@ -81,29 +81,29 @@ test('ride docks at a low bank without dismounting; dismount is a separate direc
   assert.deepEqual(a.dismountToward, { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 });
 });
 
-test('ride cancellation hands the same boat to the next task without a delayed dismount', async () => {
+test('boat_path cancellation hands the same boat to the next task without a delayed dismount', async () => {
   const a = new FakeAdapter();
   lake(a, 240); await mount(a);
   const { arbiter } = setup(a);
   const cancelled = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  arbiter.start({ skill: 'ride', args: { to: '200,0' } }, 'llm');
+  arbiter.start({ skill: 'boat_path', args: { to: '200,0' } }, 'llm');
   await sleep(30);
   arbiter.cancel('replan');
   assert.equal((await cancelled).result.status, 'cancelled');
   const completed = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  arbiter.start({ skill: 'ride', args: { to: '20,0' } }, 'llm');
+  arbiter.start({ skill: 'boat_path', args: { to: '20,0' } }, 'llm');
   const result = (await completed).result;
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(a.riding, 'boat');
   assert.equal(result.data?.arrived, true);
 });
 
-test('ride reports a timeout after progress as failure and preserves the mounted state', async () => {
+test('boat_path reports a timeout after progress as failure and preserves the mounted state', async () => {
   const a = new FakeAdapter();
   lake(a); await mount(a);
   a.ride = async () => ({ ok: false, reason: 'TIMEOUT', arrived: false, moved: 10 });
   const { run } = setup(a);
-  const result = await run('ride', { to: '30,0' });
+  const result = await run('boat_path', { to: '30,0' });
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'TIMEOUT');
   assert.equal(result.data?.moved, 10);
@@ -114,7 +114,7 @@ test('ride reports a timeout after progress as failure and preserves the mounted
 });
 
 test('registered skills retain brief descriptions', () => {
-  for (const name of ['ride', 'fish', 'wait']) {
+  for (const name of ['boat_path', 'fish', 'wait']) {
     assert.ok(SKILLS[name], name);
     assert.ok(SKILLS[name].description.length <= 90, name);
   }

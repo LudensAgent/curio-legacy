@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { API_DOC, makeBridge, setReliableSkills } from '../src/codeskills/bridge.ts';
 import { SKILLS } from '../src/skills/index.ts';
-import { digAt } from '../src/skills/primitives.ts';
+import { mineCell } from '../src/skills/movement/index.ts';
 import { runSkill, type Skill } from '../src/skills/types.ts';
 import { setBehaviorRegistry, useSkill } from '../src/skills/use-skill.ts';
 import { AbortedError, sleep, TimeoutError } from '../src/util.ts';
@@ -88,11 +88,11 @@ test('fall opt-in reaches both code entry points and preserves the observed risk
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
     t.after(() => ctx.memory.close());
     const bridge = makeBridge(ctx);
-    const blocked = await bridge(method, method === 'digAt' ? [0, 63, 0] : ['dig_at', { at: [0, -1, 0], facing: 'N' }]) as { ok: boolean; code: string };
+    const blocked = await bridge(method, method === 'digAt' ? [0, 63, 0] : ['mine_cell', { at: [0, -1, 0], facing: 'N' }]) as { ok: boolean; code: string };
     assert.equal(blocked.ok, false);
     assert.equal(blocked.code, 'BAD_ARGS');
     assert.deepEqual(adapter.actions, []);
-    const result = await bridge(method, method === 'digAt' ? [0, 63, 0, { fall: true }] : ['dig_at', { at: [0, -1, 0], facing: 'N', fall: true }]) as { ok: boolean; data: { fallRisk: string; below: string | null; drop: number | null } };
+    const result = await bridge(method, method === 'digAt' ? [0, 63, 0, { fall: true }] : ['mine_cell', { at: [0, -1, 0], facing: 'N', fall: true }]) as { ok: boolean; data: { fallRisk: string; below: string | null; drop: number | null } };
     assert.equal(result.ok, true);
     assert.match(result.data.fallRisk, /3 格内未见落点/);
     assert.equal(result.data.below, null);
@@ -107,7 +107,7 @@ test('fall opt-in does not turn hidden landing blocks into observed facts', asyn
   const all = observeAllBlocks(adapter);
   const ctx = makeCtx(adapter, { senses: { observeBlocks: (positions) => all(positions.filter((p) => p.y >= 63)) } });
   t.after(() => ctx.memory.close());
-  const result = await digAt.run(ctx, { at: [0, -1, 0], facing: 'N', fall: true });
+  const result = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'N', fall: true } as never);
   assert.equal(result.status, 'succeeded', result.summary);
   assert.match(String(result.data?.fallRisk), /未看清/);
   assert.equal(result.data?.below, null);
@@ -118,9 +118,9 @@ test('fall opt-in does not turn hidden landing blocks into observed facts', asyn
 test('recovery preserves fall authorization through nested step and code skills', async (t) => {
   for (const codeChild of [false, true]) for (const authorized of [false, true]) await t.test(`codeChild=${codeChild}, fall=${authorized}`, async (t) => {
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
-    ctx.recovery = { skill: 'dig_at', args: { at: [0, -1, 0], facing: 'N', ...(authorized ? { fall: true } : {}) }, target: { x: 0, y: 63, z: 0 } };
+    ctx.recovery = { skill: 'mine_cell', args: { at: [0, -1, 0], facing: 'N', ...(authorized ? { fall: true } : {}) }, target: { x: 0, y: 63, z: 0 } };
     const child = { name: 'fall-child', description: 'test', version: 1,
-      steps: codeChild ? [] : [{ skill: 'dig_at', args: { at: [0, -1, 0], facing: 'N', fall: true } }],
+      steps: codeChild ? [] : [{ skill: 'mine_cell', args: { at: [0, -1, 0], facing: 'N', fall: true } }],
       ...(codeChild ? { code: 'const r = await api.digAt(0,63,0,{fall:true}); if (!r.ok) throw new Error(r.summary); return r;' } : {}),
     };
     const parent = { name: 'fall-parent', description: 'test', version: 1,
@@ -141,16 +141,17 @@ test('recovery preserves fall authorization through nested step and code skills'
 test('permission to dig during movement recovery does not also authorize falling', async (t) => {
   for (const permission of ['terrain', 'allowDig'] as const) await t.test(permission, async (t) => {
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
-    ctx.recovery = { skill: 'goto', args: { dig: permission === 'terrain' }, ...(permission === 'allowDig' ? { allowDig: true } : {}), target: { x: 2, y: 64, z: 0 } };
+    ctx.recovery = { skill: 'walk_path', args: { routeId: 'rt_1' }, ...(permission === 'allowDig' ? { allowDig: true } : {}), target: { x: 2, y: 64, z: 0 } };
     t.after(() => ctx.memory.close());
-    await assert.rejects(makeBridge(ctx)('act', ['dig_at', { at: [0, -1, 0], facing: 'N', fall: true }]), /fall:true/);
+    await assert.rejects(makeBridge(ctx)('act', ['mine_cell', { at: [0, -1, 0], facing: 'N', fall: true }]), /fall:true/);
     assert.deepEqual(adapter.actions, []);
   });
 });
 
-test('cancelled swim_to keeps observed partial displacement and exact coords through the arbiter', async () => {
+test('cancelled swim_path keeps observed partial displacement and exact coords through the arbiter', async () => {
   const adapter = new FakeAdapter();
   adapter.inWater = true; adapter.oxygen = 10;
+  adapter.blocks.push({ name: 'water', pos: { x: 4, y: 64, z: 1 } });
   const ctx = makeCtx(adapter);
   const arbiter = new Arbiter(adapter, ctx.memory, ctx.bus, ctx.senses);
   let entered!: () => void;
@@ -169,7 +170,7 @@ test('cancelled swim_to keeps observed partial displacement and exact coords thr
     return { ok: false, reason: 'WATER_ESCAPE_TIMEOUT', landed: false, surfaced: false, oxygen: 6 };
   };
   const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  assert.ok(!('error' in arbiter.start({ skill: 'swim_to', args: { xyz: [4, 64, 1] } }, 'llm')));
+  assert.ok(!('error' in arbiter.start({ skill: 'swim_path', args: { mode: 'water_point', xyz: [4, 64, 1] } }, 'llm')));
   await gate;
   arbiter.cancel('替换任务');
   const outcome = await done;
@@ -205,9 +206,10 @@ test('runSkill survives a null/undefined rejection and still keeps a real partia
   ctx.memory.close();
 });
 
-test('timed-out swim_to keeps partial facts instead of discarding them', async () => {
+test('timed-out swim_path keeps partial facts instead of discarding them', async () => {
   const adapter = new FakeAdapter();
   adapter.inWater = true; adapter.oxygen = 10;
+  adapter.blocks.push({ name: 'water', pos: { x: 4, y: 64, z: 1 } });
   const ctx = makeCtx(adapter);
   const arbiter = new Arbiter(adapter, ctx.memory, ctx.bus, ctx.senses);
   adapter.swimTo = async () => {
@@ -218,7 +220,7 @@ test('timed-out swim_to keeps partial facts instead of discarding them', async (
     throw e;
   };
   const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  arbiter.start({ skill: 'swim_to', args: { xyz: [4, 64, 1] } }, 'llm');
+  arbiter.start({ skill: 'swim_path', args: { mode: 'water_point', xyz: [4, 64, 1] } }, 'llm');
   const outcome = await done;
   assert.equal(outcome.result.status, 'failed');
   assert.equal(outcome.result.failureCode, 'TIMEOUT');

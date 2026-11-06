@@ -49,7 +49,7 @@ test('材料的账：按生产格式 routine 的采集步判断趟数，取物/�
     // 取物/顺手捡到：routine 里没有木料采集步
     ep(8_000, 0, { oak_log: 8 }, 'take_items 从箱子取木头', 'take_items {"item":"oak_log"}'),
     ep(9_000, 0, { oak_log: 64 }, '从箱子取原木', 'take_items {"item":"oak_log"}'),
-    ep(10_000, 0, { oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'excavate_path {"direction":"east"} > pickup_items {"item":"oak_log"}'),
+    ep(10_000, 0, { oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'excavate_run {"direction":"east"} > pickup_items {"item":"oak_log"}'),
     // use_skill/旧数据兜底：活名明确性收紧后仍能分对
     ep(11_000, 30, { oak_log: 3 }, '获取木材', 'use_skill'),
     ep(12_000, 20, { oak_log: 2 }, '用铁斧砍树', 'use_skill'),
@@ -60,7 +60,7 @@ test('材料的账：按生产格式 routine 的采集步判断趟数，取物/�
     ep(15_500, 10, { raw_iron: 2, oak_log: 1 }, '挖铁矿时顺手捡了一根原木', 'gather {"block":"iron_ore"} > pickup_items {"item":"oak_log"}'),
     ep(16_000, 40, { lapis_lazuli: 5 }, '采集青金石', 'gather {"block":"lapis_lazuli"}'),
     ep(17_000, 30, { quartz: 4 }, '收集石英', 'gather {"block":"nether_quartz_ore"}'),
-    ep(18_000, 60, { diamond: 1 }, '挖钻石', 'excavate_path {"direction":"east"}'),
+    ep(18_000, 60, { diamond: 1 }, '挖钻石', 'excavate_run {"direction":"east"}'),
     ep(19_000, 70, { ancient_debris: 1 }, '挖远古残骸', 'gather {"block":"ancient_debris"}'),
     ep(20_000, 50, { amethyst_shard: 2 }, '挖紫水晶', 'gather {"block":"amethyst_cluster"}'),
     // 纯取物/查找/粗矿块不算矿石趟

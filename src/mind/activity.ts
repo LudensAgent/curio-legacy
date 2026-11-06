@@ -12,7 +12,7 @@ import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, Activity
 
 /**
  * 截断长反馈时同时保留头尾：开头交代是哪一步/什么失败，结尾常带可执行事实
- * （如 `→ dig_at {"at":[-1,2,0],"facing":"N"}`）。只留开头会把下一步动作切掉，
+ * （如 `→ mine_cell {"at":[-1,2,0],"facing":"N"}`）。只留开头会把下一步动作切掉，
  * agent 就会照着半截话重做错事。默认 320 字，兼顾提示词成本。
  */
 export function clipFeedback(text: string, max = 320): string {
@@ -108,19 +108,16 @@ function resetStepBudgets(a: Activity) {
 
 /**
  * 原委托声明的材料额度。当前 schema 里只有这两处能表达数量：
- * - climb_up 的 height：每确认升高一格最多消耗一个垫脚方块；
- * - place_at 的一次放置：最多花 1 个指定物品。
+ * - pillar_one 的一次原地垫高：最多消耗 1 个垫脚方块；
+ * - place_cell / place_support 的一次放置：最多花 1 个指定物品。
  * 通用 make 只是 boolean，没有数量，不能在这里假装有额度。
  */
 function materialAllowance(a: Activity, step: Step, state: AgentState) {
   const args = (step.args ?? {}) as Record<string, unknown>;
-  const climbKey = step.id ?? JSON.stringify(step.args ?? {});
-  const height = a.climb?.[climbKey]?.height
-    ?? (typeof args.height === 'number' ? args.height : Number(args.height));
   const item = typeof args.item === 'string' && args.item !== 'any' ? itemBaseName(args.item) : null;
-  const declared = step.skill === 'climb_up'
-    ? { max: Number.isFinite(height) ? height : 0, names: null as Set<string> | null }
-    : step.skill === 'place_at'
+  const declared = step.skill === 'pillar_one'
+    ? { max: 1, names: null as Set<string> | null }
+    : (step.skill === 'place_cell' || step.skill === 'place_support')
       ? { max: 1, names: item === null ? null : new Set([item]) }
       : undefined;
   if (!declared || declared.max <= 0) return undefined;
@@ -150,7 +147,7 @@ function continuationGuard(a: Activity, step: Step | undefined, state: AgentStat
   return undefined;
 }
 
-/** 技能回执里明确报告的导航阶段（walk_to/walk_known_route/walk_route 等）；没有报告就不编。 */
+/** 技能回执里明确报告的导航阶段（如 walk_path 的 nav.outcome）；没有报告就不编。 */
 function reportedStage(result: SkillResult): string | undefined {
   const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;
   const data = result.data;
@@ -246,17 +243,10 @@ export function nextStep(a: Activity): (Step & { id?: string }) | null {
     if (a.iteration + 1 >= a.repeat) return null;
     a.iteration++;
     a.index = 0;
-    a.climb = {}; // 新一轮：重置额度账本，从原始目标开始。
     resetStepBudgets(a);
   }
   const step = a.steps[a.index++];
   if (!step) return null;
-  if (step.skill === 'climb_up') {
-    const key = step.id ?? JSON.stringify(step.args ?? {});
-    a.climb ??= {};
-    a.climb[key] ??= { height: (step.args as Record<string, unknown>)?.height as number ?? 0, spent: 0, startY: Number.NaN };
-    return { skill: step.skill, args: step.args, ...(step.id ? { id: step.id } : {}), ...(step.origin ? { origin: step.origin } : {}), ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}) };
-  }
   // 归因随逻辑步骤一起下传：自动插步保留 execution_helper 与授权链，普通步骤仍是 agent。
   // 普通 agent 步骤维持原来的 {skill,args} 形状（调用方按它比较同一步）；只有插步额外带 id，
   // 便于把自动动作追溯到被执行的逻辑步骤。
@@ -304,7 +294,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const baseline = previous?.pos ? previous : a.stepStart;
   const previousPosition = a.results.at(-1)?.pos;
   if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
-  // 只记录技能明确报告过的阶段（walk_to/walk_known_route 的 nav.outcome、walk_route 的 nav.outcome、
+  // 只记录技能明确报告过的阶段（如 walk_path 的 nav.outcome、
   // 水面技能的 data.stage）；没有报告的技能保持没有，不由耗时或位置臆造阶段。
   const navStage = reportedStage(result);
   const recorded: Activity['results'][number] & { stage?: string } = {
@@ -313,24 +303,14 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (navStage) recorded.stage = navStage;
   a.results.push(recorded);
   if (a.results.length > 16) a.results = a.results.slice(-16);
-  // climb_up 的统一结算与续跑决策：账本已在 climbUp.run 里结算（成功/失败/取消/嵌套都计入），这里只判断完成/继续/耗尽。
-  if (step.skill === 'climb_up') {
-    const key = a.steps[Math.max(0, a.index - 1)]?.id ?? JSON.stringify(step.args ?? {});
-    if (result.status === 'succeeded') {
-      if (a.climb) delete a.climb[key];
-    } else {
-      const budget = a.climb?.[key];
-      if (budget && budget.spent >= budget.height && result.data?.goalReached === false) return { kind: 'stuck', why: clipFeedback(result.summary), exhausted: true };
-    }
-  }
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
-    if (step.skill === 'place_at' && result.data?.placed
-      || step.skill === 'dig_at' && result.data?.was && result.data.was !== 'air'
-      || step.skill === 'dig' && (result.data?.dug as string[] | undefined)?.length) delete a.airDigs;
+    if ((step.skill === 'place_cell' || step.skill === 'place_support') && result.data?.placed
+      || step.skill === 'mine_cell' && result.data?.was && result.data.was !== 'air'
+      || step.skill === 'excavate_run' && (result.data?.dug as string[] | undefined)?.length) delete a.airDigs;
     // 相对坐标会随身体移动；只统计同一实际目标格的重复空挖。
-    if (step.skill === 'dig_at') {
+    if (step.skill === 'mine_cell') {
       const key = JSON.stringify(step.args ?? {});
       const air = result.data?.was === 'air';
       const target = result.data?.targetCell as AgentState['pos'] | undefined;
@@ -340,7 +320,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
         const same = previous && previous.target.x === target.x && previous.target.y === target.y && previous.target.z === target.z;
         const count = same ? previous.count + 1 : 1;
         a.airDigs[key] = { target: { ...target }, count };
-        if (count >= 3) return { kind: 'stuck', why: `dig_at 连续 ${count} 次确认目标格 (${target.x},${target.y},${target.z}) 是空气，这几次未在该格发生挖掘` };
+        if (count >= 3) return { kind: 'stuck', why: `mine_cell 连续 ${count} 次确认目标格 (${target.x},${target.y},${target.z}) 是空气，这几次未在该格发生挖掘` };
       }
       else delete a.airDigs[key];
     }
@@ -348,7 +328,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     if (reached) return reached;
     // 挖了一部分后遇到空洞也算动作有实际效果，但重复回到同一格继续挖不能当作下行进展。
     // 只记录身体明确报告的停点；交回心智决定是否继续，不能替它选路。
-    if (step.skill === 'dig' && a.repeat > 1) {
+    if (step.skill === 'excavate_run' && a.repeat > 1) {
       const key = `${a.index - 1}:${JSON.stringify(step.args ?? {})}`;
       const stop = result.data?.partialStop as { pos: { x: number; y: number; z: number }; below: string | null; completed: number; requested: number } | undefined;
       a.partialStops ??= {};
@@ -357,7 +337,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
         const same = prev && prev.iteration === a.iteration - 1 && prev.pos.x === stop.pos.x && prev.pos.y === stop.pos.y && prev.pos.z === stop.pos.z && prev.below === stop.below;
         const count = same ? prev.count + 1 : 1;
         a.partialStops[key] = { pos: stop.pos, below: stop.below, iteration: a.iteration, count };
-        if (count >= 3 && remainingSteps(a) > 0) return { kind: 'stuck', why: `dig 连续 ${count} 轮在 (${stop.pos.x},${stop.pos.y},${stop.pos.z}) 上方停下：本轮确认到达下一级 ${stop.completed}/${stop.requested} 次，再下面是 ${stop.below ?? '未知'}；这几轮停在同一处，请根据实际情况决定下一步` };
+        if (count >= 3 && remainingSteps(a) > 0) return { kind: 'stuck', why: `excavate_run 连续 ${count} 轮在 (${stop.pos.x},${stop.pos.y},${stop.pos.z}) 上方停下：本轮确认到达下一级 ${stop.completed}/${stop.requested} 次，再下面是 ${stop.below ?? '未知'}；这几轮停在同一处，请根据实际情况决定下一步` };
       } else delete a.partialStops[key];
     }
     if (remainingSteps(a) === 0) {
@@ -402,24 +382,24 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: clipFeedback(result.summary) };
   // 自动插步只能是已选动作契约里明确包含的执行辅助；挖、放、耗材和改目标默认交回事实。
   const data = result.data as Record<string, any> | undefined;
-  // follow_passage（或包含它的 use_skill 等嵌套动作）报出确定的图断口（connectionGap）时，
+  // use_skill 等嵌套动作报出确定的图断口（connectionGap）时，
   // 原样重试不会改变通道拓扑：按数据字段判断，交回心智，不领重试额度。
   if (data?.connectionGap && typeof data.connectionGap === 'object') {
     const gap = data.connectionGap as { from?: AgentState['pos']; to?: AgentState['pos']; distance?: number };
     const at = (p?: AgentState['pos']) => p ? `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})` : '未知位置';
     return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；connectionGap ${at(gap.from)} ↔ ${at(gap.to)}（相距 ${typeof gap.distance === 'number' ? Math.round(gap.distance) : '未知'} 格）是记录几何里的确定断口，原样重试不会接上` };
   }
-  // follow_passage（含 use_skill 嵌套结果）明确报告身体被寻路带离记录路线时，这段位移不是进展：
+  // 嵌套结果明确报告身体被寻路带离记录路线时，这段位移不是进展：
   // 原样重试不会回到记录点，也不把它当自动重试的依据。
   const nestedNavData = data?.lastNavigationFailure as { result?: { data?: Record<string, unknown> } } | undefined;
   if (data?.offRoute === true || nestedNavData?.result?.data?.offRoute === true) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；寻路把身体带离了记录路线（offRoute），这段位移不算进展，原样重试不会回到记录点` };
   }
-  // step 的确定性障碍：回执给出了具体要挖的格，且这段活本身已经在挖（dig_at/dig/excavate_path），
+  // move_step 的确定性障碍：回执给出了具体要挖的格，且这段活本身已经在挖（mine_cell/excavate_run），
   // 就按同一委托先插入这一步挖掘再重试。只处理同一目标列/头脚格，不换方向、不换材料、不扩目标。
-  if (step.skill === 'step' && data?.movementNotAttempted === true && data?.remediation?.dig) {
+  if (step.skill === 'move_step' && data?.movementNotAttempted === true && data?.remediation?.dig) {
     const rel = data.remediation.dig as unknown;
-    const digging = a.steps.some((s) => s.skill === 'dig_at' || s.skill === 'dig' || s.skill === 'excavate_path');
+    const digging = a.steps.some((s) => s.skill === 'mine_cell' || s.skill === 'excavate_run');
     const scope = `step-dig:${digest(JSON.stringify(step.args ?? {}))}:${digest(JSON.stringify(rel))}`;
     const attempts = a.adaptations.filter((item) => item.startsWith(`step-dig:`)).length;
     if (digging && Array.isArray(rel) && rel.length === 3 && attempts < 2) {
@@ -429,7 +409,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
         const facing = (step.args as Record<string, unknown> | undefined)?.facing ?? a.facing;
         a.adaptations.push(mark);
         a.steps.splice(Math.max(0, a.index - 1), 0, {
-          skill: 'dig_at',
+          skill: 'mine_cell',
           args: { at: rel, ...(facing ? { facing } : {}) },
           id: shortId('st_'), origin: 'execution_helper',
           authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
@@ -441,50 +421,34 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     }
   }
   // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
-  if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: clipFeedback(result.summary) };
-  if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: clipFeedback(result.summary) };
+  if (step.skill === 'move_step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: clipFeedback(result.summary) };
+  if (step.skill === 'excavate_run' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: clipFeedback(result.summary) };
   const stepArgs = (step.args ?? {}) as Record<string, any>;
   const facing = stepArgs.facing ?? a.facing;
   // 1) 看不清：交回事实，不自动插火把（照明是耗材，未授权不支出）
   if (data?.obscured) return { kind: 'stuck', why: clipFeedback(result.summary) };
-  // 2) climb_up 的动作说明明确包含「头顶挡着会先挖开」：这是该动作契约内的执行辅助。
-  //    保留授权链（原步骤/参数），并说明只会消耗工具耐久；同一障碍证据只清一次，最多两次。
-  if (step.skill === 'climb_up' && data?.failureCause === 'PILLAR_CLEARANCE') {
-    // 障碍格可能有多格（身后/侧上方）：一次全挖空，别再一格一格挤牙膏、也别硬编码 [0,2,0]
-    const cells: { at: [number, number, number]; facing?: string }[] = data?.pillarClearance?.cells?.length
-      ? data.pillarClearance.cells
-      : [{ at: data?.pillarClearance?.at ?? [0, 2, 0], facing: data?.pillarClearance?.facing ?? facing }];
-    const scope = `${step.skill}:${digest(JSON.stringify(step.args ?? {}))}:${code}`;
-    const mark = `clearance:${scope}:${digest(JSON.stringify(cells.map((cell) => [cell.at, cell.facing ?? null])))}`;
-    const cleared = a.adaptations.filter((item) => item.startsWith(`clearance:${scope}:`)).length;
-    if (cleared >= 2 || a.adaptations.includes(mark)) return { kind: 'stuck', why: clipFeedback(result.summary) };
-    a.adaptations.push(mark);
-    const own = ownStep(a, step);
-    const authorizedBy = { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args };
-    a.steps.splice(Math.max(0, a.index - 1), 0, ...cells.map((c) => ({ skill: 'dig_at', args: { at: c.at, ...(c.facing ? { facing: c.facing } : {}) }, id: shortId('st_'), origin: 'execution_helper' as const, authorizedBy })));
-    a.index = Math.max(0, a.index - 1);
-    // 清障后回放同一个 climb_up：它仍是同一次委托，沿用原期限/高度/材料账本。
-    markContinuation(a, own);
-    return { kind: 'continue', adapted: `头顶被挡，先把 ${cells.length} 格障碍挖开再走（climb_up 已授权清障；只消耗工具耐久，不消耗背包方块）` };
+  // 2) pillar_one 的契约是「只垫不挖」：头顶阻挡是确定性失败，交回 Agent 决定先挖哪一格。
+  if (step.skill === 'pillar_one' && data?.failureCause === 'PILLAR_CLEARANCE') {
+    return { kind: 'stuck', why: clipFeedback(result.summary) };
   }
-  // goto 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
-  if (step.skill === 'goto' && data?.pillarClearance) return { kind: 'stuck', why: clipFeedback(result.summary) };
-  // place_at 是普通放置/搭柱：不隐式清顶或挖脚下；交回事实，挖哪一格由 Agent 决定。
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻') return { kind: 'stuck', why: clipFeedback(result.summary) };
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') return { kind: 'stuck', why: clipFeedback(result.summary) };
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: clipFeedback(result.summary) };
-  // 3) 脚下有非空气的可替换物（火把/草/雪层…）：place_at 没有授予挖掘，不自动 dig_at 清掉。
-  if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
+  // walk_path 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
+  if (step.skill === 'walk_path' && data?.pillarClearance) return { kind: 'stuck', why: clipFeedback(result.summary) };
+  // place_cell / place_support 是普通放置：不隐式清顶或挖脚下；交回事实，挖哪一格由 Agent 决定。
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻') return { kind: 'stuck', why: clipFeedback(result.summary) };
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') return { kind: 'stuck', why: clipFeedback(result.summary) };
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NOT_PLACED:跳不起来') return { kind: 'stuck', why: clipFeedback(result.summary) };
+  // 3) 脚下有非空气的可替换物（火把/草/雪层…）：place_cell/place_support 没有授予挖掘，不自动 mine_cell 清掉。
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && typeof data?.pillarFailure === 'string' && data.pillarFailure.startsWith('BLOCKED:')) {
     return { kind: 'stuck', why: clipFeedback(result.summary) };
   }
   // 4) 脚下没有实心地面（悬空/水里/梯子上）：确定性缺支撑，原地垫高垫不了，别白重试。
-  if (step.skill === 'place_at' && data?.pillarFailure === 'NO_REFERENCE') {
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NO_REFERENCE') {
     return { kind: 'stuck', why: clipFeedback(result.summary) };
   }
   // 裸 NOT_PLACED（适配器自身已重试两次仍未放下）和“贴面方块变了”都是确定性拒绝，
   // 不能当成服务器暂时延迟再回放。
   if (
-    step.skill === 'place_at' &&
+    (step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') &&
     typeof data?.pillarFailure === 'string' &&
     (data.pillarFailure === 'NOT_PLACED' || data.pillarFailure.includes('脚下贴面方块变了'))
   ) {
@@ -492,7 +456,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   }
   // 服务器暂时拒绝/尚未站稳不是“没有附着面”：在同一个父委托的期限和材料额度内有限重试（最多两次）。
   // 这些是暂时条件（服务器确认延迟/身体还没落稳），不是同一确定性缺口的原样重试；确定性拒绝已在上面的分支停止。
-  if (step.skill === 'place_at' && typeof data?.pillarFailure === 'string' && /^NOT_PLACED(?::|$)/.test(data.pillarFailure)) {
+  if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && typeof data?.pillarFailure === 'string' && /^NOT_PLACED(?::|$)/.test(data.pillarFailure)) {
     const own = ownStep(a, step);
     const scope = `pillar-retry:${digest(JSON.stringify(step.args ?? {}))}`;
     const attempts = a.adaptations.filter((item) => item.startsWith(`${scope}:`)).length;
@@ -516,26 +480,26 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 相对 step 只有“前/上/右”偏移，没有固定世界目标。失败后身体已经换位时，自动重试会
   // 用新站位重新解释同一个 [1,-1,0]，实际变成下一格（空腔里会一路下沉/换列）。这不是
   // 同一个逻辑动作的复验，交回心智按实测位置重新选择；绝对 step/xyz 仍可按原目标复验。
-  if (step.skill === 'step' && (step.args as Record<string, unknown> | undefined)?.xyz === undefined && physicallyMoved) {
+  if (step.skill === 'move_step' && (step.args as Record<string, unknown> | undefined)?.xyz === undefined && physicallyMoved) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；相对 step 失败后身体已换位，自动重试会用新站位重算落点，交回心智重新选择` };
   }
-  // swim_to 的 SWIM_NO_PROGRESS 是同一目标、同一地形下的物理停滞：身体在失败前动过，不代表路线变了。
-  // 原样重放同一个目标只会再耗一次时间与氧气；换路线、换手段交回心智决定。
-  if (step.skill === 'swim_to' && data?.reason === 'SWIM_NO_PROGRESS') {
-    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；同一目标在同样的地形里重放不会改变结果，交回心智换路线或换手段` };
+  // 上浮时头顶被实心方块封住是确定性失败：上浮只按跳、不会挖开；原样重放不会把方块弄掉。
+  if (step.skill === 'swim_path' && data?.blockedAbove) {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；头顶被 ${data.blockedAbove.name} 封住，swim_path 上浮只按跳不能挖，原样重放不会改变结果，交回心智` };
   }
-  // surface 头顶被实心方块封住是确定性失败：surface 只按跳、不会挖开；原样重放不会把方块弄掉。
-  if (step.skill === 'surface' && data?.blockedAbove) {
-    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；头顶被 ${data.blockedAbove.name} 封住，surface 只按跳不能挖，原样重放不会改变结果，交回心智` };
+  // 同一目标、同一地形下的物理停滞：身体在失败前动过，不代表路线变了。
+  // 原样重放同一个目标只会再耗一次时间与氧气；换路线、换手段交回心智决定。
+  if (step.skill === 'swim_path' && data?.reason === 'SWIM_NO_PROGRESS') {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；同一目标在同样的地形里重放不会改变结果，交回心智换路线或换手段` };
   }
   // 穿门等待超时且身体此刻仍在门方块里：这次失败没有新的身体事实可复验，自动续跑不再
   // 原样重放同一次 30 秒等待；先离开门、换门还是放弃交回心智决定。
-  // 只认 travel/recall 回执里明确标注的 portalReason，避免把其它技能数据里的 transition 当成门。
+  // 只认 travel_portal/recall_portal 回执里明确标注的 portalReason，避免把其它技能数据里的 transition 当成门。
   const portalInsideMs = typeof data?.transition?.insideMs === 'number' ? data.transition.insideMs : 0;
   if (data?.portalReason === 'PORTAL_TRANSITION_TIMEOUT' && portalInsideMs >= 1000) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；这次失败没有新的身体事实可复验，自动续跑不再原样重放，交回心智` };
   }
-  if (RETRYABLE.has(code) && !(step.skill === 'goto' && code === 'PATH_NOT_FOUND')
+  if (RETRYABLE.has(code) && !(step.skill === 'walk_path' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);
     if (guard) return { kind: 'stuck', why: guard };
@@ -592,7 +556,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     recent: a.results.slice(-3).map((r) => {
       const stage = stageOf(r);
       // 3 条的尾部各自至少留 ~80 字（260 的上限按 2/3 头、1/3 尾切，尾部长 260-174-1=85），
-      // 否则 `[前,上,右]=…→ dig_at {…}` 这类可执行尾巴仍会被切掉。
+      // 否则 `[前,上,右]=…→ mine_cell {…}` 这类可执行尾巴仍会被切掉。
       return `${r.skill} → ${r.status}${r.failureCode ? `(${r.failureCode})` : ''}${typeof stage === 'string' ? `〔阶段 ${stage}〕` : ''}：${clipFeedback(r.summary, 260)}`;
     }),
     ...(a.expect ? { my_expectation: a.expect } : {}),

@@ -13,12 +13,12 @@ description: 掉进两三格深的坑里时原地垫高爬出来（routine 里�
 ```behavior
 {
  "steps": [
-  {"skill": "dig_at", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
-  {"skill": "place_at", "args": {"at": [0, 0, 0], "item": "any"}},
-  {"skill": "dig_at", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
-  {"skill": "place_at", "args": {"at": [0, 0, 0], "item": "any"}},
-  {"skill": "dig_at", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
-  {"skill": "place_at", "args": {"at": [0, 0, 0], "item": "any"}, "optional": true}
+  {"skill": "mine_cell", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
+  {"skill": "pillar_one", "args": {"item": "any"}},
+  {"skill": "mine_cell", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
+  {"skill": "pillar_one", "args": {"item": "any"}},
+  {"skill": "mine_cell", "args": {"at": [0, 2, 0]}, "if": {"cell": {"at": [0, 2, 0], "is": "solid"}, "not": {"cell": {"at": [0, 2, 0], "is": ["sand", "gravel", "red_sand"]}}}},
+  {"skill": "pillar_one", "args": {"item": "any"}, "optional": true}
  ]
 }
 ```

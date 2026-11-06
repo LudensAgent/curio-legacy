@@ -10,7 +10,7 @@ import { TestWorld, makeCtx } from './survival-helpers.ts';
 class MergeStacksWorld extends TestWorld {
   next: ActionResult & { merged: number; freed: number } = { ok: true, merged: 3, freed: 2 };
   calls: (string | undefined)[] = [];
-  override async mergeStacks(signal: AbortSignal, item?: string): Promise<ActionResult & { merged: number; freed: number }> {
+  async mergeStacks(signal: AbortSignal, item?: string): Promise<ActionResult & { merged: number; freed: number }> {
     throwIfAborted(signal);
     this.calls.push(item);
     return this.next;

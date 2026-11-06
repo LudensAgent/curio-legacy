@@ -107,27 +107,6 @@ for (const scenario of ['noop', 'skipped', 'changed', 'steps-noop', 'steps-chang
   }
 });
 
-test('climb_up 额度耗尽直接终止，不插入学得恢复也不重放原动作', async (t) => {
-  const w = fixture(t);
-  const previous = SKILLS.climb_up;
-  SKILLS.climb_up = { name: 'climb_up', description: '测试爬升', argsDoc: '{}', timeoutMs: 3000, movement: true,
-    validate: (raw: any) => ({ ok: true, args: { height: Number(raw?.height ?? 16), untilSky: true } }),
-    run: async (ctx: { climb?: { height: number; spent: number } }) => { if (ctx.climb) ctx.climb.spent = 16; return fail('STUCK', '往上爬了 16 格后停下：仍未满足停止条件', { goalReached: false }); } };
-  t.after(() => { SKILLS.climb_up = previous; setBehaviorRegistry(null); });
-  let recovered = false;
-  (w.mind as any).d.behaviors = {
-    recoveryFor: () => { recovered = true; return { name: 're-climb', description: '重爬', steps: [] }; },
-    recoverySkipped: () => {}, creditRecovery: () => {},
-  };
-  setBehaviorRegistry({ get: () => ({ name: 're-climb', description: '重爬', steps: [] }), list: () => [{ name: 're-climb' }] });
-  await w.tick();
-  await w.reply(0, { decision: 'new', activity: { what: '爬升', steps: [{ skill: 'climb_up', args: { height: 16, untilSky: true } }] } });
-  await w.tick();
-  await flush();
-  assert.equal(recovered, false, '额度耗尽不插入学得恢复');
-  assert.equal(w.mind.activity, null, '直接交回心智，不再重放原动作');
-});
-
 test('手动调用未产生动作的技能仍正常返回成功和 noop 证据', async (t) => {
   const w = fixture(t);
   const skill = { name: 'manual-noop', description: '观察后结束', steps: [], code: 'return {ok:true,note:"没有需要做的"};' };
@@ -362,8 +341,9 @@ test('mock 模式下用规则凑出同样形状的决定，整条链路照常', 
   await w.tick();
   assert.equal(w.pending.length, 0);
   await flush();
-  assert.equal(w.mind.activity?.source, 'rule');
-  assert.ok(w.arbiter.info());
+  const plan = w.bus.recent().slice().reverse().find((event) => event.type === 'plan');
+  assert.equal(plan?.data?.source, 'rule', '规则模式产出的决定标为 rule');
+  assert.ok(Array.isArray(plan?.data?.steps) && plan!.data.steps.length > 0, '规则模式也安排可执行步骤');
 });
 
 test('提示词包含情绪、议程、窍门、念头和实际变化', () => {
@@ -415,14 +395,14 @@ test('死亡后放下手上的活，复活后认真想想，并记进日记和�
   assert.match(w.pending[1].messages[1].content, /刚刚死了/);
 });
 
-test('在原地失败、周围也没变化时不原样重试；goto 找不到路也不重试', () => {
+test('在原地失败、周围也没变化时不原样重试；walk_path 找不到路也不重试', () => {
   const adapter = new FakeAdapter();
   const here = { ...adapter.state().pos };
   const a = createActivity({ what: '挖石头', why: '', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'stone', count: 3 } }] }, '', 'llm', adapter.state());
   const s1 = nextStep(a)!;
   a.stepStart = { pos: here };
   assert.equal(afterStep(a, s1, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state()).kind, 'stuck');
-  const g = createActivity({ what: '回家', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'goto', args: { target: 'home' } }] }, '', 'llm', adapter.state());
+  const g = createActivity({ what: '回家', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'walk_path', args: { routeId: 'rt_home' } }] }, '', 'llm', adapter.state());
   const s2 = nextStep(g)!;
   g.stepStart = { pos: { x: 99, y: 64, z: 99 } };
   assert.equal(afterStep(g, s2, fail('PATH_NOT_FOUND', '眼前没有可确认的通路'), 100, adapter.state()).kind, 'stuck');
@@ -431,14 +411,14 @@ test('在原地失败、周围也没变化时不原样重试；goto 找不到路
 test('顺手的步骤没成不算这段活失败，接着做后面的', () => {
   const adapter = new FakeAdapter();
   const a = createActivity({ what: '往西走，路上见到牛就打', why: '', kind: 'explore', repeat: 1,
-    steps: [{ skill: 'hunt', args: { animal: 'cow' }, optional: true }, { skill: 'explore', args: { direction: 'W', distance: 32 } }] }, '', 'llm', adapter.state());
+    steps: [{ skill: 'hunt', args: { animal: 'cow' }, optional: true }, { skill: 'walk_path', args: { routeId: 'rt_west' } }] }, '', 'llm', adapter.state());
   const s1 = nextStep(a)!;
   const v = afterStep(a, s1, fail('NOT_FOUND', '视野里没有 cow'), 100, adapter.state());
   assert.equal(v.kind, 'continue');
   assert.match((v as any).adapted, /顺手/);
   assert.equal(a.failures, 0);
-  assert.equal(nextStep(a)!.skill, 'explore');
-  const v2 = afterStep(a, { skill: 'explore', args: {} }, ok('走了 32 格'), 100, adapter.state());
+  assert.equal(nextStep(a)!.skill, 'walk_path');
+  const v2 = afterStep(a, { skill: 'walk_path', args: {} }, ok('走了 32 格'), 100, adapter.state());
   assert.deepEqual(v2, { kind: 'done', met: true, why: '这段活的步骤都做完了' });
 });
 
@@ -825,7 +805,7 @@ test('附近失败提醒只报告新失败，等待冷却时间不会重复旧�
   const att = new Attention();
   const here = { x: 0, y: 64, z: 0 };
   const now = Date.now();
-  const failure = (i: number) => ({ pos: here, outcome: 'stuck' as const, skill: 'step', failureCode: 'PATH_NOT_FOUND',
+  const failure = (i: number) => ({ pos: here, outcome: 'stuck' as const, skill: 'move_step', failureCode: 'PATH_NOT_FOUND',
     what: `迈上台阶 ${i}`, summary: `目标脚下是 air（尝试 ${i}）`, at: now - 4000 + i * 1000 });
   const recs = [1, 2, 3].map(failure);
   const timestamps = recs.map((r) => r.at);
@@ -852,7 +832,7 @@ for (const boundary of ['pause', 'disconnect'] as const) test(`停止在线观�
   t.mock.method(Date, 'now', () => now);
   const w = fixture(t);
   await w.tick();
-  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'step',
+  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'move_step',
     failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
   Reflect.set(w.mind, 'recentEnds', records);
   assert.ok(w.mind.attention.fromLoop(records, w.adapter.pos, now));
@@ -871,10 +851,10 @@ test('每轮思考保留实际失败详情，不再推断持续卡住或强制�
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const w = fixture(t), state = w.adapter.state();
-  const records = [1, 2, 3].map((i) => ({ pos: { ...state.pos }, outcome: 'stuck' as const, skill: 'step',
+  const records = [1, 2, 3].map((i) => ({ pos: { ...state.pos }, outcome: 'stuck' as const, skill: 'move_step',
     failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
   Reflect.set(w.mind, 'recentEnds', records);
-  Reflect.set(w.mind, 'recentActionFailures', [{ step: { skill: 'step', args: { at: [1, 1, 0] } }, code: 'PATH_NOT_FOUND',
+  Reflect.set(w.mind, 'recentActionFailures', [{ step: { skill: 'move_step', args: { at: [1, 1, 0] } }, code: 'PATH_NOT_FOUND',
     summary: '目标脚下是 air', pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: records[2].at }]);
   await w.tick();
   const original = w.pending[0].messages.map((m) => m.content).join('\n');
@@ -899,7 +879,7 @@ test('活动完成时立即撤掉旧失败提醒，不等下一次感知', async
   await w.reply(0, { decision: 'new', activity: { what: '走上台阶', steps: [step()] } });
   await w.tick();
   const now = Date.now();
-  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'step',
+  const records = [1, 2, 3].map((i) => ({ pos: { ...w.adapter.pos }, outcome: 'stuck' as const, skill: 'move_step',
     failureCode: 'PATH_NOT_FOUND', what: '迈上台阶', summary: '目标脚下是 air', at: now - 4000 + i * 1000 }));
   Reflect.set(w.mind, 'recentEnds', records);
   assert.ok(w.mind.attention.fromLoop(records, w.adapter.pos, now));
@@ -1024,8 +1004,8 @@ test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥�
 test('思考时可以查动作的完整参数', async (t) => {
   const w = fixture(t);
   await w.tick();
-  await w.reply(0, { kind: 'moves', names: ['use_item', 'ride'] });
-  assert.match(w.pending[1].messages.at(-1)!.content, /- ride /);
+  await w.reply(0, { kind: 'moves', names: ['use_item', 'boat_path'] });
+  assert.match(w.pending[1].messages.at(-1)!.content, /- boat_path /);
 });
 
 test('被困地下时，模型用原子动作写一段挖阶梯的 routine，身体照着一格格执行直到见天', async (t) => {
@@ -1035,10 +1015,10 @@ test('被困地下时，模型用原子动作写一段挖阶梯的 routine，身
   await w.tick();
   const user = w.pending[0].messages[1].content;
   assert.match(user, /"local":/, '身边方块图在提示词里');
-  assert.match(w.pending[0].messages[0].content, /dig_at/, '模型可以自行选择挖掘动作');
+  assert.match(w.pending[0].messages[0].content, /mine_cell/, '模型可以自行选择挖掘动作');
   assert.doesNotMatch(user, /怎么上去自己定|一格一格自己出去/, '地形不会替模型决定要出去');
   await w.reply(0, { monologue: '四面都是石头，朝北挖阶梯上去', decision: 'new', activity: { what: '朝北挖阶梯回地面', facing: 'N', kind: 'survive', repeat: 10,
-    steps: [{ skill: 'dig_at', args: { at: [0, 2, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } }, { skill: 'dig_at', args: { at: [1, 2, 0], facing: 'N' } }, { skill: 'step', args: { to: [1, 1, 0], facing: 'N' } }],
+    steps: [{ skill: 'mine_cell', args: { at: [0, 2, 0], facing: 'N' } }, { skill: 'mine_cell', args: { at: [1, 1, 0], facing: 'N' } }, { skill: 'mine_cell', args: { at: [1, 2, 0], facing: 'N' } }, { skill: 'move_step', args: { at: [1, 1, 0], facing: 'N' } }],
     done_when: { type: 'sky_visible', equals: true } } });
   const deadline = Date.now() + 15000;
   while (w.self.history(1).length === 0 && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 30)); await w.tick(); }
@@ -1128,10 +1108,7 @@ test('白天站在地表、天光数据没更新时，不会误报“周围很�
   memory.close();
 });
 
-test('goto 可以选择挖穿/垫高直走；工地附近的坐标能当收工位置', async () => {
-  const { goTo } = await import('../src/skills/movement.ts');
-  const v = goTo.validate({ target: 'base', dig: true }, new FakeAdapter());
-  assert.ok(v.ok && v.args.dig === true);
+test('工地附近的坐标能当收工位置', async () => {
   const { validateCondition } = await import('../src/projects/conditions.ts');
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   memory.setWorld(adapter.state().worldId);
@@ -1276,10 +1253,10 @@ for (const scenario of ['same', 'position', 'direction', 'pitch', 'parameters', 
 });
 
 for (const scenario of ['gaze', 'target', 'facing'] as const) test(`相对迈步重复失败按动作目标而非镜头判断：${scenario}`, async (t) => {
-  const w = fixture(t), previous = SKILLS.step;
-  SKILLS.step = { ...previous, run: SKILLS.mind_step.run };
-  t.after(() => { SKILLS.step = previous; });
-  const activity = { what: '尝试下一级', facing: 'N', steps: [{ skill: 'step', args: { at: [1, -1, 0] } }] };
+  const w = fixture(t), previous = SKILLS.move_step;
+  SKILLS.move_step = { ...previous, run: SKILLS.mind_step.run };
+  t.after(() => { SKILLS.move_step = previous; });
+  const activity = { what: '尝试下一级', facing: 'N', steps: [{ skill: 'move_step', args: { at: [1, -1, 0] } }] };
   const failure = fail('PATH_NOT_FOUND', '目标脚下没有支撑', { movementNotAttempted: true });
   await w.tick();
   await w.reply(0, { decision: 'new', activity });
@@ -1291,7 +1268,7 @@ for (const scenario of ['gaze', 'target', 'facing'] as const) test(`相对迈步
   await w.reply(w.pending.length - 1, { decision: 'new', activity: {
     ...activity,
     ...(scenario === 'facing' ? { facing: 'W' } : {}),
-    ...(scenario === 'target' ? { steps: [{ skill: 'step', args: { at: [0, -1, 1] } }] } : {}),
+    ...(scenario === 'target' ? { steps: [{ skill: 'move_step', args: { at: [0, -1, 1] } }] } : {}),
   } });
   await w.finish(failure);
   await w.tick();

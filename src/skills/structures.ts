@@ -120,4 +120,4 @@ export const searchStructure: Skill<StructureSearchArgs> = {
   },
 };
 
-export const structureSkills = { find_stronghold: findStronghold, search_structure: searchStructure, excavate_path: excavationSkill };
+export const structureSkills = { find_stronghold: findStronghold, search_structure: searchStructure };
