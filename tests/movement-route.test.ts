@@ -243,3 +243,19 @@ test('walk_path 执行 search 路线并只在实测到达后返回成功', async
   assert.ok(Math.abs(w.pos.x - 2.5) <= 0.13, `实际位置 x=${w.pos.x}`);
   assert.equal(w.control.forward, false, '结束时应松键');
 });
+
+test('walk_path 在起点漂移超过容差时拒绝执行，要求重新规划', async (t) => {
+  const w = walkingAdapter();
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const spatial = fakeSpatial(map);
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const planned = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(planned.status, 'succeeded', planned.summary);
+  w.pos = { ...w.pos, x: w.pos.x + 0.2 };
+  const result = await walkPath.run(ctx, { routeId: String(planned.data?.routeId) });
+  assert.equal(result.status, 'failed');
+  assert.equal((result.data?.unsupported as { reason?: string } | undefined)?.reason, 'route_start_changed');
+  assert.notEqual(w.control.forward, true, '拒绝执行时不能按前进键');
+});

@@ -64,8 +64,10 @@ export const walkPath: Skill<WalkArgs> = {
     }
     if (state.worldId !== spatial.worldId) return fail('WRONG_DIMENSION', `当前世界 ${state.worldId} 与空间会话 ${spatial.worldId} 不一致`, { routeId: args.routeId });
     if (spatial.closing || spatial.paused || !spatial.observationAdmitted) return fail('NOT_CONNECTED', '共享空间会话未就绪/已暂停/已关闭，不能执行路线', { routeId: args.routeId });
-    if (Math.hypot(state.pos.x - record.from.x, state.pos.z - record.from.z) > 2 || Math.abs(state.pos.y - record.from.y) > 2) {
-      return fail('PATH_NOT_FOUND', `路线起点 (${record.from.x},${record.from.y},${record.from.z}) 与当前站位不符；重新 plan_route`, { routeId: args.routeId, from: record.from, position: state.pos, unsupported: { reason: 'route_start_changed' } });
+    // 路线起点是规划时的实测脚位；执行前只允许很小的物理漂移，超过就重新规划，不能从别的起点硬套。
+    const startDrift = Math.hypot(state.pos.x - record.from.x, state.pos.z - record.from.z) + Math.abs(state.pos.y - record.from.y);
+    if (startDrift > 0.05) {
+      return fail('PATH_NOT_FOUND', `路线起点 (${record.from.x},${record.from.y},${record.from.z}) 与当前站位相差 ${startDrift.toFixed(2)} 格；重新 plan_route`, { routeId: args.routeId, from: record.from, position: state.pos, drift: startDrift, unsupported: { reason: 'route_start_changed' } });
     }
     const body = ctx.adapter.walkBody?.();
     const tick = ctx.adapter.walkTick?.();
