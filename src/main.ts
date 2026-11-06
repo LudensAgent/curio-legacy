@@ -98,6 +98,9 @@ try {
     worldId: adapter.state().worldId,
     databasePath: config.spatial.databasePath,
     voxelLoading: config.spatial.voxelLoading,
+    // 快照序列化容量是宿主配置，不是库的固定规则；长期世界超过库默认 64MiB 后
+    // checkpoint 会一直 capacity 失败。上限只决定一次保存能否完成，不改变驻留。
+    snapshotLimits: { maxBytes: config.spatial.snapshotMaxBytes },
     ...(config.spatial.voxelLoading === 'manual'
       ? { residencyLimits: { maxResidentBytes: config.spatial.maxResidentBytes } }
       : {}),
@@ -147,8 +150,11 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
       { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state });
     return;
   }
+  const capacityNote = fact.error.kind === 'capacity'
+    ? `，快照上限=${Math.round(config.spatial.snapshotMaxBytes / 1048576)}MiB（SPATIAL_SNAPSHOT_MAX_MB）`
+    : '';
   bus.publish('spatial_checkpoint_failed', 'P1',
-    `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}｜lifecycle=${fact.state.lifecycle}, closing=${spatial.closing}, 剩余 dirty=${fact.remainingDirty}, unconfirmed=${fact.state.unconfirmedCheckpointId ?? 'none'}`,
+    `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}${capacityNote}｜lifecycle=${fact.state.lifecycle}, closing=${spatial.closing}, 剩余 dirty=${fact.remainingDirty}, unconfirmed=${fact.state.unconfirmedCheckpointId ?? 'none'}`,
     { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
 });

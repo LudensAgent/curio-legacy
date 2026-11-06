@@ -64,6 +64,14 @@ if (!Number.isFinite(maxResidentMb) || maxResidentMb <= 0 || maxResidentMb > 102
   throw new Error(`SPATIAL_MAX_RESIDENT_MB 必须是 (0,1024] 内的数字，收到：${maxResidentMb}`);
 }
 const maxResidentBytes = Math.round(maxResidentMb * 1024 * 1024);
+// 单次空间快照的序列化字节上限。库默认 64MiB；长期世界已实际达到 ~73MiB，
+// 超过后 checkpoint 会以 capacity 失败、dirty 一直留着。这里只放宽“能否落盘”的
+// 容量，不改变驻留上限或游戏规则；可用 SPATIAL_SNAPSHOT_MAX_MB 调整。
+const snapshotMaxMb = num('SPATIAL_SNAPSHOT_MAX_MB', 192);
+if (!Number.isFinite(snapshotMaxMb) || snapshotMaxMb <= 0 || snapshotMaxMb > 4096) {
+  throw new Error(`SPATIAL_SNAPSHOT_MAX_MB 必须是 (0,4096] 内的数字，收到：${snapshotMaxMb}`);
+}
+const snapshotMaxBytes = Math.round(snapshotMaxMb * 1024 * 1024);
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
@@ -167,6 +175,9 @@ export const config = {
     /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
     maxResidentMb,
     maxResidentBytes,
+    /** 单次空间快照的序列化字节上限；默认 192MiB，可用 SPATIAL_SNAPSHOT_MAX_MB 调整。 */
+    snapshotMaxMb,
+    snapshotMaxBytes,
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {
