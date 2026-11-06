@@ -80,7 +80,7 @@ function context(world: GameAdapter): SkillCtx {
 
 const args = (overrides: Partial<ExcavationArgs> = {}): ExcavationArgs => ({ entry: 'current', mode: 'stairs', direction: 'east', steps: 2, ...overrides });
 
-test('excavate_path.tool：验证物品注册名形态，非法值在动作校验时拒绝', () => {
+test('excavate_run.tool：验证物品注册名形态，非法值在动作校验时拒绝', () => {
   const world = new ToolWorld();
   assert.equal(excavationSkill.validate({ ...args(), tool: 'iron_pickaxe' }, world).ok, true);
   assert.equal(excavationSkill.validate({ ...args(), tool: 'Iron Pickaxe' }, world).ok, false);
@@ -88,7 +88,7 @@ test('excavate_path.tool：验证物品注册名形态，非法值在动作校�
   assert.equal(excavationSkill.validate(args(), world).ok, true, '不写 tool 仍走原有的身体换工具规则');
 });
 
-test('excavate_path.tool：指定工具不在背包 → TOOL_MISSING，不挖不走', async () => {
+test('excavate_run.tool：指定工具不在背包 → TOOL_MISSING，不挖不走', async () => {
   const world = new ToolWorld();
   const result = await excavationSkill.run(context(world), args({ steps: 1, tool: 'diamond_pickaxe' }));
   assert.equal(result.status, 'failed');
@@ -99,7 +99,7 @@ test('excavate_path.tool：指定工具不在背包 → TOOL_MISSING，不挖不
   assert.ok(!world.actions.some((action) => action.startsWith('equip:')), '未装备不存在的工具');
 });
 
-test('excavate_path.tool：指定工具在背包 → 装备到主手并实际开挖成功', async () => {
+test('excavate_run.tool：指定工具在背包 → 装备到主手并实际开挖成功', async () => {
   const world = new ToolWorld();
   const result = await excavationSkill.run(context(world), args({ steps: 2, tool: 'iron_pickaxe' }));
   assert.equal(result.status, 'succeeded', result.summary);
@@ -110,7 +110,7 @@ test('excavate_path.tool：指定工具在背包 → 装备到主手并实际开
   assert.ok(world.digOpts.length > 0 && world.digOpts.every((opts) => opts?.tool === 'iron_pickaxe'), '每次 dig 都把指定工具交给适配器，不让身体换别的工具');
 });
 
-test('excavate_path.tool：适配器挖不动时原样报出 TOOL_MISSING 事实，不走下一步', async () => {
+test('excavate_run.tool：适配器挖不动时原样报出 TOOL_MISSING 事实，不走下一步', async () => {
   const world = new ToolWorld();
   world.digFailure = 'TOOL_MISSING:iron_pickaxe 耐久不足，实际挖不动 grass_block';
   const result = await excavationSkill.run(context(world), args({ steps: 1, tool: 'iron_pickaxe' }));
@@ -120,7 +120,7 @@ test('excavate_path.tool：适配器挖不动时原样报出 TOOL_MISSING 事实
   assert.equal(world.moves.length, 0);
 });
 
-test('excavate_path.tool：指定工具挖不了某一格 → TOOL_MISSING 并说明哪一格，不挖', async () => {
+test('excavate_run.tool：指定工具挖不了某一格 → TOOL_MISSING 并说明哪一格，不挖', async () => {
   const world = new ToolWorld();
   world.setBlock({ x: 1, y: 63, z: 0 }, 'stone');
   const result = await excavationSkill.run(context(world), args({ steps: 1, tool: 'stone_shovel' }));
@@ -138,7 +138,7 @@ test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文�
     memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
   const activity = createActivity({
     what: '沿矿道横着挖到 y12 以下，找钻石露头', why: '测试', kind: 'gather', repeat: 1,
-    steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }],
+    steps: [{ skill: 'excavate_run', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }],
   }, '', 'llm', adapter.state());
   const fact = '工具分级事实：铁镐耐久快见底，石镐还能挖普通方块';
   const ctx = { ...base, activity, toolFact: fact };
@@ -160,7 +160,7 @@ test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额
   const activity = createActivity({
     what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1,
     steps: [
-      { skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } },
+      { skill: 'excavate_run', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } },
       { skill: 'smelt', args: { item: 'raw_iron', count: 8 } },
     ],
   }, '', 'llm', adapter.state());
@@ -240,7 +240,7 @@ test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，�
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
     memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
   const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: Date.now() - 2 * 60_000 });
-  const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_path', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
+  const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
   const materials = { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) };
   const user = buildMindMessages({ ...base, activity: miningActivity, materials }).find((m) => m.role === 'user')!.content;
   assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 72 个矿石\/粗矿\/锭（实时）/);
@@ -288,7 +288,7 @@ test('mind：同一 key 的工具事实不每念重复，key 变化后再说', (
   const arbiter = { info: () => null, start: () => ({ id: 'noop' }) };
   const mind = new Mind({ adapter, arbiter: arbiter as unknown as Arbiter, perception, memory, bus,
     self: new SelfModel(null), persona: 'P', thinker: thinker as unknown as Thinker });
-  const activity = createActivity({ what: '挖脚下', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'dig_at', args: { at: [0, -1, 0] } }] }, '', 'llm', adapter.state());
+  const activity = createActivity({ what: '挖脚下', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'mine_cell', args: { at: [0, -1, 0] } }] }, '', 'llm', adapter.state());
   (mind as any).activity = activity;
   (mind as any).think('测试', 'glance');
   assert.ok(captured[0]?.toolFact, '第一次遇到该状态时给出工具分级事实');

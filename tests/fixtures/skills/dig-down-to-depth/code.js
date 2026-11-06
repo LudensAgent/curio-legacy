@@ -6,7 +6,7 @@ if (typeof args.y === "number") {
   while (s.feet.y > target && guard < 40) {
     const below = await api.blockAt(Math.floor(s.feet.x), s.feet.y - 1, Math.floor(s.feet.z));
     if (below && below.kind === 'solid') {
-      const r = await api.act('dig_at', { at: [0, -1, 0], facing: s.facing ?? 'N' });
+      const r = await api.act('mine_cell', { at: [0, -1, 0], facing: s.facing ?? 'N' });
       if (r && !r.ok) break;
     }
     await api.sleep(200);

@@ -7,10 +7,10 @@ import { FakeAdapter } from './fake-adapter.ts';
 test('air at successive relative targets does not interrupt a tunnel routine that is moving', () => {
   const adapter = new FakeAdapter();
   const steps = [
-    { skill: 'dig_at', args: { at: [1, 0, 0], facing: 'N' } },
-    { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } },
-    { skill: 'place_at', args: { at: [1, -1, 0], facing: 'N', item: 'cobblestone' } },
-    { skill: 'step', args: { at: [1, 0, 0], facing: 'N' } },
+    { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'N' } },
+    { skill: 'mine_cell', args: { at: [1, 1, 0], facing: 'N' } },
+    { skill: 'place_cell', args: { at: [1, -1, 0], facing: 'N', item: 'cobblestone' } },
+    { skill: 'move_step', args: { at: [1, 0, 0], facing: 'N' } },
   ];
   const activity = createActivity({ what: '沿北向平巷推进', why: '', kind: 'gather', repeat: 4, steps }, '', 'llm', adapter.state());
   let moved = 0;
@@ -18,9 +18,9 @@ test('air at successive relative targets does not interrupt a tunnel routine tha
     const step = nextStep(activity);
     if (!step) break;
     const target = { x: Math.floor(adapter.pos.x), y: Math.floor(adapter.pos.y), z: Math.floor(adapter.pos.z) - 1 };
-    if (step.skill === 'step') { adapter.pos.z--; moved++; }
-    const result = step.skill === 'dig_at' ? ok('目标是空气', { was: 'air', targetCell: target })
-      : step.skill === 'place_at' ? ok('支撑已放置', { placed: 'cobblestone' }) : ok('已进入下一格');
+    if (step.skill === 'move_step') { adapter.pos.z--; moved++; }
+    const result = step.skill === 'mine_cell' ? ok('目标是空气', { was: 'air', targetCell: target })
+      : step.skill === 'place_cell' ? ok('支撑已放置', { placed: 'cobblestone' }) : ok('已进入下一格');
     const verdict = afterStep(activity, step, result, 100, adapter.state());
     assert.notEqual(verdict.kind, 'stuck');
     if (verdict.kind === 'done') assert.equal(moved, 4);
@@ -30,7 +30,7 @@ test('air at successive relative targets does not interrupt a tunnel routine tha
 
 test('moving between empty target cells resets the count even without digging or placement', () => {
   const adapter = new FakeAdapter();
-  const dig = { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } };
+  const dig = { skill: 'mine_cell', args: { at: [1, 1, 0], facing: 'N' } };
   const activity = createActivity({ what: '沿空通道走', why: '', kind: 'explore', repeat: 5, steps: [dig] }, '', 'llm', adapter.state());
   for (let i = 0; i < 5; i++) {
     adapter.pos.z--;
@@ -43,8 +43,8 @@ test('moving between empty target cells resets the count even without digging or
 test('new excavation in another cell prevents empty headroom from being treated as stalled work', () => {
   const adapter = new FakeAdapter();
   const steps = [
-    { skill: 'dig_at', args: { at: [1, 1, 0], facing: 'N' } },
-    { skill: 'dig_at', args: { at: [1, 0, 0], facing: 'N' } },
+    { skill: 'mine_cell', args: { at: [1, 1, 0], facing: 'N' } },
+    { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'N' } },
   ];
   const activity = createActivity({ what: '逐格挖开岩面', why: '', kind: 'gather', repeat: 4, steps }, '', 'llm', adapter.state());
   for (let i = 0; i < 8; i++) {
@@ -57,7 +57,7 @@ test('new excavation in another cell prevents empty headroom from being treated 
 
 test('three confirmed empty digs at one stationary cell report facts without inventing a route', () => {
   const adapter = new FakeAdapter();
-  const dig = { skill: 'dig_at', args: { at: [1, 0, 0], facing: 'N' } };
+  const dig = { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'N' } };
   const activity = createActivity({ what: '原地尝试', why: '', kind: 'experiment', repeat: 5, steps: [dig] }, '', 'llm', adapter.state());
   const result = ok('空气', { was: 'air', targetCell: { x: 0, y: 64, z: -1 } });
   assert.equal(afterStep(activity, nextStep(activity)!, result, 100, adapter.state()).kind, 'continue');
@@ -74,8 +74,8 @@ test('stationary dig progress resets empty-dig counts only when it actually remo
   for (const dug of [['stone'], []]) {
     const adapter = new FakeAdapter();
     const steps = [
-      { skill: 'dig_at', args: { at: [1, 0, 0], facing: 'N' } },
-      { skill: 'dig', args: { dir: 'up', blocks: 1 } },
+      { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'N' } },
+      { skill: 'excavate_run', args: { mode: 'stairs_up', direction: 'north', steps: 1 } },
     ];
     const activity = createActivity({ what: '清理头顶', why: '', kind: 'gather', repeat: 4, steps }, '', 'llm', adapter.state());
     const air = ok('空气', { was: 'air', targetCell: { x: 0, y: 64, z: -1 } });
@@ -90,7 +90,7 @@ test('stationary dig progress resets empty-dig counts only when it actually remo
 
 test('missing physical target evidence cannot be treated as repeated digs at one cell', () => {
   const adapter = new FakeAdapter();
-  const dig = { skill: 'dig_at', args: { at: [1, 0, 0], facing: 'N' } };
+  const dig = { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'N' } };
   const activity = createActivity({ what: '缺少目标记录', why: '', kind: 'experiment', repeat: 4, steps: [dig] }, '', 'llm', adapter.state());
   for (let i = 0; i < 4; i++) assert.notEqual(afterStep(activity, nextStep(activity)!, ok('空气', { was: 'air' }), 100, adapter.state()).kind, 'stuck');
 });

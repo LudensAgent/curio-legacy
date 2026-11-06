@@ -23,9 +23,10 @@ test('general-purpose actions stay discoverable outside the advanced line', () =
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
-  assert.match(directory, /- walk_to \{.*deadlineMs/);
+  assert.match(directory, /常用动作.*walk_path/);
   assert.match(directory, /- equip_armor：/, '没有参数的动作也要给用途');
-  const details = moveDetails(['walk_to', 'walk_route', 'fly_to', 'trade', 'use_gui', 'spatial_query', 'building_archive']);
+  const details = moveDetails(['plan_route', 'walk_path', 'fly_to', 'trade', 'use_gui', 'spatial_query', 'building_archive']);
+  assert.match(details, /- walk_path \{.*deadlineMs/);
   assert.match(details, /- building_archive /, '第 7 个动作也要查得到，不能静默截断');
   assert.match(details, /- spatial_query /);
 });

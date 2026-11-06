@@ -18,7 +18,7 @@ test('default controls describe general inputs; consulted workflows persist per 
   t.after(() => { assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(directory, { recursive: true, force: true }); });
   const before = Object.keys(SKILLS), controls = new ControlKnowledge(file);
   const basic = controlCatalog();
-  for (const name of ['inspect_block', 'interact_block', 'hit_entity', 'goto', 'hold_item', 'inspect_inventory', 'use_gui', 'sign_text', 'edit_book']) assert.match(basic, new RegExp(`^- ${name} `, 'm'));
+  for (const name of ['inspect_block', 'interact_block', 'hit_entity', 'plan_route', 'hold_item', 'inspect_inventory', 'use_gui', 'sign_text', 'edit_book']) assert.match(basic, new RegExp(`^- ${name} `, 'm'));
   assert.match(basic, /make:false.*嵌套/);
   for (const name of ['hunt', 'farm', 'boat', 'expedition', 'shelter', 'build']) assert.doesNotMatch(basic, new RegExp(`^- ${name} `, 'm'));
   controls.expose('world-a', ['hunt', 'unstuck', 'invented_power']);

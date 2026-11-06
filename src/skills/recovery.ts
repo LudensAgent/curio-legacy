@@ -9,21 +9,20 @@ type NavArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
 export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; arrival?: NavArrival; fragmentId?: string; deadlineMs?: number };
 
 /** 恢复时只有这三个库入口能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
-const NAVIGATION_SKILLS = new Set(['walk_route', 'walk_to', 'walk_known_route']);
+const NAVIGATION_SKILLS = new Set(['walk_path']);
 /**
  * 新导航恢复不能用其他直接移动/导航动作绕过原后端、目标与手段。
  * 一个显式有限集合：旧寻路/单步/按键/旧路线，以及会直接改变身体位置或移动方式的
  * 游泳、旅行、沿矿道、下行、攀爬、载具、上浮和下潜。普通非恢复调用不受影响。
  */
 const NAVIGATION_BYPASS = new Set([
-  'goto', 'step', 'move', 'press_keys', 'walk_route',
-  'swim_to', 'travel', 'follow_passage', 'descend', 'climb_up', 'ride', 'surface', 'dive',
+  'plan_route', 'move_step', 'press_keys', 'pillar_one', 'swim_path', 'boat_path', 'descend_to', 'excavate_run',
 ]);
 
 /** 组合施工必须由原委托本身授权；其他动作失败不能借恢复自动引入挖放/搭柱组合。 */
-const COMBINATION_SKILLS = new Set(['excavate_path', 'climb_up']);
+const COMBINATION_SKILLS = new Set(['excavate_run']);
 /** 水面/载具的入口、出口、方式与时间预算在恢复中保持不变。 */
-const WATER_SKILLS = new Set(['travel', 'swim_to', 'surface', 'ride', 'dive']);
+const WATER_SKILLS = new Set(['swim_path', 'boat_path']);
 /** 原始按键控制不能由其他委托的恢复升级获得。 */
 const RAW_INPUT_SKILLS = new Set(['press_keys', 'move']);
 /** 只读观察不改变身体或世界，任何恢复都可先看再决定。 */
@@ -114,7 +113,14 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   let deadlineMs: number | undefined;
   const providedTarget = worldPoint(raw.target);
   if (raw.target !== undefined && !providedTarget) return { error: 'failure.target 须为明确的世界坐标 {x,y,z}，不能将相对 at/to 当作目标' };
-  if (skill === 'walk_to') {
+  if (skill === 'walk_path') {
+    if (typeof args.routeId !== 'string' || !args.routeId.trim()) return { error: 'failure.args.routeId 必须是原 plan_route 返回的路线 ID' };
+    const deadline = recoveryDeadline(args.deadlineMs);
+    if (!deadline.ok) return { error: deadline.error };
+    navTarget = providedTarget;
+    deadlineMs = deadline.value;
+    args = { routeId: args.routeId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+  } else if (skill === 'walk_to') {
     const to = readPoint(args.to);
     if (to === null) return { error: 'failure.args.to 必须是 walk_to 的有限世界坐标（保留小数与负数）' };
     const ra = args.arrival;
@@ -199,6 +205,14 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (NAVIGATION_SKILLS.has(name) && name !== scope.skill) {
     throw new Error(`恢复「${scope.skill}」不能改用 ${name}：缺少等价的原始目标与完成条件`);
   }
+  if (name === 'walk_path') {
+    if (scope.skill !== 'walk_path') throw new Error('恢复 walk_path 只能沿用原导航委托');
+    if (typeof args.routeId !== 'string' || args.routeId !== original.routeId) throw new Error('恢复 walk_path 必须沿用原 routeId，不能换路线');
+    if (scope.deadlineMs !== undefined) {
+      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_path 不能延长原绝对期限');
+    }
+  }
   if (name === 'walk_route') {
     if (scope.skill !== 'walk_route') throw new Error('恢复 walk_route 只能沿用原导航委托');
     const originalPoints = Array.isArray(original.points) ? original.points.map(readPoint) : [];
@@ -237,38 +251,24 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   // 水面/载具：恢复沿用原入口、出口、方式和时间预算；不能在失败后换成别的移动/施工方式。
   if (WATER_SKILLS.has(scope.skill)) {
     if (name !== scope.skill) throw new Error(`恢复「${scope.skill}」不能改用 ${name}：水面/载具的目标、出口或时间预算不能被恢复扩大`);
-    if (name === 'travel') {
-      if (travelTarget(args.to) !== travelTarget(original.to ?? original.target)) throw new Error('恢复 travel 必须保留原目标');
-      if (original.noBoat === true && args.noBoat !== true) throw new Error('原出行没有授权使用船，恢复不能改用船');
-      if (args.place === true && original.place !== true) throw new Error('原出行没有授权垫方块，恢复不能增加放置');
-      const origin = worldPoint(original.headingOrigin);
-      if (origin) {
-        if (!pointEquals(worldPoint(args.headingOrigin), origin)) throw new Error('恢复 travel 必须保留原方向起点，不能把目标移到当前位置');
-        args.headingOrigin = origin;
+    if (name === 'swim_path') {
+      const mode = typeof original.mode === 'string' ? original.mode : undefined;
+      if (mode !== undefined && args.mode !== mode) throw new Error('恢复 swim_path 必须保留原模式');
+      if (mode !== 'surface') {
+        if (!pointEquals(rawPoint(args.xyz), rawPoint(original.xyz ?? original.to ?? original.at))) throw new Error('恢复 swim_path 必须使用原目标坐标');
       }
+      if (finite(original.timeoutMs) && finite(args.timeoutMs) && args.timeoutMs > original.timeoutMs) throw new Error('恢复 swim_path 不能延长原时间预算');
     }
-    if (name === 'swim_to') {
-      if (!pointEquals(rawPoint(args.xyz), rawPoint(original.xyz ?? original.to ?? original.at))) throw new Error('恢复 swim_to 必须使用原目标坐标');
-      if (finite(original.timeoutMs) && finite(args.timeoutMs) && args.timeoutMs > original.timeoutMs) throw new Error('恢复 swim_to 不能延长原时间预算');
-    }
-    if (name === 'surface' && finite(original.timeoutMs) && finite(args.timeoutMs) && args.timeoutMs > original.timeoutMs) {
-      throw new Error('恢复 surface 不能延长原时间预算');
-    }
-    if (name === 'ride') {
+    if (name === 'boat_path') {
       const to = rideTarget(args.to), from = rideTarget(original.to);
       const sameTo = to === undefined && from === undefined
         || !!to && !!from && to.x === from.x && to.z === from.z;
-      if (!sameTo) throw new Error('恢复 ride 必须保留原目标');
+      if (!sameTo) throw new Error('恢复 boat_path 必须保留原目标');
       const direction = typeof original.direction === 'string' ? original.direction.toUpperCase() : undefined;
-      if (args.direction !== direction) throw new Error('恢复 ride 必须保留原方向');
-      if (finite(original.distance) && finite(args.distance) && args.distance > original.distance) throw new Error('恢复 ride 不能扩大原距离额度');
+      if (args.direction !== direction) throw new Error('恢复 boat_path 必须保留原方向');
+      if (finite(original.distance) && finite(args.distance) && args.distance > original.distance) throw new Error('恢复 boat_path 不能扩大原距离额度');
       const until = typeof original.until === 'string' && original.until.trim() ? original.until.trim().toLowerCase().slice(0, 80) : undefined;
-      if (args.until !== until) throw new Error('恢复 ride 必须保留原停止条件');
-    }
-    if (name === 'dive') {
-      if (!pointEquals(rawPoint(args.xyz), rawPoint(original.xyz ?? original.to ?? original.at))) throw new Error('恢复 dive 必须使用原目标格');
-      const minOxygen = finite(original.min_oxygen) ? original.min_oxygen : 8;
-      if (finite(args.min_oxygen) && args.min_oxygen < minOxygen) throw new Error('恢复 dive 不能降低原氧气下限');
+      if (args.until !== until) throw new Error('恢复 boat_path 必须保留原停止条件');
     }
   }
   // 原始按键（press_keys）是独立的身体控制委托：其他动作的恢复不能升级成它。
@@ -289,80 +289,35 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
     // 不能超过原委托的按压时长；api.move 自己的入口校验再应用 1000ms 上限。
     if (finite(original.ms) && finite(args.ms) && args.ms > original.ms) throw new Error('恢复按键不能超过原按压时长');
   }
-  const terrain = ['goto', 'step', 'explore'].includes(scope.skill) && original.dig === true;
-  const placement = scope.skill === 'goto' ? (original.place ?? terrain) === true : terrain || scope.allowPlace === true;
-  const tower = scope.skill === 'goto' ? placement && (original.tower ?? terrain) === true : placement;
-  if (name === 'goto') {
-    if (args.dig === true && !terrain) throw new Error('原动作没有授权挖穿或垫块，恢复不能升级为 dig:true');
-    if (args.place === true && !placement) throw new Error('原动作没有授权放置，恢复不能增加放置');
-    if (args.tower === true && !tower) throw new Error('原动作没有授权搭柱，恢复不能增加搭柱');
-    if (!placement) args.place = false;
-    if (!tower) args.tower = false;
-    if (['goto', 'step', 'explore'].includes(scope.skill) && args.sprint === true && original.sprint !== true) throw new Error('原动作没有选择冲刺，恢复不能增加冲刺消耗');
-    if (original.lead !== undefined && args.lead !== original.lead) throw new Error('恢复必须保留原带领对象');
-    if (scope.target) {
-      const match = typeof args.target === 'string' ? args.target.trim().split(/[,\s]+/).map(Number) : [];
-      if (match.length !== 3 || !match.every(Number.isFinite) || match[0] !== scope.target.x || match[1] !== scope.target.y || match[2] !== scope.target.z) throw new Error('恢复 goto 必须使用失败动作的原绝对目标');
+  if (name === 'move_step' || name === 'mine_cell' || name === 'place_cell' || name === 'place_support' || name === 'pillar_one') {
+    if (name === 'mine_cell') {
+      for (const flag of ['wet', 'lava', 'fall', 'own'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原委托没有允许 ${flag}:true，恢复不能擅自打开`);
     }
-    const avoid = Array.isArray(original.avoid) ? original.avoid.filter((item): item is string => typeof item === 'string') : [];
-    args.avoid = [...new Set([...avoid, ...(Array.isArray(args.avoid) ? args.avoid : [])])];
-  }
-  if (name === 'dig_at' || name === 'place_at' || name === 'step') {
-    if (name === 'dig_at' && scope.skill !== 'dig_at' && !terrain && scope.allowDig !== true) throw new Error('原委托没有授权挖掘，恢复不能改挖其他方块');
-    if (name === 'place_at' && scope.skill !== 'place_at' && !placement) throw new Error('原委托没有授权支出方块；需要心智显式选择 allowPlace 才能放置');
-    if (name === 'place_at' && scope.skill === 'goto' && !tower && Array.isArray(args.at) && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0
-      && !(typeof args.item === 'string' && args.item !== 'any' && attachmentFaces(args.item))) throw new Error('原动作没有授权搭柱，恢复不能原地垫高');
+    if (name === 'mine_cell' && scope.skill !== 'mine_cell' && scope.allowDig !== true) throw new Error('原委托没有授权挖掘，恢复不能改挖其他方块');
+    if ((name === 'place_cell' || name === 'place_support' || name === 'pillar_one') && scope.skill !== name && scope.allowPlace !== true) {
+      throw new Error('原委托没有授权支出方块；需要心智显式选择 allowPlace 才能放置');
+    }
     if (name === scope.skill && scope.target) {
       const facing = (args.facing ?? facingOfYaw(ctx.adapter.eye()?.yaw ?? 0)) as Facing;
       const target = worldPoint(args.xyz) ?? (Array.isArray(args.at) && args.at.length === 3 ? toWorld(feetCell(ctx.adapter.state().pos), facing, args.at as [number, number, number]) : undefined);
       if (!target || target.x !== scope.target.x || target.y !== scope.target.y || target.z !== scope.target.z) throw new Error('恢复不能替换原动作的目标格');
     }
-    if (name === 'dig_at' && args.fall === true && original.fall !== true) throw new Error('原委托没有允许 fall:true，恢复不能擅自接受坠落风险');
-    if (name === 'dig_at' && scope.skill === 'dig_at') {
-      for (const flag of ['wet', 'lava', 'own'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原挖掘没有允许 ${flag}:true，恢复不能擅自打开`);
-    }
-    if (name === 'place_at' && scope.skill === 'place_at' && original.item !== undefined && args.item !== original.item) throw new Error('恢复必须保留原放置物品');
+    if (name === 'mine_cell' && scope.skill === 'mine_cell' && original.tool !== undefined && args.tool !== original.tool) throw new Error('恢复必须保留原挖掘工具');
+    if ((name === 'place_cell' || name === 'place_support') && scope.skill === name && original.item !== undefined && args.item !== original.item) throw new Error('恢复必须保留原放置物品');
+    if (name === 'pillar_one' && scope.skill === 'pillar_one' && original.item !== undefined && args.item !== original.item) throw new Error('恢复必须保留原垫脚材料');
   }
   // 组合施工（有界开挖、搭柱爬升）只沿用同一原委托的剩余额度，不能由别的失败自动引入。
   if (COMBINATION_SKILLS.has(name) && scope.skill !== name) {
     throw new Error(`恢复「${scope.skill}」不能引入 ${name} 组合施工：需要原委托显式授权`);
   }
-  if (name === 'excavate_path' && scope.skill === 'excavate_path') {
+  if (name === 'excavate_run' && scope.skill === 'excavate_run') {
     const originalScope = excavationScope(original);
-    if (args.entry !== originalScope.entry) throw new Error('恢复 excavate_path 必须使用原入口，不能另开入口');
-    if (args.mode !== originalScope.mode || args.direction !== originalScope.direction) throw new Error('恢复 excavate_path 必须保留原方向与模式');
-    if (!Number.isInteger(args.steps) || (args.steps as number) > originalScope.steps) throw new Error(`恢复 excavate_path 不能超过原 ${originalScope.steps} 步额度`);
-  }
-  if (name === 'climb_up' && scope.skill === 'climb_up') {
-    const originalScope = climbScope(original);
-    if (args.untilSky !== originalScope.untilSky || (args.untilExit === true) !== originalScope.untilExit) throw new Error('恢复 climb_up 必须保留原停止条件');
-    const remaining = scope.climb ? Math.max(0, scope.climb.height - scope.climb.spent) : originalScope.height;
-    if (remaining <= 0) throw new Error('恢复 climb_up 的原高度额度已用完，不能重新获得完整高度');
-    if (!finite(args.height) || args.height > remaining) args.height = remaining;
-  }
-  // 通道式 dig 也不能由其他委托的恢复自动获得，且同一次委派只能沿用原方向/目标与更小的额度。
-  if (name === 'dig') {
-    if (scope.skill !== 'dig' && !terrain && scope.allowDig !== true) throw new Error('原委托没有授权挖掘，恢复不能改用 dig');
-    if (scope.skill === 'dig') {
-      if (original.target !== undefined) {
-        const point = (value: unknown): Vec3Like | undefined => {
-          const text = typeof value === 'string' ? value.trim() : '';
-          const parts = text ? text.split(/[,， ]+/).map(Number) : [];
-          const parsed = parts.length === 3 && parts.every(Number.isFinite) ? { x: Math.floor(parts[0]), y: Math.floor(parts[1]), z: Math.floor(parts[2]) } : worldPoint(value);
-          return parsed ? { x: Math.floor(parsed.x), y: Math.floor(parsed.y), z: Math.floor(parsed.z) } : undefined;
-        };
-        const from = point(original.target), to = point(args.target);
-        if (from && to ? !pointEquals(from, to) : String(original.target).trim() !== String(args.target ?? '').trim()) throw new Error('恢复 dig 必须使用原目标方块或地标');
-        if ((original.block ?? undefined) !== (args.block ?? undefined) || (original.own === true) !== (args.own === true)) throw new Error('恢复 dig 必须保留原方块约束与归属条件');
-      } else {
-        if (args.target !== undefined || args.dir !== original.dir) throw new Error('恢复 dig 必须保留原挖掘方向');
-        if (finite(original.blocks) && finite(args.blocks) && args.blocks > original.blocks) throw new Error('恢复 dig 不能超过原格数额度');
-      }
-      for (const flag of ['wet', 'lava'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原挖掘没有允许 ${flag}:true，恢复不能擅自打开`);
-    }
+    if (args.entry !== undefined) throw new Error('恢复 excavate_run 从当前站位开始，不接受入口');
+    if (args.mode !== originalScope.mode || args.direction !== originalScope.direction) throw new Error('恢复 excavate_run 必须保留原方向与模式');
+    if (!Number.isInteger(args.steps) || (args.steps as number) > originalScope.steps) throw new Error(`恢复 excavate_run 不能超过原 ${originalScope.steps} 步额度`);
+    for (const flag of ['wet', 'lava', 'allowFalling'] as const) if (args[flag] === true && original[flag] !== true) throw new Error(`原开挖没有允许 ${flag}:true，恢复不能擅自打开`);
   }
   if (name === 'craft' && scope.skill !== 'craft') throw new Error('恢复不能隐式增加合成任务');
-  if (name === 'explore' && scope.skill !== 'explore') throw new Error('恢复不能隐式增加探索任务');
   if (name === 'defend' || name === 'hit_entity' || name === 'interact') {
     const id = args.entityId ?? args.entity;
     // 实体也是原委托的一部分：没有指定实体时，恢复不能自己挑一个攻击/交互对象。

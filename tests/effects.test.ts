@@ -12,12 +12,12 @@ test('持续效果：扔掉的东西被自己捡回来，说清楚之后做过�
   bus.on('event', (ev: any) => { if (ev.type === 'effect_broken') seen.push(ev); });
   const fx = new EffectWatch(bus);
   bus.publish('task_end', 'P2', 'toss', { taskId: 't1', status: 'succeeded', skill: 'toss_item', expect: { discarded: ['dirt'], forMs: 180_000, what: '扔掉了 dirt×32' } });
-  bus.publish('task_start', 'P2', 'dig', { taskId: 't2', skill: 'dig_at', args: { at: [1, 0, 0] } });
+  bus.publish('task_start', 'P2', 'dig', { taskId: 't2', skill: 'mine_cell', args: { at: [1, 0, 0] } });
   fx.recollected('dirt', 32);
   assert.equal(seen.length, 1);
-  assert.match(seen[0].msg, /toss_item「扔掉了 dirt×32」，又捡回来了 dirt×32：之后做过 dig_at，捡回来时正在 dig_at/);
+  assert.match(seen[0].msg, /toss_item「扔掉了 dirt×32」，又捡回来了 dirt×32：之后做过 mine_cell，捡回来时正在 mine_cell/);
   // 走到掉落物上（没在做动作）：说清楚是自动捡起
-  bus.publish('task_end', 'P2', 'dig', { taskId: 't2', status: 'succeeded', skill: 'dig_at' });
+  bus.publish('task_end', 'P2', 'dig', { taskId: 't2', status: 'succeeded', skill: 'mine_cell' });
   bus.publish('task_end', 'P2', 'toss', { taskId: 't3', status: 'succeeded', skill: 'toss_item', expect: { discarded: ['gravel'], what: '扔掉了 gravel×8' } });
   fx.recollected('gravel', 8);
   assert.match(seen[1].msg, /没在做动作.*自动捡起/);

@@ -168,7 +168,7 @@ test('hunt：可以指定打鱼，但只打浅水里的鱼', async () => {
   } finally { ctx.memory.close(); }
 });
 
-test('surface 不因低氧或封顶升级成挖顶/寻岸：始终只做一次上浮委托', async () => {
+test('swim_path surface 不因低氧或封顶升级成挖顶/寻岸：始终只做一次上浮委托', async () => {
   const w = submerged(60);
   w.oxygen = 10;
   for (let y = 60; y <= 70; y++) w.setBlock({ x: 0, y, z: 0 }, 'water');
@@ -219,13 +219,13 @@ test('光照：露天白天读出 0 当作数据不可信；地下有顶的暗�
   assert.ok(started.some((s) => s.skill === 'place_torch'), '地下暗处才插');
 });
 
-test('surface 给 LLM 用：不在水里时直接说明已在干地上；gather 的 for 写错不让整步作废', async () => {
+test('swim_path surface 给 LLM 用：不在水里时直接说明已在干地上；gather 的 for 写错不让整步作废', async () => {
   const { SKILLS, LLM_HIDDEN } = await import('../src/skills/index.ts');
-  assert.ok(!LLM_HIDDEN.has('surface') && SKILLS.surface);
+  assert.ok(!LLM_HIDDEN.has('swim_path') && SKILLS.swim_path);
   const w = new TestWorld();
   const ctx = makeCtx(w);
   try {
-    const r = await surface.run(ctx, {});
+    const r = await SKILLS.swim_path.run(ctx, { mode: 'surface' });
     assert.equal(r.status, 'succeeded'); assert.match(r.summary, /干地/);
     const v = gather.validate({ block: 'log', count: 3, for: { item: '小木屋木料' } }, w);
     assert.ok(v.ok);

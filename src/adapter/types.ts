@@ -411,7 +411,7 @@ export interface GameAdapter {
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
   /**
    * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格的空目标格放一块方块。
-   * 只用于 place_at purpose:"support" 的支撑位；会移动身体到边缘，放完保持站稳。
+   * 只用于 place_support 的支撑位；会移动身体到边缘，放完保持站稳。
    */
   sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;

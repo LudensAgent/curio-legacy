@@ -234,7 +234,7 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
     const why = dist > 48
       ? `离你约 ${dist} 格（超出 48 格视野，store_items 不会自己走过去）`
       : `离你约 ${dist} 格，转头看仍看不见（可能被遮挡或未加载）`;
-    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 goto 过去、或改选看得见的容器再存${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
+    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 plan_route → walk_path 过去、或改选看得见的容器再存${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
   }
   if (!CONTAINERS.includes(observed.name)) {
     forgetObservedContainer(ctx, pos);
@@ -514,7 +514,7 @@ export const farm: Skill<{ crop: string; size: number }> = {
 // ===================================================================== 远征
 export const expedition: Skill<{ direction: string; distance: number; torches?: boolean; eat_below?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。用 goto base 沿路标回家',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 plan_route → walk_path 沿路标走',
   argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
   timeoutMs: 900000,
   movement: true,

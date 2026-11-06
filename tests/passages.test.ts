@@ -248,7 +248,7 @@ test('按需提醒：想下矿或回地面时说明历史路线与当前通路�
   assert.ok(inside.some((r) => /你正沿着这条旧矿道.*沿旧矿道回入口的下一个路点 \(\d+,\d+,\d+\)/.test(r)), inside.join('\n'));
   const up = situationalReminders(ctx(at(22, 42, 0), '挖台阶一路挖到见天回地面'));
   assert.ok(up.some((r) => /你正沿着自己挖过的旧矿道；沿它回入口的下一步 \(\d+,\d+,\d+\)/.test(r)), up.join('\n'));
-  assert.ok(up.some((r) => /follow_passage \{"to":"entrance"\}/.test(r)), up.join('\n'));
+  assert.ok(up.some((r) => /plan_route \{"source":"history","pathId":"<记录ID>"\}/.test(r)), up.join('\n'));
   const tripCtx = ctx(at(22, 42, 0), '回地面');
   tripCtx.percept.self.sky_visible = false;
   tripCtx.trip = { minutes: 2, gained: {}, nearEnd: true };

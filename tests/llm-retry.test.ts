@@ -44,7 +44,7 @@ test('LLM 连接被拒（ECONNREFUSED）也算瞬时故障：退避重试后放�
   const tmp = http.createServer(() => {});
   await new Promise<void>((r) => tmp.listen(0, '127.0.0.1', r));
   const port = (tmp.address() as any).port;
-  await new Promise<void>((r) => tmp.close(r));
+  await new Promise<void>((r) => tmp.close(() => r()));
   const p = new OpenAICompatibleProvider(cfg(`http://127.0.0.1:${port}`));
   await assert.rejects(() => p.complete([{ role: 'user', content: 'hi' }], AbortSignal.timeout(15000)), /ECONNREFUSED|fetch failed/);
 });

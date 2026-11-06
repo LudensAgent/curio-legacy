@@ -126,42 +126,20 @@ test('只是一步合成（材料早就在背包里）不算学到做法', (t) =
   assert.equal(h.miner.episodes('crafting_table').length, 0);
 });
 
-test('更快的新动作链仍只提出候选，不以旧经历晋升或自动淘汰其它版本', (t) => {
-  const h = harness(); t.after(h.close);
-  woodenPickaxe(h, 30_000); h.adapter.inv.delete('wooden_pickaxe');
-  h.adapter.pos = { x: 100, y: 64, z: 100 }; woodenPickaxe(h, 30_000); h.adapter.inv.delete('wooden_pickaxe');
-  const first = h.methods.list();
-  assert.equal(first.length, 1);
-  const faster = () => {
-    h.step('explore', { direction: 'N', distance: 32, until: 'spruce_log' }, {}, 3000);
-    h.step('gather', { block: 'spruce_log', count: 3 }, { spruce_log: 3 }, 4000);
-    h.step('craft', { item: 'wooden_pickaxe', count: 1 }, { spruce_log: -2, wooden_pickaxe: 1 }, 3000);
-  };
-  h.adapter.pos = { x: 300, y: 64, z: 0 }; faster(); h.adapter.inv.delete('wooden_pickaxe');
-  h.adapter.pos = { x: 500, y: 64, z: 0 }; faster();
-  const now = h.methods.list().filter((d) => d.name === 'get_wooden_pickaxe');
-  assert.equal(now.length, 2);
-  assert.ok(now.every((d) => d.status === 'candidate' && d.trials.length === 0));
-  assert.equal(now.find((d) => d.version === first[0].version)?.status, 'candidate');
-  assert.ok(!h.events().some((e) => /更快的办法|skill_learned/.test(e)));
-});
-
-test('提取候选保留 extra 和探索方向；已有旧式 observed 伪证据加载后不算通过', (t) => {
+test('提取候选保留 extra；已有旧式 observed 伪证据加载后不算通过', (t) => {
   const h = harness(); t.after(h.close);
   for (const x of [0, 100]) {
     h.adapter.pos = { x, y: 64, z: x };
-    h.step('explore', { direction: 'N', distance: 32, until: 'spruce_log' }, {});
     h.step('gather', { block: 'spruce_log', count: 3 }, { spruce_log: 3 });
     h.step('craft', { item: 'wooden_pickaxe', count: 1, extra: true }, { spruce_log: -2, wooden_pickaxe: 1 });
   }
   const [candidate] = h.methods.list();
   assert.equal(candidate.program.type, 'sequence');
   if (candidate.program.type !== 'sequence') assert.fail('expected sequence');
-  const [explore, , craft] = candidate.program.steps;
-  assert.equal(explore.type, 'call'); assert.equal(craft.type, 'call');
-  if (explore.type !== 'call' || craft.type !== 'call') assert.fail('expected calls');
-  assert.equal((explore.args as { direction: string }).direction, 'N');
-  assert.equal((explore.args as { distance: number }).distance, 32);
+  const [gather, craft] = candidate.program.steps;
+  assert.equal(gather.type, 'call'); assert.equal(craft.type, 'call');
+  if (gather.type !== 'call' || craft.type !== 'call') assert.fail('expected calls');
+  assert.equal((gather.args as { block: string }).block, 'spruce_log');
   assert.equal((craft.args as { extra: boolean }).extra, true);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-experience-migration-'));
   t.after(() => {

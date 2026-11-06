@@ -185,7 +185,7 @@ export function describeBuildProblems(result: ConstructionResult): string {
     const highCells = missing.filter((x) => x.pos.y >= high - 1).slice(0, 8)
       .map((x) => `(${x.pos.x},${x.pos.y},${x.pos.z}) ${x.expected}${why.get(x.cellId) ? `：${why.get(x.cellId)!.slice(0, 40)}` : ''}`);
     const reachNote = high - low >= 3 && top >= missing.length / 2
-      ? `，其中 ${top} 块在最高的 y=${high - 1}~${high}（比最低的缺口高 ${high - low} 格；施工时人站在地上、不搭柱子）：${highCells.join('；')}。这些格子也可以自己用 place_at 放（放的人得站在离它 4 格以内），放好后 mode:"inspect" 验收`
+      ? `，其中 ${top} 块在最高的 y=${high - 1}~${high}（比最低的缺口高 ${high - low} 格；施工时人站在地上、不搭柱子）：${highCells.join('；')}。这些格子也可以自己用 place_cell/place_support 放（放的人得站在离它 4 格以内），放好后 mode:"inspect" 验收`
       : '';
     out.push(`还有 ${missingCells} 块没放上${reachNote}`);
   }
@@ -344,7 +344,7 @@ export const build: Skill<BuildArgs> = {
         if (far > 24) {
           ctx.progress(0.02, `先走到给的 origin 附近（${Math.round(far)} 格）看看地形`);
           try { await ctx.adapter.moveTo({ kind: 'near', pos: origin, range: 6 }, { signal: ctx.signal, timeoutMs: Math.max(3000, Math.min(90000, ctx.deadline - Date.now() - 60000)) }); }
-          catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `给的 origin (${origin.x},${origin.y},${origin.z}) 在 ${Math.round(far)} 格外，走不过去：${(e as Error).message}；先 goto 到那附近再 build`); }
+          catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `给的 origin (${origin.x},${origin.y},${origin.z}) 在 ${Math.round(far)} 格外，走不过去：${(e as Error).message}；先用 resolve_target/plan_route/walk_path 到那附近再 build`); }
         }
       }
       const own = [...ownStationsAt(ctx).keys()].map((k) => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });

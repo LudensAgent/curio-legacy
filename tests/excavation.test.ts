@@ -69,7 +69,7 @@ function entry(ctx: SkillCtx, label = `${EYE_DESCENT_LABEL}（尚未发现要塞
 
 test('excavation has explicit bounded args and registers a reusable method without selecting it automatically', () => {
   const world = new ExcavationWorld();
-  assert.equal(structureSkills.excavate_path, excavationSkill);
+  assert.equal('excavate_path' in structureSkills, false);
   assert.equal(excavationSkill.validate({ entry: 'current', direction: 'east' }, world).ok, true);
   for (const invalid of [{ steps: 9 }, { steps: 1.5 }, { steps: -1 }, { direction: '__proto__' }, { direction: 'toString' }, { direction: 'down' }, { entry: { x: 1, y: 2, z: 3 } }]) assert.equal(excavationSkill.validate({ ...args(), ...invalid }, world).ok, false);
   assert.deepEqual(searchStructure.validate({ kind: 'stronghold' }, world), { ok: true, args: { kind: 'stronghold', method: 'eye' } });

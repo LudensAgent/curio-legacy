@@ -67,10 +67,10 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
 /** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（climb_up 只垫不挖，不算） */
-const DIGGING_SKILLS = new Set(['gather', 'dig', 'dig_at', 'excavate_path', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'goto', 'travel', 'build']);
+const DIGGING_SKILLS = new Set(['gather', 'mine_cell', 'excavate_run', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'walk_path', 'swim_path', 'build']);
 
 /** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
-const WATER_ESCAPE = new Set(['surface', 'swim_to', 'dive', 'travel', 'ride', 'press_keys', 'move']);
+const WATER_ESCAPE = new Set(['swim_path', 'boat_path', 'press_keys', 'move']);
 
 export const DEFAULT_TIMING = {
   /** 一段活做了这么久还没抬头想过，就看一眼 */
@@ -108,7 +108,7 @@ interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState
 export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number; startY: number }, climbId?: string) {
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
-  const target = worldPoint(d.resolvedTarget) ?? worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? (step.skill === 'dig' ? worldPoint(d.pos) : undefined);
+  const target = worldPoint(d.resolvedTarget) ?? worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? ((step.skill === 'mine_cell' || step.skill === 'excavate_run') ? worldPoint(d.pos) : undefined);
   return {
     skill: step.skill, args: step.args ?? {}, code: result.failureCode ?? null, summary: clipFeedback(result.summary),
     ...(target ? { target, coordinateFrame: 'world' } : {}),
@@ -666,7 +666,7 @@ export class Mind {
     // 自动续跑的绝对期限只走调度预算 meta.deadlineMs，不改写技能参数：
     // 参数注入会被 use_skill 等严格校验器当成未知字段拒绝，也不该混进动作记录。
     const dispatch = step;
-    const climb = step.skill === 'climb_up' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
+    const climb = step.skill === 'pillar_one' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
     // 额外的 deadlineMs 只在自动续跑时出现；新的显式委托不传，Arbiter 仍按技能自身 timeout 起算。
     const schedule: Parameters<Arbiter['start']>[2] & { deadlineMs?: number } = {
       planId: this.activity.id,
@@ -893,7 +893,7 @@ export class Mind {
         // 顶层 climb_up 的进展已在账本实时入账，回退后按剩余额度续跑；普通嵌套技能（use_skill 等）内的爬升没有可靠续跑状态，
         // 若已产生部分爬升，把部分完成事实交回 Agent，不整段重播。
         const climbed = o.result.data?.climbed;
-        if (o.task.skill !== 'climb_up' && typeof climbed === 'number' && climbed > 0) {
+        if (o.task.skill !== 'pillar_one' && typeof climbed === 'number' && climbed > 0) {
           const spent = o.result.data?.spent;
           this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，累计爬升 ${spent} 格` : ''}）；没有可靠的续跑状态，是否继续由你决定`);
           return;
@@ -953,8 +953,8 @@ export class Mind {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
         const own = a.steps[Math.max(0, a.index - 1)];
-        const climb = step.skill === 'climb_up' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
-        const climbId = step.skill === 'climb_up' ? own?.id : undefined;
+        const climb = step.skill === 'pillar_one' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
+        const climbId = step.skill === 'pillar_one' ? own?.id : undefined;
         a.steps.splice(Math.max(0, a.index - 1), 0, {
           skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true, id: shortId('st_'),
           origin: 'execution_helper', authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },

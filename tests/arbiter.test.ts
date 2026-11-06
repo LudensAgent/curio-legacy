@@ -21,7 +21,7 @@ const setup = () => {
 test('取消任务：立即释放控制，任务以 cancelled 结束', async () => {
   const { adapter, arbiter, next } = setup();
   adapter.speed = 1; // 很慢，保证任务还在进行
-  arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   await sleep(100);
   const done = next();
   arbiter.cancel('测试取消');
@@ -43,7 +43,7 @@ test('beginShutdown 停止新任务与控制，但不把共享会话标记为暂
   } as unknown as SharedSpatialSession;
   const arbiter = new Arbiter(adapter, memory, bus, new Vision(adapter), spatial);
   try {
-    arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+    arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
     await sleep(100);
     const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
     arbiter.beginShutdown();
@@ -85,7 +85,7 @@ test('旧任务被取消后再发动作会被拦截（planVersion 守卫）', as
 test('抢占：新任务启动时旧任务记录 preemptedBy，planVersion 递增', async () => {
   const { adapter, arbiter, next } = setup();
   adapter.speed = 1;
-  const a = arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  const a = arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   const done = next();
   const b = arbiter.start({ skill: 'look_around', args: { seconds: 2 } }, 'reflex');
   const o = await done;
@@ -119,7 +119,7 @@ test('取消后的旧任务不能用独立信号下船', async () => {
 
 test('参数不合法的步骤被拒绝，不会启动', () => {
   const { arbiter } = setup();
-  const r = arbiter.start({ skill: 'explore', args: { direction: 'UP' } }, 'llm');
+  const r = arbiter.start({ skill: 'look_around', args: { direction: 'UP' } }, 'llm');
   assert.ok('error' in r);
   assert.equal(arbiter.current, null);
   const r2 = arbiter.start({ skill: 'teleport' }, 'llm');

@@ -75,20 +75,20 @@ test('代码技能取消时把原始 SkillResult.data 保留为 AbortedError.par
   assert.deepEqual((error as Error & { partial?: Record<string, unknown> }).partial, thrownPartial);
 });
 
-test('代码技能中失败的 stepTo/step 后，相对 at 的 dig/place 不得按原计划执行', async (t) => {
+test('代码技能中失败的 stepTo/move_step 后，相对 at 的挖掘/放置不得按原计划执行', async (t) => {
   const adapter = new FakeAdapter();
   const memory = new WorldMemory(null);
-  const originalStep = SKILLS.step;
+  const originalStep = SKILLS.move_step;
   // 模拟一次“身体没有换到新站位”的失败步骤；不改真实 step 的校验/执行实现。
-  SKILLS.step = {
-    name: 'step', description: '测试失败步骤', argsDoc: '{}', timeoutMs: 1000, movement: true,
+  SKILLS.move_step = {
+    name: 'move_step', description: '测试失败步骤', argsDoc: '{}', timeoutMs: 1000, movement: true,
     validate: () => ({ ok: true, args: {} }),
     async run(): Promise<SkillResult> {
       return { status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '没有换到新站位', data: { position: { x: 0.5, y: 64, z: 0.5 } } };
     },
   };
   t.after(() => {
-    SKILLS.step = originalStep;
+    SKILLS.move_step = originalStep;
     memory.close();
   });
   const bridge = makeBridge(makeCtx(adapter, { memory }));
@@ -96,13 +96,13 @@ test('代码技能中失败的 stepTo/step 后，相对 at 的 dig/place 不得�
   // 绝对 api.stepTo 失败后，相对 at 的挖掘/放置仍按当前（未换）站位解析，必须拒绝。
   const stepped = await bridge('stepTo', [1, 64, 0]) as { ok: boolean };
   assert.equal(stepped.ok, false);
-  await assert.rejects(bridge('act', ['dig_at', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
-  await assert.rejects(bridge('act', ['place_at', { at: [1, -1, 0], item: 'dirt', facing: 'N' }]), /没到新站位/);
+  await assert.rejects(bridge('act', ['mine_cell', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
+  await assert.rejects(bridge('act', ['place_cell', { at: [1, -1, 0], item: 'dirt', facing: 'N' }]), /没到新站位/);
 
   // 通过 api.act 调用相对/绝对 step 同样记录未到达缺口。
-  const viaAct = await bridge('act', ['step', { to: [1, 0, 0], facing: 'N' }]) as { ok: boolean };
+  const viaAct = await bridge('act', ['move_step', { at: [1, 0, 0], facing: 'N' }]) as { ok: boolean };
   assert.equal(viaAct.ok, false);
-  await assert.rejects(bridge('act', ['dig_at', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
+  await assert.rejects(bridge('act', ['mine_cell', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
   assert.equal(adapter.actions.length, 0, '被拒绝的相对动作不能在身体上执行');
 });
 
@@ -141,17 +141,13 @@ test('组合技能的子动作经过共享校验与恢复约束，不能绕过�
     memory.close();
   });
 
-  const otherMacro = learn('goto_other', [
-    { skill: 'goto', args: { target: '3,64,0' } },
-    { skill: 'goto', args: { target: '3,64,0' } },
+  const otherMacro = learn('step_other', [
+    { skill: 'move_step', args: { xyz: { x: 0, y: 64, z: -1 }, facing: 'N' } },
+    { skill: 'look', args: { dir: 'N' } },
   ]);
-  const digMacro = learn('goto_dig', [
-    { skill: 'goto', args: { target: '2,64,0', dig: true } },
-    { skill: 'goto', args: { target: '2,64,0', dig: true } },
-  ]);
-  const sameMacro = learn('goto_same', [
-    { skill: 'goto', args: { target: '2,64,0' } },
-    { skill: 'goto', args: { target: '2,64,0' } },
+  const sameMacro = learn('step_same', [
+    { skill: 'move_step', args: { xyz: { x: 1, y: 64, z: 0 }, facing: 'N' } },
+    { skill: 'look', args: { dir: 'N' } },
   ]);
   const probeMacro = learn('probe_ctx', [
     { skill: probe.name },
@@ -161,28 +157,22 @@ test('组合技能的子动作经过共享校验与恢复约束，不能绕过�
   const ctx: SkillCtx = {
     ...makeCtx(adapter, { memory }),
     senses: stubSenses(adapter), taskId: 'macro-parent', make: true,
-    recovery: { skill: 'goto', args: { dig: false }, target: { x: 2, y: 64, z: 0 } },
+    recovery: { skill: 'move_step', args: {}, target: { x: 1, y: 64, z: 0 } },
   };
   const bridge = makeBridge(ctx);
 
-  // 宏里的 goto 想换成另一个世界坐标：必须在身体动作之前拒绝。
+  // 宏里的 move_step 想换成另一格：必须在身体动作之前拒绝。
   const other = await bridge('act', [otherMacro, {}]) as { ok: boolean; summary: string };
   assert.equal(other.ok, false);
-  assert.match(other.summary, /原绝对目标/);
+  assert.match(other.summary, /目标格|原目标/);
   assert.equal(adapter.actions.length, 0, '换目标的宏不能在身体上执行任何动作');
-
-  // 宏里的 goto 想打开原委托没有的 dig 权限：同样必须在动作前拒绝。
-  const dig = await bridge('act', [digMacro, {}]) as { ok: boolean; summary: string };
-  assert.equal(dig.ok, false);
-  assert.match(dig.summary, /没有授权挖穿/);
-  assert.equal(adapter.actions.length, 0, '越权地形的宏不能在身体上执行任何动作');
 
   // 同一个原目标、未越权：放行且确实执行了身体动作。
   adapter.actions.length = 0;
   const same = await bridge('act', [sameMacro, {}]) as { ok: boolean; summary: string };
   assert.equal(same.ok, true, same.summary);
   assert.ok(adapter.actions.some((action) => action.startsWith('moveTo')), '允许的宏应真的走起来');
-  assert.deepEqual({ x: Math.floor(adapter.pos.x), y: Math.floor(adapter.pos.y), z: Math.floor(adapter.pos.z) }, { x: 2, y: 64, z: 0 });
+  assert.deepEqual({ x: Math.floor(adapter.pos.x), y: Math.floor(adapter.pos.y), z: Math.floor(adapter.pos.z) }, { x: 1, y: 64, z: 0 });
 
   // 子步骤收到的父上下文与截止时间不变（取父 deadline 与子静态超时的较小者，不重置预算）。
   observed.length = 0;

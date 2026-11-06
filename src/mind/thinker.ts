@@ -94,7 +94,7 @@ export function inferKind(steps: Step[]): ActivityKind {
   if (first.some((s) => ['build', 'repair', 'build_structure'].includes(s))) return 'build';
   if (first.some((s) => ['gather', 'hunt', 'fish', 'collect_seeds', 'forage', 'farm'].includes(s))) return 'gather';
   if (first.some((s) => ['craft', 'smelt'].includes(s))) return 'craft';
-  if (first.some((s) => ['explore', 'expedition', 'goto', 'ride', 'travel'].includes(s))) return 'explore';
+  if (first.some((s) => ['expedition', 'plan_route', 'walk_path', 'swim_path', 'boat_path'].includes(s))) return 'explore';
   if (first.some((s) => ['sleep', 'wait', 'shelter'].includes(s))) return 'rest';
   if (first.some((s) => ['store_items', 'take_items'].includes(s))) return 'tidy';
   if (first.some((s) => ['experiment_method'].includes(s) || s.startsWith('trial:'))) return 'experiment';
@@ -137,7 +137,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
       continue;
     }
     let args = v.args;
-    if (['dig_at', 'step', 'place_at'].includes(name)) {
+    if (['mine_cell', 'move_step', 'place_cell', 'place_support'].includes(name)) {
       // Primitive validation owns coordinate aliases and absolute-to-relative conversion.
       const cell = args as { at: [number, number, number]; facing: Facing; xyz?: object };
       if (!cell.xyz && (cell.at[0] !== 0 || cell.at[2] !== 0)) {

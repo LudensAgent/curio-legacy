@@ -97,11 +97,11 @@ test('自动验收和恢复重试绑定调用版本，已取消调用不产生�
   assert.deepEqual(w.engine.statsOf(definition.name)?.byVersion?.['1'], { ok: 1, fail: 0 });
   assert.deepEqual(w.engine.currentStats(definition.name), { ok: 0, fail: 0 });
 
-  const recovery = { ...definition, name: 'observed-recovery', when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } } };
+  const recovery = { ...definition, name: 'observed-recovery', when: { after_failure: { skill: ['walk_path'], code: ['PATH_NOT_FOUND'] } } };
   assert.ok(w.engine.write(recovery).ok);
-  assert.equal(w.engine.recoveryFor({ skill: 'goto', code: 'PATH_NOT_FOUND' })?.version, 1);
+  assert.equal(w.engine.recoveryFor({ skill: 'walk_path', code: 'PATH_NOT_FOUND' })?.version, 1);
   assert.ok(w.engine.write({ ...definition, name: recovery.name }).ok);
-  w.engine.creditRecovery(recovery.name, true, { skill: 'goto', code: 'PATH_NOT_FOUND' });
+  w.engine.creditRecovery(recovery.name, true, { skill: 'walk_path', code: 'PATH_NOT_FOUND' });
   assert.deepEqual(w.engine.statsOf(recovery.name)?.byVersion?.['1'], { ok: 1, fail: 0 });
   assert.deepEqual(w.engine.currentStats(recovery.name), { ok: 0, fail: 0 });
 
@@ -191,12 +191,12 @@ test('手动和候选调用的使用次数分版持久化，跳过和候选失�
 });
 
 test('恢复技能返回skipped后调度清理只记一次使用和跳过', async (t) => {
-  const w = setup(t), failure = { skill: 'goto', code: 'PATH_NOT_FOUND' };
-  assert.ok(w.engine.write({ ...definition, when: { after_failure: { skill: ['goto'], code: ['PATH_NOT_FOUND'] } },
+  const w = setup(t), failure = { skill: 'walk_path', code: 'PATH_NOT_FOUND', args: { routeId: 'rt_1' } };
+  assert.ok(w.engine.write({ ...definition, when: { after_failure: { skill: ['walk_path'], code: ['PATH_NOT_FOUND'] } },
     code: 'return {skipped:"不符合本次条件"};', verify: 'const s = await api.state(); return true;' }).ok);
   assert.equal(w.engine.recoveryFor(failure)?.name, definition.name);
   const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
-  const started = w.arbiter.start({ skill: 'use_skill', args: { name: definition.name, failure: { ...failure, args: {} } } }, 'llm');
+  const started = w.arbiter.start({ skill: 'use_skill', args: { name: definition.name, failure } }, 'llm');
   assert.ok(!('error' in started), 'error' in started ? started.error : undefined);
   assert.equal((await done).result.status, 'succeeded');
   w.engine.recoverySkipped(definition.name, failure);

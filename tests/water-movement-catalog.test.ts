@@ -6,24 +6,20 @@ test('both thinking tiers expose direction and water movement tools with their e
   for (const system of [deliberateSystem(''), glanceSystem('')]) {
     const lines = system.split('\n');
     const look = lines.find((line) => line.startsWith('- look '));
-    const dive = lines.find((line) => line.startsWith('- dive '));
-    const surface = lines.find((line) => line.startsWith('- surface '));
-    const swimTo = lines.find((line) => line.startsWith('- swim_to '));
-    const travel = lines.find((line) => line.startsWith('- travel '));
-    assert.ok(look && dive && surface && swimTo && travel, 'these actions must be discoverable before the agent uses them');
+    const swim = lines.find((line) => line.startsWith('- swim_path '));
+    const boat = lines.find((line) => line.startsWith('- boat_path '));
+    assert.ok(look && swim && boat, 'these actions must be discoverable before the agent uses them');
     assert.match(look, /"dir".*NW.*只转头不走/);
-    assert.match(dive, /"xyz".*min_oxygen.*停下回报/);
-    assert.match(surface, /有界上浮.*不找岸.*不挖不垫/);
-    assert.match(swimTo, /"xyz".*保持这个目标不换|"xyz".*游过去/);
-    assert.match(swimTo, /沿已观察到的水格.*绕开岩檐.*不挖、不垫、不换目标/, 'the catalog must not promise straight-line-only behavior');
-    assert.match(swimTo, /bx\+0\.5.*by\+1.*bz\+0\.5/, 'the foot-coordinate convention for standing on a block top is part of the contract');
-    assert.match(travel, /步行、游泳.*不制造或切换载具/);
+    assert.match(swim, /water_point.*dry_shore.*surface/);
+    assert.match(swim, /不挖、不垫、不换目标/);
+    assert.match(boat, /"direction".*"to"/);
+    assert.match(boat, /停靠不等于到达.*不造船/);
   }
 });
 
-test('active uncommon tools like ride get full args on demand, and hidden tools stay out of the catalogs', () => {
+test('active uncommon tools like boat_path get full args on demand, and hidden tools stay out of the catalogs', () => {
   // 当前活动用到的、目录里没给完整参数的动作（如 ride）由 user 提醒用 moveDetails 给完整参数
-  assert.match(moveDetails(['ride']), /^- ride .*"direction".*"to"/m);
+  assert.match(moveDetails(['boat_path']), /^- boat_path .*"direction".*"to"/m);
 });
 
 test('both thinking tiers distinguish current water contact, ground contact, and oxygen', () => {

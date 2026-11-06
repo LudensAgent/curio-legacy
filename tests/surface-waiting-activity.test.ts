@@ -19,7 +19,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 6; i++) await setImmediate(); };
 
-function fixture(t: TestContext, rescue: 'surface' | 'flee') {
+function fixture(t: TestContext, rescue: 'swim_path' | 'flee') {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
@@ -46,11 +46,11 @@ function fixture(t: TestContext, rescue: 'surface' | 'flee') {
 }
 
 for (const outcome of ['failed', 'afloat', 'landed', 'cancelled', 'other-reflex'] as const) test(`plan formed during rescue: ${outcome}`, async (t) => {
-  const w = fixture(t, outcome === 'other-reflex' ? 'flee' : 'surface');
+  const w = fixture(t, outcome === 'other-reflex' ? 'flee' : 'swim_path');
   w.adapter.inWater = true;
   await w.tick();
   assert.equal(w.pending.length, 1);
-  w.arbiter.start({ skill: outcome === 'other-reflex' ? 'flee' : 'surface', args: {} }, 'reflex');
+  w.arbiter.start({ skill: outcome === 'other-reflex' ? 'flee' : 'swim_path', args: {} }, 'reflex');
   await w.reply(0, { decision: 'new', activity: { what: '挖开头顶', steps: [{ skill: 'surface_wait_step' }] } });
   assert.equal(w.mind.activity?.what, '挖开头顶');
   if (outcome === 'cancelled') w.arbiter.cancel('取消');
@@ -105,12 +105,12 @@ test('an interrupted reflex which moved still requires reviewing the pending pla
 });
 
 test('oxygen rising across the drowning threshold prompts review without suppressing the reflex', async (t) => {
-  const w = fixture(t, 'surface');
+  const w = fixture(t, 'swim_path');
   w.adapter.inWater = true; w.adapter.oxygen = 14;
   await w.tick();
-  w.arbiter.start({ skill: 'surface', args: {} }, 'reflex');
+  w.arbiter.start({ skill: 'swim_path', args: { mode: 'surface' } }, 'reflex');
   await w.reply(0, { decision: 'new', activity: { what: '处理水下障碍', steps: [{ skill: 'surface_wait_step' }] } });
-  assert.equal(w.arbiter.info()?.skill, 'surface');
+  assert.equal(w.arbiter.info()?.skill, 'swim_path');
   w.adapter.oxygen = 20;
   w.finishRescue(ok('氧气恢复，仍在水中'));
   await flush();
@@ -119,7 +119,7 @@ test('oxygen rising across the drowning threshold prompts review without suppres
   assert.match(JSON.stringify(w.pending.at(-1)?.messages), /氧气恢复/);
 });
 
-test('damage during a non-surface reflex prompts review of a waiting plan', async (t) => {
+test('damage during a non-swim_path reflex prompts review of a waiting plan', async (t) => {
   const w = fixture(t, 'flee');
   await w.tick();
   w.arbiter.start({ skill: 'flee', args: {} }, 'reflex');

@@ -130,6 +130,6 @@ export const forage: Skill<{ count: number }> = {
     }
     if (done.failed) return fail('ERROR', `看见了能采的，但 ${done.failed} 次都没采成${tries}`, { ...done, why });
     const green = unripe ? `看得见 ${unripe} 丛浆果丛，但都还没结果（长熟要几个游戏日，熟了才有红果）；` : '';
-    return fail('NOT_FOUND', `${looked ? '转头找过了，' : ''}${green}视野里没有能采的野果（熟浆果丛、发光浆果、西瓜、够得着的橡树/深色橡树叶）；可以 explore 找森林/动物，或有钓竿时钓鱼`, { ...done, unripe });
+    return fail('NOT_FOUND', `${looked ? '转头找过了，' : ''}${green}视野里没有能采的野果（熟浆果丛、发光浆果、西瓜、够得着的橡树/深色橡树叶）；可以 plan_route → walk_path 找森林/动物，或有钓竿时钓鱼`, { ...done, unripe });
   },
 };

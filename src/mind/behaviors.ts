@@ -16,7 +16,7 @@ import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePre
  *
  *   {"name":"pillar-up-from-skeletons","description":"血少又被骷髅射时先垫高三格躲箭",
  *    "when":{"hp_below":8,"hostile":{"name":"skeleton","within":16}},
- *    "steps":[{"skill":"place_at","args":{"at":[0,0,0],"item":"any"}},…],"priority":70,"overrides":["low-hp-flee"]}
+ *    "steps":[{"skill":"mine_cell","args":{"at":[0,2,0]}},{"skill":"pillar_one"} …],"priority":70,"overrides":["low-hp-flee"]}
  *
  * - auto（when 只有状态条件）：条件成立时身体自己做，像后天练出来的反射；可以用 overrides 换掉某个天生的本能。
  * - recover（when 含 after_failure）：手上某个动作失败时，身体先试这套做法再接着做，试过还不行才叫脑子。
@@ -225,7 +225,7 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter, opts?: { d
     // 恢复类必须写清是哪个动作失败：什么失败都套用的“万能恢复”会在放方块、睡觉失败时也去乱挖
     const failureOf = (q: Predicate): Predicate['after_failure'] | undefined => q.after_failure ?? q.all?.map(failureOf).find(Boolean);
     const af = failureOf(p);
-    if (af && !af.skill?.length) return { error: 'after_failure 要写清是哪个动作失败（"skill":["goto"]），不能什么失败都套用这一套' };
+    if (af && !af.skill?.length) return { error: 'after_failure 要写清是哪个动作失败（"skill":["walk_path"]），不能什么失败都套用这一套' };
     // 只看状态、条件太宽（比如只写 night:true）会一直打断手上的活：自动技能至少要有一个具体的触发
     if (!isRecovery(p) && Object.keys(p).every((k) => ['night', 'dark', 'on_ground', 'doing', 'not_doing'].includes(k))) {
       return { error: 'skill.when 太宽了：自动做的技能要写清具体情况（血量、怪、身边的方块、失败的动作……）' };

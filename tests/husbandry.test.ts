@@ -40,12 +40,3 @@ test('打猎的账：按 hunt 的活数次数、估只数、最近几次走多�
   assert.equal(t.animals, 3, '4 块牛肉按 2 只估，1 块鸡肉 1 只');
   assert.equal(t.lastAt, at);
 });
-
-test('goto lead：带着走的生物名要合法；带着走时不跑', () => {
-  const adapter = new FakeAdapter();
-  const v = SKILLS.goto.validate({ target: 'base', lead: 'minecraft:Cow', sprint: true }, adapter as any);
-  assert.ok(v.ok);
-  assert.equal((v as any).args.lead, 'cow');
-  assert.equal((v as any).args.sprint, undefined, '牵着牛不能跑');
-  assert.equal(SKILLS.goto.validate({ target: 'base', lead: 'a cow!' }, adapter as any).ok, false);
-});

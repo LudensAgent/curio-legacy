@@ -27,11 +27,11 @@ function harness(t: { after(fn: () => void): void }) {
 test('参数被拒绝的步骤不能消费尚未处理的站位缺口', (t) => {
   const { adapter, mind, act } = harness(t);
   const activity = createActivity({ what: '移动后挖', why: '', kind: 'other', repeat: 1, steps: [
-    { skill: 'dig_at', args: { at: [9, 0, 0] }, optional: true },  // 无效（超出范围）
-    { skill: 'dig_at', args: { at: [0, 0, 1] } },  // 合法相对
+    { skill: 'mine_cell', args: { at: [9, 0, 0] }, optional: true },  // 无效（超出范围）
+    { skill: 'mine_cell', args: { at: [0, 0, 1] } },  // 合法相对
   ] }, '', 'llm', adapter.state());
   mind.activity = activity;
-  activity.stanceGap = { skill: 'step', pos: { x: 0.5, y: 64, z: 0.5 } };
+  activity.stanceGap = { skill: 'move_step', pos: { x: 0.5, y: 64, z: 0.5 } };
   act();
   assert.ok(activity.stanceGap, '校验失败的 optional 步骤被跳过，不能清掉站位缺口');
 });
@@ -39,10 +39,10 @@ test('参数被拒绝的步骤不能消费尚未处理的站位缺口', (t) => {
 test('合法相对挖掘在站位缺口下不能执行，返回依赖缺口', (t) => {
   const { adapter, mind, act } = harness(t);
   const activity = createActivity({ what: '移动后挖', why: '', kind: 'other', repeat: 1, steps: [
-    { skill: 'dig_at', args: { at: [0, 0, 1] } },
+    { skill: 'mine_cell', args: { at: [0, 0, 1] } },
   ] }, '', 'llm', adapter.state());
   mind.activity = activity;
-  activity.stanceGap = { skill: 'step', pos: { x: 0.5, y: 64, z: 0.5 } };
+  activity.stanceGap = { skill: 'move_step', pos: { x: 0.5, y: 64, z: 0.5 } };
   act();
   assert.equal(mind.activity, null, '相对挖掘应因站位缺口被中止');
 });

@@ -126,11 +126,11 @@ export class Reflex {
     if (learned?.tick(cur)) return;
     const instinct = (name: string) => !learned?.suppresses(name, cur);
     const legacy = this.options.instincts !== 'skills';
-    if (cur?.skill === 'surface' || cur?.skill === 'flee') return;
+    if (cur?.skill === 'swim_path' || cur?.skill === 'flee') return;
     if (cur?.skill === 'use_skill' && cur.source === 'reflex') { this.checkStuck(s, cur); return; } // 身体正照着反射技能在做
     // 掩体：完全封好就不出去；在坑里或正在挖坑/垫高/封顶时，只有真的被打到、怪就在身边才动
     const cover = this.cover(s.pos);
-    const fortifying = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['dig_at', 'place_at', 'climb_up', 'shelter', 'wait', 'use_skill', 'dig', 'descend', 'step'].includes(cur.skill);
+    const fortifying = !!cur && cur.source !== 'reflex' && cur.source !== 'filler' && ['mine_cell', 'place_cell', 'place_support', 'pillar_one', 'shelter', 'wait', 'use_skill', 'excavate_run', 'descend_to', 'move_step'].includes(cur.skill);
     const hurtNow = Date.now() - this.lastHurtAt < 2500;
     const mustReact = (dist: number) => cover !== 'sealed' && (!(cover === 'pit' || fortifying) || (hurtNow && dist < 4));
     const canFlee = Date.now() >= this.fleeGiveUpUntil;
@@ -171,7 +171,7 @@ export class Reflex {
     const eatBelow = this.options.habits?.().eat_below;
     const peckish = eatBelow ? s.food <= eatBelow : s.food <= 12 || (s.hp < 14 && s.food < 18);
     const goodFood = s.inventory.some((i) => GOOD_FOOD.test(i.name));
-    const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'climb_up', 'dig', 'store_items', 'take_items', 'ride', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
+    const busy = !!cur && ['hunt', 'defend', 'ranged_defend', 'flee', 'dragon_fight', 'craft', 'smelt', 'build', 'excavate_run', 'mine_cell', 'store_items', 'take_items', 'boat_path', 'use_item', 'interact', 'sleep', 'look_around'].includes(cur.skill);
     const routineWindow = !cur || cur.source === 'filler' || (Date.now() - cur.startedAt >= 1500 && cur.progress < 0.85);
     if (cur?.skill !== 'dragon_fight' && safe && this.adapter.hasFood() && (urgent || ((this.options.routineCare !== false || !!eatBelow) && peckish && goodFood && !busy && routineWindow)) && instinct('eat') && this.ready('eat', 15000)) {
       return this.fire({ skill: 'eat' }, 'P1', `饥饿 ${s.food} / 生命 ${s.hp}${urgent ? '（很饿了，有什么吃什么）' : ''}`, !urgent);

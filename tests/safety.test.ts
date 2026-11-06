@@ -22,7 +22,7 @@ const setup = () => {
 
 test('水下氧气不足时身体不自动抢占任务执行 surface', () => {
   const { adapter, events, arbiter, reflex } = setup();
-  const task = arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  const task = arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   assert.ok(!('error' in task));
   try {
     adapter.inWater = true;
@@ -38,7 +38,7 @@ test('水下氧气不足时身体不自动抢占任务执行 surface', () => {
 
 test('进入岩浆时身体不自动抢占任务执行 flee', () => {
   const { adapter, events, arbiter, reflex } = setup();
-  const task = arbiter.start({ skill: 'explore', args: { distance: 64 } }, 'llm');
+  const task = arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   assert.ok(!('error' in task));
   try {
     adapter.inLava = true;
@@ -111,7 +111,7 @@ test('地下探索期间不会自动插火把或抢占计划步骤', async () =>
   adapter.speed = 2;
   const outcomes: TaskOutcome[] = [];
   arbiter.on('done', (o: TaskOutcome) => outcomes.push(o));
-  arbiter.start({ skill: 'explore', args: { direction: 'E', distance: 40 } }, 'llm');
+  arbiter.start({ skill: 'wait', args: { seconds: 30 } }, 'llm');
   reflex.start(100);
   await sleep(1500);
   reflex.stop();
@@ -119,6 +119,6 @@ test('地下探索期间不会自动插火把或抢占计划步骤', async () =>
   await sleep(100);
   assert.ok(!events.some((e) => e.type === 'reflex' && e.msg.includes('火把')), '探索不会被照明抢占');
   assert.ok(!adapter.blocks.some((b) => b.name === 'torch'));
-  const interrupted = outcomes.find((o) => o.task.skill === 'explore' && o.preemptedBy === 'reflex');
+  const interrupted = outcomes.find((o) => o.task.skill === 'wait' && o.preemptedBy === 'reflex');
   assert.equal(interrupted, undefined);
 });

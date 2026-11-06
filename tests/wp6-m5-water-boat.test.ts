@@ -181,13 +181,13 @@ test('session reset clears swim controls and a late physics wait cannot resume t
   assert.equal(data.controls.sprint, false);
 });
 
-test('swim_to rejects an observed lava target without letting the water controller enter it', async () => {
+test('swim_path rejects an observed lava target without letting the water controller enter it', async () => {
   const a = new FakeAdapter();
   a.inWater = true;
   a.blocks.push({ name: 'lava', pos: { x: 10, y: 63, z: 0 } });
   const arbiter = new Arbiter(a, new WorldMemory(null), new EventBus(), new Vision(a));
   const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  assert.ok(!('error' in arbiter.start({ skill: 'swim_to', args: { xyz: { x: 10, y: 63, z: 0 } } }, 'llm')));
+  assert.ok(!('error' in arbiter.start({ skill: 'swim_path', args: { mode: 'water_point', xyz: { x: 10, y: 63, z: 0 } } }, 'llm')));
   const result = (await done).result;
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'BAD_ARGS');
@@ -342,20 +342,6 @@ test('public dismount does not translate adapter ok into success while riding re
   assert.equal(result.data?.stillRiding, true);
   assert.equal(result.data?.disembarked, false);
   assert.equal(a.riding, 'boat');
-});
-
-test('travel with no swim controller fails the water leg instead of walking across it', async () => {
-  const a = new FakeAdapter();
-  for (let x = 10; x <= 20; x++) for (let z = -40; z <= 40; z++) a.blocks.push({ name: 'water', pos: { x, y: 63, z } });
-  Reflect.set(a, 'swimTo', undefined);
-  const arbiter = new Arbiter(a, new WorldMemory(null), new EventBus(), new Vision(a));
-  const done = new Promise<TaskOutcome>((resolve) => arbiter.once('done', resolve));
-  assert.ok(!('error' in arbiter.start({ skill: 'travel', args: { to: '30,0' } }, 'llm')));
-  const result = (await done).result;
-  assert.equal(result.status, 'failed');
-  assert.match(result.summary, /NO_SWIM|没到指定岸/);
-  assert.ok(a.pos.x < 10.5, `must not silently walk into the river: x=${a.pos.x}`);
-  assert.ok(!a.actions.some((action) => action.startsWith('swim:')), 'no swim controller was available');
 });
 
 test('in-water target does not overshoot to the surface once jump is no longer needed', async (t) => {

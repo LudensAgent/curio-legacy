@@ -118,7 +118,7 @@ test('hearing gives rough cues without exact targets; direct and delegated entit
 test('act preserves physical feedback while omitting raw local and surroundings maps', async (t) => {
   const adapter = new FakeAdapter(), ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  const result = await makeBridge(ctx)('act', ['dig_at', { at: [0, 0, 0] }]) as { data: Record<string, unknown> };
+  const result = await makeBridge(ctx)('act', ['mine_cell', { at: [0, 0, 0] }]) as { data: Record<string, unknown> };
   assert.equal('local' in result.data, false);
   assert.equal('around' in result.data, false);
   assert.deepEqual(result.data.position, adapter.pos);
@@ -164,8 +164,7 @@ test('failed blind digging cannot identify hidden ore through its error summary'
   adapter.blocks.push({ name: 'diamond_ore', pos: { x: 2, y: 65, z: 0 } });
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
-  t.mock.method(adapter, 'dig', async () => ({ ok: false, reason: 'NO_LINE_OF_SIGHT:diamond_ore' }));
-  const result = await makeBridge(ctx)('act', ['dig_at', { at: [0, 1, 2], facing: 'N' }]) as { ok: boolean; summary: string; data: Record<string, unknown> };
+  const result = await makeBridge(ctx)('act', ['mine_cell', { at: [0, 1, 2], facing: 'N' }]) as { ok: boolean; summary: string; data: Record<string, unknown> };
   assert.equal(result.ok, false);
   assert.doesNotMatch(result.summary, /diamond_ore/);
   assert.deepEqual(result.data.targetCell, { x: 2, y: 65, z: 0 });
@@ -176,7 +175,7 @@ test('failed step and placement expose absolute recovery targets without map fee
   adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } }, { name: 'stone', pos: { x: 1, y: 65, z: 0 } });
   const ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
-  for (const [skill, args] of [['step', { to: [1, 0, 0], facing: 'E' }], ['place_at', { at: [1, 0, 0], facing: 'E', item: 'dirt' }]] as const) {
+  for (const [skill, args] of [['move_step', { to: [1, 0, 0], facing: 'E' }], ['place_cell', { at: [1, 0, 0], facing: 'E', item: 'dirt' }]] as const) {
     const result = await makeBridge(ctx)('act', [skill, args]) as { ok: boolean; data: Record<string, unknown> };
     assert.equal(result.ok, false);
     assert.deepEqual(result.data.targetCell, { x: 1, y: 64, z: 0 });
@@ -191,8 +190,8 @@ test('step, occupied placement and climb summaries cannot identify unobserved ne
   adapter.inv.set('dirt', 2);
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
-  for (const [skill, args] of [['step', { to: [1, 0, 0], facing: 'E' }], ['place_at', { at: [1, 0, 0], facing: 'E', item: 'dirt' }],
-    ['climb_up', { until_exit: true }]] as const) {
+  for (const [skill, args] of [['move_step', { to: [1, 0, 0], facing: 'E' }], ['place_cell', { at: [1, 0, 0], facing: 'E', item: 'dirt' }],
+    ['pillar_one', {}]] as const) {
     // Fresh bridge per skill: this test checks feedback disclosure, not the
     // intentional stance dependency between a failed move and a relative at.
     const result = await makeBridge(ctx)('act', [skill, args]);

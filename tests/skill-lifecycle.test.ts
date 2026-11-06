@@ -57,7 +57,7 @@ test('修订候选保留稳定版本，回滚恢复当时的参数、触发与�
   const w = setup(t);
   const old = { ...definition, args: { distance: '可选，默认一小步' } };
   assert.ok(w.engine.write(old).ok);
-  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'step', args: { to: [1, 0, 0] } }], when: { hp_below: 5 }, args: { count: '可选，默认一步' },
+  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'move_step', args: { to: [1, 0, 0] } }], when: { hp_below: 5 }, args: { count: '可选，默认一步' },
     verify: `${definition.verify}\n// 新版验收` }, { by: 'improve' }).ok);
   assert.equal(w.engine.get(definition.name)?.when?.hp_below, 8);
   assert.equal(w.engine.get(definition.name, true)?.when?.hp_below, 5);
@@ -100,7 +100,7 @@ test('跳过和无动作自报成功不能晋级，子调用保留自己的实�
   for (let i = 0; i < 3; i++) await w.run(true);
   assert.equal(w.engine.currentStats(definition.name, true).ok, 0);
   assert.ok(w.engine.get(definition.name, true));
-  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'step', args: { to: [1, 0, 0] }, if: { hp_below: 1 } }], verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
+  assert.ok(w.engine.write({ ...definition, code: undefined, steps: [{ skill: 'move_step', args: { to: [1, 0, 0] }, if: { hp_below: 1 } }], verify: 'const s = await api.state(); return true;' }, { by: 'mind' }).ok);
   for (let i = 0; i < 3; i++) await w.run(true);
   assert.equal(w.engine.currentStats(definition.name, true).ok, 0, '步骤全部跳过不能累积晋级证据');
   assert.ok(w.engine.write(definition).ok);

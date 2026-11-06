@@ -121,7 +121,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
 
   if (p.death_recovery) {
     const d = p.death_recovery;
-    out.push({ drive: 'recover', level: d.seconds_left > d.dist / 3 + 20 ? 0.95 : 0.3, why: `死亡时掉落的 ${d.lost} 记录在 ${d.dir} ${d.dist} 格外，当前状态未知`, suggest: 'goto {target:"death"} 然后 pickup_items' });
+    out.push({ drive: 'recover', level: d.seconds_left > d.dist / 3 + 20 ? 0.95 : 0.3, why: `死亡时掉落的 ${d.lost} 记录在 ${d.dir} ${d.dist} 格外，当前状态未知`, suggest: 'resolve_target {target:"death"} → plan_route → walk_path，然后 pickup_items' });
   }
   if (p.self.hp <= 8 || (hostiles >= 2 && p.self.hp <= 14)) {
     out.push({ drive: 'survive', level: p.self.hp <= 5 ? 1 : 0.8, why: `生命 ${p.self.hp}，附近敌对 ${hostiles} 个`, suggest: night ? 'shelter（挖坑封顶躲到天亮）' : '远离危险、吃东西回血' });
@@ -135,7 +135,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
       drive: 'rest',
       level: night ? 0.75 : 0.5,
       why: night ? '天黑了，怪物在外面游荡' : '太阳在落山，晚上 7 点天黑刷怪',
-      suggest: st.hasBed || bedPlaced ? 'sleep（有床直接睡过夜）' : homeBuilt ? 'goto base 回小屋' : st.blocks >= 1 ? 'shelter；有材料的话白天自己设计一间小屋 build' : '尽快收集几个方块以便 shelter',
+      suggest: st.hasBed || bedPlaced ? 'sleep（有床直接睡过夜）' : homeBuilt ? 'resolve_target base → plan_route → walk_path 回小屋' : st.blocks >= 1 ? 'shelter；有材料的话白天自己设计一间小屋 build' : '尽快收集几个方块以便 shelter',
     });
   }
   // 亮度：暗处看不清、会刷怪 → 插火把；没有火把就做；没煤就去挖煤
@@ -203,7 +203,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
   out.push({ drive: 'explore', level: !night ? 0.25 + 0.3 * novelty : 0.05, why: `周围新颖度最高 ${novelty}`, suggest: '去没去过的方向，寻找新的生物群系、村庄、矿洞' });
   if (p.curiosities.length && !night) {
     const c = p.curiosities[0];
-    out.push({ drive: 'curiosity', level: 0.45, why: `之前看见过 ${c.what}，在 ${c.dir} ${c.dist} 格外，还没去过`, suggest: `explore {direction:"${c.dir}"} 去看看` });
+    out.push({ drive: 'curiosity', level: 0.45, why: `之前看见过 ${c.what}，在 ${c.dir} ${c.dist} 格外，还没去过`, suggest: `resolve_target 到 ${c.dir} 方向 ${c.dist} 格附近，再 plan_route → walk_path 去看看` });
   }
   // ---- 仓储：背包快满了就回家整理
   if (p.emptySlots <= 5) out.push({ drive: 'storage', level: p.emptySlots <= 2 ? 0.8 : 0.6, why: `背包只剩 ${p.emptySlots} 个空位`, suggest: 'store_items（挑眼下用不上的点名存进箱子）' });

@@ -11,7 +11,7 @@ test('瞥一眼和认真想共用同一段静态系统前缀', () => {
   while (i < Math.min(deliberate.length, glance.length) && deliberate[i] === glance[i]) i++;
   const shared = deliberate.slice(0, i);
   // 共用前缀覆盖身份、操作者、读法、原则、决定、输出和整份动作目录
-  for (const marker of ['你就是这个 Minecraft 角色本人', '【操作者】', '【消息怎么读】', '【原则】', '【选动作】', '【决定】', '【输出】', '【动作】参数必须合法：', '- dig_at ']) {
+  for (const marker of ['你就是这个 Minecraft 角色本人', '【操作者】', '【消息怎么读】', '【原则】', '【选动作】', '【决定】', '【输出】', '【动作】参数必须合法：', '- mine_cell ']) {
     assert.ok(shared.includes(marker), `共用前缀缺少「${marker}」`);
   }
   // 档位从同一处分叉，各自的尾段不打断前面的缓存
