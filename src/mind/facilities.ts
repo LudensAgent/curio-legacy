@@ -1,9 +1,10 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { isResourceBlock } from '../memory/ore-spots.ts';
-import { passageDeepestAnchor, passageLevels, passageRoute } from '../memory/passages.ts';
+import { passageDeepestAnchor, passageFarthestAnchor, passageLevels, passageRoute } from '../memory/passages.ts';
 import type { Landmark, PassageRecord, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
 import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
+import { dirName } from '../perception/perception.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -82,7 +83,13 @@ export function describePassage(rec: PassageRecord, here: Vec3Like, stations: La
   const observedNote = rec.path.length > 0 && rec.deepestY < pathLow - 2
     ? `；记录里还有更低的观测点 y${rec.deepestY}，脚点表未保留/没在这一段`
     : '';
-  const text = `${where}，曾到达最低 y${rec.deepestY}${reachNote}${observedNote}`
+  // 下界找要塞/结构探索要的是“更远”，不是“更深”；主世界下矿仍以最深为主。
+  const far = rec.dim === 'the_nether' ? passageFarthestAnchor(recs, here, { reachableOnly: true }) : null;
+  const farDist = far ? Math.hypot(far.x - here.x, far.z - here.z) : 0;
+  const farNote = far && farDist >= 16
+    ? `；沿记录方向水平最远能到 ${at(far)}，约 ${Math.round(farDist)} 格（${dirName(far.x - here.x, far.z - here.z)}），沿途是旧几何，当前是否可通需现场确认`
+    : '';
+  const text = `${where}，曾到达最低 y${rec.deepestY}${reachNote}${observedNote}${farNote}`
     + `${levels.length ? `，历史脚点较多的高度有 y${levels.join('、y')}` : ''}${ores.length ? `，挖到过 ${ores.join('、')}` : ''}`
     + `${seen.length ? `，历史路线附近记得见过 ${seen.join('、')}` : ''}${things.length ? `，历史路线附近记得有${things.join('、')}` : ''}${validEntrances.length ? '；洞口可能被堵或地形变了，走到附近再确认' : '；当前路线是否可通尚未确认'}`;
   return { text, entrance, dist, inside, ...(next ? { next } : {}), ...(nextDown ? { nextDown } : {}) };

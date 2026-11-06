@@ -19,9 +19,11 @@ function undergroundShaft(what: string, why: string, opts: {
   record?: PassageRecord;
   pos?: { x: number; y: number; z: number };
   blockAt?: (p: { x: number; y: number; z: number }) => string | null;
+  dim?: string;
 } = {}) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
   memory.setWorld(adapter.worldId);
+  adapter.dim = opts.dim ?? 'overworld';
   adapter.pos = opts.pos ?? { x: 6.5, y: 60, z: 0.5 };
   adapter.removed = new Set(['0,60,0', '0,61,0']);
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
@@ -193,4 +195,25 @@ test('下方支撑格是液体时照样只说垫或下落', (t) => {
   const line = user.content.split('\n').find((l) => l.includes('下一步落脚点下方是'));
   assert.ok(line, '要给出下方液体的当前事实');
   assert.match(line, /下一步落脚点下方是 water，走过去需要垫或下落（由你定）/);
+});
+
+test('下界找要塞/开平巷时给旧道的水平最远口径，而不是只给最深', (t) => {
+  // 一条水平延伸 30+ 格的旧道，同时有一个很深的旁支；找要塞需要“更远”而不是“更深”。
+  const farPath = [
+    { x: 0, y: 60, z: 0 }, { x: 4, y: 60, z: 0 }, { x: 8, y: 60, z: 0 }, { x: 12, y: 60, z: 0 },
+    { x: 16, y: 60, z: 0 }, { x: 20, y: 60, z: 0 }, { x: 24, y: 60, z: 0 }, { x: 28, y: 60, z: 0 },
+    { x: 32, y: 60, z: 0 }, { x: 36, y: 60, z: 0 }, { x: 20, y: 40, z: 0 },
+  ];
+  const links = farPath.slice(1).map((p, i) => ({ a: farPath[i]!, b: p }));
+  const { user, close } = undergroundShaft('下界找要塞、开平巷往前推进', '在 y30~35 开平巷扫要塞砖', {
+    dim: 'the_nether',
+    record: {
+      id: 'psg_nether_far', dim: 'the_nether', kind: 'dug', entrances: [{ x: 0, y: 61, z: 0 }],
+      deepestY: 40, dug: 40, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: farPath, links,
+    },
+  });
+  t.after(close);
+  assert.match(user.content, /水平最远/, '下界找要塞需要水平延伸事实');
+  assert.match(user.content, /follow_passage \{"to":"farthest"/, '要给出往远处走的显式入口');
+  assert.doesNotMatch(user.content, /往最深处走的下一步/, '找要塞/平巷不能只给最深方向');
 });

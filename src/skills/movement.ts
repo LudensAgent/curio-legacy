@@ -9,7 +9,7 @@ import type { EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { feetCell } from '../perception/local.ts';
 import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type FailureCode, type NavOutcome, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { HEADING_TARGET, MAX_HEADING_DISTANCE, planTravel } from './overland.ts';
-import { dedupePassages, passageDeepestAnchor, passageGraph, passageNearestNode, passageRoute, passageSurfaceAnchor, passageSurfaceCandidates } from '../memory/passages.ts';
+import { dedupePassages, passageDeepestAnchor, passageFarthestAnchor, passageGraph, passageNearestNode, passageRoute, passageSurfaceAnchor, passageSurfaceCandidates } from '../memory/passages.ts';
 
 // ------------------------------------------------------------------ 寻找与张望（人眼式：不透视，只是转头看）
 /** 朝 (dx,dz) 方向的 yaw（0 = 北/-Z，正值向左/西） */
@@ -604,17 +604,17 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 
 // ------------------------------------------------------------------ follow_passage
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
-export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig?: boolean }> = {
+export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块（会消耗方块和工具耐久）；记录网断成两团时，dig:true 会先尝试接上 ≤8 格的小断口，再接回记录路线（接不上会说明尝试结果）。短 hop 会先核对目标脚格/头格/支撑格，不为了到达 x/z 离开记录路线；走不通就说明走到第几段、身体实际在哪、是否偏离记录路线（offRoute），单个坏点最多跳过一次，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
-  argsDoc: '{"to":"entrance"|"deepest", "id"?:string, "dig"?:boolean}',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；to:"farthest" 走到当前连通分量里水平距离最远的记录脚点（下界找要塞/结构探索用，不是最深）；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块（会消耗方块和工具耐久）；记录网断成两团时，dig:true 会先尝试接上 ≤8 格的小断口，再接回记录路线（接不上会说明尝试结果）。短 hop 会先核对目标脚格/头格/支撑格，不为了到达 x/z 离开记录路线；走不通就说明走到第几段、身体实际在哪、是否偏离记录路线（offRoute），单个坏点最多跳过一次，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处/最远点锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  argsDoc: '{"to":"entrance"|"deepest"|"farthest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
-    const to = a.to === 'deepest' ? 'deepest' : a.to === 'entrance' ? 'entrance' : null;
-    if (!to) return { ok: false, error: 'to 必须是 entrance（回入口）或 deepest（下最深）' };
+    const to = a.to === 'deepest' ? 'deepest' : a.to === 'entrance' ? 'entrance' : a.to === 'farthest' ? 'farthest' : null;
+    if (!to) return { ok: false, error: 'to 必须是 entrance（回入口）、deepest（下最深）或 farthest（走到水平最远点）' };
     if (a.id !== undefined && (typeof a.id !== 'string' || !/^[a-zA-Z0-9:_-]{1,100}$/.test(a.id))) return { ok: false, error: 'id 需要一条已知通道的非空 ID（可用 query passages 查看）' };
     if (a.dig !== undefined && typeof a.dig !== 'boolean') return { ok: false, error: 'dig 需要布尔值' };
     for (const flag of ['place', 'tower'] as const) if (a[flag] !== undefined) return { ok: false, error: `follow_passage 不认 ${flag}：这条入口只有 dig:true 授权沿旧矿道挖开阻挡/垫方块；要单独放置用 place_at，要搭柱用 climb_up` };
@@ -662,15 +662,19 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
       const archivedCount = recs.filter((r) => r.archivedAt !== undefined).length;
       if (!recs.length) return receipt(fail('NOT_FOUND', args.id ? `没有找到通道 ${args.id}；用 query passages 核对 ID，或省略 id 走全部旧矿道` : '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
       const back = args.to === 'entrance';
+      const goFar = args.to === 'farthest';
       // 入口解析同时记下这条出口所属的记录 ID：绕行预检要给 agent 一个“强制走这条”的 id。
       const chosenExit = back ? passageSurfaceCandidates(recs, here, { limit: 1 })[0] : undefined;
-      target = back ? (chosenExit?.anchor ?? passageSurfaceAnchor(recs, here, { allowUnreachable: !!args.dig })) : passageDeepestAnchor(recs, here);
+      target = back
+        ? (chosenExit?.anchor ?? passageSurfaceAnchor(recs, here, { allowUnreachable: !!args.dig }))
+        : goFar ? passageFarthestAnchor(recs, here) : passageDeepestAnchor(recs, here);
       if (!target) return receipt(fail('NOT_FOUND', '旧矿道里没有可用的目标点'));
       resolved = target;
       const anchor = `(${Math.round(target.x)},${Math.round(target.y)},${Math.round(target.z)})`;
       // 一开始就把解析到的记录锚点亮出来：entrance 只是记下的入口，不一定是 agent 想去的传送门/基地。
       ctx.progress(0, back
         ? `目标：记录的通道地表入口锚点 ${anchor}（是记下的入口，不一定是想去的传送门/基地；指定目标请用 goto 或 travel_portal）`
+        : goFar ? `目标：记录的通道水平最远脚点 ${anchor}（不是最深点；用于往远处走）`
         : `目标：记录的通道最深处锚点 ${anchor}`);
       const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : recs.some((r) => r.kind === 'bridge') ? '我搭的桥' : '走过的路';
       const allowDig = !!args.dig;
@@ -679,7 +683,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest'; id?: string; dig
         ? '已带 dig:true：可挖开挡路/垫方块，会消耗背包方块和工具耐久'
         : '可加 dig:true 授权挖开挡路/垫方块（会消耗背包方块和工具耐久）';
       const terrainPermission = { ...(allowDig ? { allowTerrainChanges: true } : {}), allowPlace: allowDig, allowTower: allowDig };
-      const goal = back ? '入口' : '最深处';
+      const goal = back ? '入口' : goFar ? '最远点' : '最深处';
       // 有可达地表候选时不需要这条；没有候选、但记录里确实记过入口时，把“入口在哪、还没接上”作为事实保留。
       // 这只是回执事实，不改变 target，也不替 Agent 决定要不要挖过去。
       if (back && !chosenExit) {

@@ -15,7 +15,7 @@ import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
-import { dedupePassages, passageDeepestAnchor, passageNext, passageSurfaceAnchor } from '../memory/passages.ts';
+import { dedupePassages, passageDeepestAnchor, passageFarthestAnchor, passageNext, passageSurfaceAnchor } from '../memory/passages.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
@@ -328,6 +328,9 @@ const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|�
 /** 打算里说要从地下回地面 */
 const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
+/** 打算里要往远处走/找结构：下界找要塞、开平巷、横探，和“下矿找深层”不是同一个方向。 */
+const EXPLORE_INTENT = /找要塞|要塞|找结构|结构|探索|平巷|横着|横探|往远|走远|巡逻|前进|找路|往[东南西北]/;
+
 /** 支撑格是实心：站在这里不会马上掉下去；未观测（null）不当作空气。 */
 const solidSupport = (n: string | null) => n !== null && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
 /** 脚/头两格可走时，按下方支撑格给出「能直接走/要垫或下落/未观测」的当前事实。 */
@@ -392,6 +395,32 @@ function passageWayDown(ctx: MindContext): string | null {
   }
   const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
   return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
+}
+
+/** 沿旧矿道往水平最远处走的下一步：和“下最深”对称，供下界找要塞/结构探索时复用旧道走远。 */
+function passageWayFar(ctx: MindContext): string | null {
+  const p = ctx.percept, s = ctx.state;
+  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
+  const to = passageFarthestAnchor(recs, here);
+  if (!to) return null;
+  const g = passageNext(recs, here, to);
+  if (!g) return null;
+  const next = g.next;
+  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
+  const foot = at(next.x, next.y, next.z);
+  const head = at(next.x, next.y + 1, next.z);
+  const open = (n: string | null) => n !== null && isSoftBlock(n);
+  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
+  const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
+  const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它水平最远处走`;
+  const follow = g.inside ? '；也可以 follow_passage {"to":"farthest"} 让我沿这条旧矿道往远处带路' : '；也可以 follow_passage {"to":"farthest","dig":true} 让我挖开挡路、接回旧矿道往远处带路（dig:true 会消耗方块和工具耐久）';
+  if (open(foot) && open(head)) {
+    const support = at(next.x, next.y - 1, next.z);
+    return `${along}；沿它往水平最远处的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
+  }
+  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
+  return `${along}；沿它往水平最远处的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
 }
 
 /** 打算里说要过水 / 到对岸 */
@@ -567,6 +596,16 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
     const keepInv = s.gamerules?.keepInventory;
     if (keepInv === true || keepInv === 'true') out.push('keepInventory 开着（死亡不掉落）');
+  }
+  // 下界找要塞/结构探索要的是“更远”，不是“最深”：旧道提示走 farthest 口径，不能只给最深。
+  // 只在没有命中下矿口径时追加，避免和上面的“往最深处”提示同时出现。
+  if (!MINING_INTENT.test(intent) && (EXPLORE_INTENT.test(intent) || p.self.dim !== 'overworld')) {
+    const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
+    for (const t of tunnels) out.push(`记得自己${t.text}`);
+    if (!SURFACE_INTENT.test(intent)) {
+      const far = passageWayFar(ctx);
+      if (far) out.push(far);
+    }
   }
   // 冶炼燃料预算：手上这段活要 smelt 时，先把燃料够不够摆出来（只报事实，燃料比走 methods/fuel 的原版默认）
   const smeltStep = ctx.activity?.steps?.find((st) => st.skill === 'smelt');

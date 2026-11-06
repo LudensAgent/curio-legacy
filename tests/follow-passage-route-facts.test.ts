@@ -656,3 +656,34 @@ test('已经站在入口旁调用 follow_passage 按到达处理，不误报锚�
   assert.doesNotMatch(result.summary, /锚点本身接不上/);
   assert.ok(moves.mock.callCount() <= 1);
 });
+
+test('to:"farthest" 选水平最远点，不选最深点', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const farPath: Vec3Like[] = [{ x: 0, y: 40, z: 0 }, { x: 10, y: 40, z: 0 }, { x: 20, y: 40, z: 0 }, { x: 40, y: 40, z: 0 }, { x: 0, y: 30, z: 0 }, { x: 0, y: 20, z: 0 }];
+  carve(w, farPath);
+  memory.savePassage({
+    id: 'far-vs-deep', worldId: w.worldId, dim: w.dim, kind: 'dug', entrances: [{ x: 0, y: 41, z: 0 }],
+    deepestY: 20, dug: 40, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1, path: farPath,
+    links: [
+      { a: { x: 0, y: 40, z: 0 }, b: { x: 10, y: 40, z: 0 } },
+      { a: { x: 10, y: 40, z: 0 }, b: { x: 20, y: 40, z: 0 } },
+      { a: { x: 20, y: 40, z: 0 }, b: { x: 40, y: 40, z: 0 } },
+      { a: { x: 0, y: 40, z: 0 }, b: { x: 0, y: 30, z: 0 } },
+      { a: { x: 0, y: 30, z: 0 }, b: { x: 0, y: 20, z: 0 } },
+    ],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'farthest' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(result.data?.resolvedTarget, { x: 40, y: 40, z: 0 }, '水平最远 40 格，而不是垂直最深 y20');
+  assert.ok(moves.some((p) => p.x === 40 && p.y === 40));
+  assert.ok(!moves.some((p) => p.y === 20), '不该把最深点当目标');
+});

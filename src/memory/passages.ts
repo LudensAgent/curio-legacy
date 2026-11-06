@@ -725,6 +725,39 @@ export function passageDeepestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>
   return best ?? globalDeepest();
 }
 
+/** 想往远处走时，取「从 here 能连到的脚点里水平距离最远」的脚点当目标。
+ *  主世界下矿要的是最深（passageDeepestAnchor）；下界找要塞/结构探索要的是更远，不能拿最深点当目标。
+ *  here 没给时没有“更远”的参照，返回 null；here 离网太远且 reachableOnly 时也返回 null，
+ *  否则退回全网水平最远点，交给 follow_passage 先接回网/报断口（由调用方决定是否接受回退）。 */
+export function passageFarthestAnchor(recs: Pick<PassageRecord, 'path' | 'links'>[], here?: Vec3Like,
+  opts: { near?: number; reachableOnly?: boolean } = {}): Vec3Like | null {
+  if (!here) return null;
+  const { nodes, edges, blocked } = passageGraph(recs);
+  const near = opts.near ?? 6;
+  let start = -1, bd = near;
+  nodes.forEach((q, i) => { const d = d3(q, here); if (d < bd) { bd = d; start = i; } });
+  const farthestFromHere = (pool: number[]) => {
+    let best: Vec3Like | null = null, bh = -1;
+    for (const i of pool) {
+      const p = nodes[i]!;
+      const h = Math.hypot(p.x - here.x, p.z - here.z);
+      if (h > bh) { bh = h; best = p; }
+    }
+    return best;
+  };
+  if (start < 0) return opts.reachableOnly ? null : farthestFromHere(nodes.map((_, i) => i));
+  const seen = new Set<number>([start]);
+  const stack = [start];
+  while (stack.length) {
+    const u = stack.pop()!;
+    for (const v of edges.get(u) ?? []) {
+      if (seen.has(v) || blocked.get(u)?.has(v)) continue;
+      seen.add(v); stack.push(v);
+    }
+  }
+  return farthestFromHere([...seen]);
+}
+
 /** 沿全部记下的通道连成的网，取朝 to 走的下一个路点（几何记忆，未验证当前地形）；连不上返回 null。
  * 以前回入口/下更深只对单条通道路由，碎片一多就接不回地表；这里把全部通道一起连网。 */
 export function passageNext(recs: Pick<PassageRecord, 'path' | 'kind'>[], here: Vec3Like, to: Vec3Like): { next: Vec3Like; inside: boolean; kind: 'dug' | 'walked' | 'bridge' } | null {
