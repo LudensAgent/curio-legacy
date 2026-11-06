@@ -462,6 +462,31 @@ test('place_at purpose support does not accept a non-floor occupant', async (t) 
   assert.deepEqual(w.actions, []);
 });
 
+test('place_at purpose support 在唯一参照面被挡时潜行到边缘再放', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0'); // 目标支撑格是空的
+  w.inv.set('netherrack', 1);
+  let edgeCalls = 0;
+  t.mock.method(w, 'placeBlockAt', async () => ({ ok: false, reason: 'NO_REFERENCE', detail: '只有脚下的方块能当参照，但从格心看不到它的东面' }));
+  (w as any).sneakPlaceAt = async (target: Vec3Like, names: string[]) => {
+    edgeCalls++;
+    const name = names[0];
+    w.blocks = w.blocks.filter((b) => !(b.pos.x === target.x && b.pos.y === target.y && b.pos.z === target.z));
+    w.blocks.push({ name, pos: { ...target } });
+    w.inv.set(name, (w.inv.get(name) ?? 1) - 1);
+    w.pos = { x: 1.1, y: 64, z: 0.5 };
+    return { ok: true, placed: { ...target } };
+  };
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'netherrack', purpose: 'support' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(edgeCalls, 1, '格心放不上时尝试了边缘放置');
+  assert.equal(w.blockAt({ x: 1, y: 63, z: 0 }), 'netherrack');
+  assert.equal(w.inv.get('netherrack'), 0);
+});
+
 test('place_at purpose support accepts an unobserved solid cell without leaking its name', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };

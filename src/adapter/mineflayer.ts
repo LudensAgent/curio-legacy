@@ -1930,6 +1930,86 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
+  /**
+   * 跨空腔搭桥：身体站在最后一块实心方块上，潜行挪到朝目标方向的边缘（中心越过方块边缘一点，
+   * AABB 仍压着旧方块，不会掉），再点旧方块朝目标那一面，把下一块支撑放到脚下一格。
+   * 只处理水平相邻、目标在脚下一格的支撑位；目标格必须为空。
+   */
+  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }> {
+    const check = this.actionCheckpoint(signal);
+    throwIfAborted(signal);
+    if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
+    await this.interactionReady();
+    check();
+    const b = this.bot;
+    if (!b?.entity?.position || typeof b.setControlState !== 'function' || typeof b.placeBlock !== 'function') return { ok: false, reason: 'NOT_CONNECTED' };
+    const feet = feetCell({ x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z });
+    const dx = target.x - feet.x, dz = target.z - feet.z;
+    if (Math.abs(dx) + Math.abs(dz) !== 1) return { ok: false, reason: 'EDGE_NOT_ADJACENT:目标格必须与脚格水平相邻' };
+    if (target.y !== feet.y - 1) return { ok: false, reason: 'EDGE_HEIGHT:只能补脚下一格的支撑' };
+    const tgt = this.vec(target);
+    const cur = b.blockAt(tgt);
+    if (cur && cur.boundingBox === 'block') return { ok: true, placed: { ...target } };
+    const under = b.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
+    if (!under || under.boundingBox !== 'block') return { ok: false, reason: 'EDGE_NO_SUPPORT:脚下不是实心方块' };
+    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    const epoch = this.actionEpoch;
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
+    const cx = feet.x + 0.5 + dx * 0.6, cz = feet.z + 0.5 + dz * 0.6;
+    b.clearControlStates?.();
+    b.setControlState('sneak', true);
+    let placedOk = false;
+    try {
+      if (typeof b.look === 'function') {
+        await this.afterAction(() => raceAbort(b.look(Math.atan2(-dx, -dz), -0.35, true), signal, 1000, () => {}), check);
+      }
+      b.setControlState('forward', true);
+      let last = { x: b.entity.position.x, z: b.entity.position.z }, still = 0;
+      for (let t = 0; t < 700; t += 50) {
+        await this.afterAction(() => sleep(50, signal), check);
+        const q = b.entity.position;
+        if (Math.hypot(q.x - cx, q.z - cz) < 0.08) break;
+        if (!b.entity.onGround) break;
+        if (Math.hypot(q.x - last.x, q.z - last.z) < 0.01 && ++still >= 3) break;
+        last = { x: q.x, z: q.z };
+      }
+      b.setControlState('forward', false);
+      // 必须已经从方块中心挪到边缘外侧，否则还是会被旧方块的顶面挡住。
+      const q = b.entity.position;
+      const pastEdge = (dx !== 0 ? (q.x - (feet.x + 0.5)) * dx : (q.z - (feet.z + 0.5)) * dz) >= 0.52;
+      if (!pastEdge) return { ok: false, reason: 'EDGE_NOT_REACHED:潜行没有挪到方块边缘' };
+      const ref = b.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
+      if (!ref || ref.boundingBox !== 'block') return { ok: false, reason: 'EDGE_LOST_SUPPORT:挪到边缘后脚下支撑不见了' };
+      const aim = ref.position.offset(0.5 + dx * 0.5, 0.5, 0.5 + dz * 0.5);
+      if (typeof b.lookAt === 'function') await this.afterAction(() => raceAbort(b.lookAt(aim, true), signal, 1000, () => {}), check);
+      else if (typeof b.look === 'function') await this.afterAction(() => raceAbort(b.look(Math.atan2(-dx, -dz), -0.55, true), signal, 1000, () => {}), check);
+      await this.afterAction(() => b.equip(item, 'hand'), check);
+      await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(dx, 0, dz)), signal, 5000, () => {}), check);
+      const now = b.blockAt(tgt);
+      if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的' };
+      this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
+      placedOk = true;
+      return { ok: true, placed: { ...target } };
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortedError') throw e;
+      return { ok: false, reason: `EDGE_PLACE_FAILED:${String((e as Error)?.message ?? e).slice(0, 100)}` };
+    } finally {
+      // 放置失败时人还在方块边缘外面：先潜行退回格心再松 sneak，避免一松就不受支撑。
+      if (ownsControls() && !placedOk) {
+        try {
+          if (typeof b.look === 'function') await b.look(Math.atan2(dx, dz), -0.35, true);
+          b.setControlState('forward', true);
+          await sleep(250);
+        } catch { /* 清理失败不覆盖原始结果 */ }
+      }
+      if (ownsControls()) {
+        b.setControlState('forward', false);
+        b.setControlState('sneak', false);
+      }
+    }
+  }
+
   async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);

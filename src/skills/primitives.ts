@@ -242,7 +242,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 
 export const stepTo: Skill<StepArgs> = {
   name: 'step',
-  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时向下扫到第一处可站立面：4 格内自动走并报告落差和摔伤，更大落差返回精确落点、高度和伤害由你判断。显式上 1 格只接受至少高半格的目标面；持平或更低时回报实际脚高/下一落点，不会自动改平走。不做逐格视线预检，也不因支撑格是 air 就报错；身体被占住或扫完 64 格无落点才拒绝，并给出挖掘坐标、精确高度或要补的支撑格。泡在水里时朝岸迈（[1,0,0]），身体会游过去、贴岸爬上去（岸比脚高一两格也行）。可选 fill：支撑格是空气或可替换植物时先只补那一格再迈（消耗 1 块）；不写就不垫',
+  description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时向下扫到第一处可站立面：4 格内自动走并报告落差和摔伤，更大落差返回精确落点、高度和伤害由你判断。显式上 1 格只接受至少高半格的目标面；持平或更低时回报实际脚高/下一落点，不会自动改平走。不做逐格视线预检，也不因支撑格是 air 就报错；身体被占住或扫完 64 格无落点才拒绝，并给出挖掘坐标、精确高度或要补的支撑格。泡在水里时朝岸迈（[1,0,0]），身体会游过去、贴岸爬上去（岸比脚高一两格也行）。可选 fill：支撑格是空气或可替换植物时先只补那一格再迈（消耗 1 块；必要时潜行到方块边缘放）；不写就不垫',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名|"any"（目标脚下空或可替换时先补这一格，可搭桥；"any" 表示从背包里任选一种能垫的）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级，目标列没有高半格的面时只回报实际脚高/下一落点，不自动改平走；[1,-1,0] 明确下一级；更深落差用 descend）',
   timeoutMs: 8000,
   movement: true,
@@ -520,7 +520,7 @@ function shapeOf(name: string, properties: BlockProps = {}): string {
 
 export const placeAt: Skill<CellArgs & { item: string; extra?: boolean; purpose?: 'support' }> = {
   name: 'place_at',
-  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（红树苗 mangrove_propagule 同样按树苗规则，可种在泥/沾泥的红树根上；之后长成什么见知识库）。purpose:"support" 表示这一格是拿来当落脚/承重支撑：目标格已有可站立实心方块（整块、半砖、雪层等，不要求和 item 同名）就直接算已满足、不再放置；只有空格/可替换方块才放 item。普通放置时目标格已有别的方块（包括半砖、雪层、地毯、门、火把）仍如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
+  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（红树苗 mangrove_propagule 同样按树苗规则，可种在泥/沾泥的红树根上；之后长成什么见知识库）。purpose:"support" 表示这一格是拿来当落脚/承重支撑：目标格已有可站立实心方块（整块、半砖、雪层等，不要求和 item 同名）就直接算已满足、不再放置；只有空格/可替换方块才放 item；当前站位看不到唯一参照面时会潜行挪到脚下方块的边缘再放（只动到边缘，不换目标/材料）。普通放置时目标格已有别的方块（包括半砖、雪层、地毯、门、火把）仍如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
   argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "purpose"?:"support", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -2..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；[1,-2,0] 补下一级 [1,-1,0] 脚下的支撑，加 "purpose":"support" 时已有可站立方块就当作已满足；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
   timeoutMs: 15000,
   movement: true,
@@ -664,13 +664,22 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean; purpose?
         attachable === 'side' ? `${args.item} 只能挂在实心方块侧面` : attachable === 'floor_or_side' ? `${args.item} 要立在实心方块顶面或挂在侧面` : '悬空处放不了方块'}；先走近别的面或换个位置`, { reference, ...after(ctx, args.facing, pos) });
     }
     try {
-      const r = await a.placeBlockAt(pos, names, ctx.signal);
+      let r = await a.placeBlockAt(pos, names, ctx.signal);
+      // 跨空腔补支撑：只有当前方块是参照面、从格心看不到它的侧面时，才潜行挪到方块边缘再放。
+      // 只用于 purpose:"support" 且目标与脚格水平相邻、在脚下一格；不改变目标/材料。
+      let edgeFailure: string | null = null;
+      if (!r.ok && r.reason !== 'NO_ITEM' && args.purpose === 'support' && a.sneakPlaceAt
+        && Math.abs(pos.x - feet.x) + Math.abs(pos.z - feet.z) === 1 && Math.abs(pos.y - (feet.y - 1)) <= 0.01) {
+        const edge = await a.sneakPlaceAt(pos, names, ctx.signal);
+        if (edge.ok) r = edge;
+        else edgeFailure = edge.reason ?? '未知原因';
+      }
       if (!r.ok) {
         const why = r.reason === 'NO_WALL' ? (r.detail ?? `${args.item} 只能挂在实心方块的侧面，四周没有实心墙（或者看不见那个面）`)
           : r.reason === 'NO_FLOOR_OR_WALL' ? (r.detail ?? `${args.item} 要立在实心方块上或挂在它侧面，脚下和四周都没有实心方块`)
           : r.reason === 'NO_REFERENCE' ? (r.detail ?? (attachable ? `旁边没有能挂住 ${args.item} 的实心方块面，或者看不见那个面` : '旁边没有能贴着放的方块（悬空），或者看不见那个面'))
           : typeof r.reason === 'string' && r.reason.startsWith('BAD_SUPPORT:') ? r.reason.slice('BAD_SUPPORT:'.length) : r.reason;
-        return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${why}`, after(ctx, args.facing, pos));
+        return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${why}${edgeFailure ? `；潜行到方块边缘再放也没成（${edgeFailure}）` : ''}`, after(ctx, args.facing, pos));
       }
     } catch (e) {
       if (isAbort(e)) throw e;

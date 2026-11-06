@@ -409,6 +409,11 @@ export interface GameAdapter {
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
+  /**
+   * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格的空目标格放一块方块。
+   * 只用于 place_at purpose:"support" 的支撑位；会移动身体到边缘，放完保持站稳。
+   */
+  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
   useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<GuiResult>;
