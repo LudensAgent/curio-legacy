@@ -27,16 +27,28 @@ function pocket() {
   return w;
 }
 
-/** 记录这次挖掘实际请求的工具；held 模拟主手当前物品。 */
+/** 记录这次挖掘实际请求的工具/手持选项；held 模拟主手当前物品。 */
 class ToolWorld extends FakeAdapter {
   heldTool: string | null = null;
-  digTools: (string | null | undefined)[] = [];
+  digOpts: { tool?: string | null; handOnly?: boolean }[] = [];
+  equipAttempts: string[] = [];
   override state() { return { ...super.state(), held: this.heldTool }; }
-  override async dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null }) {
-    this.digTools.push(opts?.tool);
+  override async equipItem(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal) {
+    this.equipAttempts.push(name);
+    return super.equipItem(name, destination, signal);
+  }
+  override async dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null; handOnly?: boolean }) {
+    this.digOpts.push({ ...(opts ?? {}) });
+    // 模拟旧适配器的自动换手：只有 tool/handOnly 都没传时才向背包要工具；mine_cell 不应触发。
+    if (!opts?.tool && !opts?.handOnly) {
+      const tool = [...this.inv.keys()].find((n) => /_pickaxe$/.test(n));
+      if (tool) await this.equipItem(tool, 'hand', signal);
+    }
     const tool = opts?.tool;
     if (tool && (this.inv.get(tool) ?? 0) <= 0) return { ok: false, reason: `TOOL_MISSING: 背包里没有 ${tool}` };
-    return super.dig(pos, signal);
+    const r = await super.dig(pos, signal);
+    // 模拟空手挖石头的真实结果：能挖开，但什么都不掉。
+    return opts?.handOnly && !this.heldTool ? { ...r, noDrop: true, digMs: 123 } : r;
   }
 }
 
@@ -151,6 +163,56 @@ test('move_step 绝对脚高与真实支撑不符时拒绝，不悄悄改落点'
   assert.equal(r.data?.movementNotAttempted, true);
   assert.equal(r.data?.actualSupport, 63.5);
   assert.deepEqual(w.pos, before);
+});
+
+test('move_step 文档与实际半格/落差规则一致', async (t) => {
+  // 文档必须写清实际接受的规则：上一级 0.5–1 格（半砖提示 [1,1,0]），下一级支撑顶面低 0.5–1 格。
+  assert.match(moveStep.description, /0\.5[–-]1/);
+  assert.match(moveStep.description, /\[1,1,0\]/);
+  assert.match(moveStep.argsDoc, /\[1,1,0\]/);
+  assert.match(moveStep.argsDoc, /0\.5[–-]1/);
+
+  const up = flat();
+  up.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 64, z: 0 } });
+  up.blockProperties.set('1,64,0', { type: 'bottom' });
+  const upCtx = makeCtx(up);
+  t.after(() => upCtx.memory.close());
+  const rise = await moveStep.run(upCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(rise.status, 'succeeded', rise.summary);
+  assert.equal(up.pos.y, 64.5, '向上半格用 [1,1,0]');
+
+  const down = flat();
+  down.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  down.blockProperties.set('1,63,0', { type: 'bottom' });
+  const downCtx = makeCtx(down);
+  t.after(() => downCtx.memory.close());
+  const drop = await moveStep.run(downCtx, { at: [1, -1, 0], facing: 'E' });
+  assert.equal(drop.status, 'succeeded', drop.summary);
+  assert.equal(down.pos.y, 63.5, '下一级按支撑顶面可低 0.5 格');
+
+  const same = flat();
+  same.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  same.blockProperties.set('1,63,0', { type: 'bottom' });
+  const sameCtx = makeCtx(same);
+  t.after(() => sameCtx.memory.close());
+  const level = await moveStep.run(sameCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(level.status, 'failed', '同层脚高必须一致');
+
+  const low = flat();
+  low.blocks.push({ name: 'snow', pos: { x: 1, y: 64, z: 0 } });
+  low.blockProperties.set('1,64,0', { layers: 2 });
+  const lowCtx = makeCtx(low);
+  t.after(() => lowCtx.memory.close());
+  const notEnough = await moveStep.run(lowCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(notEnough.status, 'failed', '上一级不足 0.5 格不算迈上台阶');
+
+  const high = flat();
+  high.blocks.push({ name: 'snow', pos: { x: 1, y: 63, z: 0 } });
+  high.blockProperties.set('1,63,0', { layers: 6 });
+  const highCtx = makeCtx(high);
+  t.after(() => highCtx.memory.close());
+  const tooHigh = await moveStep.run(highCtx, { at: [1, -1, 0], facing: 'E' });
+  assert.equal(tooHigh.status, 'failed', '下一级落差不足 0.5 格不算下一级');
 });
 
 test('move_step 同列向上只能沿梯子', () => {
@@ -268,7 +330,23 @@ test('mine_cell：相对和绝对 xyz 同样校验 tool，只用指定或当前�
   t.after(() => heldCtx.memory.close());
   const held = await mineCell.run(heldCtx, { at: [1, 0, 0], facing: 'E' });
   assert.equal(held.status, 'succeeded', held.summary);
-  assert.deepEqual(heldWorld.digTools, ['wooden_pickaxe'], '没指定 tool 时不能换成背包里更快的铁镐');
+  assert.deepEqual(heldWorld.digOpts, [{ handOnly: true }], '没指定 tool 时只准用当前手持');
+  assert.deepEqual(heldWorld.equipAttempts, [], '不能换成背包里更快的铁镐');
+  assert.equal(heldWorld.heldTool, 'wooden_pickaxe');
+  assert.equal(held.data?.noDrop, false, '手持工具挖石头应当有掉落事实');
+
+  const emptyWorld = stoneAtFeet(new ToolWorld());
+  emptyWorld.heldTool = null;
+  emptyWorld.inv.set('iron_pickaxe', 1);
+  const emptyCtx = makeCtx(emptyWorld, { senses: { observeBlocks: visibleTargets(emptyWorld) } });
+  t.after(() => emptyCtx.memory.close());
+  const empty = await mineCell.run(emptyCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(empty.status, 'succeeded', empty.summary);
+  assert.deepEqual(emptyWorld.digOpts, [{ handOnly: true }], '空手时也要明确只要当前手持');
+  assert.deepEqual(emptyWorld.equipAttempts, [], '空手时不能从背包自选/自动装备工具');
+  assert.equal(empty.data?.noDrop, true, '空手挖石头成功回执必须带 noDrop 事实');
+  assert.equal(empty.data?.digMs, 123, '适配器返回的实测耗时也要带回');
+  assert.doesNotMatch(empty.summary, /进了背包|已获得/);
 
   const explicitWorld = stoneAtFeet(new ToolWorld());
   explicitWorld.heldTool = 'wooden_pickaxe';
@@ -278,7 +356,8 @@ test('mine_cell：相对和绝对 xyz 同样校验 tool，只用指定或当前�
   t.after(() => explicitCtx.memory.close());
   const explicit = await mineCell.run(explicitCtx, { at: [0, 0, 0], facing: 'E', xyz: { x: 1, y: 64, z: 0 }, tool: 'iron_pickaxe' });
   assert.equal(explicit.status, 'succeeded', explicit.summary);
-  assert.deepEqual(explicitWorld.digTools, ['iron_pickaxe'], '指定的工具优先于手持');
+  assert.deepEqual(explicitWorld.digOpts, [{ tool: 'iron_pickaxe' }], '指定的工具优先于手持');
+  assert.deepEqual(explicitWorld.equipAttempts, [], '显式工具由适配器只装这一把');
 
   const missingWorld = stoneAtFeet(new ToolWorld());
   const missingCtx = makeCtx(missingWorld, { senses: { observeBlocks: visibleTargets(missingWorld) } });
@@ -286,6 +365,7 @@ test('mine_cell：相对和绝对 xyz 同样校验 tool，只用指定或当前�
   const missing = await mineCell.run(missingCtx, { at: [1, 0, 0], facing: 'E', tool: 'iron_pickaxe' });
   assert.equal(missing.status, 'failed');
   assert.equal(missing.failureCode, 'TOOL_MISSING');
+  assert.deepEqual(missingWorld.digOpts, [{ tool: 'iron_pickaxe' }]);
   assert.equal(missingWorld.actions.some((a) => a.startsWith('craft:')), false, '缺工具不能自动造');
   assert.equal(missingWorld.blockAt({ x: 1, y: 64, z: 0 }), 'stone');
 });
