@@ -286,6 +286,37 @@ test('follow_passage dig:true 在上台阶时先挖开头顶再迈', async (t) =
   assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), `挖了新头 (1,42,0)：${JSON.stringify(digs)}`);
 });
 
+test('路点比较按格子中心：站在相邻格中心时，1 格短跳不算“没有取得进展”', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  const path = [{ x: 0, y: 40, z: 0 }, { x: 1, y: 40, z: 0 }, { x: 2, y: 40, z: 0 }];
+  carve(w, path);
+  memory.savePassage({
+    id: 'p1', worldId: w.worldId, dim: w.dim, kind: 'dug',
+    entrances: [{ x: 2, y: 40, z: 0 }],
+    deepestY: 40, dug: 30, ores: {}, createdAt: 0, lastUsedAt: 0, uses: 1,
+    path,
+    links: [{ a: { x: 0, y: 40, z: 0 }, b: { x: 1, y: 40, z: 0 } }, { a: { x: 1, y: 40, z: 0 }, b: { x: 2, y: 40, z: 0 } }],
+  });
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  let calls = 0;
+  t.mock.method(w, 'moveTo', async (goal: any) => {
+    calls++;
+    // 第一次 1 格短跳：Pathfinder 认为相邻格中心已在 GoalNear 范围内，原地返回。
+    if (calls === 1) return;
+    if (goal.kind === 'near') w.pos = { ...goal.pos };
+  });
+
+  const result = await followPassage.run(ctx, { to: 'farthest' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(result.data?.skippedWaypoints, undefined, '没有被误判成坏点而跳过');
+  assert.deepEqual(w.pos, { x: 2, y: 40, z: 0 });
+});
+
 test('1 格上台阶的脚格已观测为实心：dig:true 先清脚格和头顶，再迈上去', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0, y: 40, z: 0 };

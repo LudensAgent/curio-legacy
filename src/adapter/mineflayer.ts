@@ -2014,7 +2014,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const blocker = b.blockAt(hit.position);
         return `${where} 被 ${blocker?.name ?? '未加载方块'} (${hit.position.x},${hit.position.y},${hit.position.z}) 挡住`;
       }
-      return `${where} 命中的不是请求的那一面（可能斜穿）`;
+      // 斜穿/贴脸时把「要站到哪一侧」说具体，别只让 Agent 猜“靠近或侧移”。
+      const faceName = face.y > 0.5 ? '顶面' : face.y < -0.5 ? '底面' : face.z < 0 ? '北面' : face.z > 0 ? '南面' : face.x > 0 ? '东面' : '西面';
+      const stance = face.y > 0.5 ? '站到它旁边并俯视'
+        : face.y < -0.5 ? '站到它下方仰视'
+        : `退到它${face.z < 0 ? '北侧（z 更小）' : face.z > 0 ? '南侧（z 更大）' : face.x > 0 ? '东侧（x 更大）' : '西侧（x 更小）'}一格`;
+      return `${where} 命中的不是请求的那一面（可能斜穿）；这一面是 ${faceName}，${stance}再试`;
     };
     const why = refs.slice(0, 2).map(explainFace).join('；');
     return {

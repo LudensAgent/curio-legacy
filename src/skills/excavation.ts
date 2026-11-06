@@ -188,7 +188,7 @@ function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelo
       .map((o) => ({ target: { ...o.target }, surface: o.surface, drop: o.drop, clearance: o.clearance, corridor: o.corridor, approach: o.approach, unknowns: o.unknowns }))
       .sort((a, b) => distance(a.target) - distance(b.target))
       .slice(0, 5),
-    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫方块；stairs 下行遇到安全整格落差 1..4 格会自动继续，这里停下是因为危险、未知、半格脚高或落差更大',
+    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫方块；只有 stairs 下行会对安全整格落差 1..4 格自动继续，stairs_up/tunnel 需要你补支撑或换方向',
   };
 }
 
@@ -379,12 +379,17 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const fall = cavity && 'fall' in cavity ? cavity.fall : null;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     // 用「液体」标记和方块名判断，不能用单个「水」字：它会把「没有水平承重顶面」误判成液体提示。
+    const dropRule = args.mode === 'stairs'
+      ? '；stairs 下行遇到安全整格落差 1..4 格会自动继续，这里停下是因为危险、未知、半格脚高或落差更大'
+      : args.mode === 'stairs_up'
+        ? '；stairs_up 是上行，不会自动下落：要站上这一级得先 place_at 补支撑，或换方向/descend'
+        : '；tunnel 是平巷，不会自动下落：要过去得先 place_at 补支撑，或换方向/descend';
     const hint = /液体|lava|water|岩浆/.test(msg) ? '（先换方向避开液体，或先 place_at 堵上再挖）'
       : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；实际可站立脚面在 y=${fall.landing.y.toFixed(2)}，方块在 (${fall.landing.x},${fall.landing.y - 1},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}；stairs 下行遇到安全整格落差 1..4 格会自动继续，这里停下是因为危险、未知、半格脚高或落差更大；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫方块）`
-      : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
+      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；实际可站立脚面在 y=${fall.landing.y.toFixed(2)}，方块在 (${fall.landing.x},${fall.landing.y - 1},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}${dropRule}；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫方块）`
+      : /下面是空的|洞穴|虚空/.test(msg) ? `（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞${dropRule}）`
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';

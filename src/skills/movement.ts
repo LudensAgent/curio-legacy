@@ -893,7 +893,14 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       const atText = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
       const posText = (p: Vec3Like) => `(${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})`;
       // 记录点附近的本地修正：水平 ≤1.5 且高度差 ≤1 才算这段走通。
-      const nearWaypoint = (p: Vec3Like, wp: Vec3Like) => Math.hypot(p.x - wp.x, p.z - wp.z) <= 1.5 && Math.abs(p.y - wp.y) <= 1;
+      // 记录点是脚格（floor 后的整数格），身体位置是连续坐标：比较要用格子中心，
+      // 不能拿格角。否则身体站在相邻格中心 (x+0.5,z+0.5) 时到格角已经 1.58 格，
+      // 明明只差一步也会被判成“没有取得进展”。
+      const nearWaypoint = (p: Vec3Like, wp: Vec3Like) => Math.hypot(p.x - (wp.x + 0.5), p.z - (wp.z + 0.5)) <= 1.5 && Math.abs(p.y - wp.y) <= 1;
+      // “已经在这一格”用格子判断，不用距离：格角到相邻格中心可能只有 0.7 格，
+      // 用距离会把“下一步”误当成已经走过。
+      const sameWaypointCell = (p: Vec3Like, wp: Vec3Like) =>
+        Math.floor(p.x) === Math.floor(wp.x) && Math.floor(p.z) === Math.floor(wp.z) && Math.abs(p.y - wp.y) <= 1;
       const skippedData = () => skippedWaypoints.length ? { skippedWaypoints: skippedWaypoints.map((p) => ({ ...p })) } : {};
       const adjustedData = () => supportAdjusted.length
         ? { supportAdjusted: supportAdjusted.map((a) => ({ waypoint: { ...a.waypoint }, landing: { ...a.landing }, drop: a.drop })) }
@@ -1006,7 +1013,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
         throwIfAborted(signal);
         if (Date.now() >= ctx.deadline) return receipt(fail('TIMEOUT', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段时间用完；人停在 (${last.x.toFixed(1)},${last.y.toFixed(1)},${last.z.toFixed(1)})，离目标约 ${Math.round(dist3(last, target))} 格；${digFact}`, { position: last, reachedWaypoint: i, totalWaypoints: route.length - 1, initialPosition: here, segmentStart: { ...last }, ...skippedData() }));
         const wp = route[i]!;
-        if (dist3(last, wp) <= 1.2) continue;
+        if (sameWaypointCell(last, wp)) continue;
         const hop = dist3(last, wp);
         // 上 1 格台阶：两格高隧道里跳不起来。先把「起跳头顶」「新头」两格挖开（dig:true 才授权挖），再迈。
         const lc = feetCell(last);
