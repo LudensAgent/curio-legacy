@@ -480,6 +480,16 @@ export function decisionReminders(ctx: MindContext): string[] {
       const t = materials.wood, wood = MATERIAL_FAMILIES.wood.stock;
       const inv = backpack(wood), chest = chestStock(wood);
       out.push(`木料的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个原木类方块（不含木板/木棍），一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个原木类方块（实时，不含木板/木棍）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个原木类方块` : ''}`);
+      // 紧挨着木料历史账，给出“手头有树苗、树苗能长成树”的物品与世界机制事实。
+      // 只说事实和知识库入口，不写“应该种/为了少跑”这类做法建议；种不种仍由 Agent 决定。
+      const bagSaplings = s.inventory.filter((i) => isTreeSaplingItem(i.name)).reduce((n, i) => n + i.count, 0);
+      const chestSaplings = (p.storage?.stock ?? []).filter((r) => r.inChests > 0 && isTreeSaplingItem(r.item)).reduce((n, r) => n + r.inChests, 0);
+      if (bagSaplings + chestSaplings > 0) {
+        const where = bagSaplings && chestSaplings
+          ? `背包里有 ${bagSaplings} 个树苗（可种）；记得的箱子（上次打开时）还有 ${chestSaplings} 个`
+          : bagSaplings ? `背包里有 ${bagSaplings} 个树苗（可种）` : `记得的箱子（上次打开时）里有 ${chestSaplings} 个树苗（可种）`;
+        out.push(`树苗：${where}。树苗放在草方块/泥土等土壤上会生长成树，树木长成后可采原木（需要光照和上方空间；细节见 knowledge 的「树苗/植树」）。`);
+      }
     }
     // 下矿的账（这一趟）已经在上面说过了，就不再用历史聚合重复一遍。
     if (!tripShown && materials.ore.trips >= 2 && MINING_INTENT.test(intent)) {
