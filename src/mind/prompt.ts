@@ -333,11 +333,14 @@ const EXPLORE_INTENT = /找要塞|要塞|找结构|结构|探索|平巷|横着|�
 
 /** 支撑格是实心：站在这里不会马上掉下去；未观测（null）不当作空气。 */
 const solidSupport = (n: string | null) => n !== null && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
-/** 脚/头两格可走时，按下方支撑格给出「能直接走/要垫或下落/未观测」的当前事实。 */
+/** 脚/头两格可走时，按下方支撑格给出「能直接走/不是地板/未观测」的当前事实。 */
 function stepSupportFact(support: string | null): string {
   if (solidSupport(support)) return '，可以直接走过去';
   if (support === null) return '，下方支撑格未观测';
-  return `；下一步落脚点下方是 ${support}，走过去需要垫或下落（由你定）`;
+  if (LIQUID_BLOCKS.has(support)) return `；下一步落脚点下方是 ${support}（液体），不能站`;
+  if (/^(air|cave_air|void_air)$/.test(support)) return `；下一步落脚点下方是 ${support}，没有地板`;
+  if (isSoftBlock(support)) return `；下一步落脚点下方是 ${support}（火把/装饰方块不是地板），记录点可能悬空；实际楼面需现场确认（由你定）`;
+  return `；下一步落脚点下方是 ${support}，不能站`;
 }
 
 /** 打算里说木头/砍树/原木（材料账只在相关意图出现；前导非字母避免 dialog 之类误匹配） */

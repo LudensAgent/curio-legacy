@@ -889,11 +889,15 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       let rescueCount = 0;
       let skipUsed = false;
       const skippedWaypoints: Vec3Like[] = [];
+      const supportAdjusted: { waypoint: Vec3Like; landing: Vec3Like; drop: number }[] = [];
       const atText = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
       const posText = (p: Vec3Like) => `(${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)})`;
       // 记录点附近的本地修正：水平 ≤1.5 且高度差 ≤1 才算这段走通。
       const nearWaypoint = (p: Vec3Like, wp: Vec3Like) => Math.hypot(p.x - wp.x, p.z - wp.z) <= 1.5 && Math.abs(p.y - wp.y) <= 1;
       const skippedData = () => skippedWaypoints.length ? { skippedWaypoints: skippedWaypoints.map((p) => ({ ...p })) } : {};
+      const adjustedData = () => supportAdjusted.length
+        ? { supportAdjusted: supportAdjusted.map((a) => ({ waypoint: { ...a.waypoint }, landing: { ...a.landing }, drop: a.drop })) }
+        : {};
       // 只把实际观测到的方块当作阻塞依据：未知（null）不阻塞，交给 moveTo 实测。
       // 可攀（梯子/藤蔓/脚手架）、可开（门/栅栏门/活板门）、半格顶面（半砖/楼梯/床/地毯/雪层）
       // 都不能按“实心=堵”一刀切；可站立/可占用由名称 allowlist + blockStateAt 属性判断。
@@ -923,29 +927,56 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
         }
         return false; // 观测到的整块实心
       };
-      // 支撑格：true=可站立/可攀，false=已观测为不可站，null=未知。
-      const standableCell = (p: Vec3Like): boolean | null => {
+      // 支撑格分类：火把/花/铁轨等只是“不是地板”，不是硬障碍；液体/整块实心/半格顶面/未知分开报。
+      type SupportKind = 'standable' | 'climbable' | 'air' | 'liquid' | 'decorative' | 'unknown';
+      const supportKind = (p: Vec3Like): SupportKind => {
         const name = blockNameAt(p);
-        if (name === null) return null;
-        if (LIQUID_BLOCKS.has(name)) return false;
-        if (CLIMBABLE.test(name) || OPENABLE.test(name) || PARTIAL_FLOOR.test(name)) return true;
-        return !isSoftBlock(name);
+        if (name === null) return 'unknown';
+        if (LIQUID_BLOCKS.has(name)) return 'liquid';
+        if (CLIMBABLE.test(name) || OPENABLE.test(name) || PARTIAL_FLOOR.test(name)) return 'standable';
+        if (AIR_BLOCKS.has(name)) return 'air';
+        if (isSoftBlock(name)) return 'decorative';
+        return 'standable';
+      };
+      const supportAt = (wp: Vec3Like) => {
+        const feet = feetCell(wp);
+        const support = { x: feet.x, y: feet.y - 1, z: feet.z };
+        return { cell: support, block: blockNameAt(support), kind: supportKind(support) };
       };
       // 下半格/床/箱子这类可站顶面：站上去时记录 cell 就是这块方块本身，支撑在脚格里，不在 y-1。
       const footSelfSupport = (feet: Vec3Like) => {
         const name = blockNameAt(feet);
         return name !== null && PARTIAL_FLOOR.test(name) && occupiableCell(feet) === true;
       };
+      // 只返回“确定占用/危险”的硬阻塞；air/装饰方块交给下面的本地楼面修正或 dig:true 尝试。
       const blockersAt = (wp: Vec3Like, opts: { includeHead: boolean }) => {
         const feet = feetCell(wp);
         const head = { x: feet.x, y: feet.y + 1, z: feet.z };
-        const support = { x: feet.x, y: feet.y - 1, z: feet.z };
+        const support = supportAt(wp);
         const blocked = (role: string, pos: Vec3Like) => [{ role, cell: pos, block: blockNameAt(pos) }];
         return [
           ...(occupiableCell(feet) === false ? blocked('脚格', feet) : []),
           ...(opts.includeHead && occupiableCell(head) === false ? blocked('头格', head) : []),
-          ...(footSelfSupport(feet) ? [] : standableCell(support) === false ? blocked('支撑格', support) : []),
+          ...(!footSelfSupport(feet) && (support.kind === 'liquid') ? blocked('支撑格', support.cell) : []),
         ];
+      };
+      // 记录点悬空/支撑是火把等装饰方块时，同列向下找实际可站楼面；只在同一列，不做全局 xz 绕行。
+      const localLanding = (wp: Vec3Like): { cell: Vec3Like; floor: Vec3Like; drop: number } | null => {
+        const feet = feetCell(wp);
+        const start = { x: feet.x, y: feet.y - 1, z: feet.z };
+        for (let d = 0; d <= 3; d++) {
+          const floor = { x: start.x, y: start.y - d, z: start.z };
+          const kind = supportKind(floor);
+          if (kind === 'liquid') return null;
+          if (kind === 'standable' || kind === 'climbable') {
+            const cell = { x: floor.x, y: floor.y + 1, z: floor.z };
+            const head = { x: cell.x, y: cell.y + 1, z: cell.z };
+            if (occupiableCell(cell) !== false && occupiableCell(head) !== false) {
+              return { cell, floor, drop: Math.abs(wp.y - cell.y) };
+            }
+          }
+        }
+        return null;
       };
       // 没有取得进展（未 offRoute）时的共同回执：停在第一个坏点，不把跳过尝试冒充进展。
       const stuckAt = (index: number, waypoint: Vec3Like, before: Vec3Like, got: Vec3Like, errText: string, extra: string) =>
@@ -1013,10 +1044,68 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
           const blocked = blockersAt(wp, { includeHead: true });
           if (blocked.length) {
             const detail = blocked.map((c) => `${c.role} ${atText(c.cell)} 是 ${c.block}`).join('、');
-            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 的${detail}，目标格被堵或脚下没有可站立实心，未调用寻路（人仍在 ${posText(last)}）。可选：${digFact}；或 descend/climb_up；或换路${skippedWaypoints.length ? `；已跳过 ${skippedWaypoints.map(atText).join('、')}` : ''}`, {
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 的${detail}，这是已观测的实心占用/危险支撑，未调用寻路（人仍在 ${posText(last)}）。可选：${digFact}；或 descend/climb_up；或换路${skippedWaypoints.length ? `；已跳过 ${skippedWaypoints.map(atText).join('、')}` : ''}`, {
               position: last, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
               blockedCells: blocked.map((c) => ({ role: c.role, cell: { ...c.cell }, block: c.block })),
-              remaining: Math.round(dist3(last, target!)), target, routeFacts, ...skippedData(),
+              remaining: Math.round(dist3(last, target!)), target, routeFacts, ...skippedData(), ...adjustedData(),
+            }));
+          }
+          const support = supportAt(wp);
+          if (!footSelfSupport(feetCell(wp)) && (support.kind === 'air' || support.kind === 'decorative')) {
+            const landing = localLanding(wp);
+            const shortOpts = { signal, timeoutMs: Math.max(2000, Math.min(ctx.deadline - Date.now(), 5000)), allowSwimming: false };
+            // 同列实际楼面只差 ≤2 格：做一次同列本地修正，走到真实落脚面后继续同一路线。
+            if (landing && landing.drop <= 2) {
+              if (dist3(last, landing.cell) > 1.2) {
+                try {
+                  await adapter.moveTo({ kind: 'near', pos: landing.cell, range: 1.2 }, shortOpts);
+                } catch (e) {
+                  if (isAbort(e)) { trace.push({ ...adapter.state().pos }); throw e; }
+                  if (!allowDig) {
+                    const whySupport = support.kind === 'decorative'
+                      ? `支撑格 ${atText(support.cell)} 是 ${support.block}（火把/装饰方块不是地板），记录点可能悬空`
+                      : `记录点下方 ${atText(support.cell)} 是 air，没有可站立支撑`;
+                    return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：${whySupport}；同列实际楼面在 ${atText(landing.cell)}（差 ${landing.drop} 格），走过去没成（${(e as Error).message.slice(0, 50)}）。${digFact}；或 descend/climb_up；或换路`, {
+                      position: adapter.state().pos, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+                      support: { cell: { ...support.cell }, block: support.block, kind: support.kind }, landing: { ...landing.cell },
+                      remaining: Math.round(dist3(adapter.state().pos, target!)), target, routeFacts, ...skippedData(), ...adjustedData(),
+                    }));
+                  }
+                }
+              }
+              const gotLanding = adapter.state().pos;
+              if (dist3(gotLanding, landing.cell) <= 2) {
+                trace.push({ ...gotLanding });
+                supportAdjusted.push({ waypoint: { ...wp }, landing: { ...landing.cell }, drop: landing.drop });
+                last = gotLanding;
+                continue;
+              }
+            }
+            const whySupport = support.kind === 'decorative'
+              ? `支撑格 ${atText(support.cell)} 是 ${support.block}（火把/装饰方块不是地板），记录点可能悬空`
+              : `记录点下方 ${atText(support.cell)} 是 air，没有可站立支撑`;
+            if (!allowDig) {
+              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：${whySupport}${landing ? `；同列实际楼面在 ${atText(landing.cell)}（差 ${landing.drop} 格）` : '；同列 3 格内没有可站立楼面'}。未调用寻路。${digFact}；或 descend/climb_up；或换路`, {
+                position: last, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+                support: { cell: { ...support.cell }, block: support.block, kind: support.kind }, ...(landing ? { landing: { ...landing.cell } } : {}),
+                remaining: Math.round(dist3(last, target!)), target, routeFacts, ...skippedData(), ...adjustedData(),
+              }));
+            }
+            try {
+              await adapter.moveTo({ kind: 'near', pos: wp, range: 1.2 }, { ...shortOpts, ...terrainPermission });
+            } catch (e) {
+              if (isAbort(e)) { trace.push({ ...adapter.state().pos }); throw e; }
+            }
+            const afterDig = adapter.state().pos;
+            trace.push({ ...afterDig });
+            if (nearWaypoint(afterDig, wp)) {
+              last = afterDig;
+              continue;
+            }
+            return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：${whySupport}${landing ? `；同列实际楼面在 ${atText(landing.cell)}（差 ${landing.drop} 格）` : '；同列 3 格内没有可站立楼面'}；已按 dig:true 尝试有界挖/垫，仍没走到记录点。${digFact}；或 descend/climb_up；或换路`, {
+              position: afterDig, initialPosition: here, segmentStart: { ...last }, blockedWaypoint: { ...wp }, waypointIndex: i, totalWaypoints: route.length - 1,
+              support: { cell: { ...support.cell }, block: support.block, kind: support.kind }, ...(landing ? { landing: { ...landing.cell } } : {}),
+              remaining: Math.round(dist3(afterDig, target!)), target, routeFacts, ...skippedData(), ...adjustedData(),
             }));
           }
         }
@@ -1105,7 +1194,8 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       const arrived = dist3(end, target) <= 2;
       const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
       const archiveNote = archivedCount ? `；其中 ${archivedCount} 条来自历史归档，只算旧几何，沿途已按当前方块逐段尝试` : '';
-      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}${skippedWaypoints.length ? `；跳过了不可达路点 ${skippedWaypoints.map(atText).join('、')}` : ''}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount, ...skippedData() }));
+      const adjustedNote = supportAdjusted.length ? `；支撑修正 ${supportAdjusted.length} 处（记录点悬空/装饰方块，已落到实际楼面）` : '';
+      return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${archiveNote}${deeper}${skippedWaypoints.length ? `；跳过了不可达路点 ${skippedWaypoints.map(atText).join('、')}` : ''}${adjustedNote}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount, ...skippedData(), ...adjustedData() }));
     } catch (e) {
       // 取消仍抛 AbortedError，但已测到的最后位置、原请求、锚点与后端随 partial 保留。
       if (isAbort(e)) throw cancelledNav(e, {

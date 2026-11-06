@@ -153,7 +153,7 @@ test('下一步脚/头可走但下方不是实心时，只报支撑格事实与�
   t.after(close);
   const line = user.content.split('\n').find((l) => l.includes('下一步落脚点下方是'));
   assert.ok(line, '要给出下方支撑格的事实');
-  assert.match(line, /下一步落脚点下方是 air，走过去需要垫或下落（由你定）/);
+  assert.match(line, /下一步落脚点下方是 air，没有地板/);
   assert.doesNotMatch(line, /你应该|建议先去|必须/);
   assert.match(line, /follow_passage \{"to":"deepest","dig":true\}.*会消耗方块和工具耐久/);
 });
@@ -194,7 +194,7 @@ test('下方支撑格是液体时照样只说垫或下落', (t) => {
   t.after(close);
   const line = user.content.split('\n').find((l) => l.includes('下一步落脚点下方是'));
   assert.ok(line, '要给出下方液体的当前事实');
-  assert.match(line, /下一步落脚点下方是 water，走过去需要垫或下落（由你定）/);
+  assert.match(line, /下一步落脚点下方是 water（液体），不能站/);
 });
 
 test('下界找要塞/开平巷时给旧道的水平最远口径，而不是只给最深', (t) => {
@@ -216,4 +216,20 @@ test('下界找要塞/开平巷时给旧道的水平最远口径，而不是只�
   assert.match(user.content, /水平最远/, '下界找要塞需要水平延伸事实');
   assert.match(user.content, /follow_passage \{"to":"farthest"/, '要给出往远处走的显式入口');
   assert.doesNotMatch(user.content, /往最深处走的下一步/, '找要塞/平巷不能只给最深方向');
+});
+
+test('下一步支撑是火把时说明“不是地板”，不说成需要垫/下落', (t) => {
+  const air = new Set(['7,59,0', '7,60,0']);
+  const { user, close } = undergroundShaft('沿旧矿道往下挖', '找铁矿', {
+    pos: { x: 6.5, y: 60, z: 4.5 },
+    blockAt: (p) => {
+      const k = `${p.x},${p.y},${p.z}`;
+      return air.has(k) ? 'air' : k === '7,58,0' ? 'wall_torch' : 'stone';
+    },
+  });
+  t.after(close);
+  const line = user.content.split('\n').find((l) => l.includes('下一步落脚点下方是'));
+  assert.ok(line, '要给出下方支撑格的事实');
+  assert.match(line, /wall_torch（火把\/装饰方块不是地板）/);
+  assert.doesNotMatch(line, /需要垫或下落/);
 });

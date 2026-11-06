@@ -687,3 +687,69 @@ test('to:"farthest" 选水平最远点，不选最深点', async (t) => {
   assert.ok(moves.some((p) => p.x === 40 && p.y === 40));
   assert.ok(!moves.some((p) => p.y === 20), '不该把最深点当目标');
 });
+
+test('记录点支撑是火把、实际楼面低 2 格：走本地楼面，不报“被堵”', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'torch-support', [{ x: 0, y: 40, z: 0 }, { x: 3, y: 42, z: 0 }, { x: 7, y: 42, z: 0 }], { x: 7, y: 42, z: 0 });
+  // 记录点在 y42，支撑格 y41 是火把（不是地板），同列实际楼面在 y39，脚可站 y40。
+  w.setBlock({ x: 3, y: 41, z: 0 }, 'wall_torch');
+  w.setBlock({ x: 3, y: 40, z: 0 }, 'air');
+  w.setBlock({ x: 3, y: 39, z: 0 }, 'stone');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves: Vec3Like[] = [];
+  t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') { moves.push(goal.pos); w.pos = { ...goal.pos }; } });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(moves.some((p) => p.x === 3 && p.y === 40), '应走到实际楼面 y40，而不是把火把当堵点');
+  assert.match(result.summary, /支撑修正 1 处/);
+  const adjusted = result.data?.supportAdjusted as { landing: Vec3Like }[];
+  assert.deepEqual(adjusted[0]?.landing, { x: 3, y: 40, z: 0 });
+  assert.doesNotMatch(result.summary, /目标格被堵/);
+});
+
+test('火把支撑且没有可站楼面：无 dig 只报“火把不是地板”，不调用寻路', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'torch-no-floor', [{ x: 0, y: 40, z: 0 }, { x: 3, y: 42, z: 0 }], { x: 3, y: 42, z: 0 });
+  w.setBlock({ x: 3, y: 41, z: 0 }, 'wall_torch');
+  w.setBlock({ x: 3, y: 40, z: 0 }, 'air');
+  w.setBlock({ x: 3, y: 39, z: 0 }, 'air');
+  w.setBlock({ x: 3, y: 38, z: 0 }, 'air');
+  w.setBlock({ x: 3, y: 37, z: 0 }, 'air');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance' });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /wall_torch（火把\/装饰方块不是地板）/);
+  assert.doesNotMatch(result.summary, /目标格被堵/);
+  assert.equal(moves.mock.callCount(), 0, '没有 dig 授权时不移动');
+});
+
+test('火把支撑且没有楼面：dig:true 会尝试一次有界挖/垫，而不是在预检直接放弃', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 40, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.worldId);
+  save(memory, w, 'torch-no-floor-dig', [{ x: 0, y: 40, z: 0 }, { x: 3, y: 42, z: 0 }], { x: 3, y: 42, z: 0 });
+  w.setBlock({ x: 3, y: 41, z: 0 }, 'wall_torch');
+  for (const y of [40, 39, 38, 37]) w.setBlock({ x: 3, y, z: 0 }, 'air');
+  const ctx = makeCtx(w, { memory });
+  t.after(() => memory.close());
+  const moves = t.mock.method(w, 'moveTo', async (goal: any) => { if (goal.kind === 'near') w.pos = { ...goal.pos }; });
+
+  const result = await followPassage.run(ctx as never, { to: 'entrance', dig: true });
+
+  assert.ok(moves.mock.callCount() > 0, 'dig:true 应尝试有界 moveTo/挖垫');
+  assert.doesNotMatch(result.summary, /未调用寻路/);
+});
