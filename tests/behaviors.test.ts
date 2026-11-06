@@ -154,6 +154,27 @@ test('副手装备的盾会让贴身防御候选自动接管（has 不再只数�
   } finally { engine.dispose(); }
 });
 
+test('advisory 只压被降级的版本：同名候选改写后重新获得自动接手机会', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.hp = 10;
+  const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 4, name: 'zombie', kind: 'hostile', dist: 2, perception: 'seen', pos: { x: 2, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'dig_at', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-retreat-test', '贴身怪时举盾后撤', '候选', { when: { hp_below: 16, hostile: { within: 6 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, zombie);
+  try {
+    const st = { fired: 0, ok: 0, fail: 0, lastAt: 0, advisory: { since: 0, why: '测试', version: '1' } };
+    (engine as any).stats['shield-retreat-test'] = st;
+    assert.equal(engine.tick(current), false, '被降级的候选 v1 不自动接手');
+    st.advisory.version = '0';
+    assert.equal(engine.tick(current), true, 'advisory 不再匹配当前版本时重新获得自动接手机会');
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-retreat-test');
+  } finally { engine.dispose(); }
+});
+
 test('样本技能读取：恢复类、调用类与写技能说明可用，引用隐藏动作的旧样本拒绝启用', () => {
   const book = new SkillBook(BUILTIN_SKILLS_DIR, FIXTURES);
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);

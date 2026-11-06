@@ -71,8 +71,8 @@ export interface BehaviorStats {
   lastRestoration?: { at: number; retiredAt: number; reason: string };
   /** 不是代码的技能每改写一次加一（代码技能用自己的版本号）：成败按版本记，改写不清空历史 */
   rev?: number;
-  /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；改写后恢复 */
-  advisory?: { since: number; why: string };
+  /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；只压被降级的那个版本，改写出的新版本重新获得机会 */
+  advisory?: { since: number; why: string; version?: string };
   /** 和别的技能来回拉锯过（A 做完 B 又把它推回去）：给整理用 */
   loops?: { with: string; at: number; times: number }[];
   /** 条件成立接手、却什么都没做就返回（白白打断手上的活）的次数：when 多半比代码里的判断宽。给整理用 */
@@ -432,8 +432,16 @@ export class BehaviorEngine {
       const threat = isThreat(b.when);
       if (!threat && cur && (cur.source === 'llm' || cur.source === 'rule')) { this.waiting(b, cur, now); continue; }
       const adv = this.stats[b.name]?.advisory;
-      // 拉锯里输掉的一直只提醒、不自动接手，直到它被改写（改了条件才恢复）；定时自动恢复会让两个技能过一阵又拉起来
-      if (adv) { this.waiting(b, cur, now, adv.why); continue; }
+      // 拉锯里输掉的那个版本只提醒、不自动接手；同名新版本（改写/候选）重新获得机会。
+      // 旧数据没有版本号：只压稳定版，避免把已经改写过的候选一起压住。
+      if (adv && (adv.version !== undefined ? adv.version === this.versionOf(b) : !b.candidate)) {
+        const candidate = this.candidates.get(b.name);
+        const candidateCanTake = !!candidate && candidate.mode === 'auto' && isEmergency(candidate)
+          && !this.inactive(b.name) && !this.candidateRetirement(b.name)
+          && (adv.version === undefined || adv.version !== this.versionOf(candidate));
+        if (!candidateCanTake) this.waiting(b, cur, now, adv.why);
+        continue;
+      }
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (evalPredicate(b.when!, s)) matches.push(b);
@@ -478,11 +486,12 @@ export class BehaviorEngine {
 
   private noteFire(name: string, doing: string | null, now = Date.now()) {
     this.fires = [...this.fires.filter((f) => now - f.at < BehaviorEngine.LOOP_WINDOW_MS), { at: now, name, doing }].slice(-40);
-    const last = this.fires.slice(-3).map((f) => f.name);
+    const last = this.fires.slice(-4).map((f) => f.name);
     let loop: { kind: 'pingpong' | 'tug'; a: string; b: string; times: number } | null = null;
-    // 三个就能认出 A、B、A 交替（不必等满 A、B、A、B）：早一轮识破，少来回几趟、少挨几下
-    if (last.length === 3 && last[0] === last[2] && last[0] !== last[1]) {
-      loop = { kind: 'pingpong', a: last[2], b: last[1], times: this.fires.filter((f) => f.name === last[0] || f.name === last[1]).length };
+    // 要看到两轮 A、B、A、B 才算互相拉锯：只交替一轮常常只是环境切换（水里/陆上、氧气够不够），
+    // 不足以证明两个技能在互相拆台；误判会把一个保命技能永久降级。
+    if (last.length === 4 && last[0] === last[2] && last[1] === last[3] && last[0] !== last[1]) {
+      loop = { kind: 'pingpong', a: last[2], b: last[3], times: this.fires.filter((f) => f.name === last[0] || f.name === last[1]).length };
     } else {
       // 这个技能最近连着几次接手时，手上都是同一件事
       const same = this.fires.filter((f) => f.name === name);
@@ -506,7 +515,7 @@ export class BehaviorEngine {
         const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
         this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why });
         // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）才恢复
-        this.touch(loser.name, (st) => { st.advisory = { since: now, why }; });
+        this.touch(loser.name, (st) => { st.advisory = { since: now, why, version: this.versionOf(loser) }; });
       }
       this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；「${loser.name}」先改成只提醒、不自动接手，直到它被改写` : ''}`,
         { kind: loop.kind, a: loop.a, b: loop.b, times: loop.times, held: loser?.name ?? null });
@@ -1035,7 +1044,9 @@ export class BehaviorEngine {
   /** 反射技能触发后什么都没做：记 idle（整理技能的据此收窄 when）、歇一会儿，怪更近或挨打时照常接手 */
   private noteIdle(name: string, nearest: number | undefined, interrupted?: string) {
     const now = Date.now();
-    this.touch(name, (st) => { st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
+    // 什么都没做的接手不算一次“来回”：否则在别的技能的地盘上让位（水下让给换气）也会被误判成拉锯
+    for (let i = this.fires.length - 1; i >= 0; i--) if (this.fires[i].name === name) { this.fires.splice(i, 1); break; }
+    this.touch(name, (st) => { st.fired = Math.max(0, st.fired - 1); st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
     this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: '条件成立接手后什么都没做就返回', closer: Number.isFinite(nearest) ? nearest : Infinity });
     this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回${interrupted ? `（打断了「${interrupted}」）` : ''}，先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, ...(interrupted ? { interrupted } : {}), times: this.stats[name]?.idleInterrupts });
   }
@@ -1124,7 +1135,7 @@ export class BehaviorEngine {
     const per = this.stats[name]?.byVersion?.[this.versionOf(b)];
     if (this.executionError(name, true) || this.candidates.get(name)?.version !== b.version || !per
       || per.ok < BehaviorEngine.MIN_EVIDENCE || per.ok < per.fail * 2 || !this.book?.promote(name, stableVersion)) return;
-    this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; });
+    this.touch(name, (st) => { st.disabled = false; delete st.retired; delete st.retiredAt; delete st.disabledAt; delete st.candidatePermit; delete st.lastError; delete st.advisory; });
     this.bus.publish('skill_promoted', 'P2', `候选技能 ${name} v${b.version} 已通过 ${per.ok} 次实际验收，启用其原定模式`, { name, version: b.version });
   }
 

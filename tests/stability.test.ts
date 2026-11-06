@@ -102,12 +102,14 @@ test('拉锯里输掉的一方降成只提醒、不接手，直到被改写', ()
   assert.equal(e.statsOf('go-to-surface')!.advisory, undefined, '拆开条件改写后恢复');
 });
 
-test('拉锯第三次就识破（A、B、A），不用等第四次', () => {
+test('只交替一轮不判定拉锯（可能只是环境切换）；两轮 A、B、A、B 才降级', () => {
   const { engine: e } = engine();
   for (const n of ['hide-in-hole', 'go-to-surface']) assert.ok(e.write({ name: n, description: `${n} 的做法说明`, when: { hp_below: 15 }, steps: [{ skill: 'wait', args: { seconds: 1 } }] }).ok);
   (e as any).stats['hide-in-hole'] = { fired: 5, ok: 4, fail: 1, lastAt: 0 };
   for (const n of ['hide-in-hole', 'go-to-surface', 'hide-in-hole']) (e as any).noteFire(n, null);
-  assert.ok(e.statsOf('go-to-surface')!.advisory, '第三次（A、B、A）就认出拉锯并降级，不用等到 A、B、A、B');
+  assert.equal(e.statsOf('go-to-surface')!.advisory, undefined, 'A、B、A 不判定：水里/陆上这类环境切换也会产生交替');
+  (e as any).noteFire('go-to-surface', null);
+  assert.ok(e.statsOf('go-to-surface')!.advisory, 'A、B、A、B 两轮交替才降级');
 });
 
 test('一再缺的东西认得出来；施工缺的块集中在高处会说清楚；清空记忆前把这一局的日志和统计存进 archives', () => {
