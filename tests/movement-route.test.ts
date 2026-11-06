@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap, type PathFragment } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
-import { planRoute, resolveTarget, getRouteRecord, clearRouteRecords } from '../src/skills/movement/index.ts';
+import { planRoute, resolveTarget, walkPath, getRouteRecord, clearRouteRecords } from '../src/skills/movement/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -33,7 +33,55 @@ function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}
       },
     },
     closing: false, paused: false, observationAdmitted: true,
+    attach: () => ({}),
+    detach: () => {},
   } as unknown as SharedSpatialSession;
+}
+
+/** 测试用步行身体：按住 forward 时沿当前朝向每帧走一小步。 */
+class WalkingAdapter extends FakeAdapter {
+  control: Record<string, boolean> = {};
+  private walkEntity = {
+    position: { x: 0.5, y: 64, z: 0.5 }, velocity: { x: 0, y: 0, z: 0 }, onGround: true, isInWater: false,
+  };
+  walkBody() {
+    return {
+      setControlState: (name: string, value: boolean) => { this.control[name] = value; },
+      clearControlStates: () => { for (const k of Object.keys(this.control)) this.control[k] = false; },
+      look: (yaw: number, pitch: number) => { this.yaw = yaw; this.pitch = pitch; },
+      entity: this.walkEntity,
+    };
+  }
+  walkTick() {
+    return (signal: AbortSignal) => new Promise<typeof this.walkEntity | null>((resolve) => {
+      const timer = setTimeout(() => {
+        if (signal.aborted) { resolve(null); return; }
+        if (this.control.forward || this.control.back) {
+          const speed = this.control.sneak ? 0.01 : 0.02;
+          const dir = (this.control.forward ? 1 : 0) - (this.control.back ? 1 : 0);
+          const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
+          this.pos = { ...this.pos, x: this.pos.x + fx * dir * speed, z: this.pos.z + fz * dir * speed };
+          this.walkEntity.position = { ...this.pos };
+        }
+        resolve({
+          position: { ...this.walkEntity.position },
+          velocity: { ...this.walkEntity.velocity },
+          onGround: true,
+          isInWater: false,
+        });
+      }, 5);
+      signal.addEventListener('abort', () => { clearTimeout(timer); resolve(null); }, { once: true });
+    });
+  }
+}
+
+function walkingAdapter() {
+  const w = new WalkingAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.worldId = WORLD;
+  w.sessionId = SESSION;
+  w.dim = DIM;
+  return w;
 }
 
 function fragment(id: string, polyline: PathFragment['polyline'], kind: PathFragment['kind'] = 'dug'): PathFragment {
@@ -159,4 +207,39 @@ test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划
   assert.ok((r.data?.points as unknown[]).length >= 2);
   assert.ok(getRouteRecord(String(r.data?.routeId)));
   assert.deepEqual(w.actions, []);
+});
+
+test('walk_path 拒绝未知/过期 routeId 和缺失空间会话', async (t) => {
+  const w = flatAdapter();
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const unknown = await walkPath.run(ctx, { routeId: 'nope' });
+  assert.equal(unknown.status, 'failed');
+  assert.equal(unknown.failureCode, 'BAD_ARGS');
+
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const spatial = fakeSpatial(map);
+  const planned = await planRoute.run({ ...ctx, spatial }, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(planned.status, 'succeeded', planned.summary);
+  const noSpatial = await walkPath.run(ctx, { routeId: String(planned.data?.routeId) });
+  assert.equal(noSpatial.status, 'failed');
+  assert.equal(noSpatial.failureCode, 'NOT_CONNECTED');
+});
+
+test('walk_path 执行 search 路线并只在实测到达后返回成功', async (t) => {
+  const w = walkingAdapter();
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const spatial = fakeSpatial(map);
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const planned = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(planned.status, 'succeeded', planned.summary);
+  const routeId = String(planned.data?.routeId);
+  const result = await walkPath.run(ctx, { routeId });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.outcome, 'ARRIVED');
+  // bodyArrival 的水平容差是 0.12；ARRIVED 是实测 grounded 到达，不是 1e-6 坐标。
+  assert.ok(Math.abs(w.pos.x - 2.5) <= 0.13, `实际位置 x=${w.pos.x}`);
+  assert.equal(w.control.forward, false, '结束时应松键');
 });

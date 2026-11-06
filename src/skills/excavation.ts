@@ -16,7 +16,15 @@ export interface ExcavationArgs {
   tool?: string;
   /** Agent 明确授权用哪种方块补下一级支撑（会消耗材料）；不给则不补，遇空支撑停下并报缺口。 */
   fill?: string;
+  /** 接受相邻水流入；不写则在水邻格前停下。 */
+  wet?: boolean;
+  /** 接受相邻岩浆流入/接触风险；不写则在岩浆邻格前停下。 */
+  lava?: boolean;
+  /** 接受工作面/落点上方的沙砾、沙子等下落方块；不写则在下落方块前停下。 */
+  allowFalling?: boolean;
 }
+
+export type ExcavationStopKind = 'impossible' | 'risk' | 'capability' | 'missing_support' | 'unknown' | 'budget';
 
 const registry = minecraftData(config.mc.version);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
@@ -45,7 +53,7 @@ class ExcavationStop extends Error {
   nextLanding?: Vec3Like;
   /** 缺口下方实际能站的第一处支撑；没有就保留检查深度/未知位置，不把 air 当成“无限深”。 */
   below?: BelowScan;
-  constructor(public code: FailureCode, message: string, public unsupportedGeometry = false) { super(message); }
+  constructor(public code: FailureCode, message: string, public unsupportedGeometry = false, public kind: ExcavationStopKind = 'impossible') { super(message); }
 }
 
 /** 读当前方块状态：适配器提供 blockstate 时用真实状态；只有名字时碰撞形状按“未确认”处理，不拿默认状态冒充。 */
@@ -57,13 +65,15 @@ const stateAt = (adapter: SkillCtx['adapter']): StateAt => (pos) => {
 };
 
 /** 从某个脚高向下找第一处可站立支撑；给出精确落差，而不是只说“下面是空气”。 */
-function scanSupportBelow(ctx: SkillCtx, fromFoot: Vec3Like, maxDepth = 64): BelowScan {
+function scanSupportBelow(ctx: SkillCtx, fromFoot: Vec3Like, maxDepth = 64, opts: Pick<ExcavationArgs, 'allowFalling'> = {}): BelowScan {
   const at = stateAt(ctx.adapter);
   for (let depth = 1; depth <= maxDepth; depth++) {
     const pos = { x: fromFoot.x, y: fromFoot.y - depth, z: fromFoot.z };
     const state = at(pos);
     if (!state) return { found: null, unknownAt: pos, hazardAt: null, scanned: depth };
-    if (hazard(state.name)) return { found: null, unknownAt: null, hazardAt: { at: pos, name: state.name }, scanned: depth };
+    if (hazard(state.name) && !(falling(state.name) && opts.allowFalling)) {
+      return { found: null, unknownAt: null, hazardAt: { at: pos, name: state.name }, scanned: depth };
+    }
     const top = supportTop(state.name, state.properties ?? {});
     if (top !== null) {
       const foot = pos.y + top;
@@ -78,18 +88,20 @@ function scanSupportBelow(ctx: SkillCtx, fromFoot: Vec3Like, maxDepth = 64): Bel
  * 支撑面必须等于本次要落到的脚高；半格顶面会报出实际高度并明确“整格开挖未实现半格转换”，
  * 不再说游戏里“半砖站不稳”。未知/未加载单独返回，不当作空气。
  */
-function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, label: string): ExcavationStop | null {
+function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, label: string, opts: Pick<ExcavationArgs, 'allowFalling'> = {}): ExcavationStop | null {
   const state: ObservedState | null = stateAt(ctx.adapter)(cell);
   const at = `(${cell.x},${cell.y},${cell.z})`;
   const landing = `(${cell.x},${expectedFoot},${cell.z})`;
-  if (state === null) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 未加载/未知，不能确认支撑`);
-  if (hazard(state.name)) return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（${hazardLabel(state.name)}），不能冒险下落`);
-  if (PORTAL_BLOCKS.has(state.name)) return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（传送门，不能承重），不能作为站立支撑`);
-  if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 是 ${state.name}，状态未确认（缺少 blockstate），不能确认支撑顶面`);
+  if (state === null) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 未加载/未知，不能确认支撑`, false, 'unknown');
+  if (hazard(state.name) && !(falling(state.name) && opts.allowFalling)) {
+    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（${hazardLabel(state.name)}），不能冒险下落`, false, 'risk');
+  }
+  if (PORTAL_BLOCKS.has(state.name)) return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}（传送门，不能承重），不能作为站立支撑`, false, 'impossible');
+  if (!shapeKnown(state.name, state.properties ?? {})) return new ExcavationStop('NOT_FOUND', `${label}${landing}的支撑格 ${at} 是 ${state.name}，状态未确认（缺少 blockstate），不能确认支撑顶面`, false, 'unknown');
   const top = supportTop(state.name, state.properties ?? {});
   if (top === null) {
     if (AIR.has(state.name)) {
-      const below = scanSupportBelow(ctx, { ...cell, y: expectedFoot });
+      const below = scanSupportBelow(ctx, { ...cell, y: expectedFoot }, 64, opts);
       // 脚面高度和方块格坐标分开写：以前把 foot 高度填进 (x,foot,z)，和“支撑格是 air”并列时
       // 看起来像同一格既空又有方块，调用方会转而手工补支撑。
       const where = below.found
@@ -100,16 +112,16 @@ function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, lab
             ? `向下 ${below.scanned} 格是 ${below.hazardAt.name}（${hazardLabel(below.hazardAt.name)}）`
             : '向下 64 格没有已加载的可站立面';
       const damage = below.found ? estimatedFallDamage(below.found.drop) : 0;
-      const gap = new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}：下一落点下面是空的，${where}${damage ? `；落差约 ${below.found!.drop.toFixed(Number.isInteger(below.found!.drop) ? 0 : 2)} 格，按当前生命预计约 ${damage} 点摔伤（未计护甲/摔落保护）` : ''}`);
+      const gap = new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}：下一落点下面是空的，${where}${damage ? `；落差约 ${below.found!.drop.toFixed(Number.isInteger(below.found!.drop) ? 0 : 2)} 格，按当前生命预计约 ${damage} 点摔伤（未计护甲/摔落保护）` : ''}`, false, 'missing_support');
       gap.nextLanding = { ...cell, y: expectedFoot };
       gap.below = below;
       return gap;
     }
-    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}，没有水平承重顶面，不能作为落点支撑`);
+    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 是 ${state.name}，没有水平承重顶面，不能作为落点支撑`, false, 'impossible');
   }
   const surface = cell.y + top;
   if (Math.abs(surface - expectedFoot) > 0.01) {
-    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 支撑面在 y=${surface.toFixed(2)}（${state.name}），与期望脚高 y=${expectedFoot.toFixed(2)} 不符；当前整格开挖未实现半格/非整块脚高转换`, true);
+    return new ExcavationStop('ERROR', `${label}${landing}的支撑格 ${at} 支撑面在 y=${surface.toFixed(2)}（${state.name}），与期望脚高 y=${expectedFoot.toFixed(2)} 不符；当前整格开挖未实现半格/非整块脚高转换`, true, 'capability');
   }
   return null;
 }
@@ -130,48 +142,55 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like) {
   const surface = footSurfaceY(cell, states);
   if (surface === null) {
     const below = states({ ...cell, y: cell.y - 1 });
-    if (below === null) throw new ExcavationStop('NOT_FOUND', '落点支撑未加载/未知，不能确认支撑');
-    throw new ExcavationStop('ERROR', `落点脚下是 ${below.name}，没有已确认的承重顶面`);
+    if (below === null) throw new ExcavationStop('NOT_FOUND', '落点支撑未加载/未知，不能确认支撑', false, 'unknown');
+    throw new ExcavationStop('ERROR', `落点脚下是 ${below.name}，没有已确认的承重顶面`, false, 'impossible');
   }
   if (Math.abs(surface - feet.y) > 0.01) {
-    throw new ExcavationStop('ERROR', `落点支撑面在 y=${surface.toFixed(2)}，与脚高 y=${feet.y.toFixed(2)} 不符，没有把身体当成站稳`, true);
+    throw new ExcavationStop('ERROR', `落点支撑面在 y=${surface.toFixed(2)}，与脚高 y=${feet.y.toFixed(2)} 不符，没有把身体当成站稳`, true, 'capability');
   }
   const probe = bodyProbe(feet.y, cell.x, cell.z, states);
-  if (probe.unknown.length) throw new ExcavationStop('NOT_FOUND', '落点身体空间未加载/未知，不能确认两格干燥身体空间');
+  if (probe.unknown.length) throw new ExcavationStop('NOT_FOUND', '落点身体空间未加载/未知，不能确认两格干燥身体空间', false, 'unknown');
   for (const pos of bodyCells(feet.y, cell.x, cell.z)) {
     const state = states(pos);
-    if (state && hazard(state.name)) throw new ExcavationStop('ERROR', `落点身体空间是 ${state.name}（${hazardLabel(state.name)}）`);
+    if (state && hazard(state.name)) throw new ExcavationStop('ERROR', `落点身体空间是 ${state.name}（${hazardLabel(state.name)}）`, false, 'risk');
   }
-  if (probe.blockers.length) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间');
+  if (probe.blockers.length) throw new ExcavationStop('ERROR', '落点没有已确认的两格干燥身体空间', false, 'risk');
 }
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
  * These reads never discover structures or choose an underground direction. */
-function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool?: string) {
+function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool?: string, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}) {
   const { adapter } = ctx;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
+  const water = (name: string) => ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(name);
   for (const pos of cells) {
     const name = adapter.blockAt(pos);
-    if (name === null) throw new ExcavationStop('NOT_FOUND', '局部工作面未加载/未知');
-    if (hazard(name)) throw new ExcavationStop('ERROR', `局部工作面是 ${name}（${hazardLabel(name)}）`);
+    if (name === null) throw new ExcavationStop('NOT_FOUND', '局部工作面未加载/未知', false, 'unknown');
+    if (hazard(name) && !(falling(name) && opts.allowFalling)) {
+      throw new ExcavationStop('ERROR', `局部工作面是 ${name}（${hazardLabel(name)}）`, false, 'risk');
+    }
     if (!AIR.has(name)) {
       const block = registry.blocksByName[name];
       // 工作面只要求「可挖、非保护、非危险」：火把/梯子/告示牌这类透明方块不是完整立方，却一样能瞬挖通过，
       // 不能再拿整块判定（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
-      if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`);
+      if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`, false, 'impossible');
       // 指定了工具：每一格都必须能用这件工具挖；哪一格挖不了就报哪一格，不自动改用别的工具
       if (tool) {
-        if (adapter.digTimeEstimate(name, tool) === null) throw new ExcavationStop('TOOL_MISSING', `指定的 ${tool} 挖不了工作格 (${pos.x},${pos.y},${pos.z}) 的 ${name}`);
+        if (adapter.digTimeEstimate(name, tool) === null) throw new ExcavationStop('TOOL_MISSING', `指定的 ${tool} 挖不了工作格 (${pos.x},${pos.y},${pos.z}) 的 ${name}`, false, 'impossible');
       } else {
         const tools = Object.keys(block.harvestTools ?? {});
         const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
-        if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`);
+        if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`, false, 'impossible');
       }
     }
     for (const offset of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 }]) {
       const neighbor = adapter.blockAt({ x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z });
-      if (neighbor === null) throw new ExcavationStop('NOT_FOUND', '紧邻开挖面的方块未加载/未知');
-      if (hazard(neighbor)) throw new ExcavationStop('ERROR', `紧邻开挖面是 ${neighbor}（${hazardLabel(neighbor)}）`);
+      // 邻格未加载不是已确认的危险；只作为未知边界跳过，工作面/落点/身体空间未知仍在别处硬停。
+      if (neighbor === null) continue;
+      if (hazard(neighbor)) {
+        const allowed = (falling(neighbor) && opts.allowFalling) || (water(neighbor) && opts.wet) || (neighbor === 'lava' && opts.lava);
+        if (!allowed) throw new ExcavationStop('ERROR', `紧邻开挖面是 ${neighbor}（${hazardLabel(neighbor)}）`, false, 'risk');
+      }
     }
   }
   return cells;
@@ -301,7 +320,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       let next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
       // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口。
       // 只有 Agent 显式给了 fill 才用指定材料补这一格；否则不擅自消耗背包方块。
-      let supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
+      let supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`, args);
       // 下行阶梯的下一级没有精确支撑、但同列下方 1..4 格就有安全整块楼面时，按更低的实际脚面继续，
       // 不消耗材料。Agent 已经选择“向下开阶梯”，落到下一处实际楼面属于执行这项委托；只有危险、未知、
       // 半格脚高或落差 >4 才停下，把缺口交回给 Agent 决定 descend/place_at/换方向。
@@ -312,7 +331,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           && found.drop > 0 && found.drop <= 4 && Math.abs(found.foot - Math.round(found.foot)) <= 1e-6;
         if (safeDrop) {
           const adjusted = { ...next, y: found!.foot };
-          const adjustedProblem = supportProblem(ctx, { x: adjusted.x, y: adjusted.y - 1, z: adjusted.z }, adjusted.y, `[${args.direction}] 下一落点`);
+          const adjustedProblem = supportProblem(ctx, { x: adjusted.x, y: adjusted.y - 1, z: adjusted.z }, adjusted.y, `[${args.direction}] 下一落点`, args);
           if (!adjustedProblem) {
             adjustedDrops.push({ requestedFoot: next.y, landingFoot: found!.foot, drop: found!.drop, block: found!.block, blockCell: { ...found!.at } });
             next = adjusted;
@@ -359,7 +378,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           const actual = String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill);
           filled++;
           fillFacts.push({ at: supportCell, item: actual });
-          supportProblemNow = supportProblem(ctx, supportCell, next.y, `[${args.direction}] 下一落点`);
+          supportProblemNow = supportProblem(ctx, supportCell, next.y, `[${args.direction}] 下一落点`, args);
           if (supportProblemNow) {
             throw new ExcavationStop(supportProblemNow.code,
               `[${args.direction}] 下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 已按 fill 放了 ${actual}，但仍不能确认支撑：${supportProblemNow.message}`);
@@ -368,10 +387,10 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       }
       if (supportProblemNow) throw supportProblemNow;
       const height = args.mode === 'stairs' ? 3 : 2;
-      const cells = preflightColumn(ctx, next, height, args.tool).reverse();
+      const cells = preflightColumn(ctx, next, height, args.tool, args).reverse();
       // A one-block jump needs extra clearance above the current head before
       // moving. Its floor and the next step block are never dug out.
-      const workCheck = () => { preflightColumn(ctx, next, height, args.tool); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, args.tool); };
+      const workCheck = () => { preflightColumn(ctx, next, height, args.tool, args); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, args.tool, args); };
       workCheck();
       if (args.mode === 'stairs_up') cells.unshift({ ...here, y: here.y + 2 });
       for (const pos of cells) {
@@ -406,7 +425,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
         await sleep(50, signal);
       }
-      preflightColumn(ctx, next, height, args.tool);
+      preflightColumn(ctx, next, height, args.tool, args);
       standingCell(ctx, next);
       completed++;
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
@@ -449,14 +468,15 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
       : '';
     const unsupported = error instanceof ExcavationStop && error.unsupportedGeometry ? { unsupportedGeometry: true } : {};
-    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported, ...(cavity ? { cavity } : {}) });
+    const stop = error instanceof ExcavationStop ? { stopKind: error.kind, decisionRequired: error.kind !== 'impossible' } : {};
+    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported, ...stop, ...(cavity ? { cavity } : {}) });
   }
 }
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
   description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就在挖前停下并报缺口，不把手工 place_at 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
-  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe","fill"?:"<方块名>|any"}（fill 授权补支撑、耗材料；不写则遇空支撑停下）', timeoutMs: 180000, movement: true,
+  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受沙砾/沙子等下落方块；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;
     if (typeof value.entry !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.entry) || !['stairs', 'stairs_up', 'tunnel'].includes(mode) || typeof value.direction !== 'string' || !Object.hasOwn(DIRECTIONS, value.direction) || !Number.isInteger(steps) || steps < 1 || steps > 8) return { ok: false, error: 'entry 为 current 或可信入口ID；mode=stairs|stairs_up|tunnel；direction=north|east|south|west；steps 为1-8整数' };
@@ -466,7 +486,15 @@ export const excavationSkill: Skill<ExcavationArgs> = {
       return { ok: false, error: 'fill 为可选方块名或 "any"（如 netherrack）；不写则不补支撑' };
     }
     if (typeof fill === 'string' && /_(boat|raft)$/.test(fill)) return { ok: false, error: `${fill} 是船/筏（实体，不是方块），不能用来补支撑` };
-    return { ok: true, args: { entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps, ...(tool !== undefined ? { tool } : {}), ...(typeof fill === 'string' ? { fill } : {}) } };
+    for (const flag of ['wet', 'lava', 'allowFalling'] as const) {
+      if (value[flag] !== undefined && typeof value[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
+    }
+    return { ok: true, args: {
+      entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps,
+      ...(tool !== undefined ? { tool } : {}), ...(typeof fill === 'string' ? { fill } : {}),
+      ...(value.wet === true ? { wet: true } : {}), ...(value.lava === true ? { lava: true } : {}),
+      ...(value.allowFalling === true ? { allowFalling: true } : {}),
+    } };
   },
   run: excavatePath,
 };

@@ -6,6 +6,7 @@ import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { EYE_DESCENT_LABEL, EXCAVATION_CHECKPOINT_LABEL, excavationSkill, type ExcavationArgs } from '../src/skills/excavation.ts';
+import { excavateRun } from '../src/skills/movement/index.ts';
 import { findStronghold, searchStructure, structureSkills } from '../src/skills/structures.ts';
 import type { LandingOption, Senses, SkillCtx } from '../src/skills/types.ts';
 import { throwIfAborted } from '../src/util.ts';
@@ -447,4 +448,44 @@ test('standing on a partial support is a route/geometry gap, not BAD_ARGS', asyn
   assert.equal(result.failureCode, 'PATH_NOT_FOUND', '参数本身没问题；是当前站位/支撑面不适合整格开挖');
   assert.match(result.summary, /半格/);
   assert.equal(world.digs.length, 0);
+});
+
+test('excavate_run 保留 excavate_path 的逐格验收，并把风险停下的类别交回', async () => {
+  const world = new ExcavationWorld(), ctx = context(world);
+  assert.ok(excavateRun.validate({ mode: 'stairs', direction: 'east', steps: 1 }, world).ok);
+  assert.equal(excavateRun.validate({ entry: 'current', mode: 'stairs', direction: 'east', steps: 1 }, world).ok, false);
+  assert.equal(excavateRun.name, 'excavate_run');
+  world.setBlock({ x: 1, y: 63, z: 1 }, 'water');
+  const blocked = await excavateRun.run(ctx, args({ steps: 1 }));
+  assert.equal(blocked.status, 'failed');
+  assert.equal(blocked.data?.stopKind, 'risk');
+  assert.equal(blocked.data?.decisionRequired, true);
+  assert.equal(world.digs.length, 0);
+});
+
+test('excavate_run wet:true 接受相邻水流入并继续开挖', async () => {
+  const world = new ExcavationWorld(), ctx = context(world);
+  world.setBlock({ x: 1, y: 63, z: 1 }, 'water');
+  const result = await excavateRun.run(ctx, args({ steps: 1, wet: true }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.completedSteps, 1);
+});
+
+test('excavate_run allowFalling:true 接受沙砾支撑；默认仍在风险前停下', async () => {
+  const world = new ExcavationWorld(), ctx = context(world);
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'gravel');
+  const blocked = await excavateRun.run(ctx, args({ steps: 1 }));
+  assert.equal(blocked.status, 'failed');
+  assert.equal(blocked.data?.stopKind, 'risk');
+  const allowed = await excavateRun.run(ctx, args({ steps: 1, allowFalling: true }));
+  assert.equal(allowed.status, 'succeeded', allowed.summary);
+});
+
+test('excavate_run 邻格未加载只跳过、不阻断整条开挖', async () => {
+  const world = new ExcavationWorld(), ctx = context(world);
+  const read = world.blockAt.bind(world);
+  world.blockAt = ((pos) => pos.x === 1 && pos.y === 63 && pos.z === 1 ? null : read(pos)) as unknown as typeof world.blockAt;
+  const result = await excavateRun.run(ctx, args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.completedSteps, 1);
 });
