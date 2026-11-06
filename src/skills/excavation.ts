@@ -2,8 +2,9 @@ import minecraftData from 'minecraft-data';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
-import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
+import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
+import { placeAt } from './primitives.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 export interface ExcavationArgs {
@@ -13,6 +14,8 @@ export interface ExcavationArgs {
   steps: number;
   /** Agent 明确选择的本轮主手工具（物品注册名）；不给时沿用身体现有的换工具规则 */
   tool?: string;
+  /** Agent 明确授权用哪种方块补下一级支撑（会消耗材料）；不给则不补，遇空支撑停下并报缺口。 */
+  fill?: string;
 }
 
 const registry = minecraftData(config.mc.version);
@@ -22,6 +25,7 @@ const PROTECTED = new Set(['end_portal_frame', 'end_portal', 'nether_portal', 'e
 /** 传送门方块：软块（薄片、可穿过），不是「半砖/台阶」这类能站但不稳的方块，也不是液体/坑 */
 const PORTAL_BLOCKS = new Set(['nether_portal', 'end_portal', 'end_gateway']);
 const DIRECTIONS = { north: { x: 0, z: -1 }, east: { x: 1, z: 0 }, south: { x: 0, z: 1 }, west: { x: -1, z: 0 } };
+const FACING = { north: 'N', east: 'E', south: 'S', west: 'W' } as const;
 const YAW = { north: 0, east: -Math.PI / 2, south: Math.PI, west: Math.PI / 2 };
 export const EXCAVATION_ENTRY_LABEL = '实际开挖入口';
 export const EXCAVATION_CHECKPOINT_LABEL = '实际开挖进度';
@@ -174,7 +178,7 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool?: s
 }
 
 /** 下一落点没支撑时的只读缺口：把当前可见的较低落点原样列出，不选择、不自动垫/挖/下落。 */
-function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelow(ctx, nextLanding)) {
+function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelow(ctx, nextLanding), fillTried = false) {
   const options = ctx.senses.landingOptions?.(12) ?? [];
   const distance = (target: Vec3Like) => Math.hypot(target.x - nextLanding.x, target.y - nextLanding.y, target.z - nextLanding.z);
   return {
@@ -188,7 +192,7 @@ function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelo
       .map((o) => ({ target: { ...o.target }, surface: o.surface, drop: o.drop, clearance: o.clearance, corridor: o.corridor, approach: o.approach, unknowns: o.unknowns }))
       .sort((a, b) => distance(a.target) - distance(b.target))
       .slice(0, 5),
-    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫方块；只有 stairs 下行会对安全整格落差 1..4 格自动继续，stairs_up/tunnel 需要你补支撑或换方向',
+    handoff: `可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；${fillTried ? '已按 fill 授权尝试补支撑，没成，缺口仍在' : '本次没有自动垫方块'}；只有 stairs 下行会对安全整格落差 1..4 格自动继续，stairs_up/tunnel 需要你补支撑或换方向`,
   };
 }
 
@@ -213,17 +217,22 @@ function pruneExcavationWaypoints(ctx: SkillCtx) {
 export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnObservation?: () => boolean) {
   const { adapter, senses, signal } = ctx;
   const origin = adapter.state();
-  let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0;
+  let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, filled = 0, fillTried = false;
   const path: { pos: Vec3Like; observationId: number }[] = [];
   /** stairs 下行时，记录点下一级没有精确支撑、但同列 ≤4 格内有安全楼面而多落下的地方。 */
   const adjustedDrops: { requestedFoot: number; landingFoot: number; drop: number; block: string; blockCell: Vec3Like }[] = [];
+  /** 按 Agent 显式 fill 授权补上的支撑格；材料会真实消耗。 */
+  const fillFacts: { at: Vec3Like; item: string }[] = [];
   const dropNote = () => adjustedDrops.length
     ? `（其中 ${adjustedDrops.length} 处按实际楼面多下降 ${adjustedDrops.reduce((n, d) => n + d.drop, 0)} 格）`
+    : '';
+  const fillNote = () => filled
+    ? `（按 fill 补了 ${filled} 处支撑：${fillFacts.map((f) => `${f.item} 在 (${f.at.x},${f.at.y},${f.at.z})`).join('、')}）`
     : '';
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
-      excavatedBlocks: excavated, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
+      excavatedBlocks: excavated, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
   };
@@ -290,8 +299,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         throw new ExcavationStop('PATH_NOT_FOUND', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true);
       }
       let next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
-      // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口，
-      // 不自动消耗背包材料垫块；补支撑是 Agent 显式选择 place_at 的组合动作。
+      // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口。
+      // 只有 Agent 显式给了 fill 才用指定材料补这一格；否则不擅自消耗背包方块。
       let supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
       // 下行阶梯的下一级没有精确支撑、但同列下方 1..4 格就有安全整块楼面时，按更低的实际脚面继续，
       // 不消耗材料。Agent 已经选择“向下开阶梯”，落到下一处实际楼面属于执行这项委托；只有危险、未知、
@@ -308,6 +317,52 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
             adjustedDrops.push({ requestedFoot: next.y, landingFoot: found!.foot, drop: found!.drop, block: found!.block, blockCell: { ...found!.at } });
             next = adjusted;
             supportProblemNow = null;
+          }
+        }
+      }
+      // Agent 显式给了 fill：在挖掘前把支撑补实；只替换空气/液体/可替换植物，
+      // 不拿 fill 硬盖半砖、火把、沙子/沙砾这类不该当支撑的方块。
+      if (supportProblemNow && args.fill) {
+        const fillItem = args.fill;
+        const supportCell = { x: next.x, y: next.y - 1, z: next.z };
+        const supportState = stateAt(ctx.adapter)(supportCell);
+        if (supportState && isReplaceable(supportState.name)) {
+          fillTried = true;
+          const attempt = () => placeAt.run(ctx, { at: [0, 0, 0], xyz: supportCell, facing: FACING[args.direction], item: fillItem, purpose: 'support' });
+          let placed = await attempt();
+          // 当前站位唯一的参照面可能在脚下/身后，射线打到别的面。退一格或侧移一格再试同一个目标格：
+          // 只换站位，不换目标、不换材料、不挖别处；每格最多试 3 个相邻站位。
+          if (placed.status !== 'succeeded') {
+            const stances = [
+              { x: here.x - direction.x, y: here.y, z: here.z - direction.z },
+              { x: here.x + direction.z, y: here.y, z: here.z + direction.x },
+              { x: here.x - direction.z, y: here.y, z: here.z - direction.x },
+            ];
+            for (const stance of stances) {
+              assertSession(ctx, origin);
+              const at = voxel(adapter.state().pos);
+              if (at.x === stance.x && at.y === stance.y && at.z === stance.z) continue;
+              try {
+                await adapter.moveTo({ kind: 'near', pos: stance, range: 0.3 }, { signal, timeoutMs: 2500, allowSwimming: false, constructionSafe: true });
+              } catch (e) {
+                if (isAbort(e)) throw e;
+                continue;
+              }
+              placed = await attempt();
+              if (placed.status === 'succeeded') break;
+            }
+          }
+          if (placed.status !== 'succeeded') {
+            throw new ExcavationStop(placed.failureCode ?? 'PATH_NOT_FOUND',
+              `[${args.direction}] 下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 是 ${supportState.name}；按 fill:"${args.fill}" 在当前及相邻站位补支撑都没成：${placed.summary}`);
+          }
+          const actual = String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill);
+          filled++;
+          fillFacts.push({ at: supportCell, item: actual });
+          supportProblemNow = supportProblem(ctx, supportCell, next.y, `[${args.direction}] 下一落点`);
+          if (supportProblemNow) {
+            throw new ExcavationStop(supportProblemNow.code,
+              `[${args.direction}] 下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 已按 fill 放了 ${actual}，但仍不能确认支撑：${supportProblemNow.message}`);
           }
         }
       }
@@ -365,9 +420,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return checkpointId; // 存不下恢复点就保留上一入口，不影响继续挖
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
-      if (await observe()) return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}`, { ...details(), stoppedByObservation: true });
+      if (await observe()) return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}`, { ...details(), stoppedByObservation: true });
     }
-    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
@@ -375,7 +430,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       throw error;
     }
     const msg = (error as Error).message;
-    const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding, error.below) : null;
+    const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding, error.below, fillTried) : null;
     const fall = cavity && 'fall' in cavity ? cavity.fall : null;
     // 拒绝时把「为什么 + 能怎么办」一起报，别只留一句 ERROR 让它盲试
     // 用「液体」标记和方块名判断，不能用单个「水」字：它会把「没有水平承重顶面」误判成液体提示。
@@ -388,7 +443,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；实际可站立脚面在 y=${fall.landing.y.toFixed(2)}，方块在 (${fall.landing.x},${fall.landing.y - 1},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}${dropRule}；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫方块）`
+      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；实际可站立脚面在 y=${fall.landing.y.toFixed(2)}，方块在 (${fall.landing.x},${fall.landing.y - 1},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}${dropRule}；${args.fill ? '已带 fill：补支撑失败时先确认材料和站位，或换方向/换落点；没有去挖/垫别处' : '要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫方块'}）`
       : /下面是空的|洞穴|虚空/.test(msg) ? `（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞${dropRule}）`
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
@@ -400,13 +455,18 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
-  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe"}', timeoutMs: 180000, movement: true,
-  validate(raw) {
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格再放同一个目标格，补不上就在挖前停下并报缺口，不把手工 place_at 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe","fill"?:"<方块名>|any"}（fill 授权补支撑、耗材料；不写则遇空支撑停下）', timeoutMs: 180000, movement: true,
+  validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;
     if (typeof value.entry !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.entry) || !['stairs', 'stairs_up', 'tunnel'].includes(mode) || typeof value.direction !== 'string' || !Object.hasOwn(DIRECTIONS, value.direction) || !Number.isInteger(steps) || steps < 1 || steps > 8) return { ok: false, error: 'entry 为 current 或可信入口ID；mode=stairs|stairs_up|tunnel；direction=north|east|south|west；steps 为1-8整数' };
     if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线，如 iron_pickaxe）；不写则沿用身体自己的换工具规则' };
-    return { ok: true, args: { entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps, ...(tool !== undefined ? { tool } : {}) } };
+    const fill = value.fill;
+    if (fill !== undefined && (typeof fill !== 'string' || !/^[a-z0-9_]{1,80}$/.test(fill) || (fill !== 'any' && !adapter.isKnownItem(fill)))) {
+      return { ok: false, error: 'fill 为可选方块名或 "any"（如 netherrack）；不写则不补支撑' };
+    }
+    if (typeof fill === 'string' && /_(boat|raft)$/.test(fill)) return { ok: false, error: `${fill} 是船/筏（实体，不是方块），不能用来补支撑` };
+    return { ok: true, args: { entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps, ...(tool !== undefined ? { tool } : {}), ...(typeof fill === 'string' ? { fill } : {}) } };
   },
   run: excavatePath,
 };

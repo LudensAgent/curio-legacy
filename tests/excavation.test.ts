@@ -145,6 +145,44 @@ test('a deep missing support returns the gap before digging and never spends blo
   assert.deepEqual(world.pos, { x: 1.5, y: 63, z: 0.5 });
 });
 
+test('tunnel with explicit fill places the missing support before digging and advances', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air'); // 下一脚格 y64 的支撑格是空的
+  world.inv.set('netherrack', 5);
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.filledBlocks, 1);
+  assert.deepEqual(result.data?.fillFacts, [{ at: { x: 1, y: 63, z: 0 }, item: 'netherrack' }]);
+  assert.equal(world.blockAt({ x: 1, y: 63, z: 0 }), 'netherrack');
+  assert.equal(world.inv.get('netherrack'), 4, '补支撑消耗 1 块');
+  assert.deepEqual(world.pos, { x: 1.5, y: 64, z: 0.5 });
+});
+
+test('tunnel without fill stops at the support gap before digging or spending blocks', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air');
+  world.inv.set('netherrack', 5);
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+  assert.equal(world.inv.get('netherrack'), 5, '没有 fill 授权就不消耗材料');
+  assert.match(result.summary, /支撑格 \(1,63,0\) 是空/);
+  assert.match(result.summary, /没有自动垫方块/);
+});
+
+test('stairs_up with explicit fill places the step support and climbs', async () => {
+  const world = new ExcavationWorld();
+  world.inv.set('netherrack', 5);
+  const result = await excavationSkill.run(context(world), args({ mode: 'stairs_up', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.ascendedLevels, 1);
+  assert.deepEqual(result.data?.fillFacts, [{ at: { x: 1, y: 64, z: 0 }, item: 'netherrack' }]);
+  assert.equal(world.blockAt({ x: 1, y: 64, z: 0 }), 'netherrack');
+  assert.equal(world.inv.get('netherrack'), 4);
+  assert.deepEqual(world.pos, { x: 1.5, y: 65, z: 0.5 });
+});
+
 test('the air-gap failure includes currently visible lower landings without choosing one', async () => {
   const world = new ExcavationWorld();
   for (const y of [62, 61, 60, 59, 58]) world.setBlock({ x: 1, y, z: 0 }, 'air');

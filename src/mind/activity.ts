@@ -415,6 +415,31 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (data?.offRoute === true || nestedNavData?.result?.data?.offRoute === true) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；寻路把身体带离了记录路线（offRoute），这段位移不算进展，原样重试不会回到记录点` };
   }
+  // step 的确定性障碍：回执给出了具体要挖的格，且这段活本身已经在挖（dig_at/dig/excavate_path），
+  // 就按同一委托先插入这一步挖掘再重试。只处理同一目标列/头脚格，不换方向、不换材料、不扩目标。
+  if (step.skill === 'step' && data?.movementNotAttempted === true && data?.remediation?.dig) {
+    const rel = data.remediation.dig as unknown;
+    const digging = a.steps.some((s) => s.skill === 'dig_at' || s.skill === 'dig' || s.skill === 'excavate_path');
+    const scope = `step-dig:${digest(JSON.stringify(step.args ?? {}))}:${digest(JSON.stringify(rel))}`;
+    const attempts = a.adaptations.filter((item) => item.startsWith(`step-dig:`)).length;
+    if (digging && Array.isArray(rel) && rel.length === 3 && attempts < 2) {
+      const mark = `${scope}:${digest(gapEvidence(result))}`;
+      if (!a.adaptations.includes(mark)) {
+        const own = ownStep(a, step);
+        const facing = (step.args as Record<string, unknown> | undefined)?.facing ?? a.facing;
+        a.adaptations.push(mark);
+        a.steps.splice(Math.max(0, a.index - 1), 0, {
+          skill: 'dig_at',
+          args: { at: rel, ...(facing ? { facing } : {}) },
+          id: shortId('st_'), origin: 'execution_helper',
+          authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
+        });
+        a.index = Math.max(0, a.index - 1);
+        markContinuation(a, own);
+        return { kind: 'continue', adapted: `迈步被挡，先按回执挖开 [${(rel as number[]).join(',')}] 再重试（同一段活已包含挖掘；不新增目标/材料）` };
+      }
+    }
+  }
   // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
   if (step.skill === 'step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: clipFeedback(result.summary) };
   if (step.skill === 'excavate_path' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: clipFeedback(result.summary) };

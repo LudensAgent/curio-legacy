@@ -392,7 +392,7 @@ export const stepTo: Skill<StepArgs> = {
       const placed = await placeAt.run(ctx, { at: supportAt, facing: args.facing, item: args.fill, purpose: 'support' });
       if (placed.status !== 'succeeded') {
         return fail(placed.failureCode ?? 'PATH_NOT_FOUND',
-          `迈不到 [${args.at}]：先往支撑格 [${supportAt}] 补 ${args.fill} 没成——${placed.summary}`,
+          `迈不到 [${args.at}]：先往支撑格 [${supportAt}] 补 ${args.fill} 没成——${placed.summary}；如果是连续开巷，可改用 excavate_path（带 fill）一次完成支撑和迈步`,
           { movementNotAttempted: true, fill: { at: supportAt, item: args.fill, pos: support }, ...after(ctx, args.facing, target) });
       }
       fills.push({ pos: support, at: supportAt, item: String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill) });
@@ -438,7 +438,7 @@ export const stepTo: Skill<StepArgs> = {
       if (jump) {
         const digRel = toRel(feet, args.facing, jump.cell);
         const prompt = `往上迈时自己头顶上方是 ${blockerLabel(jump.cell)}（跳不起来；先 dig_at [${digRel}]）`;
-        return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+        return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, remediation: { dig: digRel, reason: 'jump-head' }, ...after(ctx, args.facing, target) });
       }
     }
     const blocker = bodyProblem(foot, target.x, target.z);
@@ -447,13 +447,14 @@ export const stepTo: Skill<StepArgs> = {
       const atTarget = blocker.cell.y === target.y;
       const label = blockerLabel(blocker.cell);
       const prompt = atTarget ? `目标格是 ${label}（身体被占住，先 dig_at [${digRel}] 挖开）` : `目标格上方是 ${label}（会碰头；先 dig_at [${digRel}]）`;
-      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+      return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, remediation: { dig: digRel, reason: atTarget ? 'feet' : 'head' }, ...after(ctx, args.facing, target) });
     }
     for (const c of corners) {
       const cb = bodyProblem(foot, c.x, c.z);
       if (cb) {
-        const prompt = `斜向迈步会撞到角落 ${blockerLabel(cb.cell)} (${cb.cell.x},${cb.cell.y},${cb.cell.z})`;
-        return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, ...after(ctx, args.facing, target) });
+        const digRel = toRel(feet, args.facing, cb.cell);
+        const prompt = `斜向迈步会撞到角落 ${blockerLabel(cb.cell)} (${cb.cell.x},${cb.cell.y},${cb.cell.z})；先 dig_at [${digRel}]`;
+        return fail('PATH_NOT_FOUND', `迈不到 [${args.at}]：${prompt}`, { problems: [prompt], targetCell: target, landingSupport, movementNotAttempted: true, remediation: { dig: digRel, reason: 'corner' }, ...after(ctx, args.facing, target) });
       }
     }
     let movementError: unknown;

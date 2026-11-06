@@ -45,6 +45,38 @@ test('相对 step 失败且身体已换位：不自动重试，避免用新站�
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
 });
 
+test('step 头/脚被挡且这段活在挖：先插入回执给的 dig_at 再重试', () => {
+  const { adapter, activity } = activityOf([
+    { skill: 'dig_at', args: { at: [0, 2, 0], facing: 'N' } },
+    { skill: 'step', args: { at: [1, 0, 0], facing: 'N' } },
+  ]);
+  nextStep(activity); // 原来的 dig_at
+  const step = nextStep(activity)!; // 要执行的 step
+  const failure = fail('PATH_NOT_FOUND', '迈不到 [1,0,0]：目标格上方是 netherrack（会碰头；先 dig_at [1,2,0]）', {
+    movementNotAttempted: true, remediation: { dig: [1, 2, 0], reason: 'head' }, targetCell: { x: 1, y: 64, z: -1 },
+  });
+  const verdict = afterStep(activity, step, failure, 5, adapter.state());
+  assert.equal(verdict.kind, 'continue', JSON.stringify(verdict));
+  const inserted = nextStep(activity)!;
+  assert.equal(inserted.skill, 'dig_at');
+  assert.deepEqual(inserted.args, { at: [1, 2, 0], facing: 'N' });
+  assert.equal((inserted as { origin?: string }).origin, 'execution_helper');
+  // 同一回执再失败一次就停，不会无限插步。
+  activity.index = 2;
+  const again = afterStep(activity, activity.steps[2]!, failure, 5, adapter.state());
+  assert.equal(again.kind, 'stuck');
+});
+
+test('step 被挡但这段活没有挖掘授权：不自动插 dig_at', () => {
+  const { adapter, activity } = activityOf([{ skill: 'step', args: { at: [1, 0, 0], facing: 'N' } }]);
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '迈不到 [1,0,0]：目标格上方是 stone', {
+    movementNotAttempted: true, remediation: { dig: [1, 2, 0], reason: 'head' },
+  }), 5, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.ok(!activity.steps.some((s) => s.skill === 'dig_at'));
+});
+
 test('swim_to 游不动的物理停滞不原样重放，即使失败前身体移动过', () => {
   const { adapter, activity } = activityOf([{ skill: 'swim_to', args: { xyz: { x: -482, y: 64, z: -231 } } }]);
   const step = nextStep(activity)!;
