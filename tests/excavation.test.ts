@@ -96,7 +96,7 @@ test('stairs clear the three-cell transition and verify each real landing; resul
 });
 
 test('excavation refuses unsafe, partial or unknown floors and adjacent liquids before digging', async () => {
-  for (const name of ['air', 'water', 'lava', 'gravel', 'magma_block', 'stone_slab', 'nether_portal', null]) {
+  for (const name of ['water', 'lava', 'gravel', 'magma_block', 'stone_slab', 'nether_portal', null]) {
     const world = new ExcavationWorld(), adapter: GameAdapter = world;
     if (name === null) { const read = adapter.blockAt.bind(adapter); adapter.blockAt = (pos) => pos.x === 1 && pos.y === 62 ? null : read(pos); }
     else world.setBlock({ x: 1, y: 62, z: 0 }, name);
@@ -109,9 +109,21 @@ test('excavation refuses unsafe, partial or unknown floors and adjacent liquids 
   assert.equal(world.digs.length, 0);
 });
 
-test('a shallow missing support returns the gap before digging and never spends blocks', async () => {
+test('a shallow missing support is followed down to the actual floor without spending blocks', async () => {
   const world = new ExcavationWorld();
-  world.setBlock({ x: 1, y: 62, z: 0 }, 'air'); // 目标脚格下是空气，再下面 y61 是石头
+  world.setBlock({ x: 1, y: 62, z: 0 }, 'air'); // 下一脚格 y63 的支撑格是空气；同列 y61 是石头，落差 1
+  world.inv.set('cobblestone', 3);
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(world.inv.get('cobblestone'), 3, '下落到实际楼面不消耗材料');
+  assert.ok(!world.actions.some((action) => action.startsWith('place:')), '没有隐式放置');
+  assert.deepEqual(result.data?.adjustedDrops, [{ requestedFoot: 63, landingFoot: 62, drop: 1, block: 'stone', blockCell: { x: 1, y: 61, z: 0 } }]);
+  assert.deepEqual(world.pos, { x: 1.5, y: 62, z: 0.5 });
+});
+
+test('a deep missing support returns the gap before digging and never spends blocks', async () => {
+  const world = new ExcavationWorld();
+  for (const y of [62, 61, 60, 59, 58]) world.setBlock({ x: 1, y, z: 0 }, 'air'); // 第一处楼面 y57，落差 5
   world.inv.set('cobblestone', 3);
   const result = await excavationSkill.run(context(world), args({ steps: 1 }));
   assert.equal(result.status, 'failed', result.summary);
@@ -125,7 +137,7 @@ test('a shallow missing support returns the gap before digging and never spends 
   assert.deepEqual(cavity.supportCell, { x: 1, y: 62, z: 0 });
   assert.deepEqual(cavity.visibleLandings, [], '没有可见落点时不编造');
   assert.match(cavity.handoff, /descend/);
-  assert.match(cavity.handoff, /没有自动垫块/);
+  assert.match(cavity.handoff, /没有自动垫方块/);
   // 显式补上支撑（Agent 自己选择 place_at 的组合动作）后，同一段开挖可以完成。
   world.setBlock({ x: 1, y: 62, z: 0 }, 'cobblestone');
   const done = await excavationSkill.run(context(world), args({ steps: 1 }));
@@ -135,7 +147,7 @@ test('a shallow missing support returns the gap before digging and never spends 
 
 test('the air-gap failure includes currently visible lower landings without choosing one', async () => {
   const world = new ExcavationWorld();
-  world.setBlock({ x: 1, y: 62, z: 0 }, 'air');
+  for (const y of [62, 61, 60, 59, 58]) world.setBlock({ x: 1, y, z: 0 }, 'air');
   const option: LandingOption = {
     target: { x: 1.5, y: 61, z: 0.5 }, support: { pos: { x: 1, y: 60, z: 0 }, name: 'stone' },
     surface: 'ground', surfaceY: 61, drop: 3, horizontalDistance: 1,

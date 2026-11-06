@@ -286,7 +286,7 @@ test('follow_passage dig:true 在上台阶时先挖开头顶再迈', async (t) =
   assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), `挖了新头 (1,42,0)：${JSON.stringify(digs)}`);
 });
 
-test('1 格上台阶的脚格已观测为实心：dig:true 也不先清障，返回不可站事实', async (t) => {
+test('1 格上台阶的脚格已观测为实心：dig:true 先清脚格和头顶，再迈上去', async (t) => {
   const w = new TestWorld();
   w.pos = { x: 0, y: 40, z: 0 };
   const memory = new WorldMemory(null);
@@ -312,18 +312,11 @@ test('1 格上台阶的脚格已观测为实心：dig:true 也不先清障，返
 
   const result = await followPassage.run(ctx, { to: 'entrance', dig: true });
 
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  assert.equal(result.data?.offRoute, undefined);
-  assert.match(result.summary, /脚格 \(1,41,0\) 是 stone/);
-  assert.match(result.summary, /未清障、未调用寻路/);
-  assert.match(result.summary, /dig:true/);
-  assert.deepEqual(result.data?.blockedWaypoint, { x: 1, y: 41, z: 0 });
-  const cells = result.data?.blockedCells as { role: string; cell: Vec3Like; block: string }[];
-  assert.ok(cells.some((c) => c.role === '脚格' && c.cell.x === 1 && c.cell.y === 41 && c.block === 'stone'));
-  assert.equal(digs.length, 0, '可执行性预检失败时不得清障');
-  assert.equal(moves.length, 0, '可执行性预检失败时不得移动');
-  assert.deepEqual(w.pos, { x: 0, y: 40, z: 0 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(digs.some((d) => d.x === 1 && d.y === 41 && d.z === 0), `先清脚格 (1,41,0)：${JSON.stringify(digs)}`);
+  assert.ok(digs.some((d) => d.x === 1 && d.y === 42 && d.z === 0), `再清头顶 (1,42,0)：${JSON.stringify(digs)}`);
+  assert.ok(moves.length > 0, '清完两格后真的迈上去');
+  assert.deepEqual(w.pos, { x: 1, y: 41, z: 0 });
 });
 
 test('1 格上台阶的脚格/支撑未观测（null）不阻塞：仍清头并走上去', async (t) => {

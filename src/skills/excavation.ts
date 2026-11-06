@@ -86,8 +86,10 @@ function supportProblem(ctx: SkillCtx, cell: Vec3Like, expectedFoot: number, lab
   if (top === null) {
     if (AIR.has(state.name)) {
       const below = scanSupportBelow(ctx, { ...cell, y: expectedFoot });
+      // 脚面高度和方块格坐标分开写：以前把 foot 高度填进 (x,foot,z)，和“支撑格是 air”并列时
+      // 看起来像同一格既空又有方块，调用方会转而手工补支撑。
       const where = below.found
-        ? `向下 ${below.found.drop.toFixed(Number.isInteger(below.found.drop) ? 0 : 2)} 格到 (${below.found.at.x},${below.found.foot.toFixed(2)},${below.found.at.z})（${below.found.block}）`
+        ? `向下 ${below.found.drop.toFixed(Number.isInteger(below.found.drop) ? 0 : 2)} 格到可站立脚面 y=${below.found.foot.toFixed(2)}（方块 ${below.found.block} 在 (${below.found.at.x},${below.found.at.y},${below.found.at.z})）`
         : below.unknownAt
           ? `向下 ${below.scanned} 格到 (${below.unknownAt.x},${below.unknownAt.y},${below.unknownAt.z}) 起未加载/未知`
           : below.hazardAt
@@ -186,7 +188,7 @@ function cavityGap(ctx: SkillCtx, nextLanding: Vec3Like, below = scanSupportBelo
       .map((o) => ({ target: { ...o.target }, surface: o.surface, drop: o.drop, clearance: o.clearance, corridor: o.corridor, approach: o.approach, unknowns: o.unknowns }))
       .sort((a, b) => distance(a.target) - distance(b.target))
       .slice(0, 5),
-    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫块、挖掘或下落',
+    handoff: '可见落点需由 assess_landings 明确选择；确认支撑与净空后可用 descend 选落点（落体通道未看清时可显式 allowUnknownCorridor），也可 place_at 补支撑或换方向；本次没有自动垫方块；stairs 下行遇到安全整格落差 1..4 格会自动继续，这里停下是因为危险、未知、半格脚高或落差更大',
   };
 }
 
@@ -213,10 +215,15 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const origin = adapter.state();
   let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0;
   const path: { pos: Vec3Like; observationId: number }[] = [];
+  /** stairs 下行时，记录点下一级没有精确支撑、但同列 ≤4 格内有安全楼面而多落下的地方。 */
+  const adjustedDrops: { requestedFoot: number; landingFoot: number; drop: number; block: string; blockCell: Vec3Like }[] = [];
+  const dropNote = () => adjustedDrops.length
+    ? `（其中 ${adjustedDrops.length} 处按实际楼面多下降 ${adjustedDrops.reduce((n, d) => n + d.drop, 0)} 格）`
+    : '';
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
-      excavatedBlocks: excavated, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path,
+      excavatedBlocks: excavated, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
   };
@@ -282,10 +289,28 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       if (Math.abs(current.pos.y - Math.round(current.pos.y)) > 0.01) {
         throw new ExcavationStop('PATH_NOT_FOUND', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true);
       }
-      const next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
+      let next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };
       // 下一落脚要落在 next.y。先按碰撞顶面确认脚下支撑：空气/未知/半格顶面都在挖掘前报缺口，
       // 不自动消耗背包材料垫块；补支撑是 Agent 显式选择 place_at 的组合动作。
-      const supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
+      let supportProblemNow = supportProblem(ctx, { x: next.x, y: next.y - 1, z: next.z }, next.y, `[${args.direction}] 下一落点`);
+      // 下行阶梯的下一级没有精确支撑、但同列下方 1..4 格就有安全整块楼面时，按更低的实际脚面继续，
+      // 不消耗材料。Agent 已经选择“向下开阶梯”，落到下一处实际楼面属于执行这项委托；只有危险、未知、
+      // 半格脚高或落差 >4 才停下，把缺口交回给 Agent 决定 descend/place_at/换方向。
+      if (supportProblemNow && args.mode === 'stairs') {
+        const below = supportProblemNow.below;
+        const found = below?.found;
+        const safeDrop = found !== null && found !== undefined && !below!.hazardAt && !below!.unknownAt
+          && found.drop > 0 && found.drop <= 4 && Math.abs(found.foot - Math.round(found.foot)) <= 1e-6;
+        if (safeDrop) {
+          const adjusted = { ...next, y: found!.foot };
+          const adjustedProblem = supportProblem(ctx, { x: adjusted.x, y: adjusted.y - 1, z: adjusted.z }, adjusted.y, `[${args.direction}] 下一落点`);
+          if (!adjustedProblem) {
+            adjustedDrops.push({ requestedFoot: next.y, landingFoot: found!.foot, drop: found!.drop, block: found!.block, blockCell: { ...found!.at } });
+            next = adjusted;
+            supportProblemNow = null;
+          }
+        }
+      }
       if (supportProblemNow) throw supportProblemNow;
       const height = args.mode === 'stairs' ? 3 : 2;
       const cells = preflightColumn(ctx, next, height, args.tool).reverse();
@@ -340,9 +365,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return checkpointId; // 存不下恢复点就保留上一入口，不影响继续挖
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
-      if (await observe()) return ok('有界开挖中观察到目标，保留实际入口与路径', { ...details(), stoppedByObservation: true });
+      if (await observe()) return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}`, { ...details(), stoppedByObservation: true });
     }
-    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
@@ -358,7 +383,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       : /没有水平承重顶面|传送门/.test(msg) ? '（这一格不是能站的水平承重面：换方向，或先用 dig_at / place_at 改变这一格）'
       : /下落方块/.test(msg) ? '（下面是沙子/沙砾这类下落方块，换方向或先堵住再挖）'
       : /未知|未加载/.test(msg) ? '（先照亮/转头看清那一格再挖，或换方向）'
-      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；向下 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格到 (${fall.landing.x},${fall.landing.y.toFixed(2)},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫/挖/下落）`
+      : cavity ? `（下一落点 (${cavity.nextLanding.x},${cavity.nextLanding.y},${cavity.nextLanding.z}) 的支撑格 (${cavity.supportCell.x},${cavity.supportCell.y},${cavity.supportCell.z}) 是空的${fall ? `；实际可站立脚面在 y=${fall.landing.y.toFixed(2)}，方块在 (${fall.landing.x},${fall.landing.y - 1},${fall.landing.z})（落差 ${fall.drop.toFixed(Number.isInteger(fall.drop) ? 0 : 2)} 格${fall.damage ? `，按当前生命预计约 ${fall.damage} 点摔伤` : ''}）` : ''}；stairs 下行遇到安全整格落差 1..4 格会自动继续，这里停下是因为危险、未知、半格脚高或落差更大；要补支撑得自己显式 place_at 这一格，或换方向，或选落点用 descend；本次开挖没有自动垫方块）`
       : /下面是空的|洞穴|虚空/.test(msg) ? '（前面脚下是空的：要补支撑得自己显式 place_at，或换方向、下去探这个洞；这不是本次开挖自动做的）'
       : /支撑面在|半格|整格脚高/.test(msg) ? '（落点实际支撑顶面与所选脚高不符；可确认落点高度、换一格/换方向，或改用 step 明确落脚）'
       : /身体空间|干燥|站稳/.test(msg) ? '（先挖开落点那两格的脚/头空间，或换方向）'
@@ -370,7 +395,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
   argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe"}', timeoutMs: 180000, movement: true,
   validate(raw) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;

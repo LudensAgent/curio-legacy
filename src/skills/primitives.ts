@@ -243,7 +243,7 @@ async function stepOutOfWater(ctx: SkillCtx, args: CellArgs, feet: Vec3Like) {
 export const stepTo: Skill<StepArgs> = {
   name: 'step',
   description: '迈到身边相邻的一格（[前,上,右]）：可以平走、上一级台阶（上+1，会跳）、下一级（上-1）；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（整块、半砖、雪层、地毯都能站，脚高可为分数）；目标列没有同层支撑时向下扫到第一处可站立面：4 格内自动走并报告落差和摔伤，更大落差返回精确落点、高度和伤害由你判断。显式上 1 格只接受至少高半格的目标面；持平或更低时回报实际脚高/下一落点，不会自动改平走。不做逐格视线预检，也不因支撑格是 air 就报错；身体被占住或扫完 64 格无落点才拒绝，并给出挖掘坐标、精确高度或要补的支撑格。泡在水里时朝岸迈（[1,0,0]），身体会游过去、贴岸爬上去（岸比脚高一两格也行）。可选 fill：支撑格是空气或可替换植物时先只补那一格再迈（消耗 1 块）；不写就不垫',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名（目标脚下空或可替换时先补这一格，可搭桥）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级，目标列没有高半格的面时只回报实际脚高/下一落点，不自动改平走；[1,-1,0] 明确下一级；更深落差用 descend）',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "fill"?:方块名|"any"（目标脚下空或可替换时先补这一格，可搭桥；"any" 表示从背包里任选一种能垫的）}（前后/左右 ±1，上下 -1..1；[1,0,0] 平走，也会自动迈上相邻一格台阶或处理 4 格以内落差，更大落差会返回精确高度；[1,1,0] 明确上一级，目标列没有高半格的面时只回报实际脚高/下一落点，不自动改平走；[1,-1,0] 明确下一级；更深落差用 descend）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -261,7 +261,8 @@ export const stepTo: Skill<StepArgs> = {
     let fill: string | undefined;
     if (rawFill !== undefined && rawFill !== null) {
       fill = String(rawFill).trim().replace(/^minecraft:/, '');
-      if (!/^[a-z0-9_]{1,80}$/.test(fill) || !adapter.isKnownItem(fill)) return { ok: false, error: `fill 需要已知的方块名（例如 cobblestone），收到 ${String(rawFill)}` };
+      // fill:"any" 表示“只要这块支撑能站就行”，由 place_at 的 support 语义从背包里任选一种能垫的方块。
+      if (fill !== 'any' && (!/^[a-z0-9_]{1,80}$/.test(fill) || !adapter.isKnownItem(fill))) return { ok: false, error: `fill 需要已知的方块名（例如 cobblestone）或 "any"，收到 ${String(rawFill)}` };
       if (/_(boat|raft)$/.test(fill)) return { ok: false, error: `${fill} 是船/筏（实体，不是方块），不能用来补支撑` };
     }
     return { ok: true, args: { at: to, facing: facing as Facing, ...(fill ? { fill } : {}) } };
@@ -387,13 +388,14 @@ export const stepTo: Skill<StepArgs> = {
     // 只有 agent 显式写了 fill 才补支撑：选哪种材料、要不要垫仍由 agent 决定；这里只负责把这一块放到
     // 脚部目标格正下方，然后按实际方块重算落点，不额外改落点或方向。
     if (args.fill && isReplaceable(rawState(support)?.name ?? '') && landingSupport.placeAtInRange) {
-      const placed = await placeAt.run(ctx, { at: supportAt, facing: args.facing, item: args.fill });
+      // fill 是为了“有支撑能站”，不是指定材料：带 support 语义，已有可站立方块时不再要求同名。
+      const placed = await placeAt.run(ctx, { at: supportAt, facing: args.facing, item: args.fill, purpose: 'support' });
       if (placed.status !== 'succeeded') {
         return fail(placed.failureCode ?? 'PATH_NOT_FOUND',
           `迈不到 [${args.at}]：先往支撑格 [${supportAt}] 补 ${args.fill} 没成——${placed.summary}`,
           { movementNotAttempted: true, fill: { at: supportAt, item: args.fill, pos: support }, ...after(ctx, args.facing, target) });
       }
-      fills.push({ pos: support, at: supportAt, item: args.fill });
+      fills.push({ pos: support, at: supportAt, item: String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill) });
       scan = scanLanding();
     }
     // 显式上 1 格：只接受至少高半格的目标面。不接受时也要把这一列的真实脚高/下一落点说清楚，
@@ -515,10 +517,10 @@ function shapeOf(name: string, properties: BlockProps = {}): string {
   return top === null ? '非完整方块' : `可站立顶面 ${top}`;
 }
 
-export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
+export const placeAt: Skill<CellArgs & { item: string; extra?: boolean; purpose?: 'support' }> = {
   name: 'place_at',
-  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（红树苗 mangrove_propagule 同样按树苗规则，可种在泥/沾泥的红树根上；之后长成什么见知识库）。目标格已有别的方块（包括半砖、雪层、地毯、门、火把）时如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
-  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -2..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；[1,-2,0] 补下一级 [1,-1,0] 脚下的支撑；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
+  description: '在身边指定的空格放一块方块（[前,上,右]）。实心方块放 [0,0,0] 表示原地垫一块站上去（跳起来往脚下放）；梯子、火把这类贴墙的东西可以放进自己站的格子 [0,0,0]/[0,1,0]，但旁边要有实心墙。item 写方块名，或 "any" 用背包里随便一种能垫的（泥土、圆石、木板…）。树苗、花这类小植物也是方块，可以用 item 指定名字放在草方块/泥土上（红树苗 mangrove_propagule 同样按树苗规则，可种在泥/沾泥的红树根上；之后长成什么见知识库）。purpose:"support" 表示这一格是拿来当落脚/承重支撑：目标格已有可站立实心方块（整块、半砖、雪层等，不要求和 item 同名）就直接算已满足、不再放置；只有空格/可替换方块才放 item。普通放置时目标格已有别的方块（包括半砖、雪层、地毯、门、火把）仍如实报占用，不把错误材料当已完成；只放这一格，不替你做搭柱以外的施工',
+  argsDoc: '{"at":[前,上,右], "item"?:"<方块名>|any", "purpose"?:"support", "facing"?:"N|E|S|W"}（前后/左右 ±2，上下 -2..3；at 是方块占据格；例：[0,0,0] 原地垫高，[1,-1,0] 支撑 step [1,0,0]，会挡住 step [1,-1,0]；[1,-2,0] 补下一级 [1,-1,0] 脚下的支撑，加 "purpose":"support" 时已有可站立方块就当作已满足；{"at":[0,0,0],"item":"ladder"} 在脚边墙上挂梯子）',
   timeoutMs: 15000,
   movement: true,
   validate(raw, adapter) {
@@ -531,7 +533,9 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     if (at[0] === 0 && at[2] === 0 && at[1] === 1 && !attachmentFaces(item)) return { ok: false, error: '[0,1,0] 是自己的头，实心方块放不进去；往上垫高用 [0,0,0]（梯子、火把这类贴墙的东西才能放进自己站的格子）' };
     const facing = facingArg(a.facing, adapter);
     if (!FACINGS.includes(facing as Facing)) return { ok: false, error: facing };
-    return { ok: true, args: { at, facing: facing as Facing, item, ...(a.extra === true ? { extra: true } : {}) } };
+    const purpose = a.purpose;
+    if (purpose !== undefined && purpose !== 'support') return { ok: false, error: 'purpose 只支持 "support"（表示这一格是拿来当落脚/承重支撑）' };
+    return { ok: true, args: { at, facing: facing as Facing, item, ...(a.extra === true ? { extra: true } : {}), ...(purpose === 'support' ? { purpose: 'support' as const } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -549,6 +553,33 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
     // 树苗不是实心方块，[0,0,0] 是按普通放置种在自己脚这一格，不能当成原地垫高。
     const pillar = args.xyz === undefined && args.at[0] === 0 && args.at[1] === 0 && args.at[2] === 0 && !attachable && !sapling;
     if (!pillar) {
+      // purpose:"support"：这一格是拿来当落脚/承重支撑，不是指定材料。
+      // 已有任何可站立顶面（整块/半砖/雪层等）就算已满足；只有空气/可替换方块才需要放。
+      // 名字仍只在亲眼看见时给出；没看见时只报“已有可站立方块”这一几何事实。
+      if (args.purpose === 'support') {
+        const visible = stateAt(pos);
+        const raw = visible ?? (() => {
+          const name = a.blockAt(pos);
+          return name === null ? null : { name, properties: a.blockStateAt?.(pos)?.properties ?? {} };
+        })();
+        if (raw === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否已有支撑，没有放置`, after(ctx, args.facing, pos));
+        const top = supportTop(raw.name, raw.properties ?? {});
+        if (top !== null) {
+          const foot = pos.y + top;
+          const shape = visible ? shapeOf(visible.name, visible.properties) : '已有可站立方块（未看清名称）';
+          return ok(`[${args.at}] 已经有可站立支撑 ${visible ? visible.name : '（未看清名称）'}（${shape}，脚面 y=${foot.toFixed(2)}），没有另放 ${args.item}`, {
+            already: visible?.name ?? null, alreadyShape: shape, supportTop: foot, standable: true, noop: true, ...after(ctx, args.facing, pos),
+          });
+        }
+        if (!isReplaceable(raw.name)) {
+          // 名字有、但 blockstate 不完整时不能把“算不出顶面”写成“不是支撑”。
+          if (!shapeKnown(raw.name, raw.properties ?? {})) {
+            return fail('NOT_FOUND', `[${args.at}] 已有方块，但方块状态未确认，不能把它当作已确认的支撑；先看清这一格，或换一格`, { occupied: visible?.name ?? null, ...after(ctx, args.facing, pos) });
+          }
+          const shape = visible ? shapeOf(visible.name, visible.properties) : '已有方块（未看清名称）';
+          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${visible ? visible.name : '未看清的方块'} 占据（${shape}），但不是能站的支撑；要放 ${args.item} 得先 dig_at 清掉，或换一格`, { occupied: visible?.name ?? null, occupiedShape: shape, ...after(ctx, args.facing, pos) });
+        }
+      }
       // 普通放置：只有亲眼看见同一物品才算已满足。半砖/雪层/地毯/门/火把都占着这一格，
       // 不能因为“看起来是实心”就把错误材料当成功。
       const here = stateAt(pos);
@@ -558,13 +589,13 @@ export const placeAt: Skill<CellArgs & { item: string; extra?: boolean }> = {
         const shape = shapeOf(here.name, here.properties);
         if (sameItem || anySolid) return ok(`[${args.at}] 已经有 ${here.name} 了（${shape}）`, { already: here.name, alreadyShape: shape, noop: true, ...after(ctx, args.facing, pos) });
         if (!isReplaceable(here.name)) {
-          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${here.name} 占据（${shape}），不是要放的 ${args.item}；先 dig_at 清掉，或换一格`, { occupied: here.name, occupiedShape: shape, ...after(ctx, args.facing, pos) });
+          return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${here.name} 占据（${shape}），不是要放的 ${args.item}；先 dig_at 清掉，或换一格；如果这一格只是要当支撑，写 purpose:"support"（已有可站立方块就算满足）`, { occupied: here.name, occupiedShape: shape, ...after(ctx, args.facing, pos) });
         }
       } else {
         const cur = a.blockAt(pos);
         // 没看清：未加载不能当空气；服务器同步数据说明已占用时如实报占用，但不泄露方块名。
         if (cur === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否为空，没有放置`, after(ctx, args.facing, pos));
-        if (!isReplaceable(cur)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称`, after(ctx, args.facing, pos));
+        if (!isReplaceable(cur)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被占用，未放置；当前未看清方块名称；如果这一格只是要当支撑，写 purpose:"support"（已有可站立方块就算满足）`, after(ctx, args.facing, pos));
       }
     }
     const inv = a.state().inventory;

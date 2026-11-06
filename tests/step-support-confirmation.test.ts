@@ -80,6 +80,19 @@ class ReplaceWorld extends TestWorld {
   }
 }
 
+test('step fill:"any" 用背包里任意能垫的方块补支撑，并报告实际放置的那一种', async (t) => {
+  const { w, vision } = edgeWorld();
+  w.inv.set('dirt', 2);
+  const ctx = ctxFor(w, vision);
+  t.after(() => ctx.memory.close());
+  const r = await stepTo.run(ctx, { at: [1, 1, 0], facing: 'N', fill: 'any' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.fills, [{ pos: { x: 0, y: 64, z: -1 }, at: [1, 0, 0], item: 'dirt' }]);
+  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'dirt', '补的是目标脚格正下方这一格');
+  assert.equal(w.inv.get('dirt'), 1);
+  assert.equal(Math.floor(w.pos.y), 65);
+});
+
 test('step fill 能把可替换的下界根须换成支撑块再迈上去', async (t) => {
   const w = new ReplaceWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -125,4 +138,6 @@ test('fill 只认已知方块名，不能拿船来补支撑', () => {
   assert.equal(b.ok, false);
   const c = stepTo.validate({ at: [1, 1, 0], fill: 'cobblestone' }, w);
   assert.ok(c.ok && c.args.fill === 'cobblestone');
+  const any = stepTo.validate({ at: [1, 1, 0], fill: 'any' }, w);
+  assert.ok(any.ok && any.args.fill === 'any');
 });

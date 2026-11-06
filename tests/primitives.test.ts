@@ -431,6 +431,52 @@ test('place_at reports a wrong-material occupant instead of treating any solid a
   assert.deepEqual(w.actions, [], '没有放置动作');
 });
 
+test('place_at purpose support treats an existing solid block as satisfied without material', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: -1 } });
+  w.inv.set('dirt', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt', purpose: 'support' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.already, 'stone');
+  assert.equal(r.data?.standable, true);
+  assert.equal(r.data?.noop, true);
+  assert.equal(w.inv.get('dirt'), 1, '没有消耗材料');
+  assert.deepEqual(w.actions, [], '没有放置动作');
+});
+
+test('place_at purpose support does not accept a non-floor occupant', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'torch', pos: { x: 0, y: 64, z: -1 } });
+  w.inv.set('dirt', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt', purpose: 'support' });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.match(r.summary, /不是能站的支撑/);
+  assert.equal(w.inv.get('dirt'), 1);
+  assert.deepEqual(w.actions, []);
+});
+
+test('place_at purpose support accepts an unobserved solid cell without leaking its name', async (t) => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 64, z: -1 } });
+  w.inv.set('dirt', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  const r = await placeAt.run(ctx, { at: [1, 0, 0], facing: 'N', item: 'dirt', purpose: 'support' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.already, null, '没有泄露未观察方块名');
+  assert.equal(r.data?.standable, true);
+  assert.equal(w.inv.get('dirt'), 1);
+  assert.deepEqual(w.actions, []);
+});
+
 test('place_at does not treat an unobserved block as already satisfied', async (t) => {
   const w = new FakeAdapter();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
