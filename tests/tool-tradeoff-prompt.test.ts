@@ -205,6 +205,7 @@ test('提示词：木料历史账只报事实、区分背包实时与箱子旧�
   assert.ok(!user.includes('现在背包/箱子里'), '箱子记录不是当前事实，不能写成现在');
   for (const word of ['多备', '换做法', '种树', '囤']) assert.ok(!user.includes(word), `不出现策略暗示：${word}`);
   assert.ok(!userOf({ ...ctx, tier: 'glance' }).includes('木料的历史账'), '瞥一眼不重复物料账');
+  assert.ok(!userOf({ ...ctx, tier: 'glance' }).includes('树苗：'), '瞥一眼不重复树苗事实');
   assert.ok(!userOf({ ...ctx, materials: null }).includes('木料的历史账'), '没有账本数据时不说');
   assert.ok(!userOf({ ...ctx, materials: { wood: tally(1, 3, 40, 40), ore: tally(0, 0, 0, 0) } }).includes('木料的历史账'), '只跑过 1 段活不出现');
   const old = { wood: { ...tally(7, 30, 795, 114), lastAt: Date.now() - 3 * 86_400_000 }, ore: tally(0, 0, 0, 0) };
@@ -222,6 +223,12 @@ test('提示词：木料历史账只报事实、区分背包实时与箱子旧�
   assert.ok(!userOf(bareCtx).includes('树苗：'), '没有树苗时不说树苗能种');
   (bareCtx.percept as any).storage = { chests: 1, nearest: 3, stored: '箱子', stock: [{ item: 'mangrove_propagule', total: 1, inChests: 1, chestCount: 1, inBackpack: 0 }] };
   assert.match(userOf(bareCtx), /树苗：记得的箱子（上次打开时）里有 1 个树苗（可种）/, '只有箱子记得树苗时标清来源');
+  // 只有背包有树苗时，不凭空提箱子。
+  const bagOnly = new FakeAdapter(); bagOnly.inv.set('oak_log', 24); bagOnly.inv.set('oak_sapling', 1);
+  const bagPerception = new Perception(bagOnly, memory, bus, new Vision(bagOnly));
+  const bagCtx = { ...base, percept: bagPerception.update(), state: bagOnly.state(), activity: woodActivity, materials };
+  assert.match(userOf(bagCtx), /树苗：背包里有 1 个树苗（可种）。树苗放在/, '只有背包有树苗时直接报背包');
+  assert.ok(!userOf(bagCtx).includes('记得的箱子'), '没有箱子账时不提箱子');
   memory.close();
 });
 
@@ -239,6 +246,7 @@ test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，�
   assert.match(user, /矿石的历史账（最近 3 段活）：拿到 12 个矿石\/粗矿\/矿物，一共走了 260 格（最近平均每段活 80 格；最近一次 2 分钟前）；现在背包里有 72 个矿石\/粗矿\/锭（实时）/);
   assert.match(user, /粗矿块 8 个（背包\+记得的箱子合计）按块计，未折算成粗铁/, '粗矿块计入现有量但不装作粗铁');
   assert.ok(!user.includes('木料的历史账'), '挖矿意图不触发木料账');
+  assert.ok(!user.includes('树苗：'), '挖矿意图不触发树苗事实');
   // 这一趟的下矿账已经在说当前所见，历史聚合不重复
   const withTrip = { ...base, activity: miningActivity, materials, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
   (withTrip.percept.self as any).where = { kind: 'underground', text: '在地下' };
