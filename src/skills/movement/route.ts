@@ -261,17 +261,43 @@ export const planRoute: Skill<PlanArgs> = {
     if (snapshot.state !== 'FOUND' || !snapshot.candidate) return problemOf(snapshot.state, snapshot.reason, { state: snapshot.state, counters: snapshot.counters, ...(snapshot.problem ? { problem: snapshot.problem } : {}) });
     const inspection = inspectRoute(snapshot);
     const points = snapshot.candidate.points.map((p) => ({ ...p }));
+    // FOUND 只是候选；用当前证据再跑一遍 RouteVerifier，OPEN 才把路线标为 verified。
+    let confidence: 'verified' | 'candidate' = 'candidate';
+    let verdict = 'INCOMPLETE';
+    let validUntil = snapshot.validUntil;
+    let boundaries: Record<string, unknown>[] = inspection.boundaries.map((b) => ({ status: b.status, stance: b.stance, to: b.to, reason: b.reason }));
+    try {
+      const verifier = new RouteVerifier(spatial.session.voxel, { now: Date.now });
+      let status = verifier.register({
+        worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, mode: 'walk',
+        body: { feet: { ...points[0]! }, width: 0.6, height: 1.8, pose: 'standing' },
+        shapeProvider: walkCollisionProvider,
+        points,
+      });
+      while (status.verdict === 'INCOMPLETE' && Date.now() < deadline) {
+        throwIfAborted(ctx.signal);
+        status = verifier.advance(256);
+      }
+      verdict = status.verdict;
+      confidence = status.complete && status.verdict === 'OPEN' ? 'verified' : 'candidate';
+      validUntil = Math.min(snapshot.validUntil, status.validUntil);
+      if (status.earliestProblem) {
+        boundaries = [{ stepIndex: status.earliestProblem.stepIndex, status: status.earliestProblem.status, problem: status.earliestProblem.problem ?? null }];
+      }
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortedError') throw e;
+      return fail('BAD_ARGS', `搜索候选无法按当前证据复验：${(e as Error).message}`, { unsupported: { reason: 'candidate_verification_unavailable' }, state: snapshot.state });
+    }
     const routeId = randomUUID();
-    const record: RouteRecord = { kind: 'snapshot', snapshot, scope, from, target: { ...args.to }, validUntil: snapshot.validUntil, expiresAt: expiresAt(snapshot.validUntil) };
+    const record: RouteRecord = { kind: 'snapshot', snapshot, scope, from, target: { ...args.to }, validUntil, expiresAt: expiresAt(validUntil) };
     records.set(routeId, record);
-    return ok(`已规划步行路线：${points.length - 1} 段，候选置信度 ${snapshot.candidate.edgeCount} 条边；执行前仍会按当前证据逐段复验`, {
+    return ok(`已规划步行路线：${points.length - 1} 段，${verdict}，${snapshot.candidate.edgeCount} 条边；执行前仍会按当前证据逐段复验`, {
       routeId, backend: 'spatial_library', source: 'search', kind: 'walk',
       points, segments: routeSegments(points), cost: snapshot.candidate.edgeCount,
-      confidence: 'candidate', executable: true,
-      boundaries: inspection.boundaries.map((b) => ({ status: b.status, stance: b.stance, to: b.to, reason: b.reason })),
-      unsupported: null,
-      evidence: { ...scope, validUntil: snapshot.validUntil }, expiresAt: record.expiresAt,
-      counters: snapshot.counters, state: snapshot.state,
+      confidence, executable: confidence === 'verified',
+      boundaries, unsupported: null,
+      evidence: { ...scope, validUntil }, expiresAt: record.expiresAt,
+      counters: snapshot.counters, state: snapshot.state, verdict,
     });
   },
 };

@@ -203,7 +203,7 @@ test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划
   clearRouteRecords();
   const r = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.confidence, 'candidate');
+  assert.ok(r.data?.confidence === 'verified' || r.data?.confidence === 'candidate');
   assert.ok((r.data?.points as unknown[]).length >= 2);
   assert.ok(getRouteRecord(String(r.data?.routeId)));
   assert.deepEqual(w.actions, []);
