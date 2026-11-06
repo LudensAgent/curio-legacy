@@ -330,3 +330,23 @@ test('observe_portal can record a portal directly above the body, not only withi
   assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(travelStore(ctx.memory).get(r.data?.portalId as string, w.worldId)?.pos, portal);
 });
+
+test('travel_portal timeout while confirmed inside names cooldown/latency instead of only a timeout code', async (t) => {
+  const w = new TestWorld();
+  w.dim = 'the_nether';
+  w.pos = { x: 3.5, y: 64, z: 0.5 };
+  const portal = { x: 3, y: 64, z: 0 };
+  w.setBlock(portal, 'nether_portal');
+  const ctx = makeCtx(w);
+  ctx.memory.setWorld(w.worldId);
+  t.after(() => ctx.memory.close());
+  const endpoint = travelStore(ctx.memory).observe(w.state(), portal, 'nether_portal');
+  w.enterPortalAt = (async () => ({
+    ok: false, reason: 'PORTAL_TRANSITION_TIMEOUT', from: w.state(), to: null,
+    transition: { startedInPortal: true, entered: true, exitMs: 500, outsideMs: 400, insideMs: 30196, endDim: 'the_nether' },
+  })) as any;
+  const r = await travelSkills.travel_portal.run(ctx, { portalId: endpoint.id });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /传送冷却|服务器延迟|对端未就绪/);
+  assert.match(r.summary, /不要连续重进/);
+});

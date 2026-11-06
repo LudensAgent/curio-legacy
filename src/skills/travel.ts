@@ -190,7 +190,15 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
           `维度 ${result.transition.endDim}`,
         ].join('；')
       : '';
-    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收（${result.reason}）${timeline ? `：${timeline}` : ''}`, { ...(result.transition ? { transition: result.transition } : {}), portalReason: result.reason });
+    // 门内等待超时后给一句可执行的区分：如果身体确实在门方块里待了很久，问题更像
+    // 传送冷却/服务器延迟/对端未就绪，不是站位；让心智先离开/换门，别连续重进。
+    const insideMs = result.transition?.insideMs ?? 0;
+    const transitionHint = result.reason === 'PORTAL_TRANSITION_TIMEOUT'
+      ? insideMs >= 5000
+        ? '；服务器在门方块内等了这么久仍未切换，更像传送冷却、服务器延迟或对端未就绪，不是门框位置问题；先离开门几秒再试，或改走另一扇已登记的门，不要连续重进'
+        : '；身体没有稳定停在门方块里，先站进去再等'
+      : '';
+    if (!result.ok || !result.from || !result.to) return fail('ERROR', `传送未验收（${result.reason}）${timeline ? `：${timeline}` : ''}${transitionHint}`, { ...(result.transition ? { transition: result.transition } : {}), portalReason: result.reason });
     const to = result.to;
     if (!to.observationReady || to.dim === state.dim || to.worldId !== state.worldId || to.sessionId === state.sessionId) return fail('ERROR', '没有获得新维度的有效观察');
     // Arrival is a fact; a nearby return portal still requires fresh sight.
