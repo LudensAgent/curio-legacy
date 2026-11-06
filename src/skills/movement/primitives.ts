@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../../adapter/types.ts';
-import { feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
+import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
 import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, isReplaceable, supportTop } from '../../perception/geometry.ts';
 import { dropBelow, isSoftBlock, LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
@@ -227,26 +227,26 @@ export const moveStep: Skill<StepArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 export const mineCell: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。手上有能挖、也不比空手慢的工具就用；不能挖或更慢才换背包里更合适的；不自动造工具。tool 明确指定这一格用哪件工具，指定后只装备这一把，挖不动/不在背包返回 TOOL_MISSING。液体邻格默认不挖；wet/lava 分别显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3）',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。只用 tool 指定的工具；没写 tool 时只用当前手持，不自动换成更合适的、也不自动造工具（空手时身体会按适配器规则从背包取工具）——手持工具挖不动会返回 TOOL_MISSING，要换工具先 hold_item。液体邻格默认不挖；wet/lava 分别显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
     if (typeof facing !== 'string') return { ok: false, error: String(facing) };
+    const tool = a.tool;
+    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
     const rawXyz = a.xyz ?? a.abs ?? a.world;
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
       if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-1, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能挖到的范围：${rel}；先走近` };
-      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(typeof a.tool === 'string' ? { tool: a.tool } : {}) } };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
     }
     const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
-    const tool = a.tool;
-    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
     return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
   },
   async run(ctx, args) {
@@ -318,15 +318,22 @@ export const mineCell: Skill<MineArgs> = {
     const keepsake = KEEPSAKE.test(before) ? before : null;
     const countOf = (n: string) => adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
     const had = keepsake ? countOf(keepsake) : 0;
+    // 只用调用者指定的工具；没指定就只用当前手持，不换更合适的、也不造工具。
+    const forcedTool = args.tool ?? adapter.state().held ?? undefined;
     try {
-      await breakCell(ctx, pos, true, undefined, { allowWater: args.wet, allowLava: args.lava, ...(args.tool ? { tool: args.tool } : {}) });
+      await breakCell(ctx, pos, true, undefined, { allowWater: args.wet, allowLava: args.lava, ...(forcedTool ? { tool: forcedTool } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       const code = String((e as Error).message).startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : codeFromError(e);
       return fail(code, `挖 [${args.at}] 的 ${before} 没成：${why(e)}`, after(ctx, args.facing, pos));
     }
+    // 挖后复核：只有目标格确实是空气才算移除成功；被下落方块填回/未加载都只是事实，不记成已挖掉。
     const now = adapter.blockAt(pos);
-    if (now && !AIR.has(now) && !isSoftBlock(now)) return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing, pos), ...fallFacts });
+    if (now === null || !AIR.has(now)) {
+      return fail('EFFECT_NOT_CONFIRMED', `挖 [${args.at}] 的 ${before} 后，目标格仍不是空气${now === null ? '（未加载，无法确认已挖空）' : `：现在是 ${now}（可能被掉落的方块回填）`}`, {
+        cell: [...args.at], was: before, now, target: { ...pos }, ...after(ctx, args.facing, pos), ...fallFacts,
+      });
+    }
     noteEdit(ctx.taskId, 'dig', pos);
     let got = '';
     let inBag: boolean | undefined;
@@ -535,15 +542,28 @@ export const pillarOne: Skill<{ item?: string }> = {
     const before = adapter.state().pos;
     const feet = feetCell(before);
     const r = await adapter.pillarUp(names, ctx.signal);
+    // 回执按这次实际 yaw 解析朝向，不再假定北向。
+    const eye = adapter.eye();
+    const facing = eye ? facingOfYaw(eye.yaw) : 'N';
     if (!r.ok) {
       const code = r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : r.reason === 'OCCUPIED' || String(r.reason).startsWith('BLOCKED:') ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED';
-      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, ...(r.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}), ...after(ctx, 'N') });
+      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, facing, ...(r.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}), ...after(ctx, facing) });
     }
     const state = adapter.state();
     const end = feetCell(state.pos);
-    const under = adapter.blockAt(feet);
-    if (end.y <= feet.y || !under || AIR.has(under) || isSoftBlock(under)) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格：方块没留在脚下', after(ctx, 'N'));
-    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, { climbed: 1, ...after(ctx, 'N') });
+    const support = stateAt(adapter, feet);
+    const supportName = support && supportTop(support.name, support.properties) !== null ? support.name : null;
+    const rose = end.y - feet.y;
+    if (rose !== 1 || supportName === null) {
+      const problems = [
+        ...(rose === 1 ? [] : [`脚高 ${feet.y} → ${end.y}，不是正好 +1`]),
+        ...(supportName !== null ? [] : [`脚下 (${feet.x},${feet.y},${feet.z}) 没有实测的可站立支撑${support ? `（${support.name}）` : '（未加载）'}`]),
+      ];
+      return fail('EFFECT_NOT_CONFIRMED', `没有确认垫高一格：${problems.join('；')}`, {
+        climbed: rose, facing, ...(supportName !== null ? { support: { pos: { ...feet }, name: supportName } } : {}), ...after(ctx, facing),
+      });
+    }
+    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, { climbed: 1, facing, support: { pos: { ...feet }, name: supportName }, ...after(ctx, facing) });
   },
 };
 
