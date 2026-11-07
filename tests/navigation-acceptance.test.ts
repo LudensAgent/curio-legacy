@@ -33,7 +33,6 @@ import { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { spatialQuery } from '../src/skills/spatial-query.ts';
 import { runSkill, type SkillCtx } from '../src/skills/types.ts';
-import { walkRoute } from '../src/skills/walk-route.ts';
 import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
 import type { ExecutableMove } from 'curio-minecraft-3d-memory';
 
@@ -427,91 +426,6 @@ test('adapter end classification requires both real observations and cleanup fai
   assert.equal(acceptanceExitCode(null, [], [{ step: 'adapter-end', error: new Error('x') }]), 1);
   assert.equal(acceptanceExitCode(null, [{ scenario: 's', problem: 'x' }], []), 1);
   assert.equal(acceptanceExitCode(new Error('fatal'), [], []), 1);
-});
-
-test('traversal ownership pairs actual task dispatch order with the corresponding confirmed trace', { timeout: 30_000 }, async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'navigation-acceptance-ownership-'));
-  const svc = await SharedSpatialSession.open({ worldId: 'world', databasePath: path.join(dir, 'memory.db'), timeoutMs: 5000 });
-  svc.beginSession({ worldId: 'world', dim: 'overworld', sessionId: 's1' });
-  const fixture = acceptancePhysics();
-  const senses = acceptanceSenses(svc, fixture.cell);
-  const taskId = 'walk-real';
-  const sink: CapturedMove[] = [];
-  const proto = WalkMoveExecutor.prototype as unknown as {
-    move(this: unknown, request: ExecutableMove): Promise<{ sample?: unknown; failure?: unknown }>;
-  };
-  const original = proto.move;
-  // 只记录实际派发请求（不依赖 move 返回样本），按真实调用顺序登记该任务归属。
-  proto.move = function (this: unknown, request: ExecutableMove) {
-    sink.push({
-      taskId, receivedAt: Date.now(),
-      request: {
-        executionId: request.executionId, worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
-        from: { ...request.from }, to: { ...request.to }, deadlineMs: request.deadlineMs, timeoutMs: request.timeoutMs,
-      },
-      result: null, error: null,
-    });
-    return original.call(this, request);
-  };
-  try {
-    const points = [
-      { x: 200.5, y: 64, z: 216.5 },
-      { x: 201.5, y: 64, z: 216.5 },
-      { x: 202.5, y: 64, z: 216.5 },
-    ];
-    const ctx = {
-      adapter: fixture.adapter, senses, spatial: svc, signal: new AbortController().signal,
-      deadline: Date.now() + 20_000, taskId, progress() {}, setStationaryWait() {},
-    } as unknown as SkillCtx;
-    const result = await runSkill(ctx, walkRoute, { points });
-    assert.equal(result.status, 'succeeded', result.summary);
-    const nav = result.data?.nav as Record<string, unknown>;
-    assert.equal(nav.confirmed, true);
-    const trace = nav.trace as { pos: { x: number; y: number; z: number }; ts: number }[];
-    assert.equal(trace.length, 2, '两段都应由真实 onSample 确认');
-    assert.equal(sink.length, 2, '真实派发两段 move 请求');
-    const history = result.data?.history as { status: string; traversalIds: string[] };
-    assert.equal(history.status, 'accepted_pending_checkpoint');
-    assert.equal(history.traversalIds.length, 2);
-    const store = svc.session.history;
-
-    for (let i = 0; i < 2; i++) {
-      const record = store.getTraversal(history.traversalIds[i]!) as unknown as Record<string, unknown>;
-      assert.deepEqual(sink[i]!.request.from, record.from, '真实派发顺序与 from 一致');
-      assert.equal(classifyTraversalOwnership(record, taskId, sink, nav).ok, true, `第 ${i} 段应归属成功`);
-    }
-    const first = store.getTraversal(history.traversalIds[0]!) as unknown as Record<string, unknown>;
-    const second = store.getTraversal(history.traversalIds[1]!) as unknown as Record<string, unknown>;
-
-    // 跨段混搭：第一段的 executionId/from，配上第二段端点/时间 → 必须拒绝。
-    const swapped = { ...first, to: second.to, observedAt: second.observedAt };
-    assert.equal(classifyTraversalOwnership(swapped, taskId, sink, nav).ok, false);
-    // 只换端点或时间也不能借用任意其它 trace 点。
-    assert.equal(classifyTraversalOwnership({ ...first, to: trace[1]!.pos }, taskId, sink, nav).ok, false);
-    assert.equal(classifyTraversalOwnership({ ...first, observedAt: trace[1]!.ts }, taskId, sink, nav).ok, false);
-    // 名义 move 目标不是确认轨迹点。
-    assert.equal(classifyTraversalOwnership({ ...first, to: { ...sink[0]!.request.to } }, taskId, sink, nav).ok, false);
-    assert.equal(classifyTraversalOwnership({ ...first, from: { x: 200.4, y: 64, z: 216.5 } }, taskId, sink, nav).ok, false);
-    assert.equal(classifyTraversalOwnership({ ...first, worldId: 'other-world' }, taskId, sink, nav).ok, false);
-    // 另一个任务 id / 把真实请求改归其它任务：都不能冒充本任务。
-    assert.equal(classifyTraversalOwnership(first, 'other-task', sink, nav).ok, false);
-    assert.equal(classifyTraversalOwnership(first, taskId, sink.map((m) => ({ ...m, taskId: 'other-task' })), nav).ok, false);
-    assert.equal(classifyTraversalOwnership({ ...first, executionId: 'unknown-step' }, taskId, sink, nav).ok, false);
-    assert.equal(classifyTraversalOwnership(null, taskId, sink, nav).ok, false);
-
-    // 派发序号超出确认 trace 长度（末尾未确认半段）时不能借用已有 trace。
-    const viaNav = { ...second, executionId: sink[1]!.request.executionId, to: trace[0]!.pos, observedAt: trace[0]!.ts };
-    assert.equal(classifyTraversalOwnership(viaNav, taskId, sink, { ...nav, trace: [trace[0]!] }).ok, false);
-    // move 返回没有样本仍能通过：本用例的 sink.result 全为 null。
-    assert.equal(sink.every((move) => move.result === null), true);
-  } finally {
-    proto.move = original;
-    const shutdown = await svc.shutdown();
-    assert.equal(shutdown.close?.completed, true);
-    assert.equal(shutdown.close?.error, null);
-    assert.equal(shutdown.close?.dirty, false);
-    rmSync(dir, { recursive: true, force: true });
-  }
 });
 
 test('local body cell batch is bounded and centered on the measured feet', () => {

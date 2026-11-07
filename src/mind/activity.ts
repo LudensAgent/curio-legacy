@@ -178,6 +178,7 @@ export function viewOf(p?: Percept): string | undefined {
 /**
  * 自动重试只看失败回执里实际观测到的相关事实：支撑/净空、目标格、进度、额度和身体位置。
  * 转头、背包/附近资源增减、无关火把不在其中，不能用来给同一缺口再要一次重试。
+ * pillarClearance 由 pillar_one 的失败回执真实产出（movement/primitives.ts），属于缺口证据。
  */
 const GAP_EVIDENCE_FIELDS = [
   'movementNotAttempted', 'obscured', 'failureCause', 'pillarFailure', 'pillarClearance', 'reference', 'occupied',

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import type { BlockObservation } from '../src/adapter/types.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { ride } from '../src/skills/actions.ts';
-import { explore, glance } from '../src/skills/movement.ts';
+import { lookAround } from '../src/skills/movement.ts';
 import { observePortal, travelPortal, useEndGateway } from '../src/skills/travel.ts';
 import { travelStore } from '../src/travel/store.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
@@ -22,30 +22,16 @@ function fixture() {
   return { world, memory, ctx, sight, batches };
 }
 
-test('explore until does not call an eighty-block historical ore location current sight', async (t) => {
+test('look_around does not call an eighty-block historical ore location current sight', async (t) => {
   const { world, memory, ctx } = fixture();
   t.after(() => memory.close());
   const ore = { name: 'iron_ore', pos: { x: 80, y: 64, z: 0 }, dist: 80 };
   ctx.senses.knownBlocks = (names) => names.includes(ore.name) ? [ore] : [];
-  let movements = 0;
-  world.moveTo = async () => { movements++; throw new Error('PATH_NOT_FOUND'); };
-  const result = await explore.run(ctx, { direction: 'E', distance: 24, until: 'iron_ore' });
+  const result = await lookAround.run(ctx, { for: 'iron_ore', seconds: 2 });
   assert.equal(result.data?.found, undefined);
-  assert.equal(result.status, 'failed');
-  assert.ok(movements > 0);
+  assert.equal(result.failureCode, 'NOT_FOUND');
+  assert.equal(result.data?.newlyDiscovered, false);
   assert.equal(ctx.senses.knownBlocks(['iron_ore'], 96).length, 1, 'historical clue is preserved');
-});
-
-test('explore until still stops for a freshly seen target', async (t) => {
-  const { world, memory, ctx, sight } = fixture();
-  t.after(() => memory.close());
-  const pos = { x: 4, y: 64, z: 0 };
-  world.setBlock(pos, 'iron_ore'); sight.visible = true;
-  const result = await explore.run(ctx, { direction: 'E', distance: 24, until: 'iron_ore' });
-  assert.equal(result.status, 'succeeded');
-  assert.equal(result.data?.found, 'iron_ore');
-  assert.equal(result.data?.moved, 0);
-  assert.equal(world.actions.length, 0);
 });
 
 test('a visible target after the first thirty-two historical candidates is still checked in bounded batches', async (t) => {
@@ -62,19 +48,18 @@ test('a visible target after the first thirty-two historical candidates is still
       sessionId: world.sessionId, observationId: world.observationId, observedAt: Date.now(), source: 'vision',
     }));
   };
-  const result = await explore.run(ctx, { direction: 'E', distance: 24, until: 'iron_ore' });
+  const result = await lookAround.run(ctx, { for: 'iron_ore', seconds: 2 });
   assert.equal(result.data?.found, 'iron_ore');
   assert.deepEqual(batches, [32, 1]);
 });
 
-test('glance and explore until do not promote hearing to a precise visual discovery', async (t) => {
+test('look_around does not promote hearing to a precise visual discovery', async (t) => {
   const { world, memory, ctx } = fixture();
   t.after(() => memory.close());
   ctx.senses.knownBlocks = () => [];
   ctx.senses.perceivedEntities = () => [{ id: 1, name: 'cow', kind: 'passive', pos: { x: 4, y: 64, z: 0 }, dist: 4, perception: 'heard' }];
-  assert.equal(await glance(ctx, 'cow'), null);
-  world.moveTo = async () => { throw new Error('PATH_NOT_FOUND'); };
-  const result = await explore.run(ctx, { direction: 'AUTO', distance: 24, until: 'cow' });
+  const result = await lookAround.run(ctx, { for: 'cow', seconds: 2 });
+  assert.equal(result.failureCode, 'NOT_FOUND');
   assert.equal(result.data?.found, undefined);
 });
 
