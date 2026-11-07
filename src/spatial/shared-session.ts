@@ -30,7 +30,10 @@ import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-
 import type {
   BatchChangeReport,
   ChangeReport,
+  ConnectionType,
   MemoryIngest,
+  MoveMode,
+  NodeKind,
   Observation,
   ObservationBatch,
   PathFragment,
@@ -57,6 +60,10 @@ const DEFAULT_TIMEOUT_MS = 5000;
 /** 单条通道 fragment 的 links 上限。库默认 4096，但长期沿一条主矿道行走会持续追加走过的边
  *  （线上已出现 4107 条，落盘时被拒并产生 P0）；提高到 16384 给长矿道留出余量。 */
 const MAX_FRAGMENT_LINKS = 16_384;
+
+/** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
+const MAX_WALK_TOPOLOGY_NODES = 8;
+const MAX_WALK_TOPOLOGY_EDGES = 8;
 
 /** 宿主侧待加载原始证据的硬上限；超出时保留时间/数量并显式报告，不静默覆盖。 */
 export const MAX_PENDING_OBSERVATIONS = 256;
@@ -149,7 +156,10 @@ export type SharedSpatialWriteRejection =
   | { kind: 'session_mismatch'; detail: string; expectedSession: string; actualSession: string | null };
 
 /** 共享会话直接拥有的历史写方法（其余能力由 `ingest` 投影转发时门禁）。 */
-export type MemoryWriteMethod = Extract<MemoryWriteCapability, 'markTraversed' | 'markModified' | 'markStale' | 'saveFragment' | 'addTraversal'>;
+export type MemoryWriteMethod = Extract<
+  MemoryWriteCapability,
+  'markTraversed' | 'markModified' | 'markStale' | 'saveFragment' | 'addTraversal' | 'recordNode' | 'upsertEdge'
+>;
 
 /**
  * 一次写入的结果。`written` 只表示内存接受；`deliveryError.committed === true`
@@ -204,7 +214,7 @@ export type WalkMemoryOutcome =
     }
   | {
       status: 'failed';
-      stage: SharedSpatialWriteRejection['kind'] | 'save_fragment' | 'add_traversal';
+      stage: SharedSpatialWriteRejection['kind'] | 'save_fragment' | 'add_traversal' | 'capacity' | 'topology_write';
       message: string;
       fragmentId: string;
       traversalIds: string[];
@@ -464,6 +474,65 @@ function freeSummary(result: FreeResult): string {
   return `free evicted ${result.evicted.length} section(s); rejected ${pinned} pinned/${dirty} dirty/${notCommitted} not_committed`;
 }
 
+/** 连接类型只描述实测几何形状；±1 格台阶用 STAIRCASE，降/升超过 1 格用 DROP/CLIMB。 */
+function walkConnectionType(from: Vec3Like, to: Vec3Like): ConnectionType {
+  const dy = to.y - from.y;
+  if (dy <= -1.5) return 'DROP';
+  if (dy >= 1.5) return 'CLIMB';
+  if (Math.abs(dy) >= 0.5) return 'STAIRCASE';
+  return 'HORIZONTAL';
+}
+
+/**
+ * 从已确认段规划无语义路由节点与有向边。拓扑库要求每条 traversed 边引用的
+ * traversal 证据端点与边两端节点位置**逐值相等**，因此不能把相邻多段合并成一条
+ * 跨段边（那会没有任何一条真实 traversal 匹配整段端点）。这里按每个确认段的实际
+ * 端点建节点/边：起点 entrance、终点 place、y 类型变化 vertical_junction、真实
+ * 水平方向变化 turn，其余同类型直行中间节点用中性 place（不声称转向）。节点 id
+ * 用实测端点的 floor 格，重走可复用同一批 id。只使用实测 from/to 与真实
+ * traversal id；不生成反向边，也不补计划点。
+ */
+function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[]) {
+  const points = [{ ...segments[0]!.from }, ...segments.map((segment) => ({ ...segment.to }))];
+  const types = segments.map((segment) => walkConnectionType(segment.from, segment.to));
+  const headings = segments.map((_, i) => {
+    const dx = points[i + 1]!.x - points[i]!.x;
+    const dz = points[i + 1]!.z - points[i]!.z;
+    if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return null;
+    if (Math.abs(dx) >= Math.abs(dz)) return dx > 0 ? 'x+' : 'x-';
+    return dz > 0 ? 'z+' : 'z-';
+  });
+  const nodes = points.map((point, index) => {
+    const cell = { x: Math.floor(point.x), y: Math.floor(point.y), z: Math.floor(point.z) };
+    return {
+      id: `walk:${dim}:${cell.x},${cell.y},${cell.z}`,
+      pos: { ...point },
+      kind: (index === 0
+        ? 'entrance'
+        : index === points.length - 1
+          ? 'place'
+          : types[index - 1] !== types[index]
+            ? 'vertical_junction'
+            : headings[index - 1] !== null && headings[index] !== null && headings[index - 1] !== headings[index]
+              ? 'turn'
+              : 'place') as NodeKind,
+      observedAt: segments[Math.max(index - 1, 0)]!.observedAt,
+    };
+  });
+  // 同一次通道里端点完全相同的重复段合并 evidence（库允许一条边引用多条端点一致的 traversal）。
+  const byId = new Map<string, { id: string; from: string; to: string; type: ConnectionType; modes: MoveMode[]; evidenceIds: string[] }>();
+  for (const [i, segment] of segments.entries()) {
+    const from = nodes[i]!;
+    const to = nodes[i + 1]!;
+    const type = types[i]!;
+    const id = `walk:${dim}:${from.id}->${to.id}:${type}`;
+    const modes: MoveMode[] = type === 'DROP' ? ['drop'] : type === 'CLIMB' ? ['climb'] : ['walk'];
+    const existing = byId.get(id);
+    if (existing !== undefined) existing.evidenceIds.push(segment.id);
+    else byId.set(id, { id, from: from.id, to: to.id, type, modes, evidenceIds: [segment.id] });
+  }
+  return { nodes, edges: [...byId.values()] };
+}
 
 export class SharedSpatialSession {
   readonly worldId: string;
@@ -838,16 +907,22 @@ export class SharedSpatialSession {
   }
 
   /**
-   * walk_path 的已确认通道证据：先保存历史几何，再逐确认段写实测 traversal，
-   * 最后把每段实测终点标为 traversed。任何一步失败都保留已写入的前缀并如实
-   * 报告失败阶段；不把未确认段、计划坐标或时间接近补成亲历证据。
+   * walk_path 的已确认通道证据：先保存历史几何并逐确认段写实测 traversal/站位，
+   * 再在历史前缀之上写无语义路由节点与有向边。容量在历史写入后、拓扑写入前检查：
+   * 超限时保留 fragment/traversal 并跳过拓扑。拓扑失败也保留历史前缀，且已写入的
+   * 拓扑节点/边可能保留（前缀语义）。空段只保存 fragment、不写拓扑。不把未确认段、
+   * 计划坐标或时间接近补成亲历证据；记忆失败不改身体结果。
    */
   recordWalkCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
     const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
+    // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
+    // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
     const rejected =
       this.writeRejection(input.fragment.dim, 'saveFragment')
       ?? this.writeRejection(input.fragment.dim, 'addTraversal')
-      ?? this.writeRejection(input.fragment.dim, 'markTraversed');
+      ?? this.writeRejection(input.fragment.dim, 'markTraversed')
+      ?? this.writeRejection(input.fragment.dim, 'recordNode')
+      ?? this.writeRejection(input.fragment.dim, 'upsertEdge');
     if (rejected !== null) return { status: 'failed', stage: rejected.kind, message: rejected.detail, ...base };
     const oldSession = input.segments.find((segment) => this.sessionMismatch(segment.sessionId) !== null);
     if (oldSession !== undefined) {
@@ -874,6 +949,77 @@ export class SharedSpatialSession {
       const cell = { x: Math.floor(segment.to.x), y: Math.floor(segment.to.y), z: Math.floor(segment.to.z) };
       const delivered = this.deliverApplied(this.session.voxel.markTraversed(segment.dim, cell), 1);
       if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
+    }
+
+    const topology = input.segments.length === 0 ? null : planWalkTopology(input.fragment.dim, input.segments);
+    if (topology !== null && (topology.nodes.length > MAX_WALK_TOPOLOGY_NODES || topology.edges.length > MAX_WALK_TOPOLOGY_EDGES)) {
+      return {
+        status: 'failed', stage: 'capacity',
+        message: `history written (fragment + ${base.traversalIds.length} traversal(s)); topology skipped: `
+          + `confirmed corridor needs ${topology.nodes.length} node(s)/${topology.edges.length} edge(s), `
+          + `host cap ${MAX_WALK_TOPOLOGY_NODES}/${MAX_WALK_TOPOLOGY_EDGES}`,
+        ...base,
+      };
+    }
+    if (topology !== null) {
+      try {
+        const plannedEdgeIds = new Set(topology.edges.map((edge) => edge.id));
+        const movedNodeIds = new Set<string>();
+        // 只读预检：节点位置需要校准时，若仍被本次计划外的边引用（共享节点），
+        // 先失败关闭，绝不删除外部边或做破坏性半写。
+        for (const node of topology.nodes) {
+          const existing = this.session.topology.getNode(node.id);
+          if (existing === null) continue;
+          const location = existing.location;
+          const positionChanged = location.kind !== 'exact'
+            || location.pos.x !== node.pos.x
+            || location.pos.y !== node.pos.y
+            || location.pos.z !== node.pos.z;
+          if (!positionChanged) continue;
+          const adjacency = this.session.topology.adjacency(node.id, { includeBlocked: true });
+          const external = [...adjacency.outEdges, ...adjacency.inEdges]
+            .filter((edge) => !plannedEdgeIds.has(edge.id));
+          if (external.length > 0) {
+            return {
+              status: 'failed', stage: 'topology_write',
+              message: `node "${node.id}" is referenced by external edge(s) `
+                + `${external.map((edge) => edge.id).join(', ')}; topology was not changed`,
+              ...base,
+            };
+          }
+          movedNodeIds.add(node.id);
+        }
+        const label = `walk:${input.fragment.id}`;
+        // 重走时先去掉本次将要重建的边，才能把节点位置校准到本次实测端点；
+        // 库要求 evidence 端点与节点位置逐值相等，位置漂移不能让旧端点继续冒充本次证据。
+        for (const edge of topology.edges) {
+          if (this.session.topology.getEdge(edge.id) !== null) this.session.topology.forgetEdge(edge.id);
+        }
+        for (const node of topology.nodes) {
+          if (movedNodeIds.has(node.id)) {
+            this.session.topology.updateNode(node.id, { location: { kind: 'exact', pos: { ...node.pos } } });
+          }
+          this.memory.recordNode(label, node.pos, undefined, {
+            dim: input.fragment.dim, kind: node.kind, id: node.id,
+            ...(node.observedAt === null ? {} : { observedAt: node.observedAt }),
+          });
+        }
+        for (const edge of topology.edges) {
+          // 边必须用 TopologyStore 而不是 MemoryIngest.upsertEdge：facade 会丢 directed/modes。
+          this.session.topology.saveEdge({
+            id: edge.id, from: edge.from, to: edge.to, type: edge.type,
+            basis: 'traversed', evidenceIds: edge.evidenceIds,
+            fragmentId: input.fragment.id, source: 'confirmed_walk_path',
+            directed: true, modes: edge.modes,
+          });
+        }
+      } catch (error) {
+        return {
+          status: 'failed', stage: 'topology_write',
+          message: `history written; already-written topology nodes/edges may remain (prefix semantics): ${messageOf(error)}`,
+          ...base,
+        };
+      }
     }
     return { status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError };
   }
