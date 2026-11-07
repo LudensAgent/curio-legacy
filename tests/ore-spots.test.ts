@@ -41,7 +41,7 @@ test('采集看不见目标时，说出长期记得的矿点，不再说"记忆�
     assert.equal(r.status, 'failed');
     assert.doesNotMatch(r.summary, /视野和记忆里都没有/);
     assert.match(r.summary, /记得别处有 iron_ore：\(20,56,0\) 东\d+格，低 \d+ 格/);
-    assert.match(r.summary, /goto \{"target":"20,56,0","dig":true\}/);
+    assert.match(r.summary, /plan_route → walk_path 走到跟前再 gather/);
   } finally { memory.close(); }
 });
 

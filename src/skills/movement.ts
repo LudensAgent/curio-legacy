@@ -1267,32 +1267,6 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
 
 const BED_NAMES = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((c) => `${c}_bed`);
 
-// ------------------------------------------------------------------ wander（空档填充）
-export const wander: Skill<{ radius: number }> = {
-  name: 'wander',
-  description: '在附近随意走动观察（低价值填充行为，等待思考时使用）',
-  argsDoc: '{"radius"?: 4-16}',
-  timeoutMs: 20000,
-  movement: true,
-  validate(raw) {
-    return { ok: true, args: { radius: clampInt(obj(raw).radius, 4, 16, 8) } };
-  },
-  async run(ctx, args) {
-    const s = ctx.adapter.state();
-    const ang = Math.random() * Math.PI * 2;
-    const r = args.radius * (0.5 + Math.random() * 0.5);
-    try {
-      await ctx.adapter.moveTo(
-        { kind: 'xz', x: s.pos.x + Math.cos(ang) * r, z: s.pos.z + Math.sin(ang) * r, range: 2 },
-        { signal: ctx.signal, timeoutMs: Math.max(3000, ctx.deadline - Date.now()) },
-      );
-    } catch (e) {
-      if (isAbort(e)) throw e;
-    }
-    return ok('在附近走动观察');
-  },
-};
-
 // ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number; for?: string; direction?: string }> = {
   name: 'look_around',

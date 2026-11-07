@@ -57,7 +57,7 @@ import type {
 
 type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; blocks: { pos: Vec3Like; rel?: [number, number, number]; facing?: string }[] };
 
-/** 世界坐标 → 以脚为原点的 [前,上,右]（与 dig_at 的 toWorld 互为逆运算），让心智能直接对着障碍格下 dig_at */
+/** 世界坐标 → 以脚为原点的 [前,上,右]（与 mine_cell 的 toWorld 互为逆运算），让心智能直接对着障碍格下 mine_cell */
 const REL_FORWARD: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
 const REL_RIGHT: Record<string, [number, number]> = { N: [1, 0], E: [0, 1], S: [-1, 0], W: [0, -1] };
 function relToBody(feet: Vec3Like, facing: string, block: Vec3Like): [number, number, number] {
@@ -81,10 +81,10 @@ function describePillarClearance(clearance: PillarClearance): string {
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
   // 只报“挡在哪几格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
   // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
-  // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 dig_at 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
+  // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 mine_cell 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
   if (clearance.kind === 'blocked') {
     const cells = clearance.blocks.slice(0, 4).map((blk) => blk.rel
-      ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})【${relWords(blk.rel)}】[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（朝向 ${blk.facing}）→ dig_at {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
+      ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})【${relWords(blk.rel)}】[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（朝向 ${blk.facing}）→ mine_cell {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
       : `(${blk.pos.x},${blk.pos.y},${blk.pos.z})`);
     const more = clearance.blocks.length > 4 ? `；还有 ${clearance.blocks.length - 4} 格` : '';
     return `头顶跳跃空间受阻；${range}，要跳起来得先把这几格都挖空（方块名未确认）：${cells.join('；')}${more}`;

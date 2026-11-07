@@ -71,7 +71,7 @@ test('explicit pillar refuses an obstructed jump before toggling jump or placing
   const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
   assert.equal(result.reason, 'NOT_PLACED:头顶跳跃空间受阻');
   assert.match(result.clearanceDetail!, /x=0\.\.0, y=65\.\.66, z=0\.\.0/);
-  assert.match(result.clearanceDetail!, /要跳起来得先把这几格都挖空（方块名未确认）：\(0,66,0\).*dig_at/);
+  assert.match(result.clearanceDetail!, /要跳起来得先把这几格都挖空（方块名未确认）：\(0,66,0\).*mine_cell/);
   assert.doesNotMatch(result.clearanceDetail!, /stone/);
   assert.notEqual(w.controls.jump, true);
 });
