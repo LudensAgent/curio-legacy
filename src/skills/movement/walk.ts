@@ -7,6 +7,7 @@ import {
   type ExecutableMove,
   type ExecutableMoveResult,
   type NavProblem,
+  type PathFragment,
   type RoutePlan,
   type RoutePlanRegistryProblem,
   type RoutePlanScope,
@@ -17,7 +18,8 @@ import {
   type WalkPathResult,
 } from 'curio-minecraft-3d-memory';
 import { WalkMoveExecutor, walkCollisionProvider } from '../../adapter/walk-route.ts';
-import type { WalkBody, WalkLifecycle, WalkTick } from '../../adapter/walk-route.ts';
+import type { WalkBody, WalkLifecycle, WalkMoveRequestObservation, WalkTick } from '../../adapter/walk-route.ts';
+import type { SharedSpatialSession, WalkMemoryOutcome } from '../../spatial/shared-session.ts';
 import { bodyLocalCells, observeCells } from '../walk-route.ts';
 import { fail, ok, obj, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 import { clearRouteRecords, consumeRoutePlan, noteRouteScope, releaseRoutePlan } from './route.ts';
@@ -87,7 +89,7 @@ function summaryOf(result: WalkPathResult): string {
 }
 
 /** 已消费计划的终态信封：库只给出实测/终态字段，宿主补固定事实。 */
-function planData(plan: RoutePlan, result: WalkPathResult) {
+function planData(plan: RoutePlan, result: WalkPathResult, memory: WalkMemoryOutcome | null) {
   return {
     ...planFacts(plan),
     contract: result.contract,
@@ -100,7 +102,29 @@ function planData(plan: RoutePlan, result: WalkPathResult) {
     lastObservation: result.lastObservation ?? null,
     trace: result.trace,
     problem: result.problem ?? null,
-    memoryWrite: result.memoryWrite ?? null,
+    // 库报告的 `memoryWrite` 是唯一能出现 `saved` 的来源；宿主自己的写入只可能是
+    // `pending`（内存接受，未 checkpoint）或 `failed`，绝不改写成 `saved`。
+    memoryWrite: result.memoryWrite ?? (memory === null ? null : memory.status === 'written' ? 'pending' : 'failed'),
+    // 记忆写入事实按可序列化字段给出；报告转发失败的原始错误留在服务侧。
+    memory: memory === null
+      ? { status: 'not_recorded' as const, reason: 'no_confirmed_segment' as const, traversalIds: [] as string[] }
+      : memory.status === 'written'
+        ? {
+            status: 'written' as const,
+            fragmentId: memory.fragmentId,
+            traversalIds: memory.traversalIds,
+            stancesMarked: memory.stancesMarked,
+            reportDeliveryFailed: memory.deliveryError !== null,
+            // pending 只代表内存接受；落盘由宿主周期/最终 checkpoint 确认（D-070）。
+            persistence: 'pending_until_checkpoint' as const,
+          }
+        : {
+            status: 'failed' as const,
+            stage: memory.stage,
+            message: memory.message,
+            fragmentId: memory.fragmentId,
+            traversalIds: memory.traversalIds,
+          },
     confirmedSegments: result.confirmedSegments,
     remainingPoints: result.remainingPoints,
     consumption: result.consumption ?? { placed: [] },
@@ -155,14 +179,81 @@ function isRegistryProblem(reason: string | undefined): reason is RoutePlanRegis
     || reason === 'route_expired' || reason === 'scope_mismatch' || reason === 'route_not_executable';
 }
 
-function skillResult(plan: RoutePlan | null, result: WalkPathResult): SkillResult {
+function skillResult(plan: RoutePlan | null, result: WalkPathResult, memory: WalkMemoryOutcome | null): SkillResult {
   if (plan === null) return registryResult(result.routeId, result);
-  const data = planData(plan, result);
+  const data = planData(plan, result, memory);
   if (result.outcome === 'ARRIVED') return ok(summaryOf(result), data);
   if (result.outcome === 'CANCELLED') return { status: 'cancelled', summary: summaryOf(result), data };
   if (result.outcome === 'TIMEOUT') return fail('TIMEOUT', summaryOf(result), data);
   if (result.outcome === 'BLOCKED' || result.outcome === 'NO_PATH') return fail('PATH_NOT_FOUND', summaryOf(result), data);
   return fail('EFFECT_NOT_CONFIRMED', summaryOf(result), data);
+}
+
+/**
+ * 已确认段的通道几何：`[首段实际出发位置, ...每段终态 trace 的实测位置]`（长度 =
+ * 确认段数 + 1）。这是实测经过的几何，不是计划点列；未确认半段、剩余点与计划
+ * 坐标都不进入。`entrances` 为空（不保证实际开口）。
+ */
+function confirmedCorridor(
+  scope: { worldId: string; dim: string },
+  result: WalkPathResult,
+  moveRequests: readonly WalkMoveRequestObservation[],
+  confirmed: number,
+): PathFragment {
+  const trace = result.trace.slice(0, confirmed);
+  const polyline = [{ ...moveRequests[0]!.from }, ...trace.map((entry) => ({ ...entry.pos }))];
+  return {
+    id: `walk:${result.executionId}:${trace[0]!.ts}`,
+    worldId: scope.worldId,
+    dim: scope.dim,
+    kind: 'walked',
+    entrances: [],
+    polyline,
+    geometrySource: 'traversal',
+    deepestY: Math.min(...polyline.map((p) => p.y)),
+    createdAt: trace[0]!.ts,
+    lastUsedAt: trace[confirmed - 1]!.ts,
+    uses: 1,
+  };
+}
+
+/**
+ * 把库终态里已确认的段写进共享记忆：`from` 取库实际发出的 `ExecutableMove.from`，
+ * `to`/时间取对应终态 trace。没有确认段时不写，如实返回 `null`，由信封标注“未记录”。
+ */
+function recordConfirmedWalk(
+  spatial: SharedSpatialSession,
+  scope: { worldId: string; dim: string },
+  plan: RoutePlan,
+  result: WalkPathResult,
+  moveRequests: readonly WalkMoveRequestObservation[],
+): WalkMemoryOutcome | null {
+  const confirmed = Math.min(
+    result.confirmedSegments,
+    result.trace.length,
+    moveRequests.length,
+    Math.max(0, plan.points.length - 1),
+  );
+  if (confirmed === 0) return null;
+  const fragment = confirmedCorridor(scope, result, moveRequests, confirmed);
+  const segments = Array.from({ length: confirmed }, (_, i) => {
+    const move = moveRequests[i]!;
+    const trace = result.trace[i]!;
+    return {
+      id: `walk:${result.executionId}:${i}:${move.executionId}`,
+      fragmentId: fragment.id,
+      from: { ...move.from },
+      to: { ...trace.pos },
+      worldId: move.worldId,
+      dim: move.dim,
+      sessionId: move.sessionId,
+      observedAt: trace.ts,
+      source: 'confirmed_walk_path',
+      executionId: move.executionId,
+      mode: 'walk' as const,
+    };
+  });
+  return spatial.recordWalkCorridor({ fragment, segments });
 }
 
 const watchedAdapters = new WeakSet<object>();
@@ -188,9 +279,15 @@ export function createWalkBodyPort(opts: {
   onLifecycleBroken: (detail: string) => void;
   /** 每帧顺序固定为：观察入库 → 派发报告 → 构造该帧实测样本。 */
   onFrame: (entity: WalkBody['entity'], executionId: string) => BodySample;
+  /**
+   * 库实际发出的每一段单步请求（含 `ExecutableMove.from`），在执行前同步记录；
+   * 只观察，不参与控制。用于把已确认段归属到真实的出发位置。
+   */
+  onMoveRequest?: (move: WalkMoveRequestObservation) => void;
 }): WalkBodyPort {
   const executor = new WalkMoveExecutor(
     opts.body, opts.tick, opts.signal, opts.now, opts.lifecycle, opts.onLifecycleBroken,
+    undefined, opts.onMoveRequest,
   );
   let active: string | null = null;
   let lastSample: BodySample | null = null;
@@ -276,6 +373,8 @@ export const walkPath: Skill<WalkArgs> = {
 
     // 身体端口在执行钩子里按实际会话/地图构造；入口预检期间不会被调用。
     let activePort: WalkBodyPort | null = null;
+    /** 库实际发出的每段单步请求；执行结束后只取其中已确认段的前缀。 */
+    const moveRequests: WalkMoveRequestObservation[] = [];
 
     let sequence = 0;
     /** 最新一次测量；库高频拉取时重复返回同一序号，库会按重放忽略。 */
@@ -397,6 +496,7 @@ export const walkPath: Skill<WalkArgs> = {
             if (report !== null) emit(report);
             return liveSample(frameExecutionId, entity);
           },
+          onMoveRequest: (move) => { moveRequests.push(move); },
         });
         const token = spatial.attach({
           receiver: emit,
@@ -428,10 +528,14 @@ export const walkPath: Skill<WalkArgs> = {
       ctx.signal.removeEventListener('abort', onParentAbort);
     });
     if (hostFailure !== null) return hostFailure;
+    // 身体结果先定稿；记忆写入只追加历史证据，任何失败都不改写已发生的位移。
+    const memory = consumedPlan !== null && ctx.spatial !== undefined
+      ? recordConfirmedWalk(ctx.spatial, scope, consumedPlan, result, moveRequests)
+      : null;
     // 父任务取消先于库终态时仍以取消返回，保留库已记录的部分位移；注册表拒绝没有计划可报。
     if (consumedPlan !== null && ctx.signal.aborted && result.outcome !== 'CANCELLED') {
-      return { status: 'cancelled', summary: 'walk_path 被父任务取消', data: planData(consumedPlan, result) };
+      return { status: 'cancelled', summary: 'walk_path 被父任务取消', data: planData(consumedPlan, result, memory) };
     }
-    return skillResult(consumedPlan, result);
+    return skillResult(consumedPlan, result, memory);
   },
 };

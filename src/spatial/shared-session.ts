@@ -28,15 +28,25 @@ import type {
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-memory';
 import type {
+  BatchChangeReport,
   ChangeReport,
+  MemoryIngest,
   Observation,
+  ObservationBatch,
+  PathFragment,
   ResidencyLimits,
+  SaveResult,
   SectionKey,
   SectionResidency,
   SpatialQueryPort,
   SpatialQueryRequest,
   SpatialQueryResult,
+  StaleReason,
+  TraversalEvidence,
+  Vec3Like,
 } from 'curio-minecraft-3d-memory';
+import { capabilityGate, readHostCapabilities } from './capabilities.ts';
+import type { CapabilityDomain, HostCapabilityReport, MemoryWriteCapability } from './capabilities.ts';
 import type { BlockObservation } from '../adapter/types.ts';
 import { MAX_DEADLINE_DELAY_MS, WorkingSetCoordinator } from './working-set.ts';
 import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './working-set.ts';
@@ -129,6 +139,76 @@ export interface SharedSpatialReceiverFailure {
   error: unknown;
   applied: number;
 }
+
+/** 宿主写入口拒绝的类别；每一类都说明“没有调用库”或“作用域不符”，不是世界事实。 */
+export type SharedSpatialWriteRejection =
+  | { kind: 'capability_unavailable'; method: MemoryWriteCapability; detail: string }
+  | { kind: 'not_ready'; detail: string }
+  | { kind: 'closed'; detail: string }
+  | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string }
+  | { kind: 'session_mismatch'; detail: string; expectedSession: string; actualSession: string | null };
+
+/** 共享会话直接拥有的历史写方法（其余能力由 `ingest` 投影转发时门禁）。 */
+export type MemoryWriteMethod = Extract<MemoryWriteCapability, 'markTraversed' | 'markModified' | 'markStale' | 'saveFragment' | 'addTraversal'>;
+
+/**
+ * 一次写入的结果。`written` 只表示内存接受；`deliveryError.committed === true`
+ * 表示写入已经提交，失败只属于报告转发（契约 §8.1 规则 6）。
+ */
+export type SharedSpatialWriteResult =
+  | {
+      status: 'written';
+      report: ChangeReport;
+      deliveryError: { committed: true; error: unknown } | null;
+    }
+  | { status: 'rejected'; reason: SharedSpatialWriteRejection };
+
+export type SharedSpatialSaveResult =
+  | { status: 'written'; result: SaveResult }
+  | { status: 'rejected'; reason: SharedSpatialWriteRejection };
+
+/** fragment 保存没有库返回值；成功只表示内存接受。 */
+export type SharedSpatialFragmentSaveResult =
+  | { status: 'written' }
+  | { status: 'rejected'; reason: SharedSpatialWriteRejection };
+
+/** 一条已确认段的实测证据；`from` 来自库实际发出的 `ExecutableMove.from`。 */
+export interface WalkCorridorSegment {
+  id: string;
+  fragmentId: string;
+  from: Vec3Like;
+  to: Vec3Like;
+  worldId: string;
+  dim: string;
+  sessionId: string | null;
+  observedAt: number | null;
+  source: string;
+  executionId: string;
+  mode: 'walk';
+}
+
+/** walk_path 已确认通道的写入请求；只有实测确认的段与终点允许进入。 */
+export interface WalkCorridorEvidence {
+  fragment: PathFragment;
+  segments: readonly WalkCorridorSegment[];
+}
+
+/** walk_path 记忆写入结局；失败阶段保留已写入的 traversal 前缀，不冒充已保存。 */
+export type WalkMemoryOutcome =
+  | {
+      status: 'written';
+      fragmentId: string;
+      traversalIds: string[];
+      stancesMarked: number;
+      deliveryError: { committed: true; error: unknown } | null;
+    }
+  | {
+      status: 'failed';
+      stage: SharedSpatialWriteRejection['kind'] | 'save_fragment' | 'add_traversal';
+      message: string;
+      fragmentId: string;
+      traversalIds: string[];
+    };
 
 /** 结构化缺口类别；只描述宿主实际拒绝/未完成的事实。 */
 export type SharedSpatialGapKind =
@@ -352,6 +432,16 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** `MemoryIngest` 投影只有 void/结果返回；拒绝按库的写入边界抛出。 */
+function throwIfRejected(result: SharedSpatialWriteResult | SharedSpatialSaveResult | SharedSpatialFragmentSaveResult): void {
+  if (result.status === 'rejected') throw writeRejectionError(result.reason);
+}
+
+/** 宿主拒绝写入 → 库写入边界抛出的类型化错误；拒绝事实不被吞掉。 */
+function writeRejectionError(reason: SharedSpatialWriteRejection): PersistenceError {
+  return new PersistenceError(reason.kind === 'closed' ? 'closed' : 'invalid_argument', reason.detail);
+}
+
 /** manual 写入容量拒绝是库内普通 Error；按消息里的上限名归类，不猜私有字节。 */
 function capacityKindOf(error: unknown): 'count_capacity' | 'byte_capacity' | 'capacity' | null {
   if (error instanceof PersistenceError && error.kind === 'capacity') return 'capacity';
@@ -394,6 +484,11 @@ export class SharedSpatialSession {
   private readonly diagnostic: ((diagnostic: SharedSpatialDiagnostic) => void) | undefined;
   /** 唯一查询端口：只读组合 session 的 voxel/history/topology，不暴露写入方法。 */
   private readonly queryPort: SpatialQueryPort;
+  /** 同一组合 store 的契约写入端口（`MemoryIngest`）；写方法只能经共享会话调用。 */
+  private readonly memory: MemoryIngest;
+  /** 启动时读取一次的能力报告（契约 §2.3/§13.1）；只读，不在运行中重新协商。 */
+  private readonly capabilityReport: HostCapabilityReport;
+  private readonly ingestPort: MemoryIngest;
 
   /** 已接受的原始 handoff，按到达顺序；最多 MAX_PENDING_OBSERVATIONS 条。 */
   private pending: PendingHandoff[] = [];
@@ -420,6 +515,10 @@ export class SharedSpatialSession {
   private cancelFailureGeneration = -1;
   /** 当前附着的 receiver 回调失败；applied 说明写入是否已经发生。 */
   private receiverFailure: SharedSpatialReceiverFailure | null = null;
+  /** 最近一次报告转发失败；写入已经提交（契约 §8.1 规则 6）。 */
+  private deliveryFailure: { committed: true; error: unknown } | null = null;
+  /** 最近一次因库能力为 false 而未调用的写方法；`null` 表示没有拒绝过。 */
+  private capabilityRejection: SharedSpatialWriteRejection | null = null;
 
   private constructor(
     session: SpatialSession,
@@ -436,14 +535,77 @@ export class SharedSpatialSession {
     this.diagnostic = diagnostic;
     this.coordinator = session.voxelLoading === 'manual' ? new WorkingSetCoordinator(session) : null;
     // 不传 isContainer：宿主目前没有容器分类器，库会把 containerAnchors 如实报为
-    // unsupported，而不是按节点名/标签猜测。构造只持有三个内存存储的引用。
-    this.queryPort = new SpatialMemoryStoreImpl({
+    // unsupported，而不是按节点名/标签猜测。构造只持有三个内存存储的引用；
+    // 同一实例同时提供只读 query 与契约写入端口。
+    const store = new SpatialMemoryStoreImpl({
       worldId,
       map: session.voxel,
       fragments: session.history,
       topology: session.topology,
       query: { now },
     });
+    this.queryPort = store;
+    this.memory = store;
+    // 契约 §13.1：启动时读取能力报告并留下契约版本；读取失败就是启动失败。
+    this.capabilityReport = readHostCapabilities(this);
+    // `MemoryIngest` 投影只有 void/结果返回：写方法经共享会话自己的包装（同一套
+    // 能力/作用域门禁），拒绝按库的写入边界抛 `PersistenceError`；其余拓扑写方法
+    // 在这里统一过能力门禁后转发，库不会被调用。
+    const port = (name: MemoryWriteCapability) => {
+      if (this.allowed('memory', name)) return;
+      this.recordCapabilityRejection(name);
+      throw new PersistenceError('invalid_argument', `library reports memory.${name}=false; the ingest port does not call it`);
+    };
+    this.ingestPort = {
+      beginSession: (sessionId) => {
+        port('beginSession');
+        const scope = this.scope;
+        if (scope === null) {
+          throw new PersistenceError('invalid_argument', `beginSession("${sessionId}") needs a trusted scope; use beginSession(scope) first`);
+        }
+        return this.beginSession({ ...scope, sessionId });
+      },
+      // 与类上的 observeBatch 同一语义：能力 false 时记录拒绝并返回空报告，
+      // 调用方可读 `lastCapabilityRejection()`；不抛错、不伪装已写入。
+      observeBatch: (batch) => this.observeBatch(batch),
+      markTraversed: (dim, pos) => { throwIfRejected(this.markTraversed(dim, pos)); },
+      markModified: (dim, pos, actionId) => { throwIfRejected(this.markModified(dim, pos, actionId)); },
+      saveFragment: (fragment) => { throwIfRejected(this.saveFragment(fragment)); },
+      addTraversal: (evidence) => {
+        const result = this.addTraversal(evidence);
+        if (result.status === 'rejected') throw writeRejectionError(result.reason);
+        return result.result;
+      },
+      recordNode: (label, pos, tag, options) => {
+        port('recordNode');
+        return this.memory.recordNode(label, pos, tag, options);
+      },
+      upsertEdge: (edge) => {
+        port('upsertEdge');
+        this.memory.upsertEdge(edge);
+      },
+      savePortalEdge: (edge, traversals) => {
+        port('savePortalEdge');
+        return this.memory.savePortalEdge(edge, traversals);
+      },
+      addPortalTraversal: (edgeId, traversal) => {
+        // 契约 §2.3 的 memory 能力没有 addPortalTraversal 键；该写依赖传送边能力，
+        // 按 `savePortalEdge` 门禁。
+        port('savePortalEdge');
+        return this.memory.addPortalTraversal(edgeId, traversal);
+      },
+      // `this.markStale` 自己走 `writeRejection`，这里不再前置 `port()`。
+      markStale: (dim, reason) => {
+        const result = this.markStale(dim, reason);
+        if (result.status === 'rejected') throw writeRejectionError(result.reason);
+        return result.report;
+      },
+    };
+  }
+
+  /** 启动时已读取的库能力报告（契约 §2.3）；宿主组合的持久化生命周期单独列出。 */
+  capabilities(): HostCapabilityReport {
+    return this.capabilityReport;
   }
 
   static async open(options: SharedSpatialOpenOptions): Promise<SharedSpatialSession> {
@@ -509,6 +671,10 @@ export class SharedSpatialSession {
    * 当作新 scope 的当前证据重新提交。
    */
   beginSession(scope: TrustedScope): ChangeReport {
+    if (!this.allowed('memory', 'beginSession')) {
+      this.recordCapabilityRejection('beginSession');
+      throw new PersistenceError('invalid_argument', 'library reports memory.beginSession=false; the host does not call it');
+    }
     if (this.closingFlag) {
       throw new PersistenceError('closed', 'shared spatial session is closed; beginSession is rejected');
     }
@@ -525,7 +691,8 @@ export class SharedSpatialSession {
     const revoked = sessionChanged || dimChanged ? this.revokeCurrent() : null;
     let report = this.session.voxel.beginSession(scope.sessionId);
     if (dimChanged) {
-      report = { sections: [...report.sections, ...this.session.voxel.markStale(prev!.dim, 'observation_gap').sections] };
+      const stale = this.staleReport(prev!.dim);
+      report = { sections: [...report.sections, ...(stale.status === 'written' ? stale.report.sections : [])] };
     }
     this.scope = scope;
     this.admitted = true;
@@ -544,7 +711,8 @@ export class SharedSpatialSession {
     this.invalidatePending('interrupt');
     const revoked = this.revokeCurrent();
     this.admitted = false;
-    const report = this.scope === null ? { sections: [] } : this.session.voxel.markStale(this.scope.dim, 'observation_gap');
+    const stale = this.scope === null ? null : this.staleReport(this.scope.dim);
+    const report = stale?.status === 'written' ? stale.report : { sections: [] };
     this.deliverLifecycle(report, revoked);
     if (revoked !== null && revoked.failure !== null) throw revoked.failure.error;
     return report;
@@ -570,6 +738,11 @@ export class SharedSpatialSession {
     );
     if (scoped.length === 0) return { sections: [] };
     const converted = scoped.map(toObservation);
+    if (!this.allowed('memory', 'observeBatch')) {
+      // 能力 false 不调用库；拒绝留在可见缺口，不伪造空报告为“已写入”。
+      this.recordGap('observe_failed', converted, 'library reports memory.observeBatch=false; the host does not call it');
+      return { sections: [] };
+    }
     if (this.coordinator === null) {
       return this.dispatch(
         this.session.voxel.observeBatch({ observations: converted, unobserved: [] }),
@@ -577,6 +750,132 @@ export class SharedSpatialSession {
       );
     }
     return this.observeManual(converted);
+  }
+
+  /**
+   * 契约 §4.1 的 `MemoryIngest` 单入口投影：宿主（含 walk_path）不再直接接触
+   * `VoxelMap`/`FragmentStore` 写方法。`beginSession`/`observeBatch`/`markStale`
+   * 走共享会话自己的准入与作用域；历史写经同一个 store 进入。拒绝时按库的写入
+   * 边界抛 `PersistenceError`，成功只表示内存接受，不等于 checkpoint 已保存。
+   *
+   * 投影比共享会话自己的 `beginSession(scope)` 窄：`sessionId` 单独无法表达
+   * world/dim，因此只在已有一份可信作用域后使用（切换作用域仍走 `beginSession(scope)`）。
+   *
+   * 过渡期仍直接读取 `session.voxel`/`session.history` 的入口只用于只读查询与
+   * 库执行环境（`route.ts`/`walk.ts`/`spatial-query.ts`），不在本类之外新增写入口。
+   */
+  get ingest(): MemoryIngest {
+    return this.ingestPort;
+  }
+
+  /** 契约 §4.1 `observeBatch`；admission/pause/作用域与 `observe` 同一套门禁。 */
+  observeBatch(batch: ObservationBatch): BatchChangeReport {
+    if (this.closingFlag) {
+      throw new PersistenceError('closed', 'shared spatial session is closed; observations are rejected');
+    }
+    if (!this.allowed('memory', 'observeBatch')) {
+      this.recordCapabilityRejection('observeBatch');
+      return { sections: [], gaps: batch.unobserved };
+    }
+    const scope = this.scope;
+    if (this.pausedFlag || !this.admitted || scope === null) return { sections: [], gaps: [] };
+    const report: BatchChangeReport = this.session.voxel.observeBatch({
+      observations: batch.observations.filter(
+        (o) => o.worldId === this.worldId && o.sessionId === scope.sessionId && o.dim === scope.dim,
+      ),
+      // gap 只有坐标与原因，没有 world/dim，无法按作用域过滤；原样交给库作为诊断。
+      unobserved: batch.unobserved,
+    });
+    this.dispatch(report, report.sections.length);
+    return report;
+  }
+
+  /**
+   * 实测站位的共享会话包装。只接受当前可信维度；能力 false、未准入、暂停或关停
+   * 时不调用库、也不回退到更宽的旧后端。
+   */
+  markTraversed(dim: string, pos: Vec3Like): SharedSpatialWriteResult {
+    const rejection = this.writeRejection(dim, 'markTraversed');
+    return rejection === null
+      ? this.deliverApplied(this.session.voxel.markTraversed(dim, pos), 1)
+      : { status: 'rejected', reason: rejection };
+  }
+
+  /** 已确认自身动作修改的格；`actionId` 必填，未确认的动作不得调用。 */
+  markModified(dim: string, pos: Vec3Like, actionId: string): SharedSpatialWriteResult {
+    const rejection = this.writeRejection(dim, 'markModified');
+    return rejection === null
+      ? this.deliverApplied(this.session.voxel.markModified(dim, pos, actionId), 1)
+      : { status: 'rejected', reason: rejection };
+  }
+
+  /** 外部显式 markStale（`MemoryIngest` 投影）；返回报告并转发给活跃执行器。 */
+  markStale(dim: string, reason: StaleReason): SharedSpatialWriteResult {
+    const rejection = this.writeRejection(dim, 'markStale');
+    return rejection === null
+      ? this.deliverApplied(this.session.voxel.markStale(dim, reason), 0)
+      : { status: 'rejected', reason: rejection };
+  }
+
+  /**
+   * 保存历史几何；不生成 traversal，不证明当前可走。库只校验 fragment 的
+   * world/dim，会话归属由这里校验：旧会话的证据不得写成当前会话的事实。
+   */
+  saveFragment(fragment: Parameters<MemoryIngest['saveFragment']>[0]): SharedSpatialFragmentSaveResult {
+    // `PathFragment` 没有 session 字段，会话归属只能由 traversal/段校验；这里只做
+    // 能力/生命周期/维度门禁。
+    const rejection = this.writeRejection(fragment.dim, 'saveFragment');
+    if (rejection !== null) return { status: 'rejected', reason: rejection };
+    this.memory.saveFragment(fragment);
+    return { status: 'written' };
+  }
+
+  /** 保存实测连续走过的证据；fragment 必须已存在；会话归属同 `saveFragment`。 */
+  addTraversal(evidence: TraversalEvidence): SharedSpatialSaveResult {
+    const rejection = this.writeRejection(evidence.dim, 'addTraversal', evidence.sessionId);
+    if (rejection !== null) return { status: 'rejected', reason: rejection };
+    return { status: 'written', result: this.memory.addTraversal(evidence) };
+  }
+
+  /**
+   * walk_path 的已确认通道证据：先保存历史几何，再逐确认段写实测 traversal，
+   * 最后把每段实测终点标为 traversed。任何一步失败都保留已写入的前缀并如实
+   * 报告失败阶段；不把未确认段、计划坐标或时间接近补成亲历证据。
+   */
+  recordWalkCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
+    const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
+    const rejected =
+      this.writeRejection(input.fragment.dim, 'saveFragment')
+      ?? this.writeRejection(input.fragment.dim, 'addTraversal')
+      ?? this.writeRejection(input.fragment.dim, 'markTraversed');
+    if (rejected !== null) return { status: 'failed', stage: rejected.kind, message: rejected.detail, ...base };
+    const oldSession = input.segments.find((segment) => this.sessionMismatch(segment.sessionId) !== null);
+    if (oldSession !== undefined) {
+      const mismatch = this.sessionMismatch(oldSession.sessionId)!;
+      return { status: 'failed', stage: 'session_mismatch', message: mismatch, ...base };
+    }
+
+    try {
+      this.memory.saveFragment(input.fragment);
+    } catch (error) {
+      return { status: 'failed', stage: 'save_fragment', message: messageOf(error), ...base };
+    }
+
+    let deliveryError: { committed: true; error: unknown } | null = null;
+    for (const segment of input.segments) {
+      try {
+        this.memory.addTraversal({ ...segment, fragmentId: segment.fragmentId });
+      } catch (error) {
+        return { status: 'failed', stage: 'add_traversal', message: messageOf(error), ...base };
+      }
+      base.traversalIds.push(segment.id);
+      // 站位标记按格坐标（库要求整数格）：实测连续位置所在的格就是走过的格，
+      // 不四舍五入到别的格，也不从计划点补；与已写入的 traversal 一一对应。
+      const cell = { x: Math.floor(segment.to.x), y: Math.floor(segment.to.y), z: Math.floor(segment.to.z) };
+      const delivered = this.deliverApplied(this.session.voxel.markTraversed(segment.dim, cell), 1);
+      if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
+    }
+    return { status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError };
   }
 
   /**
@@ -591,7 +890,8 @@ export class SharedSpatialSession {
     const revoked = paused ? this.revokeCurrent() : null;
     if (paused) this.invalidatePending('pause');
     this.pausedFlag = paused;
-    const report = this.scope === null ? { sections: [] } : this.session.voxel.markStale(this.scope.dim, 'observation_gap');
+    const stale = this.scope === null ? null : this.staleReport(this.scope.dim);
+    const report = stale?.status === 'written' ? stale.report : { sections: [] };
     this.deliverLifecycle(report, revoked);
     if (revoked !== null && revoked.failure !== null) throw revoked.failure.error;
     return report;
@@ -696,6 +996,20 @@ export class SharedSpatialSession {
   /** 当前附着的 receiver 回调失败；`applied` 明确写入是否已经发生。 */
   lastReceiverFailure(): SharedSpatialReceiverFailure | null {
     return this.receiverFailure;
+  }
+
+  /**
+   * 最近一次报告转发失败；`committed:true` 表示写入已提交（契约 §8.1 规则 6），
+   * 调用者不得把它当成观测被拒绝而重试写入。覆盖 observeBatch/beginSession/
+   * interrupt/markStale 与历史写。
+   */
+  lastDeliveryFailure(): { committed: true; error: unknown } | null {
+    return this.deliveryFailure;
+  }
+
+  /** 最近一次因库能力 false 而拒绝调用的写方法（B1 门禁的可观察事实）。 */
+  lastCapabilityRejection(): SharedSpatialWriteRejection | null {
+    return this.capabilityRejection;
   }
 
   /**
@@ -1451,14 +1765,109 @@ export class SharedSpatialSession {
    * `applied` 让调用者区分“写入后回调失败”和“未写入”。
    */
   private dispatch(report: ChangeReport, applied = 0): ChangeReport {
+    this.dispatchError(report, applied);
+    return report;
+  }
+
+  /**
+   * 历史写入的统一门禁：能力 false 不调用（也不回退），关停/未准入/暂停拒绝，
+   * 维度不是当前可信维度时拒绝——绝不按时间接近或请求推断写入。
+   */
+  private writeRejection(
+    dim: string,
+    method: MemoryWriteMethod,
+    sessionId: string | null = this.scope?.sessionId ?? null,
+  ): SharedSpatialWriteRejection | null {
+    if (!this.allowed('memory', method)) {
+      this.recordCapabilityRejection(method);
+      return {
+        kind: 'capability_unavailable', method,
+        detail: `library reports memory.${method}=false; the host does not call it and does not fall back`,
+      };
+    }
+    if (this.closingFlag) return { kind: 'closed', detail: 'shared spatial session is closing; history writes are rejected' };
+    const scope = this.scope;
+    if (this.pausedFlag || !this.admitted || scope === null) {
+      return { kind: 'not_ready', detail: 'shared spatial session is paused, not admitted, or has no trusted scope' };
+    }
+    if (dim !== scope.dim) {
+      return {
+        kind: 'scope_mismatch',
+        detail: `dimension "${dim}" is not the trusted dimension "${scope.dim}"`,
+        expectedDim: scope.dim, actualDim: dim,
+      };
+    }
+    const mismatch = this.sessionMismatch(sessionId);
+    return mismatch === null
+      ? null
+      : { kind: 'session_mismatch', detail: mismatch, expectedSession: scope.sessionId, actualSession: sessionId };
+  }
+
+  /**
+   * 旧会话的证据不得写成当前会话的事实：库只校验 fragment 的 world/dim，会话
+   * 归属只能由宿主校验。`null` sessionId 是“未知”，同样不能当作当前会话。
+   */
+  private sessionMismatch(sessionId: string | null): string | null {
+    const scope = this.scope;
+    if (scope === null || sessionId === scope.sessionId) return null;
+    return `evidence session ${sessionId === null ? 'null (unknown)' : `"${sessionId}"`} is not the trusted session "${scope.sessionId}"`;
+  }
+
+  /**
+   * 生命周期 markStale 的唯一入口：beginSession（换维）/interrupt/setPaused 都走这里。
+   * 能力 false 时不调用库，返回结构化 rejected 并记录 `lastCapabilityRejection()`；
+   * 调用方不得把空报告当成已应用的 STALE。
+   */
+  private staleReport(dim: string): SharedSpatialWriteResult {
+    if (!this.allowed('memory', 'markStale')) {
+      this.recordCapabilityRejection('markStale');
+      return {
+        status: 'rejected',
+        reason: {
+          kind: 'capability_unavailable', method: 'markStale',
+          detail: 'library reports memory.markStale=false; the lifecycle STALE boundary was not applied',
+        },
+      };
+    }
+    return { status: 'written', report: this.session.voxel.markStale(dim, 'observation_gap'), deliveryError: null };
+  }
+
+  /** 每���按启动时记录的那份报告读取能力位（测试可替换同一对象来模拟库答复）。 */
+  private allowed(domain: CapabilityDomain, name: string): boolean {
+    return capabilityGate(this.capabilityReport)(domain, name);
+  }
+
+  private recordCapabilityRejection(method: MemoryWriteCapability): void {
+    this.capabilityRejection = {
+      kind: 'capability_unavailable', method,
+      detail: `library reports memory.${method}=false; the host does not call it and does not fall back`,
+    };
+  }
+
+  /**
+   * 写入已提交后同步转发报告。订阅者失败按 §8.1 规则 6 保留为 `committed:true`，
+   * 不把已发生的写入改写成被拒绝。
+   */
+  private deliverApplied(report: ChangeReport, applied: number): SharedSpatialWriteResult {
+    const deliveryError = this.dispatchError(report, applied);
+    return { status: 'written', report, deliveryError };
+  }
+
+  /**
+   * 同步派发并保留第一份回调失败；`null` 表示没有失败。写入已经提交，失败只属于
+   * 报告转发（契约 §8.1 规则 6），调用者不得把它当成观测被拒绝而重试写入。
+   */
+  private dispatchError(report: ChangeReport, applied: number): { committed: true; error: unknown } | null {
     const attachment = this.attachment;
-    if (attachment === null) return report;
+    if (attachment === null) return null;
     try {
       attachment.receiver(report);
+      return null;
     } catch (error) {
       this.recordReceiverFailure(error, applied);
+      this.deliveryFailure = { committed: true, error };
+      return this.deliveryFailure;
     }
-    return report;
   }
 
   private recordReceiverFailure(error: unknown, applied: number): void {
@@ -1521,6 +1930,7 @@ export class SharedSpatialSession {
       revoked.attachment.receiver(report);
     } catch (error) {
       this.recordReceiverFailure(error, 0);
+      this.deliveryFailure = { committed: true, error };
     } finally {
       if (this.attachment === revoked.attachment) this.attachment = null;
     }
