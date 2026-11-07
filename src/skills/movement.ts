@@ -89,7 +89,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
     const direction = String(a.direction ?? 'auto').toUpperCase();
     if (direction !== 'AUTO' && !DIRS[direction]) return { ok: false, error: `direction 必须是 auto 或 ${Object.keys(DIRS).join('/')}` };
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;
-    if (until && until.split('|').some((t) => /^(base|home|家|基地|bed|床)$/.test(t.trim()))) return { ok: false, error: 'until 只认看得见的方块或生物；回家用 goto {"target":"base"}，路不通就看【身边】local 一段段走，或用 goto 到中途某个坐标' };
+    if (until && until.split('|').some((t) => /^(base|home|家|基地|bed|床)$/.test(t.trim()))) return { ok: false, error: 'until 只认看得见的方块或生物；回家用 resolve_target 解析 base 再 plan_route → walk_path，路不通就看【身边】local 用 move_step 一段段走，或 resolve_target 到中途某个坐标再 plan_route → walk_path' };
     return { ok: true, args: { direction, distance: clampInt(a.distance, 24, 160, 64), ...(until ? { until } : {}) } };
   },
   async run(ctx, args) {
@@ -106,7 +106,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       // 水底的石头、对岸的草地也“看得见”：说清楚它泡在水里，别当成脚下就有
       const above = at ? adapter.blockAt({ x: Math.floor(at.x), y: Math.floor(at.y) + 1, z: Math.floor(at.z) }) : null;
       const underwater = above === 'water' ? '（它在水底，上面是水）' : '';
-      return ok(`不用走远：已经看见 ${already.what} 就在 ${already.dist} 格外${where}${underwater}；这次没有走过去，要过去用 goto`, { found: already.what, dist: already.dist, moved: 0, ...(at ? { pos: at } : {}), ...(underwater ? { underwater: true } : {}) });
+      return ok(`不用走远：已经看见 ${already.what} 就在 ${already.dist} 格外${where}${underwater}；这次没有走过去，要过去用 resolve_target 解析它的坐标再 plan_route → walk_path`, { found: already.what, dist: already.dist, moved: 0, ...(at ? { pos: at } : {}), ...(underwater ? { underwater: true } : {}) });
     }
     // 这趟搜寻的进展（同一世界/维度、10 分钟内接着找同一样东西才算同一趟）
     let search = key ? searches.get(key) : undefined;
@@ -175,7 +175,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
       const net = Math.round(Math.hypot(here.x - search.start.x, here.z - search.start.z));
       const netDir = net >= 16 ? dirName(here.x - search.start.x, here.z - search.start.z) : '';
       const tips = [...notes, `为找 ${args.until} 这趟已经走了 ${search.walked} 格，离开始找的地方 ${net} 格${netDir ? `（朝 ${netDir}）` : ''}`];
-      if (search.legs >= 2 && net < search.walked * 0.5) tips.push('一直在附近绕：认准一个方向（explore 用 auto 或同一方向）一口气走远');
+      if (search.legs >= 2 && net < search.walked * 0.5) tips.push('一直在附近绕：认准一个方向（direction 用 auto 或同一方向）一口气走远');
       if (wood && s.biome && TREELESS.test(s.biome)) tips.push(`${s.biome} 里几乎没有树：沿同一方向一直走到群系边缘（看见草地、森林或河流）`);
       return `（${tips.join('；')}）`;
     };
@@ -227,7 +227,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
           // 换一个方向再试；最多试三个方向，避免只试两个就判死
         }
       }
-      return fail('PATH_NOT_FOUND', `${attempts.length} 个方向都无法前进（${attempts.join('；')}）；explore 本身不挖墙、不垫路，要穿过去可显式用 goto {"target":"<坐标>","dig":true}（挖墙/垫路/搭柱）或 place:true（只垫路），也可用 excavate_path 开一条通道`, { attempts });
+      return fail('PATH_NOT_FOUND', `${attempts.length} 个方向都无法前进（${attempts.join('；')}）；explore 本身不挖墙、不垫路；要穿过去可显式用 excavate_run（从当前站位向该方向开挖 stairs/tunnel，每次 ≤8 格；方向只认 north/east/south/west 之一），挡脚处用 mine_cell、要垫路用 place_cell/place_support、原地搭柱用 pillar_one（只垫一格，连续爬升需重复调用或换 place_cell 搭台阶），走通后再 plan_route → walk_path`, { attempts });
     } finally {
       clearInterval(prog);
     }
@@ -237,7 +237,7 @@ export const explore: Skill<{ direction: string; distance: number; until?: strin
 // ------------------------------------------------------------------ goto
 export const goTo: Skill<{ target: string; dig?: boolean; place?: boolean; tower?: boolean; sprint?: boolean; avoid?: string[]; lead?: string; headingOrigin?: Vec3Like }> = {
   name: 'goto',
-  description: '步行去地标或坐标；直接交给寻路按真实方块判断台阶、绕行和最多 4 格安全落差，不再先用视线挑选“看得见的落脚点”。明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。完成条件：坐标按指定格精确验收（相邻格只算部分进展，arrived:false），地标/方向按目标附近 2 格验收；后端 pathfinder。遇到木门会开门。默认不挖墙、不放方块；dig:true 兼容旧行为，允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
+  description: '步行去地标或坐标；直接交给寻路按真实方块判断台阶、绕行和最多 4 格安全落差，不再先用视线挑选“看得见的落脚点”。明确三维坐标尽量进入指定格，进不去时停在相邻格并说明差多少。完成条件：坐标按指定格精确验收（相邻格只算部分进展，arrived:false），地标/方向按目标附近 2 格验收；后端 pathfinder。遇到木门会开门。默认不挖墙、不放方块；dig:true 允许挖掘、垫路，并默认允许原地搭柱爬坡（可 tower:false 关闭）。place:false 可禁止放置，tower:false 可禁止原地搭柱；也可单独设 place:true 授权垫路、tower:true 授权搭柱。搭建消耗方块，可能在水面架桥。lead 可带指定生物走。',
   argsDoc: '{"target":"<地标、坐标或方向如 E 200>" 或 {"x":数字,"y":数字,"z":数字}, "dig"?:boolean, "place"?:boolean（允许垫路，默认继承 dig）, "tower"?:boolean（允许原地搭柱；dig:true 时默认开启，可 tower:false 关闭）, "sprint"?:boolean, "avoid"?:["方块名"], "lead"?:"生物名"}；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
   timeoutMs: 600000,
   movement: true,
@@ -610,7 +610,7 @@ async function walkTo(ctx: SkillCtx, args: { target: string; dig?: boolean; plac
 /** 沿自己记下的旧矿道（把全部通道连成网的脚点）逐段走：entrance 回记录入口（不一定是传送门/基地），deepest 下到最深处。 */
 export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?: string; dig?: boolean }> = {
   name: 'follow_passage',
-  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 goto 或 travel_portal；to:"deepest" 下到最深处；to:"farthest" 走到当前连通分量里水平距离最远的记录脚点（下界找要塞/结构探索用，不是最深）；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块（会消耗方块和工具耐久）；记录网断成两团时，dig:true 会先尝试接上 ≤8 格的小断口，再接回记录路线（接不上会说明尝试结果）。短 hop 会先核对目标脚格/头格/支撑格，不为了到达 x/z 离开记录路线；走不通就说明走到第几段、身体实际在哪、是否偏离记录路线（offRoute），单个坏点最多跳过一次，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处/最远点锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
+  description: '沿旧矿道回记录入口（不一定是传送门/基地）；to:"entrance" 取当前连通分量里靠近地表、且沿记录网实际路长最短的记录入口锚点（不是 y 最高或直线最近），要找特定传送门/基地用 resolve_target 解析，再 plan_route → walk_path；跨维度用 travel_portal；to:"deepest" 下到最深处；to:"farthest" 走到当前连通分量里水平距离最远的记录脚点（下界找要塞/结构探索用，不是最深）；可选 id 只选一条已知通道（含历史归档），不选则走去重后的全部记录连成的网。每段用步行寻路，dig:true 才允许挖开挡路、垫方块（会消耗方块和工具耐久）；记录网断成两团时，dig:true 会先尝试接上 ≤8 格的小断口，再接回记录路线（接不上会说明尝试结果）。短 hop 会先核对目标脚格/头格/支撑格，不为了到达 x/z 离开记录路线；走不通就说明走到第几段、身体实际在哪、是否偏离记录路线（offRoute），单个坏点最多跳过一次，接不上时给出 connectionGap 两端。回入口的路线如果明显绕远（路长 ≥24 格且比两端低 ≥8 格）、同时同分量有便宜得多的备选出口（≤0.7× 当前路长）时，会在开走前停下给出备选和代价；否则照常走。要强制走指定记录就带 id。完成条件：走完记录脚点后离入口/最深处/最远点锚点三维 ≤2 格才算 arrived；后端 pathfinder_waypoints；只认 to、id 与 dig，不提供 place/tower 施工权限',
   argsDoc: '{"to":"entrance"|"deepest"|"farthest", "id"?:string, "dig"?:boolean}',
   timeoutMs: 600000,
   movement: true,
@@ -664,7 +664,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       // 显式指定 id 时不合并：agent 选的就是那一条，合并可能把它删掉。
       const recs = args.id ? allRecs.filter((r) => r.id === args.id) : dedupePassages(allRecs);
       const archivedCount = recs.filter((r) => r.archivedAt !== undefined).length;
-      if (!recs.length) return receipt(fail('NOT_FOUND', args.id ? `没有找到通道 ${args.id}；用 query passages 核对 ID，或省略 id 走全部旧矿道` : '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 goto / excavate_path'));
+      if (!recs.length) return receipt(fail('NOT_FOUND', args.id ? `没有找到通道 ${args.id}；用 query passages 核对 ID，或省略 id 走全部旧矿道` : '没有记下的旧矿道；要先下矿走过/挖过一段，或改用 plan_route → walk_path / excavate_run'));
       const back = args.to === 'entrance';
       const goFar = args.to === 'farthest';
       // 入口解析同时记下这条出口所属的记录 ID：绕行预检要给 agent 一个“强制走这条”的 id。
@@ -677,7 +677,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       const anchor = `(${Math.round(target.x)},${Math.round(target.y)},${Math.round(target.z)})`;
       // 一开始就把解析到的记录锚点亮出来：entrance 只是记下的入口，不一定是 agent 想去的传送门/基地。
       ctx.progress(0, back
-        ? `目标：记录的通道地表入口锚点 ${anchor}（是记下的入口，不一定是想去的传送门/基地；指定目标请用 goto 或 travel_portal）`
+        ? `目标：记录的通道地表入口锚点 ${anchor}（是记下的入口，不一定是想去的传送门/基地；指定目标先用 resolve_target 解析，再 plan_route → walk_path；跨维度用 travel_portal）`
         : goFar ? `目标：记录的通道水平最远脚点 ${anchor}（不是最深点；用于往远处走）`
         : `目标：记录的通道最深处锚点 ${anchor}`);
       const kind = recs.some((r) => r.kind === 'dug') ? '挖过的旧矿道' : recs.some((r) => r.kind === 'bridge') ? '我搭的桥' : '走过的路';
@@ -794,7 +794,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
               ? allowDig
                 ? `；已按 dig:true 尝试沿断口挖/垫过去${bridgeError ? `，没成（${bridgeError}）` : ''}；挖/垫会消耗背包方块和工具耐久；可自己过去或改走别的路`
                 : gapDistance! <= 2
-                  ? `；这两格之间没有已记录的连接；${digFact}，或自己 step / dig_at / place_at（由你决定）`
+                  ? `；这两格之间没有已记录的连接；${digFact}，或自己 move_step / mine_cell / place_cell（由你决定）`
                   : `；${digFact}沿断口挖/垫过去接上，或改走别的路（不会自动补边）`
               : `；这是旧几何的现状，不会自动补边；${digFact}`;
             const why = pair && to && gapDistance !== null
@@ -1059,7 +1059,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
             const b = adapter.blockAt(h);
             if (b === null || AIR_BLOCKS.has(b) || isSoftBlock(b) || LIQUID_BLOCKS.has(b)) continue;
             if (!allowDig) {
-              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；${digFact}；或自己 dig_at 阶梯`, { position: last, initialPosition: here, segmentStart: { ...last }, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
+              return receipt(fail('PATH_NOT_FOUND', `沿${kind}${back ? '回入口' : '下最深'}走到第 ${i}/${route.length - 1} 段：下一路点 ${atText(wp)} 是 1 格上台阶，头顶 (${h.x},${h.y},${h.z}) 是 ${b}，两格高隧道里跳不上去；${digFact}；或自己 mine_cell 阶梯`, { position: last, initialPosition: here, segmentStart: { ...last }, reachedWaypoint: i, totalWaypoints: route.length - 1, blockedHead: h, ...skippedData() }));
             }
             try {
               await breakCell(ctx, h);
@@ -1250,7 +1250,7 @@ export const followPassage: Skill<{ to: 'entrance' | 'deepest' | 'farthest'; id?
       const arrived = dist3(end, target) <= 2;
       const place = arrived ? `到达${goal}参考点附近` : `离${goal}参考点约 ${remaining} 格`;
       // 回入口成功时再提醒一次：记录入口只是当前连通分量的锚点，不一定是 Agent 想去的门厅/传送门。
-      const entranceCaveat = back ? '；这是当前连通分量的记录入口，不一定是门厅/传送门；要回具体地点用 goto/travel_portal' : '';
+      const entranceCaveat = back ? '；这是当前连通分量的记录入口，不一定是门厅/传送门；要回具体地点用 resolve_target 解析目标再 plan_route → walk_path；跨维度用 travel_portal' : '';
       const archiveNote = archivedCount ? `；其中 ${archivedCount} 条来自历史归档，只算旧几何，沿途已按当前方块逐段尝试` : '';
       const adjustedNote = supportAdjusted.length ? `；支撑修正 ${supportAdjusted.length} 处（记录点悬空/装饰方块，已落到实际楼面）` : '';
       return receipt(ok(`沿${kind}${back ? '回入口' : '下最深'}走完了记下的 ${route.length} 个脚点，现在站在 (${end.x.toFixed(1)},${end.y.toFixed(1)},${end.z.toFixed(1)})，${place}（再往前没有记过的路，剩下的自己看）${entranceCaveat}${archiveNote}${deeper}${skippedWaypoints.length ? `；跳过了不可达路点 ${skippedWaypoints.map(atText).join('、')}` : ''}${adjustedNote}`, { position: end, remaining, target, arrived, walkedWaypoints: route.length, archivedCount, routeFacts, rescueCount, ...skippedData(), ...adjustedData() }));
@@ -1331,7 +1331,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
 // ------------------------------------------------------------------ unstuck（仅反射层使用）
 export const unstuck: Skill<{}> = {
   name: 'unstuck',
-  description: '脱困：看看身边哪边能走就往哪边走；四面都被封住且背包有可垫方块时，委托 climb_up 搭柱向上爬（会消耗背包里的可垫方块，可能先挖开头顶阻挡）。只由反射层使用，不自动改变玩法方法；结果按阶段列出实际放下的方块与数量',
+  description: '脱困：看看身边哪边能走就往哪边走；四面都被封住且背包有可垫方块时，自动垫方块搭柱向上爬（脚下有梯子时先沿梯爬）（会消耗背包里的可垫方块，可能先挖开头顶阻挡）。只由反射层使用，不自动改变玩法方法；结果按阶段列出实际放下的方块与数量',
   argsDoc: '{}',
   timeoutMs: 40000,
   movement: false,
@@ -1404,7 +1404,7 @@ export const surface: Skill<{ timeoutMs?: number }> = {
   movement: true,
   validate(raw) {
     const a = obj(raw);
-    if (a.escape !== undefined) return { ok: false, error: 'surface 不再接受 escape："dig"|"shore"（自动挖顶/找气穴/寻岸超出委托）。要挖开头顶用 dig_at，要向指定岸边游用 swim_to {"xyz":[x,y,z]}，要持续按住上浮用 press_keys {"keys":{"jump":true},"ms":…}' };
+    if (a.escape !== undefined) return { ok: false, error: 'surface 不再接受 escape："dig"|"shore"（自动挖顶/找气穴/寻岸超出委托）。要挖开头顶用 mine_cell，要游到指定位置用 swim_path {"xyz":[x,y,z],"mode":"water_point|dry_shore"}（dry_shore 到干岸站稳），要持续按住上浮用 press_keys {"keys":{"jump":true},"ms":…}' };
     const timeoutMs = a.timeoutMs;
     if (timeoutMs !== undefined && (!Number.isFinite(Number(timeoutMs)) || Number(timeoutMs) < 1000 || Number(timeoutMs) > 20000)) return { ok: false, error: 'timeoutMs 必须是 1000–20000 的毫秒数' };
     return { ok: true, args: timeoutMs !== undefined ? { timeoutMs: Math.round(Number(timeoutMs)) } : {} };
