@@ -517,10 +517,14 @@ test('read-only spatial_query does not load, pin, observe, or save', { timeout: 
       kind: 'cells', dim: DIM, positions: [{ x: 40, y: 0, z: 0 }],
     });
     assert.equal(result.status, 'succeeded');
-    const query = rec(rec(result.data).spatialQuery);
-    const cell = rec((query.results as unknown[])[0]);
-    assert.equal(cell.availability, 'unavailable_history');
-    assert.equal(rec(cell.residency).residency, 'not_resident');
+    const envelope = rec(result.data);
+    assert.equal(envelope.status, 'partial');
+    assert.equal(envelope.readOnly, true);
+    assert.equal(envelope.executable, false);
+    const cell = rec((rec(envelope.data).cells as unknown[])[0]);
+    assert.equal(cell.observed, false);
+    assert.equal(cell.residency, 'not_resident');
+    assert.deepEqual(rec(cell.gap), { pos: { x: 40, y: 0, z: 0 }, reason: 'unloaded' });
     assert.equal(spy.prepares.length, 0, '只读查询不得隐式 prepare');
     assert.equal(h.svc.workingSetStats().pinnedLeases, 0);
     assert.equal(h.svc.session.voxel.saveRevision, revisionBefore);

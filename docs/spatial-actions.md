@@ -52,22 +52,34 @@
 
 ## spatial_query
 
-只读查询共享空间记忆中已经记录的事实：指定方块的最近观测证据与 Section 驻留状态、单个历史片段（`polyline`/`entrances`/`links`）的分页、明确 traversal/node、历史拓扑路线，以及按维度分页的片段索引。
+只读查询共享空间记忆的契约端口（契约 §5）。返回 `SpatialQueryResult` 信封：`status`、`contract`、`worldId`、`dim`、`sessionId`、`computedAt`、`readOnly:true`、`executable:false`、`data`、`problem`、`total`、`nextAfter`。
+
+支持 15 种 kind：`cells`、`fragments`、`traversals`、`nodes`、`edges`、`historyRoute`、`anchor`、`components`、`segments`、`portals`、`resourceAnchors`、`containerAnchors`、`containerContents`、`snapshot`、`capabilities`。
 
 ```json
 {"kind":"cells","dim":"overworld","positions":[{"x":0,"y":64,"z":0}]}
-{"kind":"fragment","dim":"overworld","fragmentId":"id","field":"polyline|entrances|links","offset":0,"limit":16}
-{"kind":"traversals","dim":"overworld","ids":["t1"]}
-{"kind":"traversals","dim":"overworld","fragmentId":"id","after":"cursor","limit":4}
-{"kind":"nodes","dim":"overworld","ids":["n1"]}
-{"kind":"route","dim":"overworld","fromNodeId":"n1","toNodeId":"n2","mode":"walk","maxNodes":32,"maxEdges":128,"maxHistoryReads":64,"maxDiagnostics":8}
-{"kind":"fragments","dim":"overworld","after":"cursor","limit":4}
+{"kind":"fragments","dim":"overworld","fragmentKind":"walked","geometrySource":"traversal","after":"cursor","limit":100}
+{"kind":"traversals","dim":"overworld","fragmentId":"id","after":"cursor","limit":100}
+{"kind":"nodes","dim":"overworld","tag":"base","label":"home","source":"agent","after":"cursor","limit":100}
+{"kind":"edges","dim":"overworld","from":"n1","to":"n2","type":"HORIZONTAL","basis":"traversed","after":"cursor","limit":100}
+{"kind":"historyRoute","dim":"overworld","from":{"x":0,"y":64,"z":0},"to":{"x":10,"y":64,"z":0},"near":5}
+{"kind":"anchor","dim":"overworld","here":{"x":0,"y":64,"z":0},"order":"surface","near":6}
+{"kind":"components","dim":"overworld"}
+{"kind":"segments","fragmentId":"id"}
+{"kind":"portals","after":"cursor","limit":100}
+{"kind":"resourceAnchors","dim":"overworld","tag":"resource","label":"iron","after":"cursor","limit":100}
+{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}
+{"kind":"containerContents","dim":"overworld"}
+{"kind":"snapshot"}
+{"kind":"capabilities"}
 ```
 
-- `dim` 必须显式给出具体维度，不能是 `unknown`。ID 长度、数量、分页和预算都有上限；超出时直接拒绝，不 clamp。
-- 返回的是最近一次记录或历史几何，不代表当前世界、当前可通行性、当前可执行点列或在线观察。`FAILED`/`FOUND` 等历史状态不是当前结论。
-- `fragment` / `fragments` 的 `polyline`、`entrances`、`links` 是历史几何；`geometrySource` 只描述来源分类。片段索引与按 `fragmentId` 的 traversal 分页会扫描当前库的完整索引后再过滤、排序、取页；`limit` 只限制本页条数。输出超过 64 KiB 时返回结构化的 `result_too_large`，不截断证据。
-- 查询本身是只读的，不观察、不移动、不写入、不刷新证据时间。作为独立 Arbiter 任务时，仍遵循普通任务的抢占、取消与 `stopAll` 调度，不创建并发的只读通道。
+- 请求字段、枚举、未知字段与上限都由库 validator 校验：列表默认 `limit=100`、最大 `1000`，`cells` 最多 4096 个整数坐标；越界值返回 `status:"invalid_request"`（技能映射 `BAD_ARGS`），不 clamp。
+- 已移除的旧 kind 失败关闭：`fragment` 改用 `fragments`（完整几何在返回条目的 `polyline`），`route` 改用 `historyRoute` 或 `nodes`/`edges`，`traversals`/`nodes` 的 `ids` 模式改用过滤条件 + `after`/`limit`；`field`/`offset` 不再接受。
+- `containerContents` 固定 `status:"unsupported"` + `problem.kind:"host_ledger"`，无 `data`，不会用 `items:[]` 冒充空箱；本宿主未配置容器分类器，`containerAnchors` 固定 `unsupported`。
+- `capabilities` 的库报告原样在信封 `data.capabilities`；信封顶层另加 `hostComposed`（与 `status`/`contract` 同级，`owner:"host_composed"`）列出宿主真实接线。两者键组对齐但形状独立，不互相冒充。
+- 历史几何、观测证据与分段都不代表当前可通行或可执行；`historyRoute` 固定 `historicalGeometry:true`、`executable:false`、`currentPassability:"UNKNOWN"`；`snapshot` 只是只读计数/版本/能力。
+- 查询本身是只读的：不观察、不移动、不加载 Section、不写入、不刷新证据时间、不 pin/保存。作为独立 Arbiter 任务时，仍遵循普通任务的抢占、取消与 `stopAll` 调度，不创建并发的只读通道。响应超过 64 KiB 时返回结构化 `result_too_large`，不截断证据。
 - 通过 `use_skill` / 代码里的 `api.act("spatial_query", …)` 调用时，沿用现有技能校验与执行链路，并共享同一 `ctx.spatial`、取消信号、`taskId` 与父期限。
 
 ### 查询记账

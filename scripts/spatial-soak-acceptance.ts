@@ -67,7 +67,7 @@ import {
   localBodyCells,
   parseRconList,
   preflightBotConflict,
-  validateFragmentsQuery,
+  validateQueryPage,
   type CapturedMove,
   type CapturedRouteSample,
   type PhysicsFrame,
@@ -1862,8 +1862,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     try {
       if (outcome === null) throw new Error('spatial_query timed out before terminal outcome');
       if (outcome.result.status !== 'succeeded') throw new Error(`spatial_query status ${outcome.result.status}`);
-      const query = isRecordValue(outcome.result.data) ? outcome.result.data.spatialQuery : undefined;
-      const checked = validateFragmentsQuery(query);
+      const query = isRecordValue(outcome.result.data) ? outcome.result.data : undefined;
+      const checked = validateQueryPage(query, 'fragments');
       emit('query-verdict', info.id, { legTaskId, verdict: checked, query: query === undefined ? null : clone(query) });
       if (!checked.ok) throw new Error(`spatial_query invalid: ${checked.problems.join(', ')}`);
       queryVerifiedLegs += 1;

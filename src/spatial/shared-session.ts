@@ -26,13 +26,16 @@ import type {
   VoxelLoading,
   WorkingSetStats,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { VoxelResidencyError } from 'curio-minecraft-3d-memory';
+import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-memory';
 import type {
   ChangeReport,
   Observation,
   ResidencyLimits,
   SectionKey,
   SectionResidency,
+  SpatialQueryPort,
+  SpatialQueryRequest,
+  SpatialQueryResult,
 } from 'curio-minecraft-3d-memory';
 import type { BlockObservation } from '../adapter/types.ts';
 import { MAX_DEADLINE_DELAY_MS, WorkingSetCoordinator } from './working-set.ts';
@@ -389,6 +392,8 @@ export class SharedSpatialSession {
   private readonly operationTimeoutMs: number;
   private readonly coordinator: WorkingSetCoordinator | null;
   private readonly diagnostic: ((diagnostic: SharedSpatialDiagnostic) => void) | undefined;
+  /** 唯一查询端口：只读组合 session 的 voxel/history/topology，不暴露写入方法。 */
+  private readonly queryPort: SpatialQueryPort;
 
   /** 已接受的原始 handoff，按到达顺序；最多 MAX_PENDING_OBSERVATIONS 条。 */
   private pending: PendingHandoff[] = [];
@@ -422,6 +427,7 @@ export class SharedSpatialSession {
     databasePath: string,
     operationTimeoutMs: number,
     diagnostic: ((diagnostic: SharedSpatialDiagnostic) => void) | undefined,
+    now: () => number,
   ) {
     this.session = session;
     this.worldId = worldId;
@@ -429,14 +435,25 @@ export class SharedSpatialSession {
     this.operationTimeoutMs = operationTimeoutMs;
     this.diagnostic = diagnostic;
     this.coordinator = session.voxelLoading === 'manual' ? new WorkingSetCoordinator(session) : null;
+    // 不传 isContainer：宿主目前没有容器分类器，库会把 containerAnchors 如实报为
+    // unsupported，而不是按节点名/标签猜测。构造只持有三个内存存储的引用。
+    this.queryPort = new SpatialMemoryStoreImpl({
+      worldId,
+      map: session.voxel,
+      fragments: session.history,
+      topology: session.topology,
+      query: { now },
+    });
   }
 
   static async open(options: SharedSpatialOpenOptions): Promise<SharedSpatialSession> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // 同一个时钟供体素中断边界与查询信封使用；测试可注入固定时钟。
+    const now = options.now ?? Date.now;
     const session = await openSpatialSession({
       worldId: options.worldId,
       databasePath: options.databasePath,
-      voxelOptions: options.now ? { now: options.now } : undefined,
+      voxelOptions: { now },
       ...(options.voxelLoading === undefined ? {} : { voxelLoading: options.voxelLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       timeoutMs,
@@ -449,7 +466,19 @@ export class SharedSpatialSession {
       options.databasePath,
       timeoutMs,
       options.onWorkingSetDiagnostic,
+      now,
     );
+  }
+
+  /**
+   * 只读查询委托（契约 §5.1）：不观察、不移动、不加载 Section、不刷新证据时间、
+   * 不写库、不 pin/保存。所有事实都来自 session 已经拥有的内存存储。
+   *
+   * 请求在这里只做一次类型化：库的 `SpatialQueryPort` 是运行期 schema 的拥有者，
+   * 未知 kind/字段与越界值都由它返回结构化 `invalid_request`。
+   */
+  query(request: unknown): SpatialQueryResult {
+    return this.queryPort.query(request as SpatialQueryRequest);
   }
 
   get paused(): boolean {
