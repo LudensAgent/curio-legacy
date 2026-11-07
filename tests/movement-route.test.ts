@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap, type PathFragment } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
-import { planRoute, resolveTarget, walkPath, getRouteRecord, clearRouteRecords } from '../src/skills/movement/index.ts';
+import { planRoute, resolveTarget, walkPath, clearRouteRecords } from '../src/skills/movement/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -174,7 +174,7 @@ test('plan_route source:"history" 可显式给 pathId，也可在附近记录路
   assert.equal(explicit.data?.kind, 'dug');
   assert.equal(explicit.data?.confidence, 'verified');
   assert.equal((explicit.data?.points as unknown[]).length, 3);
-  assert.ok(getRouteRecord(String(explicit.data?.routeId)), 'routeId 应可在进程内取回');
+  assert.match(String(explicit.data?.routeId), /^rt_/, 'routeId 由库注册表签发');
 
   const recalled = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'history', arrival: { kind: 'exact' } });
   assert.equal(recalled.status, 'succeeded', recalled.summary);
@@ -208,7 +208,7 @@ test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划
   assert.equal(r.status, 'succeeded', r.summary);
   assert.ok(r.data?.confidence === 'verified' || r.data?.confidence === 'candidate');
   assert.ok((r.data?.points as unknown[]).length >= 2);
-  assert.ok(getRouteRecord(String(r.data?.routeId)));
+  assert.match(String(r.data?.routeId), /^rt_/);
   assert.deepEqual(w.actions, []);
 });
 

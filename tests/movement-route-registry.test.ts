@@ -12,7 +12,6 @@ import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import {
   clearRouteRecords,
   consumeRoutePlan,
-  getRouteRecord,
   planRoute,
   releaseRoutePlan,
 } from '../src/skills/movement/index.ts';
@@ -96,7 +95,6 @@ test('plan_route 薄适配库 planRoute：库签发 routeId、保存完整计划
   assert.ok((r.data?.evidence as { validUntil?: number }).validUntil !== undefined);
   assert.ok(Number(r.data?.expiresAt) <= Date.now() + 30_000 + 100);
   assert.ok(Array.isArray(r.data?.boundaries));
-  assert.ok(getRouteRecord(routeId), '旧执行器视图仍能取回计划');
 
   const first = consumeRoutePlan(routeId, SCOPE);
   assert.ok(isPlan(first), '第一次消费应返回库计划');
@@ -145,7 +143,7 @@ test('历史召回起点 >0.05 返回结构化 history_start_mismatch，不从�
   assert.deepEqual(explicit.data?.start, { x: 2.5, y: 64, z: 0.5 });
   assert.deepEqual(explicit.data?.routeStart, { x: 0.5, y: 64, z: 0.5 });
   assert.equal(explicit.data?.drift, 2);
-  assert.equal(getRouteRecord('frag-away'), undefined);
+  assert.equal(explicit.data?.routeId, undefined, '起点不符时不得签发可执行 routeId');
 
   const recalled = await planRoute.run(ctx, ask({ x: 2.5, y: 64, z: 0.5 }, 'history'));
   assert.equal(recalled.status, 'failed');
