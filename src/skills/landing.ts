@@ -33,14 +33,14 @@ export function assessLanding(option: LandingOption, hp: number, supportTopValue
 
 export const assessLandings: Skill<{ radius: number }> = {
   name: 'assess_landings',
-  description: '只读评估当前可见的较低地面或水面：精确落点、落差、入口净空、可见水深与按当前生命粗估的摔伤；支撑顶面用与 step/descend 相同的碰撞形状复核并标出不一致，未知如实保留；不选择落点，也不保证四周无路',
+  description: '只读评估当前可见的较低地面或水面：精确落点、落差、入口净空、可见水深与按当前生命粗估的摔伤；支撑顶面用与 move_step/descend_to 相同的碰撞形状复核并标出不一致，未知如实保留；不选择落点，也不保证四周无路',
   argsDoc: '{"radius"?:1-12}', timeoutMs: 3000, movement: false, readOnly: true,
   validate(raw) { return { ok: true, args: { radius: clampInt(obj(raw).radius, 1, 12, 6) } }; },
   async run(ctx, args) {
     if (!ctx.senses.landingOptions) return fail('NOT_FOUND', '感官没有提供可见落点，不能凭坐标读取隐藏地形');
     ctx.senses.refresh();
     const state = ctx.adapter.state();
-    // 支撑顶面按当前已观察 blockstate 的碰撞形状复核，与 step/descend 共用 supportTop；
+    // 支撑顶面按当前已观察 blockstate 的碰撞形状复核，与 move_step/descend_to 共用 supportTop；
     // 拿不到状态或形状未确认时如实返回 null/unknown，不按整数脚高假定。
     const options = ctx.senses.landingOptions(args.radius).map((option) => {
       if (option.surface === 'water') return assessLanding(option, state.hp);

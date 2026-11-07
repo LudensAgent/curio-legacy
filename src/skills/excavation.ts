@@ -5,6 +5,7 @@ import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
+import { markSelfModified } from '../spatial/shared-session.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 export interface ExcavationArgs {
@@ -516,6 +517,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           stop.refill = { at: { ...pos }, name: cleared };
           throw stop;
         }
+        // 只有挖后复核确实变成空气才计入：这时才是已确认的自身动作修改。
+        markSelfModified(ctx.spatial, origin.dim, pos, ctx.taskId);
         excavated++;
         assertSession(ctx, origin);
       }

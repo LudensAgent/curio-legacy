@@ -1936,3 +1936,19 @@ export class SharedSpatialSession {
     }
   }
 }
+
+/**
+ * 动作确认链的 `markModified` 接线（D-070 B3）：技能只在自己核实过格子变化后才调用。
+ * 能力 false / 未准入 / 暂停 / 维度不符时返回 `null`——不调用库、不回退、不把拒绝报成成功；
+ * 已提交的写入报告原样返回。没有共享会话（测试或未接线的宿主）时不写。
+ */
+export function markSelfModified(
+  spatial: SharedSpatialSession | undefined,
+  dim: string,
+  pos: Vec3Like,
+  actionId: string,
+) {
+  if (!spatial) return null;
+  const result = spatial.markModified(dim, pos, actionId);
+  return result.status === 'rejected' ? null : result;
+}

@@ -223,7 +223,7 @@ async function digPit(ctx: SkillCtx, args: { until: 'day' | 'healed' }): Promise
     const problem = chamberProblem(true);
     if (problem) return fail('ERROR', problem);
     const s = adapter.state();
-    return ok(`在避难所里待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；人在自己挖的坑底，正上方 3 格就是原来的地面，出去时 dig {"dir":"up","blocks":3} 或直接走动（会挖开顶上的方块）`);
+    return ok(`在避难所里待到${s.isDay ? '天亮' : '现在'}，生命 ${Math.round(s.hp)}；人在自己挖的坑底，正上方 3 格就是原来的地面，出去时用 mine_cell 逐格挖开正上方 3 格（{"at":[0,1,0]}、{"at":[0,2,0]}、{"at":[0,3,0]}）或直接走动（会挖开顶上的方块）`);
   }
 }
 
