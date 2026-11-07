@@ -28,6 +28,7 @@ function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}
     session: {
       voxel: map,
       history: {
+        worldId: WORLD,
         getFragment: (id: string) => fragments[id] ?? null,
         fragments: () => ({ items: Object.values(fragments), total: Object.keys(fragments).length }),
       },
@@ -162,8 +163,9 @@ test('plan_route source:"history" 可显式给 pathId，也可在附近记录路
   t.after(() => ctx.memory.close());
   clearRouteRecords();
 
-  // 没有匹配的记录路线：明确失败，不猜测。
-  const missing = await planRoute.run(ctx, { to: { x: 20, y: 64, z: 20 }, mode: 'walk', source: 'history', arrival: { kind: 'exact' } });
+  // 历史里没有起点匹配的记录路线：明确失败，不猜测。
+  const empty = { ...ctx, spatial: fakeSpatial(map) };
+  const missing = await planRoute.run(empty, { to: { x: 20, y: 64, z: 20 }, mode: 'walk', source: 'history', arrival: { kind: 'exact' } });
   assert.equal(missing.status, 'failed');
   assert.match(missing.summary, /记录路线/);
 
@@ -191,7 +193,8 @@ test('plan_route history 拒绝变高路线，不伪装成可执行', async (t) 
   const r = await planRoute.run(ctx, { to: { x: 2, y: 63, z: 0 }, mode: 'walk', source: 'history', pathId: 'frag-stairs', arrival: { kind: 'exact' } });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /高度/);
+  assert.equal((r.data?.unsupported as { kind?: string } | undefined)?.kind, 'unsupported_geometry');
+  assert.match(r.summary, /height|same-height/i);
 });
 
 test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划阶段零移动', async (t) => {
