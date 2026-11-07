@@ -66,7 +66,7 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
-/** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（climb_up 只垫不挖，不算） */
+/** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（pillar_one 只垫不挖，不算） */
 const DIGGING_SKILLS = new Set(['gather', 'mine_cell', 'excavate_run', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'walk_path', 'swim_path', 'build']);
 
 /** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
@@ -105,7 +105,7 @@ interface Snapshot { at: number; sessionId: string; dim: string; pos: AgentState
  * 交给恢复技能的“刚失败的那一步”：除了动作、参数、失败码和一句话，还带上动作自己算出来的目标坐标
  * （比如 goto "NW 20" 实际要去的那一格）和失败时人在哪——以前只有一句话，恢复技能和它的核对都“没有目标坐标”
  */
-export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }, climb?: { height: number; spent: number; startY: number }, climbId?: string) {
+export function failureFor(step: { skill: string; args?: unknown }, result: { failureCode?: string | null; summary: string; data?: unknown }, pos: { x: number; y: number; z: number }) {
   const d = result.data && typeof result.data === 'object' ? result.data as Record<string, unknown> : {};
   const blockTarget = d.blockTarget && typeof d.blockTarget === 'object' ? d.blockTarget as Record<string, unknown> : {};
   const target = worldPoint(d.resolvedTarget) ?? worldPoint(d.targetCell) ?? worldPoint(d.target) ?? worldPoint(blockTarget.pos) ?? ((step.skill === 'mine_cell' || step.skill === 'excavate_run') ? worldPoint(d.pos) : undefined);
@@ -115,8 +115,6 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
     ...(Number.isSafeInteger(d.targetId ?? d.entityId) ? { entityId: Number(d.targetId ?? d.entityId) } : {}),
     position: worldPoint(d.position) ?? { ...pos },
     ...(d.waterAhead !== undefined ? { waterAhead: !!d.waterAhead } : {}),
-    ...(climb ? { climb } : {}),
-    ...(climbId ? { climbId } : {}),
   };
 }
 
@@ -666,14 +664,12 @@ export class Mind {
     // 自动续跑的绝对期限只走调度预算 meta.deadlineMs，不改写技能参数：
     // 参数注入会被 use_skill 等严格校验器当成未知字段拒绝，也不该混进动作记录。
     const dispatch = step;
-    const climb = step.skill === 'pillar_one' ? this.activity.climb?.[step.id ?? JSON.stringify(step.args ?? {})] : undefined;
     // 额外的 deadlineMs 只在自动续跑时出现；新的显式委托不传，Arbiter 仍按技能自身 timeout 起算。
     const schedule: Parameters<Arbiter['start']>[2] & { deadlineMs?: number } = {
       planId: this.activity.id,
       ...(step.id ? { stepId: step.id } : {}),
       ...(step.origin ? { origin: step.origin } : {}),
       ...(step.authorizedBy ? { authorizedBy: step.authorizedBy } : {}),
-      ...(climb ? { climb } : {}),
       ...(budget?.continuation ? { deadlineMs: budget.deadlineMs } : {}),
     };
     const r = this.d.arbiter.start(dispatch, this.activity.source === 'rule' ? 'rule' : 'llm', schedule);
@@ -890,8 +886,7 @@ export class Mind {
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
-        // 顶层 climb_up 的进展已在账本实时入账，回退后按剩余额度续跑；普通嵌套技能（use_skill 等）内的爬升没有可靠续跑状态，
-        // 若已产生部分爬升，把部分完成事实交回 Agent，不整段重播。
+        // 嵌套技能（use_skill 等）内的部分爬升没有可靠续跑状态：把部分完成事实交回 Agent，不整段重播。
         const climbed = o.result.data?.climbed;
         if (o.task.skill !== 'pillar_one' && typeof climbed === 'number' && climbed > 0) {
           const spent = o.result.data?.spent;
@@ -953,10 +948,8 @@ export class Mind {
         a.adaptations.push(`skill:${b.name}`);
         a.awaitingRecovery = b.name;
         const own = a.steps[Math.max(0, a.index - 1)];
-        const climb = step.skill === 'pillar_one' ? a.climb?.[own?.id ?? JSON.stringify(step.args ?? {})] : undefined;
-        const climbId = step.skill === 'pillar_one' ? own?.id : undefined;
         a.steps.splice(Math.max(0, a.index - 1), 0, {
-          skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos, climb, climbId) }, optional: true, id: shortId('st_'),
+          skill: 'use_skill', args: { name: b.name, failure: failureFor(step, result, this.d.adapter.state().pos) }, optional: true, id: shortId('st_'),
           origin: 'execution_helper', authorizedBy: { skill: step.skill, ...(own?.id ? { stepId: own.id } : {}), args: step.args },
         });
         a.index = Math.max(0, a.index - 1);
@@ -1489,19 +1482,7 @@ export class Mind {
       const running = this.d.arbiter.info();
       const currentIndex = a.index - 1;
       const runningId = a.steps[currentIndex]?.id;
-      // 稳定参数：去掉可变运行状态（如恢复账本 failure.climb），身份校验只比较稳定委托参数，恢复账本由 climbId 绑定。
-      const stableArgs = (args: unknown): unknown => {
-        if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
-        const a = args as Record<string, unknown>;
-        const failure = a.failure;
-        if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
-          const f = { ...(failure as Record<string, unknown>) };
-          delete f.climb;
-          return { ...a, failure: f };
-        }
-        return args;
-      };
-      // 1. 先校验整个草案的实例引用：存在、唯一、动作与稳定参数一致。失败保留现状并反馈原因，不把错误引用解释为新动作授权。
+      // 1. 先校验整个草案的实例引用：存在、唯一、动作与参数一致。失败保留现状并反馈原因，不把错误引用解释为新动作授权。
       const referenced = new Set<string>();
       for (let i = 0; i < draft.steps.length; i++) {
         const s = draft.steps[i];
@@ -1510,7 +1491,7 @@ export class Mind {
         referenced.add(s.id);
         const old = a.steps.find((o) => o.id === s.id);
         if (!old) { decision.notes.push(`steps[${i}] 引用了不存在的实例 #${s.id}，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：未知实例 #${s.id}`, { planId: a.id }); return; }
-        if (old.skill !== s.skill || !isDeepStrictEqual(stableArgs(old.args), stableArgs(s.args))) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
+        if (old.skill !== s.skill || !isDeepStrictEqual(old.args, s.args)) { decision.notes.push(`steps[${i}] 引用了实例 #${s.id} 但参数已变：要改目标就新建动作（去掉 id），调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：实例 #${s.id} 参数不符`, { planId: a.id }); return; }
       }
       // 2. 决定是否保留在途任务：所有步骤统一按已验证的实例 ID 判断（省略 ID 视为新建），不用参数匹配回退。
       const sameRunning = (draftStep: { id?: string } | undefined, old: { id?: string }) => !!draftStep && !!draftStep.id && draftStep.id === old.id;
@@ -1519,44 +1500,11 @@ export class Mind {
       const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameRunning(draft.steps[currentIndex], runningOld)
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
-      // 2.5 校验将继续执行（运行及之后）的恢复步骤的父账本：无论是否带步骤 ID，账本必须仍在，否则返回明确错误。
-      for (let i = Math.max(0, runningIndex); i < draft.steps.length; i++) {
-        const s = draft.steps[i];
-        if (s.skill !== 'use_skill') continue;
-        const f = (s.args as Record<string, unknown> | undefined)?.failure as { climbId?: string } | undefined;
-        if (typeof f?.climbId === 'string' && f.climbId && !a.climb?.[f.climbId]) { decision.notes.push(`steps[${i}] 的恢复需要父账本 #${f.climbId}，但该账本已不存在，调整未生效`); this.d.bus.publish('activity_adjust', 'P2', `调整被拒绝：恢复父账本 #${f.climbId} 缺失`, { planId: a.id }); return; }
-      }
       // 全部校验通过后再取消旧任务：拒绝非法调整不得取消原动作，避免原动作被取消后活动仍被记为 done。
       if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
-      // 3. 分配 ID：引用保留原 ID，新建分配新 ID；恢复步骤按 climbId 重新绑定当前账本，不采用模型回传的进度副本。
-      const steps = draft.steps.map((s) => {
-        const step = { ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') };
-        if (step.skill === 'use_skill' && step.args && typeof step.args === 'object') {
-          const args = step.args as Record<string, unknown>;
-          const failure = args.failure;
-          if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
-            const f = failure as Record<string, unknown>;
-            if (typeof f.climbId === 'string' && f.climbId) {
-              const entry = a.climb?.[f.climbId];
-              if (entry) args.failure = { ...f, climb: entry };
-            }
-          }
-        }
-        return step;
-      });
-      // 4. 保留被引用实例的账本：既含步骤自身 ID，也含恢复步骤通过 failure.climbId 引用的父账本（删除父步骤仍保留恢复时账本不丢）。
-      const preservedClimb: Record<string, { height: number; spent: number; startY: number }> = {};
-      for (const s of steps) {
-        if (typeof s.id === 'string') { const entry = a.climb?.[s.id]; if (entry) preservedClimb[s.id] = entry; }
-        if (s.skill === 'use_skill' && s.args && typeof s.args === 'object') {
-          const failure = (s.args as Record<string, unknown>).failure;
-          if (failure && typeof failure === 'object' && !Array.isArray(failure)) {
-            const f = failure as Record<string, unknown>;
-            if (typeof f.climbId === 'string' && f.climbId) { const entry = a.climb?.[f.climbId]; if (entry) preservedClimb[f.climbId] = entry; }
-          }
-        }
-      }
-      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0, climb: preservedClimb,
+      // 3. 分配 ID：引用保留原 ID，新建分配新 ID。
+      const steps = draft.steps.map((s) => ({ ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') }));
+      Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;

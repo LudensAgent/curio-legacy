@@ -190,7 +190,7 @@ export function describeBuildProblems(result: ConstructionResult): string {
     out.push(`还有 ${missingCells} 块没放上${reachNote}`);
   }
   if (d.length) out.push(`具体缺陷：${d.slice(0, 3).map((x) => `${x.kind} @ (${x.pos.x},${x.pos.y},${x.pos.z}) expected=${x.expected}, actual=${x.actual ?? 'unknown'}`).join('；')}${d.length > 3 ? `；其余 ${d.length - 3} 处见 inspection.defects` : ''}`);
-  if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；goto 只到附近，随后按方位 dig 可能挖到别的墙；处理后用 mode:"inspect" 复验');
+  if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；plan_route → walk_path 只到附近，随后按方位 mine_cell 可能挖到别的墙；处理后用 mode:"inspect" 复验');
   if (d.some((x) => ['missing', 'wrong_block', 'wrong_state'].includes(x.kind))) out.push('缺块/结构错位用 mode:"repair" 按原档案修补；改变布局需同时提交新 spec');
   if (unknown) out.push('走近上述坐标加载区块后，用 mode:"inspect" 重新检查');
   return out.length ? `${out.join('；')}。` : '';

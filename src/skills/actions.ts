@@ -37,8 +37,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、boat_path 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体）；船/筏是实体不是方块，interact_block 只对可见方块右键并拒绝船/筏，on 写坐标当前也不支持船/筏；放船后用 interact {"entity":"boat"} 坐上去、boat_path 划走；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell；船/筏写 water，坐标形式不支持船/筏）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -68,9 +68,13 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     if (!s.inventory.some((i) => i.name === args.item)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
     if (typeof args.on !== 'string') {
       const pos = args.on;
+      // 船/筏是实体不是方块，坐标放船属于另一套放置语义（A2 未批准）：明确拒绝并指向现有入口，不落进桶/点火的泛化报错。
+      if (/_boat$|_raft$/.test(args.item)) {
+        return fail('BAD_ARGS', `on 写坐标当前不支持放船/筏：${args.item} 是船/筏（实体，不是方块），不能用 interact_block 右键；坐上去用 interact {"entity":"boat"}，放船用 use_item {"item":"${args.item}","on":"water"}`, { item: args.item, pos });
+      }
       // 按坐标右键种树没有“落点”语义（落点由命中的面决定）；直接给出能指定格子的入口，别落进桶/点火专用的报错。
       if (isTreeSaplingItem(args.item)) {
-        return fail('BAD_ARGS', `${args.item} 不能对坐标右键种下：要指定格子和下方的土壤用 place_at {"at":[前,上,右],"item":"${args.item}"}（树苗/红树苗正下方必须是草方块/泥土/砂土/灰化土/泥等土壤）；或把 on 写成 "grass_block"/"dirt"/"mud"，走到能看见的土壤旁右键种下`, { hint: 'place_at', item: args.item });
+        return fail('BAD_ARGS', `${args.item} 不能对坐标右键种下：要指定格子和下方的土壤用 place_cell {"at":[前,上,右],"item":"${args.item}"}（树苗/红树苗正下方必须是草方块/泥土/砂土/灰化土/泥等土壤）；或把 on 写成 "grass_block"/"dirt"/"mud"，走到能看见的土壤旁右键种下`, { hint: 'place_cell', item: args.item });
       }
       if (IGNITE_ITEMS.has(args.item)) {
         if (!adapter.useBlockAt) return fail('ERROR', '当前适配器不支持对坐标使用物品');
@@ -423,7 +427,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
     }
     if (!direction && !to) return { ok: false, error: '需要 direction 或 to' };
     for (const flag of ['dig', 'place', 'tower'] as const) if (a[flag] !== undefined) {
-      return { ok: false, error: `ride 不认 ${flag}：驾驶载具不会挖、放或搭柱；要施工先下船后用 dig_at/place_at/climb_up，下乘用 dismount` };
+      return { ok: false, error: `ride 不认 ${flag}：驾驶载具不会挖、放或搭柱；要施工先下船后用 mine_cell/place_cell/pillar_one，下乘用 dismount` };
     }
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;
     return { ok: true, args: { ...(direction ? { direction } : {}), ...(to ? { to } : {}), distance: clampInt(a.distance, 8, 240, 48), ...(until ? { until } : {}) } };
@@ -583,7 +587,7 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   async run(ctx, args) {
     const a = ctx.adapter;
     if (!a.diveTo) return fail('ERROR', '当前适配器不会潜水');
-    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 goto / step');
+    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 plan_route → walk_path，或逐格 move_step');
     const d = dist3(a.state().pos, args.xyz);
     if (d > 24) return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 有 ${Math.round(d)} 格远，一口气游不到；先游近一点`);
     try {
@@ -627,9 +631,9 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const s0 = a.state();
     // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
     const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
-    // 目标格已观察为岩浆：swim_to 只有水面控制，明确拒绝而不是把身体开进岩浆；风险事实交给 Agent 决定下一步。
+    // 目标格已观察为岩浆：swim_path 只有水面控制，明确拒绝而不是把身体开进岩浆；风险事实交给 Agent 决定下一步。
     if (a.blockAt(args.xyz) === 'lava') {
-      return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_to 只做水面游泳，不执行进入岩浆；如果确实要靠近，风险与做法由你选择`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+      return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_path 只做水面游泳，不执行进入岩浆；如果确实要靠近，风险与做法由你选择`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     }
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
@@ -744,7 +748,7 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
     const horizontal = Math.hypot(after.pos.x - before.x, after.pos.z - before.z);
     const stuckJumping = !!args.keys.jump && !after.inWater && horizontal < 0.5;
     const data = { keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
-    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 step 或 climb_up' : ''}`;
+    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 move_step 或 pillar_one' : ''}`;
     return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
   },
 };

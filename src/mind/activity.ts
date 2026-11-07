@@ -178,6 +178,7 @@ export function viewOf(p?: Percept): string | undefined {
 /**
  * 自动重试只看失败回执里实际观测到的相关事实：支撑/净空、目标格、进度、额度和身体位置。
  * 转头、背包/附近资源增减、无关火把不在其中，不能用来给同一缺口再要一次重试。
+ * pillarClearance 由 pillar_one 的失败回执真实产出（movement/primitives.ts），属于缺口证据。
  */
 const GAP_EVIDENCE_FIELDS = [
   'movementNotAttempted', 'obscured', 'failureCause', 'pillarFailure', 'pillarClearance', 'reference', 'occupied',
@@ -264,6 +265,21 @@ const OPTIONAL_HOPELESS = new Set(['TARGET_GONE', 'BAD_ARGS', 'UNKNOWN_ITEM', 'W
 
 /** 失败了值得原样再试一次的情况（路被挡、东西跑了、偶发错误） */
 const RETRYABLE = new Set(['TIMEOUT', 'STUCK', 'PATH_NOT_FOUND', 'TARGET_GONE', 'ERROR', 'EFFECT_NOT_CONFIRMED']);
+/** 技能报告的确定性停点：几何/材料/站位不变时，原样重放不会改变结果。 */
+const DETERMINISTIC_STOPS = new Set(['impossible', 'risk', 'capability', 'missing_support']);
+
+/**
+ * 同一失败的自动重试上限。EFFECT_NOT_CONFIRMED 的回填/未加载失败与结构化确定性停点
+ * （risk/capability/missing_support/decisionRequired/缺支撑）最多再确认一次；
+ * 路被挡、超时、目标消失等暂时失败仍保留两次复验额度。
+ */
+function autoRetryLimit(code: string, data: Record<string, unknown> | undefined): number {
+  const deterministic = code === 'EFFECT_NOT_CONFIRMED'
+    || data?.decisionRequired === true
+    || (typeof data?.stopKind === 'string' && DETERMINISTIC_STOPS.has(data.stopKind))
+    || (!!data?.supportMissing && typeof data.supportMissing === 'object');
+  return deterministic ? 1 : 2;
+}
 /** 不想清楚就没法继续的失败（缺材料、缺工具、背包满…） */
 const NEEDS_THOUGHT = new Set(['MISSING_MATERIALS', 'WOULD_WASTE', 'NO_CRAFTING_TABLE', 'TOOL_MISSING', 'UNKNOWN_ITEM', 'BAD_ARGS', 'INVENTORY_FULL', 'NO_FOOD', 'WRONG_DIMENSION', 'LOW_HP']);
 
@@ -431,8 +447,6 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'pillar_one' && data?.failureCause === 'PILLAR_CLEARANCE') {
     return { kind: 'stuck', why: clipFeedback(result.summary) };
   }
-  // walk_path 是「委托寻路」：头顶被挡是路线事实，不替 Agent 决定挖哪一格——挖开、绕行还是退回去由它定。
-  if (step.skill === 'walk_path' && data?.pillarClearance) return { kind: 'stuck', why: clipFeedback(result.summary) };
   // place_cell / place_support 是普通放置：不隐式清顶或挖脚下；交回事实，挖哪一格由 Agent 决定。
   if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间受阻') return { kind: 'stuck', why: clipFeedback(result.summary) };
   if ((step.skill === 'place_cell' || step.skill === 'place_support' || step.skill === 'pillar_one') && data?.pillarFailure === 'NOT_PLACED:头顶跳跃空间未加载') return { kind: 'stuck', why: clipFeedback(result.summary) };
@@ -471,7 +485,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue', adapted: `${step.skill} 被服务器暂时拒绝或身体尚未落稳（${data.pillarFailure.slice(0, 60)}）；沿用原委托期限和材料额度再确认一次` };
   }
   // 5) 同一技能+错误+原参数+同一证据版本不原样重试。首次重试要求身体实际移动（相关进展）；
-  //    之后只有失败回执里的支撑/净空/目标/进度等事实变了才允许复验，且最多两次。
+  //    之后只有失败回执里的支撑/净空/目标/进度等事实变了才允许复验。
+  //    EFFECT_NOT_CONFIRMED 与 risk/capability/missing_support/decisionRequired 这类确定性失败
+  //    最多自动再确认一次，避免回填/未加载或几何没变时反复尝试。
   //    转头、附近资源增减、无关火把不计入证据。
   const retryScope = `${step.skill}:${digest(JSON.stringify(step.args ?? {}))}:${code}`;
   const retryMark = `retry:${retryScope}:${digest(gapEvidence(result))}`;
@@ -500,7 +516,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；这次失败没有新的身体事实可复验，自动续跑不再原样重放，交回心智` };
   }
   if (RETRYABLE.has(code) && !(step.skill === 'walk_path' && code === 'PATH_NOT_FOUND')
-    && !a.adaptations.includes(retryMark) && retries < 2 && (retries > 0 || physicallyMoved)) {
+    && !a.adaptations.includes(retryMark) && retries < autoRetryLimit(code, data) && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);
     if (guard) return { kind: 'stuck', why: guard };
     a.adaptations.push(retryMark);

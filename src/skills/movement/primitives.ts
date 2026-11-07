@@ -1,11 +1,12 @@
-import type { Vec3Like } from '../../adapter/types.ts';
-import { feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
+import type { PlacementFaceAttempt, Vec3Like } from '../../adapter/types.ts';
+import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
 import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, isReplaceable, supportTop } from '../../perception/geometry.ts';
 import { dropBelow, isSoftBlock, LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from '../build.ts';
 import { noteEdit } from '../../mind/edits.ts';
+import { markSelfModified } from '../../spatial/shared-session.ts';
 import { PLACEABLE } from '../survival.ts';
 import { isStation, rememberStation } from '../stations.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from '../types.ts';
@@ -15,10 +16,10 @@ const AIR = new Set(['air', 'cave_air', 'void_air']);
 const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
 
 interface CellArgs { at: Rel; facing: Facing; xyz?: Vec3Like }
-interface StepArgs extends CellArgs {}
 interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string }
 interface PlaceArgs extends CellArgs { item: string }
 interface SupportArgs extends CellArgs { item: string }
+type PlaceAttempt = { stance: string; position: Vec3Like; endPosition?: Vec3Like; ok?: true; reason?: string; detail?: string; attemptedFaces?: PlacementFaceAttempt[] };
 
 /** 当前已加载方块的几何状态；只用于碰撞/支撑判断，不用于给方块起名。 */
 function stateAt(adapter: SkillCtx['adapter'], p: Vec3Like) {
@@ -63,10 +64,10 @@ function shapeOf(name: string, properties: Record<string, string | number | bool
  * 站到相邻一格的纯移动元语。
  * 只执行调用者明确指定的落点：不向下扫描并把“更低的落点”当成落点，不自动补支撑。
  */
-export const moveStep: Skill<StepArgs> = {
+export const moveStep: Skill<CellArgs> = {
   name: 'move_step',
-  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。同层要求目标格脚高与当前脚高一致；上一级最多高 1 格（会跳）；下一级要求目标脚高正好低 1 格；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（半砖、雪层、地毯可为分数脚高）。目标脚高不符、下方是空腔或落差超过 1 格时如实返回支撑格和落差，不自动改落点；补支撑用 place_support，更大落差用 descend_to。',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（前后/左右 ±1，上下 -1..1；[1,0,0] 同层，[1,1,0] 上一级，[1,-1,0] 下一级；同列 [0,1,0] 只在梯子上可爬）',
+  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。同层要求目标格脚高与当前脚高一致；上一级可高 0.5–1 格（含半砖，向上半格用 [1,1,0]，会跳）；下一级按目标格支撑顶面可低 0.5–1 格；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（半砖、雪层、地毯可为分数脚高）。目标脚高不符、下方是空腔或落差超过 1 格时如实返回支撑格和落差，不自动改落点；补支撑用 place_support，更大落差用 descend_to。',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（前后/左右 ±1，上下 -1..1；[1,0,0] 同层（脚高须一致），[1,1,0] 上一级高 0.5–1 格（含半砖），[1,-1,0] 下一级支撑顶面低 0.5–1 格；同列 [0,1,0] 只在梯子上可爬）',
   timeoutMs: 8000,
   movement: true,
   validate(raw, adapter) {
@@ -227,32 +228,35 @@ export const moveStep: Skill<StepArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 export const mineCell: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。手上有能挖、也不比空手慢的工具就用；不能挖或更慢才换背包里更合适的；不自动造工具。tool 明确指定这一格用哪件工具，指定后只装备这一把，挖不动/不在背包返回 TOOL_MISSING。液体邻格默认不挖；wet/lava 分别显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3）',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换成更合适的、也不自动造工具。指定的 tool 不在背包或挖不动返回 TOOL_MISSING；没指定时挖不动/不掉落按适配器真实规则返回 noDrop、超时等事实，要换工具先 hold_item。液体邻格默认不挖；wet/lava 分别显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
     if (typeof facing !== 'string') return { ok: false, error: String(facing) };
+    const tool = a.tool;
+    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
     const rawXyz = a.xyz ?? a.abs ?? a.world;
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
       if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-1, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能挖到的范围：${rel}；先走近` };
-      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(typeof a.tool === 'string' ? { tool: a.tool } : {}) } };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
     }
     const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
-    const tool = a.tool;
-    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
     return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const raw = adapter.state().pos;
+    const origin = adapter.state();
+    const raw = origin.pos;
+    // 归因用动作开始时的维度：确认后再读 state().dim 可能已被传送改变，不能把旧格记到新维度。
+    const dim = origin.dim;
     const feet = feetCell(raw);
     const support = supportCell(raw);
     const digsSupport = args.xyz !== undefined
@@ -318,15 +322,25 @@ export const mineCell: Skill<MineArgs> = {
     const keepsake = KEEPSAKE.test(before) ? before : null;
     const countOf = (n: string) => adapter.state().inventory.filter((i) => i.name === n).reduce((a, i) => a + i.count, 0);
     const had = keepsake ? countOf(keepsake) : 0;
+    // 只用调用者指定的工具；没指定就只用当前手持（空手就空手挖），不换更合适的、也不造工具。
+    // info 会让 breakCell 回填适配器实测的 noDrop/digMs；成功回执照实带回，不把空手掉落写成“拿到了”。
+    const digInfo: { noDrop?: boolean; ms?: number } = {};
     try {
-      await breakCell(ctx, pos, true, undefined, { allowWater: args.wet, allowLava: args.lava, ...(args.tool ? { tool: args.tool } : {}) });
+      await breakCell(ctx, pos, true, digInfo, { allowWater: args.wet, allowLava: args.lava, ...(args.tool !== undefined ? { tool: args.tool } : { handOnly: true }) });
     } catch (e) {
       if (isAbort(e)) throw e;
       const code = String((e as Error).message).startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : codeFromError(e);
       return fail(code, `挖 [${args.at}] 的 ${before} 没成：${why(e)}`, after(ctx, args.facing, pos));
     }
+    // 挖后复核：只有目标格确实是空气才算移除成功；被下落方块填回/未加载都只是事实，不记成已挖掉。
     const now = adapter.blockAt(pos);
-    if (now && !AIR.has(now) && !isSoftBlock(now)) return ok(`挖掉了 [${args.at}] 的 ${before}，但上面掉下来的 ${now} 又填上了`, { cell: [...args.at], was: before, now, ...after(ctx, args.facing, pos), ...fallFacts });
+    if (now === null || !AIR.has(now)) {
+      return fail('EFFECT_NOT_CONFIRMED', `挖 [${args.at}] 的 ${before} 后，目标格仍不是空气${now === null ? '（未加载，无法确认已挖空）' : `：现在是 ${now}（可能被掉落的方块回填）`}`, {
+        cell: [...args.at], was: before, now, target: { ...pos }, ...after(ctx, args.facing, pos), ...fallFacts,
+      });
+    }
+    // 挖后复核已确认目标格是空气：这时才把这一格记成自身动作修改，失败/未确认不写。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'dig', pos);
     let got = '';
     let inBag: boolean | undefined;
@@ -335,7 +349,12 @@ export const mineCell: Skill<MineArgs> = {
       inBag = countOf(keepsake) > had;
       got = inBag ? `；${keepsake} 已经进了背包` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items`;
     }
-    return ok(`挖掉了 [${args.at}] 的 ${before}${got}`, { cell: [...args.at], was: before, ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos), ...fallFacts }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
+    return ok(`挖掉了 [${args.at}] 的 ${before}${got}`, {
+      cell: [...args.at], was: before,
+      ...(digInfo.noDrop !== undefined ? { noDrop: digInfo.noDrop } : {}),
+      ...(digInfo.ms !== undefined ? { digMs: digInfo.ms } : {}),
+      ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos), ...fallFacts,
+    }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
   },
 };
 
@@ -369,44 +388,62 @@ export const placeCell: Skill<PlaceArgs> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const feet = feetCell(adapter.state().pos);
+    const origin = adapter.state();
+    const feet = feetCell(origin.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    // stateAt 只判几何/占用；名称、材质说明只来自本次 visibleStates，未看清就如实写未看清。
     const raw = stateAt(adapter, pos);
-    const seen = visibleStates(ctx, [pos]).get(`${pos.x},${pos.y},${pos.z}`) ?? null;
+    const seen = visibleStates(ctx, [pos]).get(key) ?? null;
     if (raw === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否为空，没有放置`, after(ctx, args.facing, pos));
     if (!AIR.has(raw.name) && !isReplaceable(raw.name)) {
-      if (raw.name === args.item) return ok(`[${args.at}] 已经有 ${args.item} 了`, { already: raw.name, noop: true, ...after(ctx, args.facing, pos) });
-      return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${seen?.name ?? '未看清的方块'} 占据（${shapeOf(raw.name, raw.properties)}），不是要放的 ${args.item}；先 mine_cell 清掉或换一格`, { occupied: seen?.name ?? null, ...after(ctx, args.facing, pos) });
+      if (seen?.name === args.item) return ok(`[${args.at}] 已经有 ${args.item} 了`, { already: args.item, noop: true, ...after(ctx, args.facing, pos) });
+      if (seen) return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是要放的 ${args.item}；先 mine_cell 清掉或换一格`, { occupied: seen.name, ...after(ctx, args.facing, pos) });
+      return fail('PATH_NOT_FOUND', `[${args.at}] 已被方块占据（本次未看清是什么），无法确认是否已经是 ${args.item}；没有放置，换角度看清楚或先 mine_cell`, { occupied: null, unknown: true, ...after(ctx, args.facing, pos) });
     }
     if (!adapter.state().inventory.some((i) => i.name === args.item && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`, after(ctx, args.facing, pos));
     try {
       const r = await adapter.placeBlockAt(pos, [args.item], ctx.signal);
-      if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${r.reason ?? r.detail ?? '放置失败'}`, after(ctx, args.facing, pos));
+      if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${r.reason ?? r.detail ?? '放置失败'}`, { attemptedFaces: r.attemptedFaces ?? [], ...after(ctx, args.facing, pos) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `放 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing, pos));
     }
-    const now = adapter.blockStateAt?.(pos)?.name ?? adapter.blockAt(pos);
-    if (!now || AIR.has(now)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing, pos));
-    if (now !== args.item && !(args.item === 'torch' && now === 'wall_torch')) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 实际出现的是 ${now}，不是请求的 ${args.item}`, { placed: now, requested: args.item, ...after(ctx, args.facing, pos) });
+    const now = stateAt(adapter, pos);
+    if (now === null || AIR.has(now.name)) return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 还是空的`, after(ctx, args.facing, pos));
+    const observed = visibleStates(ctx, [pos]).get(key) ?? null;
+    if (observed && observed.name !== args.item && !(args.item === 'torch' && observed.name === 'wall_torch')) {
+      return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 实际出现的是 ${observed.name}，不是请求的 ${args.item}`, { placed: observed.name, requested: args.item, ...after(ctx, args.facing, pos) });
+    }
+    // 放置效果已用目标格非空气且材料不符即失败的方式确认；确认后才记成自身动作修改。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'place', pos);
-    if (isStation(now)) rememberStation(ctx, now, pos);
-    return ok(`在 [${args.at}] 放了 ${now}`, { placed: now, ...after(ctx, args.facing, pos) });
+    if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
+    return ok(
+      `在 [${args.at}] 放了 ${observed?.name ?? `一块方块（实际名称本次未看清；请求的是 ${args.item}）`}`,
+      { placed: observed?.name ?? null, requested: args.item, observed: observed !== null, ...after(ctx, args.facing, pos) },
+    );
   },
 };
 
 /** 形成可站立支撑；已有可站面就成功，不要求同名材料。 */
 export const placeSupport: Skill<SupportArgs> = {
   name: 'place_support',
-  description: '在指定格形成可站立支撑（[前,上,右] 或 xyz）。已有可站立顶面（整块、半砖、雪层等）就算满足，不要求与 item 同名，也不再消耗材料；只有空气/可替换植物才放 item。支持脚下一格和脚下两格；当前站位看不到唯一参照面时会尝试后退/侧移或潜行到脚下方块边缘再放。只放这一格，不换材料、不换目标。',
-  argsDoc: '{"at":[前,上,右], "item"?:"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item"?:"方块名|any"}（前后/左右 ±2，上下 -2..3）',
+  description: '在指定格形成可站立支撑（[前,上,右] 或 xyz）。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。已有可站立顶面（整块、半砖、雪层等）就算满足，不要求与 item 同名，也不再消耗材料；只有空气/可替换植物才放 item。支持脚下一格和脚下两格；当前站位看不到参照面时会后退/侧移或潜行到支撑块边缘再放。脚下两格的边缘放置需要支撑块下方那一格是同层实心参照方块；没有就如实失败，改用 descend_to 或换到能看见参照面的站位。成功回执返回 consumed=放置前后目标材料总数之差；失败回执返回每次尝试的实际站位与参照面事实。只放这一格，不换材料、不换目标，不自动清障/垫高。',
+  argsDoc: '{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any；前后/左右 ±2，上下 -2..3）',
   timeoutMs: 20000,
   movement: true,
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
     if (typeof facing !== 'string') return { ok: false, error: String(facing) };
-    const item = String(a.item ?? a.block ?? 'any').trim().replace(/^minecraft:/, '');
+    const explicit = a.item ?? a.block;
+    if (explicit === undefined || explicit === null || String(explicit).trim() === '') {
+      return { ok: false, error: 'place_support 需要 item：已知方块名或字面 "any"（不会默认自选材料）' };
+    }
+    const item = String(explicit).trim().replace(/^minecraft:/, '');
     if (item !== 'any' && (!/^[a-z0-9_]{1,80}$/.test(item) || !adapter.isKnownItem(item))) return { ok: false, error: `item 需要已知方块名或 "any"` };
     if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是实体，不是方块` };
     const rawXyz = a.xyz ?? a.abs ?? a.world;
@@ -424,40 +461,70 @@ export const placeSupport: Skill<SupportArgs> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const feet = feetCell(adapter.state().pos);
+    const origin = adapter.state();
+    const feet = feetCell(origin.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
+    const key = `${pos.x},${pos.y},${pos.z}`;
+    // stateAt 只判几何/支撑；名称与材质说明只来自本次 visibleStates，未看清就如实写未看清。
+    const seenAt = () => visibleStates(ctx, [pos]).get(key) ?? null;
     const raw = stateAt(adapter, pos);
     if (raw === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否需要支撑`, after(ctx, args.facing, pos));
     const top = supportTop(raw.name, raw.properties);
     if (top !== null) {
-      const seen = visibleStates(ctx, [pos]).get(`${pos.x},${pos.y},${pos.z}`);
-      return ok(`[${args.at}] 已经有可站立支撑 ${seen?.name ?? '（未看清名称）'}（${shapeOf(raw.name, raw.properties)}），没有另放 ${args.item}`, { already: seen?.name ?? null, supportTop: pos.y + top, standable: true, noop: true, ...after(ctx, args.facing, pos) });
+      const seen = seenAt();
+      return ok(
+        `[${args.at}] 已经有可站立支撑${seen ? ` ${seen.name}（${shapeOf(seen.name, seen.properties)}）` : '（本次未看清名称和形状）'}，没有另放 ${args.item}`,
+        { already: seen?.name ?? null, observed: seen !== null, supportTop: pos.y + top, standable: true, noop: true, consumed: 0, ...after(ctx, args.facing, pos) },
+      );
     }
-    if (!isReplaceable(raw.name)) return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${raw.name} 占据（${shapeOf(raw.name, raw.properties)}），不是可站立支撑；先 mine_cell 清掉或换一格`, { occupied: raw.name, ...after(ctx, args.facing, pos) });
+    if (!isReplaceable(raw.name)) {
+      const seen = seenAt();
+      return fail(
+        'PATH_NOT_FOUND',
+        seen
+          ? `[${args.at}] 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是可站立支撑；先 mine_cell 清掉或换一格`
+          : `[${args.at}] 已被方块占据（本次未看清是什么），不是可站立支撑；先 mine_cell 清掉或换一格`,
+        { occupied: seen?.name ?? null, observed: seen !== null, ...after(ctx, args.facing, pos) },
+      );
+    }
     const inv = adapter.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块' : args.item}`, after(ctx, args.facing, pos));
-    const attempts: Record<string, unknown>[] = [];
     const countOf = () => names.reduce((n, name) => n + adapter.state().inventory.filter((i) => i.name === name).reduce((sum, i) => sum + i.count, 0), 0);
     const beforeCount = countOf();
+    const attempts: PlaceAttempt[] = [];
+    // position = 尝试放置时的站位（适配器能报边缘站位就用它）；endPosition = 调用返回后身体实际在哪。
+    const attemptFacts = (stance: string, position: Vec3Like, extra: Partial<PlaceAttempt> = {}) => {
+      attempts.push({ stance, position, endPosition: { ...adapter.state().pos }, ...extra });
+    };
     const verify = () => {
+      // 是否形成可站支撑只看几何顶面；实际材料名另从 visibleStates 取。
       const now = stateAt(adapter, pos);
-      return now !== null && supportTop(now.name, now.properties) !== null ? now : null;
+      return now !== null && supportTop(now.name, now.properties) !== null;
     };
     // 已消耗材料但目标格仍不可站：不再换站位/换材料重试，避免一次委托消耗多块。
     const consumedWithoutSupport = (reason: string) => {
       const used = beforeCount - countOf();
       return used > 0
-        ? fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 放了 ${used} 块方块，但目标格仍没有形成可站立支撑（${reason}）`, { consumed: used, targetCell: { ...pos }, ...after(ctx, args.facing, pos) })
+        ? fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 放了 ${used} 块方块，但目标格仍没有形成可站立支撑（${reason}）`, {
+          consumed: used, materials: [...names], attempts, targetCell: { ...pos }, ...after(ctx, args.facing, pos),
+        })
         : null;
     };
+    let formed = false;
     // 1) 当前站位直接放
-    let placed: string | null = null;
+    const currentStance = { ...adapter.state().pos };
     try {
       const r = await adapter.placeBlockAt(pos, names, ctx.signal);
-      if (r.ok && verify()) placed = verify()!.name;
+      if (r.ok && verify()) formed = true;
       else {
-        attempts.push({ stance: 'current', reason: r.reason ?? r.detail ?? 'not placed' });
+        attemptFacts('current', currentStance, {
+          reason: r.reason ?? r.detail ?? 'not placed',
+          ...(r.detail ? { detail: r.detail } : {}),
+          ...(r.attemptedFaces?.length ? { attemptedFaces: r.attemptedFaces } : {}),
+        });
         if (r.ok) {
           const exhausted = consumedWithoutSupport('放置回执成功但目标格不可站');
           if (exhausted) return exhausted;
@@ -465,16 +532,23 @@ export const placeSupport: Skill<SupportArgs> = {
       }
     } catch (e) {
       if (isAbort(e)) throw e;
-      attempts.push({ stance: 'current', reason: (e as Error).message });
+      attemptFacts('current', currentStance, { reason: (e as Error).message });
     }
     const dx = pos.x - feet.x, dz = pos.z - feet.z;
-    // 2) 目标与脚水平相邻、在脚下一格：交给适配器的边缘潜行放置
-    if (!placed && adapter.sneakPlaceAt && Math.abs(dx) + Math.abs(dz) === 1 && Math.abs(pos.y - (feet.y - 1)) <= 0.01) {
+    const drop = feet.y - pos.y;
+    // 2) 目标与脚水平相邻、在脚下一格或两格：交给适配器的边缘潜行放置。
+    //    两格下要求支撑块下方有同层实心参照方块；适配器做不了会如实返回 EDGE_*，不伪造成功。
+    if (!formed && adapter.sneakPlaceAt && Math.abs(dx) + Math.abs(dz) === 1 && (Math.abs(drop - 1) <= 0.01 || Math.abs(drop - 2) <= 0.01)) {
+      // 调用前的站位；适配器若报告实际潜行到的边缘站位，就用它作为尝试站位。
+      const edgeEntry = { ...adapter.state().pos };
       try {
         const edge = await adapter.sneakPlaceAt(pos, names, ctx.signal);
-        if (edge.ok && verify()) placed = verify()!.name;
+        if (edge.ok && verify()) formed = true;
         else {
-          attempts.push({ stance: 'edge', reason: edge.reason ?? 'not placed' });
+          attemptFacts('edge', edge.stance ?? edgeEntry, {
+            reason: edge.reason ?? 'not placed',
+            ...(edge.attemptedFaces?.length ? { attemptedFaces: edge.attemptedFaces } : {}),
+          });
           if (edge.ok) {
             const exhausted = consumedWithoutSupport('边缘放置回执成功但目标格不可站');
             if (exhausted) return exhausted;
@@ -482,7 +556,7 @@ export const placeSupport: Skill<SupportArgs> = {
         }
       } catch (e) {
         if (isAbort(e)) throw e;
-        attempts.push({ stance: 'edge', reason: (e as Error).message });
+        attemptFacts('edge', edgeEntry, { reason: (e as Error).message });
       }
     }
     // 3) 换一个站位重试：后退一格、左右各一格。只换站位，不换目标/材料。
@@ -491,25 +565,50 @@ export const placeSupport: Skill<SupportArgs> = {
       { name: 'left', pos: { x: feet.x - Math.sign(dz), y: feet.y, z: feet.z + Math.sign(dx) } },
       { name: 'right', pos: { x: feet.x + Math.sign(dz), y: feet.y, z: feet.z - Math.sign(dx) } },
     ].filter((s) => s.pos.x !== feet.x || s.pos.z !== feet.z);
-    for (const stance of placed ? [] : stances) {
+    for (const stance of formed ? [] : stances) {
+      const beforeMove = { ...adapter.state().pos };
       try {
         await adapter.moveTo({ kind: 'near', pos: { x: stance.pos.x + 0.5, y: feet.y, z: stance.pos.z + 0.5 }, range: 0.3 }, { signal: ctx.signal, timeoutMs: Math.min(2500, ctx.deadline - Date.now()), constructionSafe: true, allowSwimming: false });
+        const at = { ...adapter.state().pos };
         const r = await adapter.placeBlockAt(pos, names, ctx.signal);
-        if (r.ok && verify()) { placed = verify()!.name; attempts.push({ stance: stance.name, ok: true }); break; }
-        attempts.push({ stance: stance.name, reason: r.reason ?? r.detail ?? 'not placed' });
+        if (r.ok && verify()) { formed = true; attemptFacts(stance.name, at, { ok: true }); break; }
+        attemptFacts(stance.name, at, {
+          reason: r.reason ?? r.detail ?? 'not placed',
+          ...(r.detail ? { detail: r.detail } : {}),
+          ...(r.attemptedFaces?.length ? { attemptedFaces: r.attemptedFaces } : {}),
+        });
         if (r.ok) {
           const exhausted = consumedWithoutSupport(`在 ${stance.name} 站位放置回执成功但目标格不可站`);
           if (exhausted) return exhausted;
         }
       } catch (e) {
         if (isAbort(e)) throw e;
-        attempts.push({ stance: stance.name, reason: (e as Error).message });
+        attemptFacts(stance.name, beforeMove, { reason: (e as Error).message });
       }
     }
-    if (!placed) return fail('PATH_NOT_FOUND', `[${args.at}] 没能形成可站立支撑：${attempts.map((a) => `${a.stance}:${a.reason}`).join('；')}`, { attempts, targetCell: { ...pos }, ...after(ctx, args.facing, pos) });
+    const consumed = beforeCount - countOf();
+    if (!formed) {
+      return fail('PATH_NOT_FOUND', `[${args.at}] 没能形成可站立支撑：${attempts.map((a) => `${a.stance}:${a.reason ?? '未放置'}`).join('；')}`, {
+        attempts, materials: [...names], consumed, targetCell: { ...pos },
+        remediation: {
+          stance: '换到能看见目标格相邻实心面的站位再 place_support（例如目标格另一侧）',
+          alternatives: ['descend_to 降到下一级后从下方补支撑', 'place_cell 在已有参照面的相邻格放置'],
+        },
+        ...after(ctx, args.facing, pos),
+      });
+    }
+    // 只有 verify() 确认目标格已形成可站立顶面才算 formed；未成支撑不记修改。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'place', pos);
-    if (isStation(placed)) rememberStation(ctx, placed, pos);
-    return ok(`[${args.at}] 形成可站立支撑 ${placed}`, { placed, attempts, targetCell: { ...pos }, ...after(ctx, args.facing, pos) });
+    const observed = seenAt();
+    if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
+    return ok(
+      `[${args.at}] 形成可站立支撑${observed ? ` ${observed.name}` : '（实际材料名称本次未看清）'}，消耗 ${consumed} 块`,
+      {
+        placed: observed?.name ?? null, observed: observed !== null, materials: [...names], consumed, attempts, targetCell: { ...pos },
+        ...after(ctx, args.facing, pos),
+      },
+    );
   },
 };
 
@@ -532,18 +631,35 @@ export const pillarOne: Skill<{ item?: string }> = {
     const inv = adapter.state().inventory;
     const names = args.item && args.item !== 'any' ? [args.item] : PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0));
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item && args.item !== 'any' ? args.item : '能垫的方块（泥土/圆石/木板…）'}`);
-    const before = adapter.state().pos;
-    const feet = feetCell(before);
+    const startState = adapter.state();
+    const feet = feetCell(startState.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = startState.dim;
     const r = await adapter.pillarUp(names, ctx.signal);
+    // 回执按这次实际 yaw 解析朝向，不再假定北向。
+    const eye = adapter.eye();
+    const facing = eye ? facingOfYaw(eye.yaw) : 'N';
     if (!r.ok) {
       const code = r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : r.reason === 'NO_REFERENCE' ? 'PATH_NOT_FOUND' : r.reason === 'OCCUPIED' || String(r.reason).startsWith('BLOCKED:') ? 'PATH_NOT_FOUND' : 'EFFECT_NOT_CONFIRMED';
-      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, ...(r.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}), ...after(ctx, 'N') });
+      return fail(code, `原地垫高没成：${String(r.reason ?? '未知原因')}${r.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, { pillarFailure: r.reason, facing, ...(r.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}), ...after(ctx, facing) });
     }
     const state = adapter.state();
     const end = feetCell(state.pos);
-    const under = adapter.blockAt(feet);
-    if (end.y <= feet.y || !under || AIR.has(under) || isSoftBlock(under)) return fail('EFFECT_NOT_CONFIRMED', '没有站高一格：方块没留在脚下', after(ctx, 'N'));
-    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, { climbed: 1, ...after(ctx, 'N') });
+    const support = stateAt(adapter, feet);
+    const supportName = support && supportTop(support.name, support.properties) !== null ? support.name : null;
+    const rose = end.y - feet.y;
+    if (rose !== 1 || supportName === null) {
+      const problems = [
+        ...(rose === 1 ? [] : [`脚高 ${feet.y} → ${end.y}，不是正好 +1`]),
+        ...(supportName !== null ? [] : [`脚下 (${feet.x},${feet.y},${feet.z}) 没有实测的可站立支撑${support ? `（${support.name}）` : '（未加载）'}`]),
+      ];
+      return fail('EFFECT_NOT_CONFIRMED', `没有确认垫高一格：${problems.join('；')}`, {
+        climbed: rose, facing, ...(supportName !== null ? { support: { pos: { ...feet }, name: supportName } } : {}), ...after(ctx, facing),
+      });
+    }
+    // 已确认脚高正好 +1 且脚下是实测可站立支撑：垫脚块就在原脚的格子。
+    markSelfModified(ctx.spatial, dim, feet, ctx.taskId);
+    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, { climbed: 1, facing, support: { pos: { ...feet }, name: supportName }, ...after(ctx, facing) });
   },
 };
 

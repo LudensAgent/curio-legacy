@@ -429,118 +429,22 @@ export function classifyPostCancelFrames(frames: readonly PhysicsFrame[], durati
   return { ok: p.length === 0, problems: p, reactivated };
 }
 
-/** fragments 稳定契约；返回原始条目，不把几何改写成观测。 */
-export function validateFragmentsQuery(value: unknown) {
+/** 契约信封 + 列表页：返回库原样 `data.items`，不把几何改写成观测。 */
+export function validateQueryPage(value: unknown, kind: string) {
   const p: string[] = [];
-  if (!isRecord(value)) return { ok: false, problems: ['spatialQuery is not an object'], fragments: [] as Record<string, unknown>[], page: null };
-  const page = isRecord(value.page) ? value.page : null;
-  if (page === null) p.push('missing page');
-  else {
-    if (page.scan !== 'full_index_filter_sort') p.push('page.scan is not full_index_filter_sort');
-    if (typeof page.scanNote !== 'string') p.push('missing page.scanNote');
-    if (!isNum(page.limit) || !isNum(page.total) || !isNum(page.returned)) p.push('page numeric fields malformed');
-    if (!(page.after === null || typeof page.after === 'string')) p.push('page.after malformed');
-  }
-  const fragments = Array.isArray(value.fragments) ? value.fragments.filter(isRecord) : [];
-  if (!Array.isArray(value.fragments)) p.push('missing fragments array');
-  if (page !== null && isNum(page.returned) && page.returned !== fragments.length) p.push('page.returned differs from fragments.length');
-  for (const f of fragments) {
-    if (typeof f.id !== 'string' || typeof f.worldId !== 'string' || typeof f.dim !== 'string') p.push('fragment identity fields malformed');
-    if (typeof f.kind !== 'string' || typeof f.geometrySource !== 'string') p.push('fragment provenance fields malformed');
-    if (!isNum(f.createdAt) || !isNum(f.lastUsedAt) || !isNum(f.uses)) p.push('fragment time/uses fields malformed');
-    const projectionProblems = (name: string, projection: unknown) => {
-      if (!isRecord(projection)) { p.push(`fragment ${name} projection malformed`); return; }
-      if (!isNum(projection.points) || projection.points < 0) p.push(`fragment ${name}.points is not a non-negative count`);
-      else if (projection.points === 0) {
-        if (projection.first !== null || projection.last !== null) p.push(`fragment ${name} with zero points must have null first/last`);
-      } else if (!isVec(projection.first) || !isVec(projection.last)) p.push(`fragment ${name} first/last malformed`);
-    };
-    projectionProblems('polyline', f.polyline);
-    projectionProblems('entrances', f.entrances);
-    const links = isRecord(f.links) ? f.links : null;
-    if (links === null) p.push('fragment links projection malformed');
-    else if (links.recorded === false) {
-      if (typeof links.note !== 'string') p.push('fragment unrecorded links must explain that absence is not no-connection');
-    } else if (links.recorded !== true) p.push('fragment links.recorded must be boolean');
-    else {
-      if (!isNum(links.points) || links.points < 0) p.push('fragment links.points malformed');
-      else if (links.points === 0 && (links.first !== null || links.last !== null)) p.push('fragment links with zero points must have null first/last');
-    }
-  }
-  return { ok: p.length === 0, problems: p, fragments, page };
-}
-
-/** 列表投影（点数/首末点）必须与真实 PathFragment 全量几何和元数据一致。 */
-export function fragmentProjectionMatches(fragment: unknown, actual: PathFragment | null) {
-  const p: string[] = [];
-  if (!isRecord(fragment) || actual === null) return { ok: false, problems: ['fragment projection or typed original missing'] };
-  for (const field of ['id', 'worldId', 'dim', 'kind', 'geometrySource'] as const) {
-    if (fragment[field] !== actual[field]) p.push(`fragment ${field} differs from typed original`);
-  }
-  for (const field of ['createdAt', 'lastUsedAt', 'uses', 'deepestY'] as const) {
-    if (fragment[field] !== actual[field]) p.push(`fragment ${field} differs from typed original`);
-  }
-  const compared = (name: 'polyline' | 'entrances' | 'links', source: readonly unknown[] | undefined) => {
-    const projection = isRecord(fragment[name]) ? fragment[name] as Record<string, unknown> : null;
-    if (projection === null) { p.push(`fragment ${name} projection missing`); return; }
-    if (source === undefined) {
-      if (projection.recorded !== false) p.push(`fragment ${name} should be reported as unrecorded`);
-      return;
-    }
-    if (projection.points !== source.length) p.push(`fragment ${name}.points differs from typed original length`);
-    if (!isDeepStrictEqual(projection.first, source[0] ?? null)) p.push(`fragment ${name}.first differs from typed original`);
-    if (!isDeepStrictEqual(projection.last, source.at(-1) ?? null)) p.push(`fragment ${name}.last differs from typed original`);
-  };
-  compared('polyline', actual.polyline);
-  compared('entrances', actual.entrances);
-  compared('links', actual.links);
-  return { ok: p.length === 0, problems: p };
-}
-
-/** fragment.polyline 稳定契约；返回原始有序点。 */
-export function validateFragmentQuery(value: unknown, fragmentId: string) {
-  const p: string[] = [];
-  if (!isRecord(value)) return { ok: false, problems: ['spatialQuery is not an object'], points: [] as Vec3Like[], total: 0 };
-  if (value.found !== true) return { ok: false, problems: [`fragment not found (reason=${String(value.reason ?? 'missing')})`], points: [] as Vec3Like[], total: 0 };
-  const fragment = isRecord(value.fragment) ? value.fragment : null;
-  if (fragment === null || fragment.id !== fragmentId) p.push('fragment query identity mismatch');
-  const poly = fragment !== null && isRecord(fragment.polyline) ? fragment.polyline : null;
-  if (poly === null) return { ok: false, problems: [...p, 'missing fragment.polyline'], points: [] as Vec3Like[], total: 0 };
-  if (poly.recorded !== true) p.push('polyline.recorded is not true');
-  if (!isNum(poly.total) || !isNum(poly.offset) || !isNum(poly.returned)) p.push('polyline page fields malformed');
-  const points = Array.isArray(poly.items) ? poly.items.filter(isVec) : [];
-  if (!Array.isArray(poly.items)) p.push('polyline.items missing');
-  if (poly.offset !== 0) p.push('polyline.offset is not 0');
-  if (isNum(poly.returned) && poly.returned !== points.length) p.push('polyline.returned differs from items.length');
-  if (isNum(poly.total) && isNum(poly.returned) && poly.returned !== poly.total) p.push('polyline page incomplete (raise limit only with a new bounded query)');
-  if (points.length < 2) p.push('polyline has fewer than 2 points');
-  return { ok: p.length === 0, problems: p, points, total: isNum(poly.total) ? poly.total : 0 };
-}
-
-/** traversals 稳定契约；返回原始 TraversalEvidence，不做时间/session 合成。 */
-export function validateTraversalsQuery(value: unknown, fragmentId: string, scope: { worldId: string; dim: string; sessionId: string }) {
-  const p: string[] = [];
-  if (!isRecord(value)) return { ok: false, problems: ['spatialQuery is not an object'], items: [] as unknown[], record: null };
-  const items = Array.isArray(value.items) ? value.items : [];
-  if (!Array.isArray(value.items)) p.push('missing items array');
-  if (!isRecord(value.page)) p.push('missing page');
-  else if (!isNum(value.page.total) || !isNum(value.page.returned) || !isNum(value.page.limit)) p.push('traversals page malformed');
-  const record = items.filter((item) => isRecord(item) && item.status === 'found' && isRecord(item.record))
-    .map((item) => (item as Record<string, unknown>).record as Record<string, unknown>)
-    .find((r) => r.fragmentId === fragmentId) ?? null;
-  if (record === null) p.push('no found TraversalEvidence for selected fragment');
-  else {
-    if (typeof record.id !== 'string') p.push('traversal id missing');
-    if (!isVec(record.from) || !isVec(record.to)) p.push('traversal from/to malformed');
-    if (record.worldId !== scope.worldId || record.dim !== scope.dim) p.push('traversal world/dim mismatch');
-    if (record.sessionId !== scope.sessionId) p.push('traversal sessionId does not match this run');
-    if (!isNum(record.observedAt)) p.push('traversal observedAt missing');
-    if (typeof record.source !== 'string') p.push('traversal source missing');
-    if (!(typeof record.actionId === 'string' && record.actionId !== '') && !(typeof record.executionId === 'string' && record.executionId !== '')) {
-      p.push('traversal is not linked to an action/execution');
-    }
-  }
-  return { ok: p.length === 0, problems: p, items, record };
+  if (!isRecord(value)) return { ok: false, problems: ['query envelope is not an object'], total: null as number | null, items: [] as Record<string, unknown>[], nextAfter: undefined as string | undefined };
+  if (value.contract !== 'memory-host-contract/1') p.push('contract envelope mismatch');
+  if (value.readOnly !== true || value.executable !== false) p.push('query envelope readOnly/executable malformed');
+  if (value.status !== 'ok') p.push(`query status ${String(value.status)}`);
+  const data = isRecord(value.data) ? value.data : null;
+  if (data === null) p.push('missing query data');
+  else if (data.kind !== kind) p.push(`query data kind ${String(data.kind)} != ${kind}`);
+  const items = data !== null && Array.isArray(data.items) ? data.items.filter(isRecord) : [];
+  if (data !== null && !Array.isArray(data.items)) p.push('missing query data.items');
+  const total = data !== null && typeof data.total === 'number' ? data.total : null;
+  if (total === null) p.push('missing query data.total');
+  const nextAfter = typeof value.nextAfter === 'string' ? value.nextAfter : undefined;
+  return { ok: p.length === 0, problems: p, total, items, nextAfter };
 }
 
 /** Bot 客户端退出的有界分类（真实 bot.end 与 adapter disconnected 都观察到才算完整）。 */
@@ -1035,12 +939,12 @@ async function main() {
       preHistory.outcome = outcome === null ? null : clone(outcome);
       if (outcome === null) throw new Error('pre-walk history query timed out');
       if (outcome.result.status !== 'succeeded') throw new Error(`pre-walk history query status ${outcome.result.status}`);
-      const q = isRecord(outcome.result.data) ? outcome.result.data.spatialQuery : undefined;
-      const checked = validateFragmentsQuery(q);
+      const q = isRecord(outcome.result.data) ? outcome.result.data : undefined;
+      const checked = validateQueryPage(q, 'fragments');
       preHistory.query = q === undefined ? null : clone(q);
       preHistory.verdict = checked;
       if (!checked.ok) throw new Error(`pre-walk query invalid: ${checked.problems.join(', ')}`);
-      if (checked.page === null || checked.page.total !== 0 || checked.fragments.length !== 0) throw new Error('fresh run history is not empty before first walk');
+      if (checked.total !== 0 || checked.items.length !== 0) throw new Error('fresh run history is not empty before first walk');
     } catch (e) { addProblem(preHistory, errorText(e)); } finally { finish(preHistory); }
 
     const s1 = scenario('walk_to');
@@ -1084,45 +988,58 @@ async function main() {
         queries.push(entry); writeEvidence();
         if (outcome === null) throw new Error(`${name} query timed out`);
         if (outcome.result.status !== 'succeeded') throw new Error(`${name} query status ${outcome.result.status}`);
-        const q = isRecord(outcome.result.data) ? outcome.result.data.spatialQuery : undefined;
+        const q = isRecord(outcome.result.data) ? outcome.result.data : undefined;
         entry.query = q === undefined ? null : clone(q); writeEvidence();
-        if (q === undefined) throw new Error(`${name} query missing data.spatialQuery`);
+        if (q === undefined) throw new Error(`${name} query missing contract envelope`);
         return q;
       };
-      const fragments = validateFragmentsQuery(await runQuery('fragments', { kind: 'fragments', dim, limit: 8 }));
+      const fragments = validateQueryPage(await runQuery('fragments', { kind: 'fragments', dim, limit: 8 }), 'fragments');
       s2.fragmentsVerdict = fragments;
       if (!fragments.ok) throw new Error(fragments.problems.join(', '));
-      const selected = fragments.fragments.find((f) => f.geometrySource === 'traversal') ?? null;
+      const selected = fragments.items.find((f) => f.geometrySource === 'traversal') ?? null;
       if (selected === null) throw new Error('no traversal-sourced fragment in fresh history');
       s2.selectedProjection = clone(selected);
-      const fragmentId = selected.id as string;
+      const fragmentId = String(selected.id);
 
-      // 用真实历史读取完整几何：列表里的 polyline.points 是点数，不是数组，不能拿来与完整点列比较。
+      // fragments 页已是库原样 PathFragment；直接与 typed 原始几何比较。
       const typed = spatial.session.history.getFragment(fragmentId);
       if (typed === null) throw new Error(`typed PathFragment ${fragmentId} missing after walk`);
       originalFragment = typed;
-      const projection = fragmentProjectionMatches(selected, typed);
+      const projection = isDeepStrictEqual(selected, typed)
+        ? { ok: true, problems: [] as string[] }
+        : { ok: false, problems: ['fragment listing differs from typed original'] };
       s2.fragmentProjection = projection;
-      if (!projection.ok) throw new Error(`fragment listing projection differs from typed original: ${projection.problems.join(', ')}`);
+      if (!projection.ok) throw new Error(`fragment listing differs from typed original: ${projection.problems.join(', ')}`);
 
-      // 路线点上限 32：单页 limit=32 已是有界完整读取；helper 要求 offset=0 且该页完整，
-      // 不写一个实际无法翻页的循环来假装分页。
-      const polylinePage = validateFragmentQuery(await runQuery('fragment.polyline', { kind: 'fragment', dim, fragmentId, field: 'polyline', offset: 0, limit: 32 }), fragmentId);
-      s2.polylineVerdict = polylinePage;
-      if (!polylinePage.ok) throw new Error(polylinePage.problems.join(', '));
-      const points: Vec3Like[] = polylinePage.points;
-      const total = polylinePage.total;
-      if (points.length !== total) throw new Error(`fragment query returned ${points.length}/${total} polyline points`);
+      // 完整几何来自同一 fragments 页（不再有 fragment+field/offset 查询）。
+      const points: Vec3Like[] = Array.isArray(selected.polyline) ? selected.polyline.filter(isVec) : [];
+      const polylineVerdict = { ok: points.length >= 2, problems: points.length >= 2 ? [] : ['fragment listing has fewer than 2 points'], points, total: points.length };
+      s2.polylineVerdict = polylineVerdict;
+      if (!polylineVerdict.ok) throw new Error(polylineVerdict.problems.join(', '));
       if (!isDeepStrictEqual(points, typed.polyline)) throw new Error('fragment query polyline differs from typed original geometry/order');
       if (!points.every(inLane)) throw new Error('stored route leaves the reserved dry lane');
       if (!points.slice(1).every((p, i) => p.y === points[i].y && Math.abs(p.x - points[i].x) + Math.abs(p.z - points[i].z) === 1)) throw new Error('stored polyline is not same-height unit-adjacent');
       knownPoints = points;
 
       const scope = { worldId: adapter.state().worldId, dim, sessionId: adapter.state().sessionId };
-      const traversals = validateTraversalsQuery(await runQuery('traversals', { kind: 'traversals', dim, fragmentId, limit: 8 }), fragmentId, scope);
-      s2.traversalsVerdict = traversals;
-      if (!traversals.ok) throw new Error(traversals.problems.join(', '));
-      selectedTraversal = traversals.record;
+      const traversals = validateQueryPage(await runQuery('traversals', { kind: 'traversals', dim, fragmentId, limit: 8 }), 'traversals');
+      const traversalProblems = [...traversals.problems];
+      const traversalRecord = traversals.items.find((item) => item.fragmentId === fragmentId) ?? null;
+      if (traversalRecord === null) traversalProblems.push('no TraversalEvidence for selected fragment');
+      else {
+        if (!isVec(traversalRecord.from) || !isVec(traversalRecord.to)) traversalProblems.push('traversal from/to malformed');
+        if (traversalRecord.worldId !== scope.worldId || traversalRecord.dim !== scope.dim) traversalProblems.push('traversal world/dim mismatch');
+        if (traversalRecord.sessionId !== scope.sessionId) traversalProblems.push('traversal sessionId does not match this run');
+        if (!isNum(traversalRecord.observedAt)) traversalProblems.push('traversal observedAt missing');
+        if (typeof traversalRecord.source !== 'string') traversalProblems.push('traversal source missing');
+        const linked = (typeof traversalRecord.actionId === 'string' && traversalRecord.actionId !== '')
+          || (typeof traversalRecord.executionId === 'string' && traversalRecord.executionId !== '');
+        if (!linked) traversalProblems.push('traversal is not linked to an action/execution');
+      }
+      const traversalVerdict = { ok: traversalProblems.length === 0, problems: traversalProblems, record: traversalRecord };
+      s2.traversalsVerdict = traversalVerdict;
+      if (!traversalVerdict.ok) throw new Error(traversalVerdict.problems.join(', '));
+      selectedTraversal = traversalRecord;
       // N3 归属：actionId 必须等于真实首个 walk 任务，executionId 必须来自该任务真实
       // ExecutableMove 请求；from 用请求原值，to/observedAt 必须对应已确认 nav.trace 点。
       // delegation 样本 id 与逐段 executionId 不同，不能再用样本 id 反推归属。

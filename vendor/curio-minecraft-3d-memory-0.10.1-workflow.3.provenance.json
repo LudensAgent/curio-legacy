@@ -1,0 +1,34 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.10.1-workflow.3"
+  },
+  "sourceHEAD": "2ecaea7886e1c79b7e5e37de7a8d518dc1402bd0",
+  "artifactSHA256": "367c0a27e031c12e3ec03b9ec78c12cd609d3ffac4001b40e47aecc772a3263c",
+  "npmIntegrity": "sha512-cPX6kgtpYIQ9rpI3VuXTSs2Ag0mwpK6evXXkFb8ZjHbun8z1IiTD57yYNedWE54a/rv837Lum8/P2el6NHNNPw==",
+  "sourceBinding": {
+    "clean": true,
+    "head": "2ecaea7886e1c79b7e5e37de7a8d518dc1402bd0",
+    "note": "Library build worktree /path/to/curio-minecraft-3d-memory/.claude/worktrees/V-3-build was clean before and after packaging. Only package.json version was temporarily set to 0.10.1-workflow.3 for packaging and was restored to HEAD with git checkout; package-lock.json was not modified. The version field is not a build input."
+  },
+  "verification": {
+    "unitTests": {
+      "status": "PASS",
+      "command": "npm test",
+      "passed": 1259,
+      "failed": 0,
+      "files": 61
+    },
+    "typecheck": {
+      "status": "PASS",
+      "command": "npm run typecheck"
+    },
+    "build": {
+      "status": "PASS",
+      "command": "npm run build"
+    },
+    "consumerRuntime": "NOT_RUN",
+    "consumerNodeNextTypes": "NOT_RUN"
+  },
+  "notes": "Third workflow vendor. Built from integration commit 2ecaea7; includes the full M4 line (M4.1-M4.8) and the M5 ./memory and ./navigation subpath entries plus the single-source plan capability report. Real Minecraft/mineflayer integration was not run for this artifact."
+}

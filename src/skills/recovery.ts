@@ -1,14 +1,10 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local.ts';
-import { attachmentFaces } from '../perception/surroundings.ts';
 import type { SkillCtx } from './types.ts';
-import { readPoint } from './walk-route.ts';
 
-type NavArrival = { kind: 'exact' } | { kind: 'near'; radius: number };
+export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; deadlineMs?: number };
 
-export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; arrival?: NavArrival; fragmentId?: string; deadlineMs?: number };
-
-/** 恢复时只有这三个库入口能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
+/** 恢复时只有 walk_path 这个库入口能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
 const NAVIGATION_SKILLS = new Set(['walk_path']);
 /**
  * 新导航恢复不能用其他直接移动/导航动作绕过原后端、目标与手段。
@@ -29,7 +25,6 @@ const RAW_INPUT_SKILLS = new Set(['press_keys', 'move']);
 const OBSERVATION_SKILLS = new Set(['look', 'look_around', 'wait', 'inspect_block', 'assess_landings', 'spatial_query']);
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
-const pointEquals = (a: Vec3Like | undefined, b: Vec3Like | undefined) => !!a && !!b && a.x === b.x && a.y === b.y && a.z === b.z;
 /** 原动作参数还没经过该技能校验，可能写成数组/字符串；恢复核对时按同样的三种写法解析。 */
 const rawPoint = (value: unknown): Vec3Like | undefined => {
   if (typeof value === 'string') {
@@ -41,14 +36,6 @@ const rawPoint = (value: unknown): Vec3Like | undefined => {
     return parts.length === 3 && parts.every(Number.isFinite) ? { x: parts[0], y: parts[1], z: parts[2] } : undefined;
   }
   return worldPoint(value);
-};
-const travelTarget = (value: unknown): string | undefined => {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const point = value as Record<string, unknown>;
-    return [point.x, point.y, point.z].every((item) => typeof item === 'number' && Number.isFinite(item)) ? `${point.x},${point.y},${point.z}`
-      : [point.x, point.z].every((item) => typeof item === 'number' && Number.isFinite(item)) ? `${point.x},${point.z}` : undefined;
-  }
-  return typeof value === 'string' ? value.trim() : undefined;
 };
 const rideTarget = (value: unknown): { x: number; z: number } | undefined => {
   if (typeof value === 'string') {
@@ -74,17 +61,6 @@ function excavationScope(args: Record<string, unknown>) {
   };
 }
 
-function climbScope(args: Record<string, unknown>) {
-  const untilExit = (args.until_exit ?? args.untilExit) === true;
-  const untilSky = typeof args.until_sky === 'boolean' ? args.until_sky
-    : typeof args.untilSky === 'boolean' ? args.untilSky : args.height === undefined && !untilExit;
-  return {
-    height: Number.isInteger(args.height) ? args.height as number : untilSky || untilExit ? 16 : 3,
-    untilSky,
-    untilExit,
-  };
-}
-
 /** 原 failure 里的绝对期限只在失败交接边界校验一次；正值绝对 epoch，不当作时长。 */
 function recoveryDeadline(value: unknown): { ok: true; value?: number } | { ok: false; error: string } {
   if (value === undefined) return { ok: true };
@@ -92,6 +68,9 @@ function recoveryDeadline(value: unknown): { ok: true; value?: number } | { ok: 
     ? { ok: true, value }
     : { ok: false, error: 'failure.args.deadlineMs 必须是正的绝对 epoch 毫秒' };
 }
+
+/** 两个已解析的世界坐标完全相同（全等比较，不加容差）。 */
+const pointEquals = (a: Vec3Like | undefined, b: Vec3Like | undefined) => !!a && !!b && a.x === b.x && a.y === b.y && a.z === b.z;
 
 /** World coordinates only; never guess at/to relative arrays or coerce null into zero. */
 export function worldPoint(value: unknown): Vec3Like | undefined {
@@ -108,8 +87,6 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   const skill = raw.skill.trim();
   let args = raw.args as Record<string, unknown>;
   let navTarget: Vec3Like | undefined;
-  let arrival: NavArrival | undefined;
-  let fragmentId: string | undefined;
   let deadlineMs: number | undefined;
   const providedTarget = worldPoint(raw.target);
   if (raw.target !== undefined && !providedTarget) return { error: 'failure.target 须为明确的世界坐标 {x,y,z}，不能将相对 at/to 当作目标' };
@@ -120,54 +97,6 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
     navTarget = providedTarget;
     deadlineMs = deadline.value;
     args = { routeId: args.routeId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
-  } else if (skill === 'walk_to') {
-    const to = readPoint(args.to);
-    if (to === null) return { error: 'failure.args.to 必须是 walk_to 的有限世界坐标（保留小数与负数）' };
-    const ra = args.arrival;
-    if (ra === null || typeof ra !== 'object' || Array.isArray(ra)) return { error: 'failure.args.arrival 必须是 walk_to 的原始到达条件' };
-    const kind = (ra as Record<string, unknown>).kind;
-    if (kind === 'exact') arrival = { kind: 'exact' };
-    else if (kind === 'near') {
-      const radius = (ra as Record<string, unknown>).radius;
-      if (typeof radius !== 'number' || !Number.isFinite(radius) || radius <= 0) return { error: 'failure.args.arrival.radius 必须是正的有限数字' };
-      arrival = { kind: 'near', radius };
-    } else return { error: 'failure.args.arrival.kind 必须是 exact 或 near' };
-    const deadline = recoveryDeadline(args.deadlineMs);
-    if (!deadline.ok) return { error: deadline.error };
-    // 实际失败记录若带 target，只能是与原 to 完全相同的绝对目标；不静默改目标。
-    if (providedTarget && (providedTarget.x !== to.x || providedTarget.y !== to.y || providedTarget.z !== to.z)) {
-      return { error: 'failure.target 必须与 walk_to 原绝对目标一致，不能替换目标' };
-    }
-    navTarget = to;
-    deadlineMs = deadline.value;
-    args = { ...args, to, arrival, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
-  } else if (skill === 'walk_route') {
-    // walk_route 的目标就是调用者给定的路线末点；原请求的点列必须整条保留，
-    // 恢复不能重选路线、缩短点列或把末点换成当前位置。
-    if (!Array.isArray(args.points)) return { error: 'failure.args.points 必须是 walk_route 的原路线点列' };
-    const parsed = args.points.map(readPoint);
-    const badIndex = parsed.findIndex((point) => point === null);
-    if (badIndex >= 0) return { error: `failure.args.points[${badIndex}] 必须是有限世界坐标` };
-    const points = parsed.filter((point): point is Vec3Like => point !== null);
-    const last = points[points.length - 1];
-    if (last === undefined) return { error: 'failure.args.points 至少需要一个点' };
-    const deadline = recoveryDeadline(args.deadlineMs);
-    if (!deadline.ok) return { error: deadline.error };
-    if (providedTarget && !pointEquals(providedTarget, last)) {
-      return { error: 'failure.target 必须与 walk_route 原路线末点一致，不能替换目标' };
-    }
-    navTarget = last;
-    deadlineMs = deadline.value;
-    args = { ...args, points, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
-  } else if (skill === 'walk_known_route') {
-    if (typeof args.fragmentId !== 'string' || args.fragmentId.length === 0) return { error: 'failure.args.fragmentId 必须是原路线 ID' };
-    const deadline = recoveryDeadline(args.deadlineMs);
-    if (!deadline.ok) return { error: deadline.error };
-    fragmentId = args.fragmentId;
-    deadlineMs = deadline.value;
-    // known route 的终点来自实际失败记录；没有就保持缺失，不由 fragment 几何臆造。
-    navTarget = providedTarget;
-    args = { ...args, fragmentId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
   }
   const target = navTarget ?? providedTarget, position = worldPoint(raw.position);
   if (raw.position !== undefined && !position) return { error: 'failure.position 须为明确的世界坐标' };
@@ -183,7 +112,7 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   }
   const { allowPlace: _allowPlace, allowDig: _allowDig, ...rest } = raw;
   return { ...rest, skill, args, ...(target ? { target } : {}), ...(position ? { position } : {}), ...(entityId !== undefined ? { entityId: Number(entityId) } : {}), ...(climb ? { climb } : {}),
-    ...(arrival ? { arrival } : {}), ...(fragmentId !== undefined ? { fragmentId } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}),
+    ...(deadlineMs !== undefined ? { deadlineMs } : {}),
     ...(raw.allowPlace === true ? { allowPlace: true } : {}), ...(raw.allowDig === true ? { allowDig: true } : {}) };
 }
 
@@ -211,39 +140,6 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
     if (scope.deadlineMs !== undefined) {
       if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
       else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_path 不能延长原绝对期限');
-    }
-  }
-  if (name === 'walk_route') {
-    if (scope.skill !== 'walk_route') throw new Error('恢复 walk_route 只能沿用原导航委托');
-    const originalPoints = Array.isArray(original.points) ? original.points.map(readPoint) : [];
-    const points = Array.isArray(args.points) ? args.points.map(readPoint) : [];
-    const same = originalPoints.length > 0 && points.length === originalPoints.length
-      && points.every((point, index) => point !== null && pointEquals(point, originalPoints[index] ?? undefined));
-    if (!same) throw new Error('恢复 walk_route 必须保留原路线点列与末点，不能重选路线或替换目标');
-    if (scope.deadlineMs !== undefined) {
-      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
-      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_route 不能延长原绝对期限');
-    }
-  }
-  if (name === 'walk_to') {
-    const to = readPoint(args.to);
-    if (!scope.target) throw new Error('恢复 walk_to 缺少原绝对目标，不能自行发明目标');
-    if (to === null || to.x !== scope.target.x || to.y !== scope.target.y || to.z !== scope.target.z) throw new Error('恢复 walk_to 必须使用失败动作的原绝对目标');
-    const requested = args.arrival as NavArrival | undefined;
-    const same = requested !== undefined && scope.arrival !== undefined && requested.kind === scope.arrival.kind
-      && (requested.kind === 'exact' || (requested.kind === 'near' && scope.arrival.kind === 'near' && requested.radius === scope.arrival.radius));
-    if (!same) throw new Error('恢复 walk_to 必须保留原 arrival 种类与 near 半径，不能替换完成条件');
-    if (scope.deadlineMs !== undefined) {
-      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
-      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_to 不能延长原绝对期限');
-    }
-  }
-  if (name === 'walk_known_route') {
-    if (!scope.fragmentId) throw new Error('恢复 walk_known_route 缺少原 fragmentId，不能自行发明路线');
-    if (args.fragmentId !== scope.fragmentId) throw new Error('恢复 walk_known_route 必须使用失败动作的原 fragmentId');
-    if (scope.deadlineMs !== undefined) {
-      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
-      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_known_route 不能延长原绝对期限');
     }
   }
   // 只读观察不改变身体或世界，任何恢复都可先看，不扩大物理委托。

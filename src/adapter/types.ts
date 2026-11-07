@@ -211,6 +211,13 @@ export interface ActionResult {
   effectEvidence?: EffectEvidence;
 }
 
+/** 放置失败时实际尝试过的参照方块与点击面；face 是从参照方块指向目标格的单位向量。 */
+export interface PlacementFaceAttempt {
+  ref: Vec3Like;
+  face: [number, number, number];
+  reason?: string;
+}
+
 /** 界面操作：往某格放东西、从某格取（shift 点击）、点界面按钮（切石机配方、织布机图案、附魔选项）、铁砧改名 */
 export type GuiOp =
   | { put: { item: string; slot: number; count?: number; sourceSlot?: number } }
@@ -408,12 +415,14 @@ export interface GameAdapter {
   /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
-  placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult>;
+  placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: PlacementFaceAttempt[] }>;
   /**
-   * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格的空目标格放一块方块。
+   * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格或两格的空目标格放一块方块。
+   * 脚下两格需要在支撑块下方有实心参照方块；没有时如实返回 EDGE_NO_REFERENCE，不伪造成功。
    * 只用于 place_support 的支撑位；会移动身体到边缘，放完保持站稳。
+   * `stance` 是实际尝试放置时的身体位置（潜行到边缘后）；失败前没挪动就不返回。
    */
-  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }>;
+  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: PlacementFaceAttempt[] }>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
   useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<GuiResult>;
@@ -455,9 +464,10 @@ export interface GameAdapter {
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   /**
    * 挖一格。opts.tool 给具体物品名时只准用这一把：背包没有或它挖不动这块 → TOOL_MISSING，
-   * 不换别的工具、不退回空手；不传（或 null）沿用自动换手：手上能挖就用，不能才按上次亲手选的同种工具→最快工具。
+   * 不换别的工具、不退回空手；opts.handOnly 为 true 时只用当前手持（空手就空手挖），不从背包换工具；
+   * 两者都不传沿用自动换手：手上能挖就用，不能才按上次亲手选的同种工具→最快工具。
    */
-  dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null }): Promise<ActionResult>;
+  dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null; handOnly?: boolean }): Promise<ActionResult>;
   /** 这个掉落物是不是自己几分钟前扔掉的（只是事实，捡不捡由心智和技能自己定） */
   isDiscarded?(item: string, pos: Vec3Like): boolean;
   /** 改主意了（指名要捡回某样扔掉的东西）：不再当它是扔掉的，捡回来也不算“又捡回来了” */

@@ -33,6 +33,7 @@ import type {
   Eye,
   GameAdapter,
   Optics,
+  PlacementFaceAttempt,
   MoveOpts,
   MoveTarget,
   Vec3Like,
@@ -56,7 +57,7 @@ import type {
 
 type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; blocks: { pos: Vec3Like; rel?: [number, number, number]; facing?: string }[] };
 
-/** 世界坐标 → 以脚为原点的 [前,上,右]（与 dig_at 的 toWorld 互为逆运算），让心智能直接对着障碍格下 dig_at */
+/** 世界坐标 → 以脚为原点的 [前,上,右]（与 mine_cell 的 toWorld 互为逆运算），让心智能直接对着障碍格下 mine_cell */
 const REL_FORWARD: Record<string, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
 const REL_RIGHT: Record<string, [number, number]> = { N: [1, 0], E: [0, 1], S: [-1, 0], W: [0, -1] };
 function relToBody(feet: Vec3Like, facing: string, block: Vec3Like): [number, number, number] {
@@ -80,10 +81,10 @@ function describePillarClearance(clearance: PillarClearance): string {
   const range = `跳跃时身体扫过的方块范围 x=${min.x}..${max.x}, y=${min.y}..${max.y}, z=${min.z}..${max.z}`;
   // 只报“挡在哪几格”，不报方块名：跳起来撞到的位置是身体能感知的（本体感觉），
   // 方块名称属于看不到的透视信息，交给心智/技能自己看清或动手再确认。
-  // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 dig_at 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
+  // 但补上相对身体的 [前,上,右] 坐标、自然语言方向、朝向和 mine_cell 参数：否则心智要从绝对坐标反推相对坐标，窄竖井里容易挖错格。
   if (clearance.kind === 'blocked') {
     const cells = clearance.blocks.slice(0, 4).map((blk) => blk.rel
-      ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})【${relWords(blk.rel)}】[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（朝向 ${blk.facing}）→ dig_at {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
+      ? `(${blk.pos.x},${blk.pos.y},${blk.pos.z})【${relWords(blk.rel)}】[前,上,右]=[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}]（朝向 ${blk.facing}）→ mine_cell {"at":[${blk.rel[0]},${blk.rel[1]},${blk.rel[2]}],"facing":"${blk.facing}"}`
       : `(${blk.pos.x},${blk.pos.y},${blk.pos.z})`);
     const more = clearance.blocks.length > 4 ? `；还有 ${clearance.blocks.length - 4} 格` : '';
     return `头顶跳跃空间受阻；${range}，要跳起来得先把这几格都挖空（方块名未确认）：${cells.join('；')}${more}`;
@@ -1767,7 +1768,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.emit('hand_choice', name);
   }
 
-  private async equipBestTool(block: any, signal: AbortSignal, forced?: string | null): Promise<ActionResult> {
+  private async equipBestTool(block: any, signal: AbortSignal, forced?: string | null, handOnly = false): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
     const e = b.entity;
@@ -1784,6 +1785,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.noteHandChoice(forced);
       return { ok: true };
     }
+    // 调用方只要“当前手持”：空手就空手挖，不能从背包替它挑/换工具。
+    // 挖不动/不掉落的真实结果由 dig 的 noDrop/超时事实返回，不在这一步偷偷升级。
+    if (handOnly) return { ok: true };
     let best: any = null;
     let bestTime = Infinity;
     const timeFor = (type: number | null, ench: any[] = []) => {
@@ -1826,7 +1830,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return { ok: true };
   }
 
-  async dig(pos: Vec3Like, signal: AbortSignal, opts: { tool?: string | null } = {}): Promise<ActionResult> {
+  async dig(pos: Vec3Like, signal: AbortSignal, opts: { tool?: string | null; handOnly?: boolean } = {}): Promise<ActionResult> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -1837,8 +1841,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 没有对应工具时只是不掉东西，照样能挖掉（原版：空手挖石头约 7.5 秒、深板岩约 15 秒，什么都不掉）：
     // 清路、脱困只要把这一格挖开，用不着镐；要拿到圆石、矿石才得用镐（gather 自己会先检查）。
     // 以前这里一律拒绝（TOOL_MISSING），它就学成了“没镐石头动不了”，镐快断时宁可困在洞里也不敢挖
-    const harvest = this.canHarvest(pos);
-    const tool = await this.afterAction(() => this.equipBestTool(block, signal, opts.tool), check);
+    // handOnly 的掉落事实按实际手持算：背包里虽有镐，空手挖石头仍是什么都不掉。
+    const heldHarvests = !block.harvestTools || (!!b.heldItem && !!block.harvestTools[b.heldItem.type]);
+    const harvest = opts.handOnly === true ? heldHarvests : this.canHarvest(pos);
+    const tool = await this.afterAction(() => this.equipBestTool(block, signal, opts.tool, opts.handOnly === true), check);
     if (!tool.ok) return tool;
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
@@ -1932,10 +1938,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   /**
    * 跨空腔搭桥：身体站在最后一块实心方块上，潜行挪到朝目标方向的边缘（中心越过方块边缘一点，
-   * AABB 仍压着旧方块，不会掉），再点旧方块朝目标那一面，把下一块支撑放到脚下一格。
-   * 只处理水平相邻、目标在脚下一格的支撑位；目标格必须为空。
+   * AABB 仍压着旧方块，不会掉），再点参照方块朝目标那一面，把支撑放到脚下一格或两格。
+   * 脚下一格点脚下支撑块的侧面；脚下两格点支撑块下方那一格的侧面（这要求那一格是实心参照方块）。
+   * 只处理水平相邻的支撑位；目标格必须为空。几何不允许时如实返回原因，不瞬移、不伪造成功。
    */
-  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like }> {
+  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -1946,14 +1953,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const feet = feetCell({ x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z });
     const dx = target.x - feet.x, dz = target.z - feet.z;
     if (Math.abs(dx) + Math.abs(dz) !== 1) return { ok: false, reason: 'EDGE_NOT_ADJACENT:目标格必须与脚格水平相邻' };
-    if (target.y !== feet.y - 1) return { ok: false, reason: 'EDGE_HEIGHT:只能补脚下一格的支撑' };
+    const drop = feet.y - target.y;
+    if (drop !== 1 && drop !== 2) return { ok: false, reason: 'EDGE_HEIGHT:只能补脚下一格或两格的支撑，其他高度需要另找站位' };
     const tgt = this.vec(target);
     const cur = b.blockAt(tgt);
     if (cur && cur.boundingBox === 'block') return { ok: true, placed: { ...target } };
     const under = b.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
     if (!under || under.boundingBox !== 'block') return { ok: false, reason: 'EDGE_NO_SUPPORT:脚下不是实心方块' };
+    // 参照方块必须与目标格同层：drop 1 是脚下支撑块，drop 2 是再下面一格。
+    const refAt = new Vec3(feet.x, target.y, feet.z);
+    const refBefore = b.blockAt(refAt);
+    const face: [number, number, number] = [dx, 0, dz];
+    const tried = refBefore && refBefore.boundingBox === 'block'
+      ? [{ ref: { x: refAt.x, y: refAt.y, z: refAt.z }, face }]
+      : [];
+    if (!tried.length) {
+      return { ok: false, reason: `EDGE_NO_REFERENCE:目标格 (${target.x},${target.y},${target.z}) 同层的 (${refAt.x},${refAt.y},${refAt.z}) 不是实心参照方块；脚下两格没有可点的侧面，换站位或改用 descend_to/place_cell`, attemptedFaces: [] };
+    }
     const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
-    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    if (!item) return { ok: false, reason: 'NO_ITEM', attemptedFaces: tried };
     const epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
     const cx = feet.x + 0.5 + dx * 0.6, cz = feet.z + 0.5 + dz * 0.6;
@@ -1977,23 +1995,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       b.setControlState('forward', false);
       // 必须已经从方块中心挪到边缘外侧，否则还是会被旧方块的顶面挡住。
       const q = b.entity.position;
+      const stance = { x: q.x, y: q.y, z: q.z };
       const pastEdge = (dx !== 0 ? (q.x - (feet.x + 0.5)) * dx : (q.z - (feet.z + 0.5)) * dz) >= 0.52;
-      if (!pastEdge) return { ok: false, reason: 'EDGE_NOT_REACHED:潜行没有挪到方块边缘' };
-      const ref = b.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
-      if (!ref || ref.boundingBox !== 'block') return { ok: false, reason: 'EDGE_LOST_SUPPORT:挪到边缘后脚下支撑不见了' };
+      if (!pastEdge) return { ok: false, reason: 'EDGE_NOT_REACHED:潜行没有挪到方块边缘', stance, attemptedFaces: tried };
+      const ref = b.blockAt(refAt);
+      if (!ref || ref.boundingBox !== 'block') return { ok: false, reason: 'EDGE_LOST_SUPPORT:挪到边缘后脚下支撑或参照方块不见了', stance, attemptedFaces: tried };
       const aim = ref.position.offset(0.5 + dx * 0.5, 0.5, 0.5 + dz * 0.5);
       if (typeof b.lookAt === 'function') await this.afterAction(() => raceAbort(b.lookAt(aim, true), signal, 1000, () => {}), check);
       else if (typeof b.look === 'function') await this.afterAction(() => raceAbort(b.look(Math.atan2(-dx, -dz), -0.55, true), signal, 1000, () => {}), check);
       await this.afterAction(() => b.equip(item, 'hand'), check);
       await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(dx, 0, dz)), signal, 5000, () => {}), check);
       const now = b.blockAt(tgt);
-      if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的' };
+      if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的', stance, attemptedFaces: tried };
       this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
       placedOk = true;
-      return { ok: true, placed: { ...target } };
+      return { ok: true, placed: { ...target }, stance, attemptedFaces: tried };
     } catch (e) {
       if ((e as Error)?.name === 'AbortedError') throw e;
-      return { ok: false, reason: `EDGE_PLACE_FAILED:${String((e as Error)?.message ?? e).slice(0, 100)}` };
+      const q = b.entity.position;
+      return { ok: false, reason: `EDGE_PLACE_FAILED:${String((e as Error)?.message ?? e).slice(0, 100)}`, stance: { x: q.x, y: q.y, z: q.z }, attemptedFaces: tried };
     } finally {
       // 放置失败时人还在方块边缘外面：先潜行退回格心再松 sneak，避免一松就不受支撑。
       if (ownsControls() && !placedOk) {
@@ -2010,7 +2030,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult> {
+  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2043,9 +2063,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       .filter((x) => x.ref && (x.ref.boundingBox === 'block' || (fluidRef && (x.ref.name === 'lava' || x.ref.name === 'water'))))
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
     const at = `(${target.x},${target.y},${target.z})`;
-    if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL', detail: `${at} 四周没有已加载的实心方块面` };
+    if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL', detail: `${at} 四周没有已加载的实心方块面`, attemptedFaces: [] };
+    // 实际尝试过的参照方块/面：失败回执要给结构化事实，不能只给一句文本。
+    const attemptedFaces: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] = [];
     for (const { f, ref } of refs) {
-      if (!this.canClickPlacementFace(ref, f.scaled(-1))) continue;
+      const attempt: PlacementFaceAttempt = { ref: { x: ref.position.x, y: ref.position.y, z: ref.position.z }, face: [-f.x, -f.y, -f.z] };
+      attemptedFaces.push(attempt);
+      if (!this.canClickPlacementFace(ref, f.scaled(-1))) {
+        attempt.reason = 'FACE_NOT_CLICKABLE:视线被挡或超出交互距离';
+        continue;
+      }
       const sneak = OPENS_ON_CLICK.test(ref.name);
       try {
         await this.afterAction(() => b.equip(item, 'hand'), check);
@@ -2057,6 +2084,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         return { ok: true };
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
+        attempt.reason = `PLACE_FAILED:${String(e?.message ?? e).slice(0, 80)}`;
       }
     }
     // 窄竖井里往自己脚下/头那一格插火把：脚下那块顶面无论如何都够得着，射线门禁在身体格上容易误拒，直接贴着脚下放
@@ -2108,6 +2136,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       detail: refs.length
         ? `${at} 有 ${refs.length} 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格${why ? `：${why}` : ''}；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放`
         : `${at} 四周没有相邻实心方块（悬空），从当前站位没有可贴的面${isTreeSaplingItem(item.name) ? '；即使下面有土，也要先站到能看见目标格相邻面的位置' : ''}`,
+      attemptedFaces,
     };
   }
 
@@ -4750,17 +4779,57 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const before = count();
         const appeared = () => Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id))
           && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
-        let entity: any = null;
+        // 水面没有碰撞形状（boundingBox=empty），通用 raycast 会直接穿过水格；船必须右键水面本身，所以给水面格补一个
+        // 液面形状，再按与 placeItemAgainst/放桶路径相同的「current-view 射线首先命中目标」口径判断。不能只看 lookAt 是否发出。
+        const boatSurface = (candidate: Block, ray: iterators.RaycastIterator) => {
+          if (candidate.name !== 'water' && candidate.name !== 'bubble_column') return !!ray.intersect(candidate.shapes, candidate.position);
+          const above = b.blockAt(candidate.position.offset(0, 1, 0));
+          const surface = above?.name === candidate.name ? 1 : 8 / 9;
+          return !!ray.intersect([...candidate.shapes, [0, 0, 0, 1, surface, 1]], candidate.position);
+        };
+        const raycastAvailable = typeof b.world?.raycast === 'function';
+        const viewHitsSurface = () => {
+          // this.ready 已保证 bot.entity（含 Vec3 position）存在，下面的失败归因也直接读它。
+          // 没有真实射线接口时退回同一套放置面口径（距离/眼位）：只能证明位置可达，视线未验证；
+          // 不能把“不知道视线”说成“视线预检通过”。
+          if (!raycastAvailable) return this.canClickPlacementFace(block, new Vec3(0, 1, 0), undefined, true);
+          const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+          const view = new Vec3(-Math.sin(b.entity.yaw) * Math.cos(b.entity.pitch), Math.sin(b.entity.pitch), -Math.cos(b.entity.yaw) * Math.cos(b.entity.pitch));
+          return b.world.raycast(from, view, 4.4, boatSurface)?.position.equals(block.position) === true;
+        };
+        const where = (v: { x: number; y: number; z: number }) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
+        let sent = 0, entity: any = null;
         for (let attempt = 0; attempt < 3 && !entity && count() === before; attempt++) {
-          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
+          // 原版液面高度是 y+8/9≈0.888，不是 y+1：瞄 y+1 时射线在目标水格中心前就高于液面，会 MISS。
+          // 与放桶路径同一口径，瞄略低于液面的 0.85，保证预检和真实 use_item 落在同一方向。
+          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 0.85, 0.5), true), check);
           await this.afterAction(() => this.lookSynced(), check);
+          // 预检只拒绝当前委托：不换水面、不移动、不换物品；未命中立刻返回，不空转等 3 秒。
+          if (!viewHitsSurface()) {
+            const feet = b.entity.position, eye = feet.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+            const feetName = b.blockAt(feet)?.name ?? '未知';
+            const inWater = !!b.entity?.isInWater || feetName === 'water' || feetName === 'bubble_column';
+            const sentText = sent ? `此前已发送 ${sent} 次使用动作均未确认新船实体，本轮未发送` : '未发送使用动作';
+            const missText = raycastAvailable ? '实际视线未命中目标水面' : '位置/眼位回退校验未通过（无 raycast 能力，视线未验证）';
+            return { ok: false, reason: `NO_PLACEMENT_FACE:使用前${missText}，${sentText}`, effectEvidence: { verified: true, changed: false, reasons: [
+              `${missText}，${sentText}`,
+              `目标格 ${where(block.position)} 是 ${block.name}（上方 ${b.blockAt(block.position.offset(0, 1, 0))?.name ?? '未知'}）`,
+              `实测位置 ${where(feet)}，眼位 ${where(eye)}，脚下方块 ${feetName}，inWater=${inWater}`,
+            ] } };
+          }
+          sent++;
           await this.afterAction(async () => { b.swingArm('right'); await b._client.write('use_item', { hand: 0 }); }, check);
           await this.waitForInteraction(() => !!appeared(), check, 1000);
           entity = appeared();
         }
         const consumed = before - count();
-        const reasons = [...(entity ? [`服务器返回新实体 ${entity.name}`] : ['放置后没有确认新船实体']),
-          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : [])];
+        const reasons = [
+          raycastAvailable
+            ? `视线预检通过后发送使用动作 ${sent} 次`
+            : `无 raycast 能力：仅通过位置/眼位回退校验（视线未验证）后发送使用动作 ${sent} 次`,
+          `背包 ${item} 数量 ${before}→${before - consumed}`,
+          ...(entity ? [`服务器返回新实体 ${entity.name}`] : ['没有出现新船实体']),
+        ];
         const changed = !!entity || consumed > 0;
         if (!changed) return { ok: false, reason: 'ENTITY_NOT_SPAWNED:多次放置后没有确认新船实体，背包里的船也未减少', effectEvidence: { verified: true, changed: false, reasons } };
         return { ok: true, spawned: entity?.name ?? item, effectEvidence: { verified: true, changed, reasons } };

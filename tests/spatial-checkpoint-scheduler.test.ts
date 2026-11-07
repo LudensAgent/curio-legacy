@@ -41,6 +41,7 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
     journalRevision: 0,
     confirmedJournalRevision: 0,
     journalBaselineCheckpointId: null,
+    restoredGameVersion: null,
     ledgerRevision: 0,
     confirmedLedgerRevision: 0,
     ledgerBaselineCheckpointId: null,

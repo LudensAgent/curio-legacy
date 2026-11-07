@@ -267,7 +267,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         // 看不见目标：不替它决定往下挖（直上直下挖是最危险的挖法），只说脚下踩着的是什么，挖不挖、往哪挖由它定
         if (canDigDown && !underNote) {
           const under = adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) });
-          if (under && names.includes(under)) underNote = `；脚下踩着的就是 ${under}（要挖自己用 dig_at，往下挖小心掉进洞里或岩浆）`;
+          if (under && names.includes(under)) underNote = `；脚下踩着的就是 ${under}（要挖自己用 mine_cell，往下挖小心掉进洞里或岩浆）`;
         }
         // 眼前没有了就转头找找（砍完一棵树，人会四下看看下一棵在哪），每次采集只找一次
         if (!searched && !s.inWater) {
@@ -287,7 +287,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
         const spots = names.some((n) => isResourceBlock(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
         const remembered = spots.length
-          ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就 goto {"target":"${spots[0].pos.x},${spots[0].pos.y},${spots[0].pos.z}","dig":true} 走到跟前再 gather`
+          ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就先用 plan_route → walk_path 走到跟前再 gather`
           : !unconfirmed.length && isResourceBlock(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
           ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) }, manMadeCaveat)

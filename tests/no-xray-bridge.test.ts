@@ -4,7 +4,6 @@ import type { BlockObservation } from '../src/adapter/types.ts';
 import { makeBridge, visibleActionSenses } from '../src/codeskills/bridge.ts';
 import { localMap } from '../src/perception/local.ts';
 import { Vision } from '../src/perception/vision.ts';
-import { goTo } from '../src/skills/movement.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -144,19 +143,6 @@ test('nearestLand verifies visible support and headroom before asserting a remem
   visible.set('6,65,0', 'air');
   visible.set('6,64,0', 'water');
   assert.equal(await api('nearestLand', []), null, 'visible water is not dry ground');
-});
-
-test('goto cannot reveal an unseen remote lava cell in preflight feedback', async (t) => {
-  t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
-  const adapter = new FakeAdapter();
-  adapter.blocks.push({ name: 'lava', pos: { x: 20, y: 64, z: 0 } });
-  const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
-  t.after(() => ctx.memory.close());
-  t.mock.method(adapter, 'moveTo', async () => { throw new Error('NoPath'); });
-  const result = await goTo.run(ctx, { target: '20,64,0' });
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
-  assert.doesNotMatch(result.summary, /lava/);
-  assert.deepEqual(result.data?.targetCell, { x: 20, y: 64, z: 0 });
 });
 
 test('failed blind digging cannot identify hidden ore through its error summary', async (t) => {

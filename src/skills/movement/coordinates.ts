@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../../adapter/types.ts';
-import { FACINGS, facingOfYaw, localMap, toWorld, type Facing } from '../../perception/local.ts';
+import { FACINGS, facingOfYaw, localMap, type Facing } from '../../perception/local.ts';
 import { surroundings } from '../../perception/surroundings.ts';
 import type { SkillCtx } from '../types.ts';
 
@@ -67,27 +67,6 @@ const RGT: Record<Facing, [number, number]> = { N: [1, 0], E: [0, 1], S: [-1, 0]
 export function toRel(feet: Vec3Like, facing: Facing, p: Vec3Like): Rel {
   const dx = p.x - feet.x, dz = p.z - feet.z;
   return [dx * FWD[facing][0] + dz * FWD[facing][1], p.y - feet.y, dx * RGT[facing][0] + dz * RGT[facing][1]];
-}
-
-/** 把 {at} 或 {xyz} 解析成世界格；两者都写时 xyz 优先。 */
-export function resolveCell(
-  ctx: SkillCtx,
-  a: Record<string, unknown>,
-  facing: Facing,
-  bounds: { f: number; u: [number, number]; r: number },
-): { pos: Vec3Like; rel: Rel } | string {
-  const xyz = absValue(a.xyz ?? a.abs ?? a.world);
-  if (xyz) {
-    const feet = { x: Math.floor(ctx.adapter.state().pos.x), y: Math.floor(ctx.adapter.state().pos.y + 0.05), z: Math.floor(ctx.adapter.state().pos.z) };
-    const rel = toRel(feet, facing, xyz);
-    const parsed = parseRel(rel, bounds);
-    if (typeof parsed === 'string') return `(${xyz.x},${xyz.y},${xyz.z}) 不在身边：${parsed}`;
-    return { pos: { ...xyz }, rel: parsed };
-  }
-  const parsed = parseRel(relValue(a), bounds);
-  if (typeof parsed === 'string') return parsed;
-  const feet = { x: Math.floor(ctx.adapter.state().pos.x), y: Math.floor(ctx.adapter.state().pos.y + 0.05), z: Math.floor(ctx.adapter.state().pos.z) };
-  return { pos: toWorld(feet, facing, parsed), rel: parsed };
 }
 
 export function facingArg(raw: unknown, adapter: { eye(): { yaw: number } | null }): Facing | string {

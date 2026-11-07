@@ -2,164 +2,60 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ActionResult, Vec3Like } from '../src/adapter/types.ts';
 import { useItem } from '../src/skills/actions.ts';
-import { placeAt, primitiveSkills } from '../src/skills/primitives.ts';
-import type { SkillCtx, SkillResult } from '../src/skills/types.ts';
+import { saplingSoilFor, saplingSoilText } from '../src/perception/surroundings.ts';
+import { placeCell } from '../src/skills/movement/primitives.ts';
+import { sleep } from '../src/util.ts';
 import { TestWorld, makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
-/** primitiveSkills 里的 place_at 带 withAbsolute 包装（xyz → 相对格），单独取出并收窄参数类型。 */
-const placeAtAbsolute = primitiveSkills.find((skill) => skill.name === 'place_at') as unknown as {
-  run(ctx: SkillCtx, args: { at: [number, number, number]; facing: 'N'; item: string; xyz?: Vec3Like }): Promise<SkillResult>;
-};
-
-test('place_at 把树苗种在相邻的有效土壤上，并按实际方块确认', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('oak_sapling', 2);
-  // 面朝北，[1,0,0] = (0,64,-1)，正下方 (0,63,-1) 是默认草方块。
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'oak_sapling');
-  assert.equal(w.inv.get('oak_sapling'), 1, '成功放置应消耗一个树苗');
-});
-
-test('place_at [0,0,0] 的树苗按普通放置种在脚下，不走原地垫高', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('oak_sapling', 1);
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [0, 0, 0], facing: 'N', item: 'oak_sapling' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'oak_sapling', '树苗应种在自己脚这一格');
-  assert.equal(w.pos.y, 64, '没有被垫高一格');
-  assert.doesNotMatch(r.summary, /原地垫高|站高/, '树苗不是垫柱材料');
-});
-
-test('place_at 绝对坐标 xyz 用目标格正下方做土壤检查并种下', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('oak_sapling', 1);
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  // (0,64,-1) 正下方 (0,63,-1) 是默认草方块；withAbsolute 应换算成相对 [1,0,0] 并对这一格做支撑检查。
-  const r = await placeAtAbsolute.run(c, { at: [0, 0, 0], facing: 'N', item: 'oak_sapling', xyz: { x: 0, y: 64, z: -1 } });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.deepEqual(r.data?.targetCell, { x: 0, y: 64, z: -1 });
-  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'oak_sapling');
-  assert.equal(w.blockAt({ x: 0, y: 63, z: -1 }), 'grass_block', '支撑格保持原样');
-
-  // 同一绝对目标格换成石头下方：支撑检查必须落到 (0,63,-1)，而不是换算前的占位 [0,0,0] 或其他格子。
-  const bad = new TestWorld();
-  bad.pos = { x: 0.5, y: 64, z: 0.5 };
-  bad.inv.set('oak_sapling', 1);
-  bad.setBlock({ x: 0, y: 63, z: -1 }, 'stone');
-  const badCtx = makeCtx(bad, { senses: { observeBlocks: observeAllBlocks(bad) } });
-  t.after(() => badCtx.memory.close());
-  const failed = await placeAtAbsolute.run(badCtx, { at: [0, 0, 0], facing: 'N', item: 'oak_sapling', xyz: { x: 0, y: 64, z: -1 } });
-  assert.equal(failed.status, 'failed');
-  assert.match(failed.summary, /正下方 \(0,63,-1\) 是 stone/);
-  assert.equal(bad.blockAt({ x: 0, y: 64, z: -1 }), 'air');
-});
-
-test('place_at 把红树苗 mangrove_propagule 按树苗规则种在泥上', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('mangrove_propagule', 1);
-  w.setBlock({ x: 0, y: 63, z: -1 }, 'mud');
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'mangrove_propagule' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'mangrove_propagule');
-});
-
-test('place_at 红树苗可以种在黏土上（clay 只对红树苗有效）', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('mangrove_propagule', 1);
-  w.setBlock({ x: 0, y: 63, z: -1 }, 'clay');
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'mangrove_propagule' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'mangrove_propagule');
-});
-
-test('place_at 普通树苗在黏土上仍失败并明确报支撑', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('oak_sapling', 1);
-  w.setBlock({ x: 0, y: 63, z: -1 }, 'clay');
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /正下方 \(0,63,-1\) 是 clay/);
-  assert.match(r.summary, /普通树苗不能种在黏土上/);
-  assert.equal(w.inv.get('oak_sapling'), 1);
-});
-
-test('place_at 红树苗种在石头下同样明确报支撑错误', async (t) => {
-  const w = new TestWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('mangrove_propagule', 1);
-  w.setBlock({ x: 0, y: 63, z: -1 }, 'stone');
-  const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-  t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'mangrove_propagule' });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /正下方 \(0,63,-1\) 是 stone/);
-  assert.match(r.summary, /mangrove_propagule/);
-  assert.doesNotMatch(r.summary, /悬空|看不见那个面/);
-});
-
-test('place_at 拒绝种在空气/石头下方，并明确报出下方方块', async (t) => {
-  for (const below of ['air', 'stone'] as const) {
-    const w = new TestWorld();
-    w.pos = { x: 0.5, y: 64, z: 0.5 };
-    w.inv.set('oak_sapling', 1);
-    w.setBlock({ x: 0, y: 63, z: -1 }, below);
-    const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
-    t.after(() => c.memory.close());
-    const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
-    assert.equal(r.status, 'failed', `${below}: ${r.summary}`);
-    assert.equal(r.failureCode, 'BAD_ARGS');
-    assert.match(r.summary, new RegExp(`正下方 \\(0,63,-1\\) 是 ${below}`));
-    assert.match(r.summary, /只能种在/);
-    assert.equal(r.data?.support, below);
-    assert.doesNotMatch(r.summary, /悬空|看不见那个面/, '土壤错误不应落进泛化放置反馈');
-    assert.equal(w.blockAt({ x: 0, y: 64, z: -1 }), 'air', '失败不应放置');
-    assert.equal(w.inv.get('oak_sapling'), 1, '失败不应消耗树苗');
-  }
-});
-
-/** 下方土壤有效，但放置面看不见/够不到：模拟真实适配器返回具体细节。 */
-class NoFaceWorld extends TestWorld {
-  override async placeBlockAt(): Promise<ActionResult> {
-    return { ok: false, reason: 'NO_REFERENCE', detail: '(0,64,-1) 有 1 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格；调整站位（靠近或侧移）让目标面和相邻方块进入视野/交互距离再放' };
+/** 树苗只能种在有效土壤上：桩复用生产规则 saplingSoilFor，place_cell 走适配器真实放置路径。 */
+class SoilWorld extends TestWorld {
+  override async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult> {
+    await sleep(10, signal);
+    const name = itemNames.find((n) => (this.inv.get(n) ?? 0) > 0);
+    if (!name) return { ok: false, reason: 'NO_ITEM' };
+    if (this.blockAt(pos) !== 'air') return { ok: true };
+    if (/(_sapling$)|^mangrove_propagule$/.test(name)) {
+      const soil = this.blockAt({ x: pos.x, y: pos.y - 1, z: pos.z }) ?? 'unknown';
+      if (!saplingSoilFor(name).has(soil)) return { ok: false, reason: 'BAD_SUPPORT:' + name + ' 只能种在' + saplingSoilText(name) + '上，正下方是 ' + soil };
+    }
+    this.setBlock(pos, name);
+    this.inv.set(name, (this.inv.get(name) ?? 1) - 1);
+    return { ok: true };
   }
 }
 
-test('place_at 土壤有效但看不到/够不到面时保留适配器细节，不回退成“悬空”', async (t) => {
-  const w = new NoFaceWorld();
-  w.pos = { x: 0.5, y: 64, z: 0.5 };
-  w.inv.set('oak_sapling', 1);
+test('place_cell 把树苗种在相邻的有效土壤上，并按实际方块确认、扣除一棵', async (t) => {
+  assert.ok(saplingSoilFor('mangrove_propagule').has('clay'), '红树苗的土壤规则来自生产函数');
+  assert.equal(saplingSoilFor('oak_sapling').has('clay'), false, '普通树苗不接受黏土');
+  const w = new SoilWorld();
+  w.pos = { x: 1.5, y: 64, z: 1.5 };
+  w.setBlock({ x: 1, y: 63, z: 0 }, 'grass_block');
+  w.inv.set('oak_sapling', 2);
   const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
   t.after(() => c.memory.close());
-  const r = await placeAt.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
-  assert.match(r.summary, /视线被挡或超出 4\.4 格/);
-  assert.match(r.summary, /调整站位（靠近或侧移）/);
-  assert.match(r.summary, /交互距离/);
-  assert.doesNotMatch(r.summary, /四周已看清|悬空/);
+  const r = await placeCell.run(c, { at: [1, 0, 0], facing: 'N', item: 'oak_sapling' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'oak_sapling');
+  assert.equal(w.inv.get('oak_sapling'), 1);
 });
 
-test('use_item 对坐标种树苗给出 place_at / 土壤方块名的明确指引', async (t) => {
+test('place_cell 种在石头/黏土等非土壤上如实失败，且不放置、不消耗', async (t) => {
+  for (const [soil, sapling] of [['stone', 'oak_sapling'], ['clay', 'oak_sapling'], ['stone', 'mangrove_propagule']] as const) {
+    const w = new SoilWorld();
+    w.pos = { x: 1.5, y: 64, z: 1.5 };
+    w.setBlock({ x: 1, y: 63, z: 0 }, soil);
+    w.inv.set(sapling, 1);
+    const c = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+    t.after(() => c.memory.close());
+    const r = await placeCell.run(c, { at: [1, 0, 0], facing: 'N', item: sapling });
+    assert.equal(r.status, 'failed', sapling + ' on ' + soil + ': ' + r.summary);
+    assert.match(r.summary, /BAD_SUPPORT/, sapling + ' on ' + soil + ' 要带出适配器的土壤原因');
+    assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air', '没有种下');
+    assert.equal(w.inv.get(sapling), 1, '失败不消耗树苗');
+  }
+});
+
+test('use_item 对坐标种树苗给出 place_cell / 土壤方块名的明确指引', async (t) => {
   const w = new TestWorld();
   w.inv.set('oak_sapling', 1);
   const c = makeCtx(w);
@@ -167,7 +63,7 @@ test('use_item 对坐标种树苗给出 place_at / 土壤方块名的明确指�
   const r = await useItem.run(c, { item: 'oak_sapling', on: { x: 0, y: 64, z: -1 } });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /place_at/);
+  assert.match(r.summary, /place_cell/);
   assert.match(r.summary, /grass_block/);
   assert.doesNotMatch(r.summary, /只支持满桶|打火石/, '不应落到桶/点火专用的报错');
   assert.equal(w.inv.get('oak_sapling'), 1, '未种下不应消耗树苗');
@@ -219,7 +115,7 @@ test('use_item 对坐标种红树苗同样给出树苗指引', async (t) => {
   const r = await useItem.run(c, { item: 'mangrove_propagule', on: { x: 0, y: 64, z: -1 } });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /place_at/);
+  assert.match(r.summary, /place_cell/);
   assert.match(r.summary, /mangrove_propagule/);
   assert.equal(w.inv.get('mangrove_propagule'), 1);
 });

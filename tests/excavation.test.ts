@@ -439,14 +439,16 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
   assert.equal(world.blockAt({ x: 1, y: 64, z: 0 }), 'obsidian', 'the real jump lands on the original retained step');
 });
 
-test('standing on a partial support is a route/geometry gap, not BAD_ARGS', async () => {
+test('standing on a partial support is a capability gap that returns BAD_ARGS with remediation', async () => {
   const world = new ExcavationWorld();
   world.setBlock({ x: 0, y: 63, z: 0 }, 'soul_sand');
   world.pos = { x: 0.5, y: 63.875, z: 0.5 };
   const result = await excavationSkill.run(context(world), args({ mode: 'stairs_up', steps: 1 }));
   assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'PATH_NOT_FOUND', '参数本身没问题；是当前站位/支撑面不适合整格开挖');
+  assert.equal(result.failureCode, 'BAD_ARGS', '按规格 capability → BAD_ARGS + unsupportedGeometry + remediation');
+  assert.equal(result.data?.unsupportedGeometry, true);
   assert.match(result.summary, /半格/);
+  assert.deepEqual(result.data?.remediation, { action: 'move_step', at: { x: 0, y: 63, z: 0 }, reason: 'fractional_foot_support' });
   assert.equal(world.digs.length, 0);
 });
 
@@ -481,11 +483,193 @@ test('excavate_run allowFalling:true 接受沙砾支撑；默认仍在风险前�
   assert.equal(allowed.status, 'succeeded', allowed.summary);
 });
 
-test('excavate_run 邻格未加载只跳过、不阻断整条开挖', async () => {
+test('excavate_run 邻格未加载只跳过、不阻断整条开挖，并把未知邻格作为数据返回', async () => {
   const world = new ExcavationWorld(), ctx = context(world);
   const read = world.blockAt.bind(world);
   world.blockAt = ((pos) => pos.x === 1 && pos.y === 63 && pos.z === 1 ? null : read(pos)) as unknown as typeof world.blockAt;
   const result = await excavateRun.run(ctx, args({ steps: 1 }));
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.completedSteps, 1);
+  const unknown = result.data?.unknownAdjacent as Vec3Like[];
+  assert.deepEqual(unknown, [{ x: 1, y: 63, z: 1 }], '未知邻格作为边界事实返回，不当成危险也不阻断');
+});
+
+test('工作面自身的下落方块默认可挖，并在回执里标记为已接受风险', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'sand');
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(world.digs.some((pos) => pos.x === 1 && pos.y === 63), '工作面沙子默认挖开');
+  const risks = result.data?.risks as Array<{ at: Vec3Like; name: string; kind: string; role: string; authorization: string; accepted: boolean }>;
+  assert.deepEqual(risks.find((risk) => risk.at.x === 1 && risk.at.y === 63), {
+    at: { x: 1, y: 63, z: 0 }, name: 'sand', kind: 'falling', role: 'work_face', authorization: 'allowFalling', accepted: true,
+  });
+  assert.deepEqual(result.data?.riskCells, [{ x: 1, y: 63, z: 0 }]);
+});
+
+test('挖后复核持续失败：工作面沙被落块回填时不报成功、不移动', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'sand');
+  world.afterDig = (pos) => { if (pos.x === 1 && pos.y === 63) world.setBlock(pos, 'sand'); };
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal(result.data?.completedSteps, 0);
+  assert.deepEqual(result.data?.refill, { at: { x: 1, y: 63, z: 0 }, name: 'sand' });
+  assert.equal(world.moves.length, 0);
+  assert.ok(!world.actions.some((action) => action.startsWith('place:')), '复核失败没有用回填掩盖或自行垫块');
+});
+
+test('落点上方的下落方块默认停在风险前，allowFalling 后才继续并报告授权', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 66, z: 0 }, 'gravel'); // 两格高隧道的头顶上方
+  const blocked = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1 }));
+  assert.equal(blocked.status, 'failed', blocked.summary);
+  assert.equal(blocked.failureCode, 'BAD_ARGS', '风险不是笼统 ERROR');
+  assert.equal(blocked.data?.stopKind, 'risk');
+  assert.equal(blocked.data?.decisionRequired, true);
+  const risks = blocked.data?.risks as Array<{ at: Vec3Like; name: string; kind: string; authorization: string; accepted: boolean }>;
+  assert.deepEqual(risks.find((risk) => risk.name === 'gravel'), {
+    at: { x: 1, y: 66, z: 0 }, name: 'gravel', kind: 'falling', role: 'neighbor', authorization: 'allowFalling', accepted: false,
+  });
+  assert.deepEqual(blocked.data?.riskCells, [{ x: 1, y: 66, z: 0 }]);
+  assert.deepEqual(blocked.data?.remediation, { action: 'authorize', authorization: 'allowFalling', at: { x: 1, y: 66, z: 0 }, reason: 'unaccepted_risk' });
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+
+  const allowedWorld = new ExcavationWorld();
+  allowedWorld.setBlock({ x: 1, y: 66, z: 0 }, 'gravel');
+  const allowed = await excavationSkill.run(context(allowedWorld), args({ mode: 'tunnel', steps: 1, allowFalling: true }));
+  assert.equal(allowed.status, 'succeeded', allowed.summary);
+  const allowedRisks = allowed.data?.risks as Array<{ name: string; accepted: boolean }>;
+  assert.ok(allowedRisks.some((risk) => risk.name === 'gravel' && risk.accepted));
+});
+
+test('相邻岩浆默认停在风险前，lava:true 显式接受后才继续', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 1 }, 'lava');
+  const blocked = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(blocked.status, 'failed', blocked.summary);
+  assert.equal(blocked.failureCode, 'BAD_ARGS');
+  assert.equal(blocked.data?.stopKind, 'risk');
+  assert.equal(blocked.data?.decisionRequired, true);
+  const risks = blocked.data?.risks as Array<{ name: string; kind: string; authorization: string; accepted: boolean }>;
+  assert.deepEqual(risks.find((risk) => risk.name === 'lava'), { at: { x: 1, y: 63, z: 1 }, name: 'lava', kind: 'liquid', role: 'neighbor', authorization: 'lava', accepted: false });
+  assert.deepEqual(blocked.data?.remediation, { action: 'authorize', authorization: 'lava', at: { x: 1, y: 63, z: 1 }, reason: 'unaccepted_risk' });
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+
+  const allowedWorld = new ExcavationWorld();
+  allowedWorld.setBlock({ x: 1, y: 63, z: 1 }, 'lava');
+  const allowed = await excavationSkill.run(context(allowedWorld), args({ steps: 1, lava: true }));
+  assert.equal(allowed.status, 'succeeded', allowed.summary);
+  assert.equal(allowed.data?.completedSteps, 1);
+});
+
+test('落点支撑或身体是液体时 wet/lava 不能授权，补救不再建议 authorize', async () => {
+  const cases: Array<{ name: 'water' | 'lava'; auth: Partial<ExcavationArgs>; at: Vec3Like; role: 'landing_support' | 'body' }> = [
+    { name: 'water', auth: { wet: true }, at: { x: 1, y: 62, z: 0 }, role: 'landing_support' },
+    { name: 'lava', auth: { lava: true }, at: { x: 1, y: 62, z: 0 }, role: 'landing_support' },
+    { name: 'water', auth: { wet: true }, at: { x: 0, y: 64, z: 0 }, role: 'body' },
+    { name: 'lava', auth: { lava: true }, at: { x: 0, y: 64, z: 0 }, role: 'body' },
+  ];
+  for (const c of cases) {
+    for (const override of [{}, c.auth]) {
+      const world = new ExcavationWorld();
+      world.setBlock(c.at, c.name);
+      const result = await excavationSkill.run(context(world), args({ steps: 1, ...override }));
+      assert.equal(result.status, 'failed', `${c.role}/${c.name}: 液体不会被 wet/lava 变成可站`);
+      assert.equal(result.failureCode, 'BAD_ARGS');
+      assert.equal(result.data?.stopKind, 'risk');
+      const risks = result.data?.risks as Array<{ at: Vec3Like; name: string; kind: string; role: string; authorization: string | null; accepted: boolean }>;
+      assert.deepEqual(risks.find((risk) => risk.at.x === c.at.x && risk.at.y === c.at.y), {
+        at: c.at, name: c.name, kind: 'liquid', role: c.role, authorization: null, accepted: false,
+      }, `${c.role}/${c.name}: 落点/身体的液体没有可授权开关`);
+      const remediation = result.data?.remediation as { action: string; authorization?: string } | undefined;
+      assert.equal(remediation?.action, 'change_direction', `${c.role}/${c.name}: 补救不能建议 wet/lava`);
+      assert.equal(remediation?.authorization, undefined);
+      assert.equal(world.digs.length, 0);
+      assert.equal(world.moves.length, 0);
+    }
+  }
+});
+
+test('缺支撑返回契约字段 supportMissing 和一步补救，而不是只给文本', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air'); // tunnel 下一脚格 y64 的支撑格为空
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(result.data?.stopKind, 'missing_support');
+  assert.equal(result.data?.decisionRequired, true);
+  assert.deepEqual(result.data?.supportMissing, {
+    at: { x: 1, y: 63, z: 0 },
+    item: 'any',
+    stance: { kind: 'adjacent', recommended: 'west' },
+    cost: 1,
+    reason: 'next_landing_support_air',
+  });
+  assert.deepEqual(result.data?.remediation, { action: 'place_support', at: { x: 1, y: 63, z: 0 }, item: 'any', reason: 'next_landing_support_air' });
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+});
+
+test('fill 材料不足时按 capability 分类，仍返回 supportMissing（含指定材料）且不挖不垫', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air');
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'MISSING_MATERIALS');
+  assert.equal(result.data?.stopKind, 'capability', '材料不足不是缺支撑');
+  assert.equal(result.data?.decisionRequired, true);
+  const missing = result.data?.supportMissing as { at: Vec3Like; item: string; cost: number };
+  assert.deepEqual(missing.at, { x: 1, y: 63, z: 0 });
+  assert.equal(missing.item, 'netherrack', '回执带出 Agent 指定的 fill 材料');
+  assert.equal(missing.cost, 1);
+  assert.equal(result.data?.remediation && (result.data.remediation as { action: string }).action, 'place_support');
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+  assert.ok(!world.actions.some((action) => action.startsWith('place:')), '补支撑失败没有自行换材料');
+});
+
+test('fill 补支撑仍无支撑时报 missing_support，并带出结构化站位尝试', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air');
+  world.inv.set('netherrack', 5);
+  const place = world.placeBlockAt.bind(world);
+  world.placeBlockAt = async (pos, itemNames, signal) => pos.x === 1 && pos.y === 63 && pos.z === 0
+    ? { ok: false as const, reason: 'NO_REFERENCE' }
+    : place(pos, itemNames, signal);
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(result.data?.stopKind, 'missing_support', '补了仍无支撑才是缺支撑');
+  const attempts = result.data?.fillAttempts as Record<string, unknown>[];
+  assert.ok(Array.isArray(attempts) && attempts.length > 0, 'attempts 作为结构化字段返回');
+  assert.equal(attempts[0].stance, 'current');
+  assert.match(result.summary, /站位尝试/);
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.inv.get('netherrack'), 5, '补支撑失败没有消耗材料');
+});
+
+test('两格高隧道按真实几何保留天花板并逐格确认身体空间', async () => {
+  const world = new ExcavationWorld();
+  for (const x of [1, 2, 3]) world.setBlock({ x, y: 66, z: 0 }, 'stone');
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 2 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.completedSteps, 2);
+  assert.deepEqual(world.pos, { x: 2.5, y: 64, z: 0.5 });
+  for (const x of [1, 2, 3]) assert.equal(world.blockAt({ x, y: 66, z: 0 }), 'stone', '头顶天花板保持完整');
+  assert.equal(world.digs.length, 0, '两格高通道的脚/头空间本来就是空气，只在工作面实心时才挖');
+});
+
+test('未知工作面仍然硬停，不把未知当空气挖', async () => {
+  const world = new ExcavationWorld(), adapter: GameAdapter = world;
+  const read = adapter.blockAt.bind(adapter);
+  adapter.blockAt = (pos) => pos.x === 1 && pos.y === 63 ? null : read(pos);
+  const result = await excavationSkill.run(context(adapter), args({ steps: 1 }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'NOT_FOUND');
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
 });
