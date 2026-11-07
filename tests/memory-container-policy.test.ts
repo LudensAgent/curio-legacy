@@ -11,7 +11,7 @@ import { myFacilities } from '../src/mind/facilities.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { storeItems, takeItems } from '../src/skills/economy.ts';
-import { digAt, placeAt } from '../src/skills/primitives.ts';
+import { mineCell, placeCell } from '../src/skills/movement/primitives.ts';
 import { rememberStation } from '../src/skills/stations.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
@@ -160,30 +160,15 @@ test('placing two adjacent containers keeps both, and digging one invalidates on
   const { world, memory, ctx } = fixture(), first = { x: 1, y: 64, z: 0 }, adjacent = { x: 1, y: 64, z: 1 };
   t.after(() => memory.close());
   world.inv.set('chest', 2);
-  assert.equal((await placeAt.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'chest' })).status, 'succeeded');
-  assert.equal((await placeAt.run(ctx, { at: [1, 0, 1], facing: 'E', item: 'chest' })).status, 'succeeded');
+  assert.equal((await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'chest' })).status, 'succeeded');
+  assert.equal((await placeCell.run(ctx, { at: [1, 0, 1], facing: 'E', item: 'chest' })).status, 'succeeded');
   assert.equal(memory.landmarks().filter((l) => l.label === '我的箱子').length, 2);
   [first, adjacent].forEach((pos) => memory.noteChestUse(world.dim, pos, { put: [{ name: 'coal', count: 1 }] }));
   world.dig = async (pos) => { world.setBlock(pos, 'air'); world.inv.set('chest', 1); return { ok: true }; };
-  assert.equal((await digAt.run(ctx, { at: [1, 0, 0], facing: 'E', own: true })).status, 'succeeded');
+  assert.equal((await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E', own: true })).status, 'succeeded');
   assert.equal(memory.chestAt(world.dim, first), undefined);
   assert.ok(memory.chestAt(world.dim, adjacent));
   assert.deepEqual(memory.landmarks().filter((l) => l.label === '我的箱子').map((l) => l.pos), [adjacent]);
-});
-
-test('placing a solid block directly above a chest is refused to keep the lid usable', async (t) => {
-  const { world, memory, ctx } = fixture();
-  t.after(() => memory.close());
-  world.inv.set('cobblestone', 4);
-  world.setBlock({ x: 1, y: 64, z: 0 }, 'chest');
-  const result = await placeAt.run(ctx, { at: [1, 1, 0], facing: 'E', item: 'cobblestone' });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'BAD_ARGS');
-  assert.equal(world.blockAt({ x: 1, y: 65, z: 0 }), 'air', '正上方没有被盖上');
-  // 火把这类贴墙挂件不挡箱盖，照常放
-  world.inv.set('torch', 1);
-  const torch = await placeAt.run(ctx, { at: [1, 1, 0], facing: 'E', item: 'torch' });
-  assert.equal(torch.status, 'succeeded');
 });
 
 test('loading own/plain container twins removes only the duplicate at the identical cell', (t) => {

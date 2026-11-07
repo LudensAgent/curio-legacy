@@ -7,7 +7,7 @@ import { placeTorch } from '../src/skills/light.ts';
 import { surface } from '../src/skills/movement.ts';
 import { hunt } from '../src/skills/survival.ts';
 import { eat, gather, gatherTargetRisk } from '../src/skills/work.ts';
-import { dig } from '../src/skills/body.ts';
+import { mineCell } from '../src/skills/movement/primitives.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
 
 // ------------------------------------------------------------ gather 不往水边/出过事的地方钻
@@ -306,7 +306,7 @@ test('建筑 spec：门写成木料时换成同木种的门，认不出就用橡
   assert.equal(normalizeSpec({ palette: { door: 'iron_door' } }).palette.door, 'oak_door');
 });
 
-test('dig：没有镐也能空手挖开石头（慢、不掉东西），但不自动造镐', async () => {
+test('mine_cell：没有镐也能空手挖开石头（慢、不掉东西），但不自动造镐', async (t) => {
   const w = new TestWorld();
   w.canHarvest = () => (w.inv.get('wooden_pickaxe') ?? 0) > 0;
   // 像真的身体一样：没有对应的镐也挖得掉，只是什么都不掉
@@ -319,21 +319,21 @@ test('dig：没有镐也能空手挖开石头（慢、不掉东西），但不�
     return r;
   };
   const p = w.state().pos;
-  const above = (n: number) => ({ x: Math.floor(p.x), y: Math.floor(p.y) + 2 + n, z: Math.floor(p.z) });
-  w.setBlock(above(0), 'stone');
-  const ctx = makeCtx(w);
-  try {
-    let r = await dig.run(ctx, { dir: 'up', blocks: 1 });
-    assert.equal(r.status, 'succeeded', `没有镐、没有工作台：空手挖开（${r.summary}）`);
-    assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '就地动作不为了合成走开');
-    assert.ok(!w.inv.get('cobblestone'), '空手挖不掉东西');
-    w.setBlock(above(0), 'stone');
-    w.inv.set('oak_log', 3);
-    w.setBlock({ x: Math.floor(p.x) + 1, y: Math.floor(p.y), z: Math.floor(p.z) }, 'crafting_table');
-    r = await dig.run(ctx, { dir: 'up', blocks: 1 });
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '不自动造镐，由心智显式选择');
-  } finally { ctx.memory.close(); }
+  const head = { x: Math.floor(p.x), y: Math.floor(p.y) + 2, z: Math.floor(p.z) };
+  w.setBlock(head, 'stone');
+  const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => positions.filter((pos) => w.blockAt(pos) !== null).map((pos) => ({ name: w.blockAt(pos)!, properties: {}, pos, worldId: w.worldId, dimension: w.dim, sessionId: w.sessionId, observationId: 1, observedAt: Date.now(), source: 'vision' })) } });
+  t.after(() => ctx.memory.close());
+  let r = await mineCell.run(ctx, { at: [0, 2, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', `没有镐、没有工作台：空手挖开（${r.summary}）`);
+  assert.equal(r.data?.noDrop, true, '空手挖不掉东西，如实报告 noDrop');
+  assert.equal(r.data?.digMs, 7500, '如实报告适配器实测耗时');
+  assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '就地动作不为了合成走开');
+  w.setBlock(head, 'stone');
+  w.inv.set('oak_log', 3);
+  w.setBlock({ x: Math.floor(p.x) + 1, y: Math.floor(p.y), z: Math.floor(p.z) }, 'crafting_table');
+  r = await mineCell.run(ctx, { at: [0, 2, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(!w.actions.includes('craft:wooden_pickaxe'), '不自动造镐，由心智显式选择');
 });
 
 // ------------------------------------------------------------ 第四轮评审

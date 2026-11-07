@@ -11,7 +11,7 @@ import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { breakCell } from '../src/skills/body.ts';
 import { useGui } from '../src/skills/gui.ts';
-import { digAt } from '../src/skills/primitives.ts';
+import { mineCell } from '../src/skills/movement/primitives.ts';
 import { AbortedError } from '../src/util.ts';
 import { TestWorld, makeCtx } from './survival-helpers.ts';
 
@@ -176,7 +176,7 @@ test('dig_at clears only the removed chest and its impressions, leaving an adjac
   });
   ctx.memory.addLandmark('waypoint', '装矿石的（chest）', world.dim, pos, 0);
   world.dig = async (p) => { world.setBlock(p, 'air'); world.inv.set('chest', 1); return { ok: true }; };
-  const result = await digAt.run(ctx, { at: [1, 0, 0], facing: 'E', own: true });
+  const result = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E', own: true });
   assert.equal(result.status, 'succeeded');
   assert.equal(ctx.memory.chestAt(world.dim, pos), undefined);
   assert.ok(ctx.memory.chestAt(world.dim, next));

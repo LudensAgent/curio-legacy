@@ -14,41 +14,20 @@ const pair = (line: number, name: string) => ({ line, name });
  * `goto`/`explore`/`follow_passage`/`excavate_path`/`swim_to`；旧名 `place_at`/`dig_at`/
  * `climb_up`/`descend` 也不再注册。扫描是裸词，`名字 {...}` 与「回家用 goto」这类写法都会被命中。
  *
- * 显式豁免按（行号, 名字）对登记（D-069，归属 C-CLEAN-01）：只跳过该行该名字，
- * 同一行新增的其它未注册名仍会被抓到；守卫断言逐对确认旧名仍在，豁免过期会立即报错。
- * D-069 范围：`movement.ts:624` 与 `:994..:1204`；其余豁免是未注册技能的自身定义/内部注释。
+ * C-CLEAN-01a 删掉了死技能对象（movement.ts 的 goto/explore/follow_passage、excavation.ts 的
+ * excavate_path、body.ts 的 dig），它们的名字不再出现在提示源；D-069 的行号豁免随之失效。
+ * 唯一保留的豁免是 movement.ts 的 surface 里 `backend: 'climb_up'` 内部标签（不是可到达提示）。
+ * 守卫断言逐对确认旧名仍在，豁免过期会立即报错。
  */
 const MOVEMENT = 'src/skills/movement.ts';
 const CARD_FILES = ['src/skills/build.ts', 'src/skills/survival.ts', MOVEMENT];
 const OLD_NAMES = ['goto', 'explore', 'follow_passage', 'excavate_path', 'swim_to', 'place_at', 'dig_at', 'climb_up', 'descend'];
-const D069_LINES = [994, 1031, 1040, 1082, 1099, 1119, 1139, 1156, 1194, 1203, 1204];
 
 const EXEMPT = [
   {
     file: MOVEMENT,
-    pairs: [
-      pair(61, 'explore'), pair(80, 'explore'), pair(81, 'explore'),
-      pair(237, 'goto'), pair(239, 'goto'), pair(328, 'goto'),
-      pair(414, 'follow_passage'), pair(609, 'follow_passage'), pair(612, 'follow_passage'),
-      pair(629, 'goto'),
-    ],
-    why: '技能定义与内部注释，不是可到达提示',
-  },
-  {
-    file: MOVEMENT, pairs: [pair(230, 'explore')], why: 'explore 自指：说明本技能不挖/垫，不是推荐调用',
-  },
-  {
-    file: MOVEMENT,
-    pairs: [
-      pair(624, 'follow_passage'), pair(624, 'place_at'), pair(624, 'climb_up'),
-      ...D069_LINES.flatMap((line) => [pair(line, 'descend'), pair(line, 'climb_up')]),
-    ],
-    why: 'D-069 豁免，归属 C-CLEAN-01',
-  },
-  {
-    file: MOVEMENT,
-    pairs: [pair(1377, 'climb_up'), pair(1381, 'climb_up'), pair(1383, 'climb_up')],
-    why: '内部 backend 标签/注释，不是提示',
+    pairs: [pair(149, 'climb_up'), pair(153, 'climb_up'), pair(155, 'climb_up')],
+    why: 'surface 的 backend 内部标签，不是可到达提示',
   },
 ];
 
@@ -82,10 +61,11 @@ test('survival hunt fallback recommends registered expedition with its real argu
   assert.equal(Object.hasOwn(SKILLS, 'explore'), false, 'explore 未注册时本断言才成立；若 C-CLEAN-01 后注册，需同步');
 });
 
-test('movement prompt for an already-seen target no longer recommends goto', () => {
+test('movement prompts no longer mention removed goto/explore/follow_passage names', () => {
   const source = readSource(MOVEMENT);
-  assert.equal(source.includes('要过去用 goto'), false, '已经看见的目标不应再推荐 goto');
-  assert.ok(source.includes('要过去用 resolve_target 解析它的坐标再 plan_route → walk_path'));
+  for (const name of ['goto', 'explore', 'follow_passage']) {
+    assert.equal(oldNameIn(source, name), false, `movement.ts 已删除死技能 ${name}，不应再出现该名`);
+  }
 });
 
 test('surface guidance points at registered swim_path with a real mode, not legacy swim_to', () => {
