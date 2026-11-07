@@ -33,7 +33,9 @@ const HOST_COMPOSED_CAPABILITIES = {
     saveFragment: true,
     addTraversal: true,
     recordNode: true,
-    upsertEdge: false,
+    // 宿主边写入经 SharedSpatialSession.session.topology.saveEdge（保留 directed/modes）；
+    // MemoryIngest.upsertEdge facade 会丢弃二者，但库 upsertEdge 能力本身可用。
+    upsertEdge: true,
     savePortalEdge: false,
     checkpoint: true,
     flush: false,
