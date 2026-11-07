@@ -19,15 +19,12 @@ import {
   classifyTraversalOwnership,
   classifyWalkToResult,
   controlReleaseProblems,
-  fragmentProjectionMatches,
   initialObservationFacts,
   localBodyCells,
   parseCliArgs,
   parseRconList,
   preflightBotConflict,
-  validateFragmentsQuery,
-  validateFragmentQuery,
-  validateTraversalsQuery,
+  validateQueryPage,
   type CapturedMove,
   type CapturedRouteSample,
   type PhysicsFrame,
@@ -356,7 +353,7 @@ test('terminal body must satisfy the same hypot tolerance, grounded/dry/ready sc
   assert.equal(controlReleaseProblems(controls).length, 0);
 });
 
-test('real spatialQuery outputs use counts for listings and full geometry for comparison', async () => {
+test('real spatialQuery returns the contract page with full recorded geometry', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'navigation-acceptance-query-'));
   const world = 'world-acceptance-query', dim = 'overworld', session = 's1';
   const svc = await SharedSpatialSession.open({ worldId: world, databasePath: path.join(dir, 'memory.db'), timeoutMs: 5000 });
@@ -374,24 +371,24 @@ test('real spatialQuery outputs use counts for listings and full geometry for co
 
     const listingResult = await spatialQuery.run(ctx, { kind: 'fragments', dim, limit: 8 } as const);
     assert.equal(listingResult.status, 'succeeded');
-    const listing = validateFragmentsQuery((listingResult.data as Record<string, unknown>).spatialQuery);
-    assert.equal(listing.ok, true);
-    const projection = listing.fragments.find((f) => f.id === 'f-real');
+    const envelope = listingResult.data as Record<string, unknown>;
+    assert.equal(envelope.status, 'ok');
+    assert.equal(envelope.contract, 'memory-host-contract/1');
+    assert.equal(envelope.worldId, world);
+    assert.equal(envelope.readOnly, true);
+    assert.equal(envelope.executable, false);
+    assert.equal(envelope.total, 1);
+    const listing = envelope.data as Record<string, unknown>;
+    assert.equal(listing.kind, 'fragments');
+    const projection = (listing.items as Record<string, unknown>[]).find((fragment) => fragment.id === 'f-real');
     assert.ok(projection);
-    assert.equal(typeof (projection.polyline as Record<string, unknown>).points, 'number', 'listing points is a count, not an array');
-    assert.equal(Array.isArray((projection.polyline as Record<string, unknown>).points), false);
-    assert.equal(typeof (projection.entrances as Record<string, unknown>).points, 'number');
 
+    // 契约返回库原样 PathFragment：完整几何数组，不再由宿主换成点数投影。
     const typed = history.getFragment('f-real');
     assert.ok(typed);
-    assert.equal(fragmentProjectionMatches(projection, typed).ok, true);
-    // 投影一旦被当成数组形状就会失败，而不是悄悄接受错误契约。
-    assert.equal(fragmentProjectionMatches({ ...projection, polyline: { points: [{ x: 0, y: 0, z: 0 }] } }, typed).ok, false);
-
-    const fragmentResult = await spatialQuery.run(ctx, { kind: 'fragment', dim, fragmentId: 'f-real', field: 'polyline', offset: 0, limit: 32 } as const);
-    const points = validateFragmentQuery((fragmentResult.data as Record<string, unknown>).spatialQuery, 'f-real');
-    assert.equal(points.ok, true);
-    assert.deepEqual(points.points, typed.polyline);
+    assert.deepEqual(projection.polyline, typed.polyline);
+    assert.deepEqual(projection.entrances, typed.entrances);
+    assert.equal(projection.geometrySource, 'traversal');
   } finally {
     const shutdown = await svc.shutdown();
     assert.equal(shutdown.close?.completed, true);
@@ -401,16 +398,24 @@ test('real spatialQuery outputs use counts for listings and full geometry for co
   }
 });
 
-test('spatial query contracts reject missing fields and keep raw records', () => {
-  assert.equal(validateFragmentsQuery({}).ok, false);
-  assert.equal(validateFragmentsQuery({ fragments: [], page: { after: null, limit: 8, total: 0, returned: 0, scan: 'wrong', scanNote: 'x' } }).ok, false);
-  assert.equal(validateFragmentQuery({}, 'f1').ok, false);
-  assert.equal(validateFragmentQuery({ found: false, reason: 'missing' }, 'f1').ok, false);
-  assert.equal(validateFragmentQuery({ found: true, fragment: { id: 'f1', polyline: { recorded: true, total: 3, offset: 0, returned: 2, items: [{ x: 1, y: 64, z: 1 }, { x: 2, y: 64, z: 1 }] } } }, 'f1').ok, false);
-  assert.equal(validateTraversalsQuery({}, 'f1', { worldId: 'w', dim: 'overworld', sessionId: 's' }).ok, false);
-  const record = { id: 't1', fragmentId: 'f1', from: { x: 1, y: 64, z: 1 }, to: { x: 2, y: 64, z: 1 }, worldId: 'w', dim: 'overworld', sessionId: 's', observedAt: 10, source: 'confirmed_walk' };
-  assert.equal(validateTraversalsQuery({ items: [{ status: 'found', record }], page: { total: 1, returned: 1, limit: 8 } }, 'f1', { worldId: 'w', dim: 'overworld', sessionId: 's' }).ok, false);
-  assert.equal(validateTraversalsQuery({ items: [{ status: 'found', record: { ...record, actionId: 't_1' } }], page: { total: 1, returned: 1, limit: 8 } }, 'f1', { worldId: 'w', dim: 'overworld', sessionId: 's' }).ok, true);
+test('spatial query envelope validation keeps raw records and rejects old projections', () => {
+  assert.equal(validateQueryPage({}, 'fragments').ok, false);
+  const page = {
+    contract: 'memory-host-contract/1', status: 'ok', readOnly: true, executable: false,
+    total: 1, nextAfter: 'f1',
+    data: { kind: 'fragments', items: [{ id: 'f1', polyline: [{ x: 1, y: 64, z: 1 }] }], total: 1, nextAfter: 'f1' },
+  };
+  const checked = validateQueryPage(page, 'fragments');
+  assert.equal(checked.ok, true);
+  assert.equal(checked.total, 1);
+  assert.equal(checked.nextAfter, 'f1');
+  assert.deepEqual(checked.items, [{ id: 'f1', polyline: [{ x: 1, y: 64, z: 1 }] }], '列表保留库原样条目');
+  assert.equal(validateQueryPage({ ...page, status: 'partial' }, 'fragments').ok, false);
+  assert.equal(validateQueryPage({ ...page, contract: 'memory-host-contract/0' }, 'fragments').ok, false);
+  assert.equal(validateQueryPage({ ...page, data: { ...page.data, kind: 'traversals' } }, 'fragments').ok, false);
+  // 旧投影（fragments/page 与 fragment/field/offset）不再被接受。
+  assert.equal(validateQueryPage({ fragments: [], page: { total: 0 } }, 'fragments').ok, false);
+  assert.equal(validateQueryPage({ found: true, fragment: { id: 'f1' } }, 'fragments').ok, false);
 });
 
 test('adapter end classification requires both real observations and cleanup failure stays nonzero', () => {

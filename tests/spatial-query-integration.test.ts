@@ -123,42 +123,50 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       taskId: 'integration-parent', progress() {}, spatial,
     };
 
-    await t.test('Arbiter 任务：显式 dim、零预算与分页原样穿过调度', async () => {
-      const route = await arbiterOutcome(arbiter!, 'spatial_query', {
-        kind: 'route', dim: DIM, fromNodeId: 'n-a', toNodeId: 'n-b', maxEdges: 0,
+    await t.test('Arbiter 任务：契约信封与库分页原样穿过调度', async () => {
+      const nodes = await arbiterOutcome(arbiter!, 'spatial_query', {
+        kind: 'nodes', dim: DIM, source: 'agent', limit: 1,
       });
-      assert.ok(route !== null, 'route 查询应有终态');
-      assert.equal(route.result.status, 'succeeded');
-      const routeQuery = rec(rec(route.result.data).spatialQuery);
-      assert.deepEqual(routeQuery.scope, { worldId: WORLD, dim: DIM });
-      assert.equal(rec(routeQuery.requested).budgets && rec(rec(routeQuery.requested).budgets).maxEdges, 0);
-      assert.equal(rec(routeQuery.route).status, 'BUDGET_EXHAUSTED');
-      assert.equal(rec(routeQuery.interpretation).currentPassability, 'not_assessed');
+      assert.ok(nodes !== null, 'nodes 查询应有终态');
+      assert.equal(nodes.result.status, 'succeeded');
+      const nodesEnvelope = rec(nodes.result.data);
+      assert.equal(nodesEnvelope.status, 'ok');
+      assert.equal(nodesEnvelope.contract, 'memory-host-contract/1');
+      assert.equal(nodesEnvelope.worldId, WORLD);
+      assert.equal(nodesEnvelope.dim, DIM);
+      assert.equal(nodesEnvelope.readOnly, true);
+      assert.equal(nodesEnvelope.executable, false);
+      const nodesData = rec(nodesEnvelope.data);
+      assert.equal(nodesData.kind, 'nodes');
+      assert.deepEqual((nodesData.items as { id: string }[]).map((node) => node.id), ['n-a']);
 
       const first = await arbiterOutcome(arbiter!, 'spatial_query', {
-        kind: 'fragment', dim: DIM, fragmentId: 'f-integration', field: 'polyline', offset: 0, limit: 1,
+        kind: 'fragments', dim: DIM, limit: 1,
       });
       assert.ok(first !== null);
       assert.equal(first.result.status, 'succeeded');
-      const firstPage = rec(rec(rec(rec(first.result.data).spatialQuery).fragment).polyline);
-      assert.equal(firstPage.total, 3);
-      assert.equal(firstPage.returned, 1);
-      assert.equal(firstPage.nextOffset, 1);
-      assert.deepEqual(firstPage.items, [{ x: 0, y: 64, z: 0 }]);
+      const firstEnvelope = rec(first.result.data);
+      assert.equal(firstEnvelope.total, 1);
+      const firstData = rec(firstEnvelope.data);
+      const firstFragment = rec((firstData.items as unknown[])[0]);
+      assert.equal(firstFragment.id, 'f-integration');
+      assert.deepEqual(firstFragment.polyline, [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }]);
 
       const second = await arbiterOutcome(arbiter!, 'spatial_query', {
-        kind: 'fragment', dim: DIM, fragmentId: 'f-integration', field: 'polyline', offset: 1, limit: 1,
+        kind: 'traversals', dim: DIM, fragmentId: 'f-integration', limit: 1,
       });
       assert.ok(second !== null);
-      const secondPage = rec(rec(rec(rec(second.result.data).spatialQuery).fragment).polyline);
-      assert.equal(secondPage.nextOffset, 2);
-      assert.deepEqual(secondPage.items, [{ x: 1, y: 64, z: 0 }]);
-      assert.equal(rec(rec(second.result.data).spatialQuery).scope && rec(rec(rec(second.result.data).spatialQuery).scope).dim, DIM);
+      const secondEnvelope = rec(second.result.data);
+      assert.equal(secondEnvelope.total, 1);
+      const traversal = rec((rec(secondEnvelope.data).items as unknown[])[0]);
+      assert.equal(traversal.id, 't-integration');
+      assert.equal(traversal.sessionId, SESSION);
+      assert.equal(traversal.observedAt, 12_345);
     });
 
     await t.test('代码路径 api.act：保留查询结果、标记 noop、不冒充物理动作', async () => {
       const code = `const a = await api.act("spatial_query", ${JSON.stringify({ kind: 'cells', dim: DIM, positions: [{ x: 0, y: 64, z: 0 }] })});\n`
-        + `const b = await api.act("spatial_query", ${JSON.stringify({ kind: 'traversals', dim: DIM, ids: ['t-integration'] })});\n`
+        + `const b = await api.act("spatial_query", ${JSON.stringify({ kind: 'traversals', dim: DIM, fragmentId: 'f-integration' })});\n`
         + 'return { a, b };';
       const behavior = { name: 'query-code', description: '代码只读查询', steps: [], code };
       setBehaviorRegistry({ get: (name) => name === behavior.name ? behavior : undefined, list: () => [{ name: behavior.name }] });
@@ -166,13 +174,14 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(result.status, 'succeeded');
       assert.equal(result.data?.noop, true);
       const returned = rec(result.data?.result);
-      const cellData = rec(rec(rec(returned.a).data).spatialQuery);
-      assert.deepEqual(rec(cellData.scope), { worldId: WORLD, dim: DIM });
-      assert.equal(rec((cellData.results as unknown[])[0] as Record<string, unknown>).evidence !== undefined, true);
-      const travRecord = rec(rec(rec(returned.b).data).spatialQuery);
-      const travItem = rec((travRecord.items as unknown[])[0] as Record<string, unknown>);
-      assert.equal(rec(travItem.record).sessionId, SESSION);
-      assert.equal(rec(travItem.record).observedAt, 12_345);
+      const cellEnvelope = rec(rec(returned.a).data);
+      assert.equal(cellEnvelope.status, 'ok');
+      const cellData = rec(cellEnvelope.data);
+      assert.equal(rec((cellData.cells as unknown[])[0]).observed, true);
+      const travEnvelope = rec(rec(returned.b).data);
+      const travItem = rec((rec(travEnvelope.data).items as unknown[])[0]);
+      assert.equal(travItem.sessionId, SESSION);
+      assert.equal(travItem.observedAt, 12_345);
     });
 
     await t.test('学习步骤：只读步骤不计完成数、保留 stepResults 与查询数据', async () => {
@@ -189,19 +198,19 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(result.data?.noop, true);
       const steps = result.data?.stepResults as Record<string, unknown>[];
       assert.equal(steps.length, 2);
-      const cellQuery = rec(rec(steps[0]!.data).spatialQuery);
-      assert.equal(rec((cellQuery.results as unknown[])[0] as Record<string, unknown>).evidence !== undefined, true);
-      const fragmentsQuery = rec(rec(steps[1]!.data).spatialQuery);
-      assert.equal(rec(fragmentsQuery.page).limit, 1);
-      assert.equal(rec(fragmentsQuery.page).scan, 'full_index_filter_sort');
+      const cellEnvelope = rec(rec(steps[0]!.data));
+      assert.equal(rec((rec(cellEnvelope.data).cells as unknown[])[0]).observed, true);
+      const fragmentsEnvelope = rec(rec(steps[1]!.data));
+      assert.equal(fragmentsEnvelope.total, 1);
+      assert.equal((rec(fragmentsEnvelope.data).items as unknown[]).length, 1);
     });
 
     await t.test('SkillLibrary 宏：只读元数据、逐页结果与 noop 聚合穿过 api.act', async () => {
       const learned = library.learn({
         name: 'query_macro', description: '分页读取历史片段',
         steps: [
-          { skill: 'spatial_query', args: { kind: 'fragment', dim: DIM, fragmentId: 'f-integration', field: 'polyline', offset: 0, limit: 1 } },
-          { skill: 'spatial_query', args: { kind: 'traversals', dim: DIM, ids: ['t-integration'] } },
+          { skill: 'spatial_query', args: { kind: 'fragments', dim: DIM, limit: 1 } },
+          { skill: 'spatial_query', args: { kind: 'traversals', dim: DIM, fragmentId: 'f-integration' } },
         ],
       });
       assert.ok(learned.ok, learned.ok ? '' : learned.error);
@@ -214,11 +223,12 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(direct.data?.noop, true);
       const directSteps = direct.data?.stepResults as Record<string, unknown>[];
       assert.equal(directSteps.length, 2);
-      const page = rec(rec(rec(rec(rec(directSteps[0]!.data).spatialQuery).fragment)).polyline);
-      assert.deepEqual(page.items, [{ x: 0, y: 64, z: 0 }]);
-      assert.equal(page.nextOffset, 1);
-      const traversalItem = rec((rec(rec(directSteps[1]!.data).spatialQuery).items as unknown[])[0] as Record<string, unknown>);
-      assert.equal(rec(traversalItem.record).observedAt, 12_345);
+      const fragmentEnvelope = rec(directSteps[0]!.data);
+      const fragmentItem = rec((rec(fragmentEnvelope.data).items as unknown[])[0]);
+      assert.equal(fragmentItem.id, 'f-integration');
+      assert.equal((fragmentItem.polyline as unknown[]).length, 3);
+      const traversalItem = rec((rec(rec(directSteps[1]!.data).data).items as unknown[])[0]);
+      assert.equal(traversalItem.observedAt, 12_345);
 
       // 宏再被代码包一层：查询数据仍保留，整体仍是 noop。
       const behavior = { name: 'query-macro-code', description: '代码调用只读宏', steps: [], code: 'return await api.act("macro:query_macro", {});' };
