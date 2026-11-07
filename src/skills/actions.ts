@@ -37,8 +37,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体，之后 interact 坐上去、boat_path 划走）；要对准确定的那一格用 interact_block（写坐标）；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体）；船/筏是实体不是方块，interact_block 只对可见方块右键并拒绝船/筏，on 写坐标当前也不支持船/筏；放船后用 interact {"entity":"boat"} 坐上去、boat_path 划走；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell；船/筏写 water，坐标形式不支持船/筏）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -68,6 +68,10 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     if (!s.inventory.some((i) => i.name === args.item)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`);
     if (typeof args.on !== 'string') {
       const pos = args.on;
+      // 船/筏是实体不是方块，坐标放船属于另一套放置语义（A2 未批准）：明确拒绝并指向现有入口，不落进桶/点火的泛化报错。
+      if (/_boat$|_raft$/.test(args.item)) {
+        return fail('BAD_ARGS', `on 写坐标当前不支持放船/筏：${args.item} 是船/筏（实体，不是方块），不能用 interact_block 右键；坐上去用 interact {"entity":"boat"}，放船用 use_item {"item":"${args.item}","on":"water"}`, { item: args.item, pos });
+      }
       // 按坐标右键种树没有“落点”语义（落点由命中的面决定）；直接给出能指定格子的入口，别落进桶/点火专用的报错。
       if (isTreeSaplingItem(args.item)) {
         return fail('BAD_ARGS', `${args.item} 不能对坐标右键种下：要指定格子和下方的土壤用 place_cell {"at":[前,上,右],"item":"${args.item}"}（树苗/红树苗正下方必须是草方块/泥土/砂土/灰化土/泥等土壤）；或把 on 写成 "grass_block"/"dirt"/"mud"，走到能看见的土壤旁右键种下`, { hint: 'place_cell', item: args.item });

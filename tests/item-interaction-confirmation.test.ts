@@ -122,7 +122,8 @@ test('boat and raft placement forces the look at the water surface then sends us
     const result = await pending;
     assert.equal(result.ok, true, result.reason);
     assert.equal(result.spawned, 'boat');
-    assert.ok(looks.some((l) => l.force === true && l.point.distanceTo(water.offset(0.5, 1.0, 0.5)) < 0.01), '强制看向水面顶面中心');
+    // 液面在 y+8/9；瞄 0.85 与放桶路径一致，瞄 y+1 在斜视时会从水面上方掠过。
+    assert.ok(looks.some((l) => l.force === true && l.point.distanceTo(water.offset(0.5, 0.85, 0.5)) < 0.01), '强制看向水面（略低于 8/9 液面）');
     assert.equal(result.effectEvidence?.changed, true);
   }
 });

@@ -4779,17 +4779,57 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const before = count();
         const appeared = () => Object.values(b.entities ?? {}).find((en: any) => !ids.has(String(en.id))
           && /(^|_)(boat|raft)$/.test(String(en.name)) && en.position.distanceTo(block.position) < 4);
-        let entity: any = null;
+        // 水面没有碰撞形状（boundingBox=empty），通用 raycast 会直接穿过水格；船必须右键水面本身，所以给水面格补一个
+        // 液面形状，再按与 placeItemAgainst/放桶路径相同的「current-view 射线首先命中目标」口径判断。不能只看 lookAt 是否发出。
+        const boatSurface = (candidate: Block, ray: iterators.RaycastIterator) => {
+          if (candidate.name !== 'water' && candidate.name !== 'bubble_column') return !!ray.intersect(candidate.shapes, candidate.position);
+          const above = b.blockAt(candidate.position.offset(0, 1, 0));
+          const surface = above?.name === candidate.name ? 1 : 8 / 9;
+          return !!ray.intersect([...candidate.shapes, [0, 0, 0, 1, surface, 1]], candidate.position);
+        };
+        const raycastAvailable = typeof b.world?.raycast === 'function';
+        const viewHitsSurface = () => {
+          // this.ready 已保证 bot.entity（含 Vec3 position）存在，下面的失败归因也直接读它。
+          // 没有真实射线接口时退回同一套放置面口径（距离/眼位）：只能证明位置可达，视线未验证；
+          // 不能把“不知道视线”说成“视线预检通过”。
+          if (!raycastAvailable) return this.canClickPlacementFace(block, new Vec3(0, 1, 0), undefined, true);
+          const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+          const view = new Vec3(-Math.sin(b.entity.yaw) * Math.cos(b.entity.pitch), Math.sin(b.entity.pitch), -Math.cos(b.entity.yaw) * Math.cos(b.entity.pitch));
+          return b.world.raycast(from, view, 4.4, boatSurface)?.position.equals(block.position) === true;
+        };
+        const where = (v: { x: number; y: number; z: number }) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
+        let sent = 0, entity: any = null;
         for (let attempt = 0; attempt < 3 && !entity && count() === before; attempt++) {
-          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 1.0, 0.5), true), check);
+          // 原版液面高度是 y+8/9≈0.888，不是 y+1：瞄 y+1 时射线在目标水格中心前就高于液面，会 MISS。
+          // 与放桶路径同一口径，瞄略低于液面的 0.85，保证预检和真实 use_item 落在同一方向。
+          await this.afterAction(() => b.lookAt(block.position.offset(0.5, 0.85, 0.5), true), check);
           await this.afterAction(() => this.lookSynced(), check);
+          // 预检只拒绝当前委托：不换水面、不移动、不换物品；未命中立刻返回，不空转等 3 秒。
+          if (!viewHitsSurface()) {
+            const feet = b.entity.position, eye = feet.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+            const feetName = b.blockAt(feet)?.name ?? '未知';
+            const inWater = !!b.entity?.isInWater || feetName === 'water' || feetName === 'bubble_column';
+            const sentText = sent ? `此前已发送 ${sent} 次使用动作均未确认新船实体，本轮未发送` : '未发送使用动作';
+            const missText = raycastAvailable ? '实际视线未命中目标水面' : '位置/眼位回退校验未通过（无 raycast 能力，视线未验证）';
+            return { ok: false, reason: `NO_PLACEMENT_FACE:使用前${missText}，${sentText}`, effectEvidence: { verified: true, changed: false, reasons: [
+              `${missText}，${sentText}`,
+              `目标格 ${where(block.position)} 是 ${block.name}（上方 ${b.blockAt(block.position.offset(0, 1, 0))?.name ?? '未知'}）`,
+              `实测位置 ${where(feet)}，眼位 ${where(eye)}，脚下方块 ${feetName}，inWater=${inWater}`,
+            ] } };
+          }
+          sent++;
           await this.afterAction(async () => { b.swingArm('right'); await b._client.write('use_item', { hand: 0 }); }, check);
           await this.waitForInteraction(() => !!appeared(), check, 1000);
           entity = appeared();
         }
         const consumed = before - count();
-        const reasons = [...(entity ? [`服务器返回新实体 ${entity.name}`] : ['放置后没有确认新船实体']),
-          ...(consumed > 0 ? [`背包 ${item} 减少 ${consumed}`] : [])];
+        const reasons = [
+          raycastAvailable
+            ? `视线预检通过后发送使用动作 ${sent} 次`
+            : `无 raycast 能力：仅通过位置/眼位回退校验（视线未验证）后发送使用动作 ${sent} 次`,
+          `背包 ${item} 数量 ${before}→${before - consumed}`,
+          ...(entity ? [`服务器返回新实体 ${entity.name}`] : ['没有出现新船实体']),
+        ];
         const changed = !!entity || consumed > 0;
         if (!changed) return { ok: false, reason: 'ENTITY_NOT_SPAWNED:多次放置后没有确认新船实体，背包里的船也未减少', effectEvidence: { verified: true, changed: false, reasons } };
         return { ok: true, spawned: entity?.name ?? item, effectEvidence: { verified: true, changed, reasons } };
