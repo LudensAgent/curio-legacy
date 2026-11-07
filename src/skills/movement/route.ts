@@ -7,12 +7,10 @@ import {
   planRoute as libraryPlanRoute,
   type BodySample,
   type NavProblem,
-  type PathFragment,
   type RoutePlan,
   type RoutePlanRegistryProblem,
   type RoutePlanScope,
   type RouteUnsupported,
-  type WalkSearchSnapshot,
 } from 'curio-minecraft-3d-memory';
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkCollisionProvider } from '../../adapter/walk-route.ts';
@@ -42,45 +40,6 @@ const newRegistry = () => new RoutePlanRegistryImpl({ capacity: REGISTRY_CAPACIT
 let routeRegistry = newRegistry();
 let lastScope: Scope | null = null;
 
-/**
- * 进程内路线句柄；重启即失效，不持久化。`plan` 是库注册表签发的完整计划
- * （A7 的置信度/可执行/verdict/边界/证据/过期/起点/目标/来源/pathId/作用域）；
- * `snapshot` 只保留给现有 walk 执行器读取点列，C-WALK-01 改用 consume 后可删。
- */
-export type RouteRecord =
-  | {
-      kind: 'snapshot';
-      plan: RoutePlan;
-      snapshot: WalkSearchSnapshot;
-      scope: Scope;
-      from: Vec3Like;
-      target: Vec3Like;
-      validUntil: number;
-      expiresAt: number;
-    }
-  | {
-      kind: 'known';
-      plan: RoutePlan;
-      pathId: string;
-      pathKind?: PathFragment['kind'];
-      points: Vec3Like[];
-      scope: Scope;
-      from: Vec3Like;
-      target: Vec3Like;
-      validUntil: number;
-      expiresAt: number;
-    };
-
-/** 旧 walk.ts 的只读视图；routeId 本身由库注册表签发和约束。 */
-const routeRecords = new Map<string, RouteRecord>();
-
-export function getRouteRecord(routeId: string): RouteRecord | undefined {
-  const record = routeRecords.get(routeId);
-  if (!record) return undefined;
-  if (Date.now() > record.expiresAt) { routeRecords.delete(routeId); return undefined; }
-  return record;
-}
-
 /** Atomically consume a plan handle. First call consumes it even if the checks fail. */
 export function consumeRoutePlan(routeId: string, scope: RoutePlanScope): RoutePlan | RoutePlanRegistryProblem {
   return routeRegistry.consume(routeId, scope, Date.now());
@@ -94,21 +53,18 @@ export function releaseRoutePlan(routeId: string): void {
 /** 清空全部易失路线；重启/换会话/换维时调用。 */
 export function clearRouteRecords() {
   routeRegistry = newRegistry();
-  routeRecords.clear();
   lastScope = null;
 }
 
-function rememberRecord(record: RouteRecord) {
-  const now = Date.now();
-  for (const [id, existing] of routeRecords) {
-    if (now > existing.expiresAt) routeRecords.delete(id);
+/**
+ * 入口作用域对账：world/dim/session 任一变化都先清空旧路线，
+ * 让旧 routeId 变成 route_not_found，而不是可被新作用域误用的残留。
+ */
+export function noteRouteScope(scope: RoutePlanScope): void {
+  if (lastScope !== null && (lastScope.worldId !== scope.worldId || lastScope.dim !== scope.dim || lastScope.sessionId !== scope.sessionId)) {
+    clearRouteRecords();
   }
-  while (routeRecords.size >= REGISTRY_CAPACITY) {
-    const oldest = routeRecords.keys().next().value;
-    if (oldest === undefined) break;
-    routeRecords.delete(oldest);
-  }
-  routeRecords.set(record.plan.routeId, record);
+  lastScope = scope;
 }
 
 const finitePoint = (v: unknown): Vec3Like | null => {
@@ -273,18 +229,6 @@ function planData(plan: RoutePlan, scope: Scope, search: WalkRouteSearch) {
   };
 }
 
-function rememberPlan(plan: RoutePlan, scope: Scope, search: WalkRouteSearch) {
-  const common = { plan, scope, from: plan.start, target: plan.resolvedTarget, validUntil: plan.evidence.validUntil, expiresAt: plan.expiresAt };
-  if (plan.source === 'history') {
-    if (plan.pathId === undefined) return;
-    rememberRecord({ kind: 'known', ...common, pathId: plan.pathId, ...(plan.kind === undefined ? {} : { pathKind: plan.kind }), points: plan.points });
-    return;
-  }
-  const snapshot = search.status();
-  if (snapshot === null) return;
-  rememberRecord({ kind: 'snapshot', ...common, snapshot });
-}
-
 /** 历史起点不符：结构化 failure，不返回可执行 routeId，也不从路线中间开始。 */
 function historyStartFailure(
   pathId: string | undefined,
@@ -370,10 +314,7 @@ export const planRoute: Skill<PlanArgs> = {
     if (Date.now() >= deadline) return fail('TIMEOUT', 'plan_route 期限在开始前已耗尽', { classification: 'TIMEOUT' });
     const scope: Scope = { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId };
     // 换会话/换维：旧 routeId 必须失效；重启由进程内注册表天然满足。
-    if (lastScope !== null && (lastScope.worldId !== scope.worldId || lastScope.dim !== scope.dim || lastScope.sessionId !== scope.sessionId)) {
-      clearRouteRecords();
-    }
-    lastScope = scope;
+    noteRouteScope(scope);
     const from = { ...state.pos };
 
     let pathId = args.pathId;
@@ -436,7 +377,6 @@ export const planRoute: Skill<PlanArgs> = {
         return historyStartFailure(plan.pathId, plan.start, routeStart ?? plan.resolvedTarget, drift, plan.requestedTarget, plan.resolvedTarget);
       }
     }
-    rememberPlan(plan, scope, search);
     const label = plan.source === 'history'
       ? `历史路线 ${plan.pathId ?? ''}（${plan.kind ?? 'unknown'}）`
       : '已知空间路线';
