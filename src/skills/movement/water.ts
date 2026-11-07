@@ -15,7 +15,7 @@ type SwimArgs = { xyz?: Vec3Like; mode: SwimMode; timeoutMs?: number };
 export const swimPath: Skill<SwimArgs> = {
   name: 'swim_path',
   description: '在水面/水中执行一次有界游泳：mode:"water_point" 到指定水中点，mode:"dry_shore" 到指定干岸并离水站稳，mode:"surface" 有界上浮换气。不挖、不垫、不换目标；未到时如实报告位置、氧气、阶段、头顶挡块和最近开口水面。',
-  argsDoc: '{"xyz":[x,y,z], "mode":"water_point|dry_shore|surface", "timeoutMs"?:1000-20000}；surface 不接受 xyz；water_point/dry_shore 必须给 xyz（脚坐标）。',
+  argsDoc: '{"xyz":[x,y,z], "mode":"water_point|dry_shore|surface", "timeoutMs"?:1000-20000}；surface 不接受 xyz；water_point/dry_shore 必须给 xyz（脚坐标，目标格必须可查询/已加载〔blockAt 非 null〕，否则拒绝）。旧名 step/dig_at/place_at 不再注册（改用 move_step/mine_cell/place_cell）；自动 ≤4 格落差已移交 descend_to/move_step，水中上岸由 swim_path 完成；jump/climb_one 的替代是 pillar_one 与 move_step [1,1,0]。',
   timeoutMs: 25000,
   movement: true,
   outcomeBoundary: true,
@@ -40,10 +40,14 @@ export const swimPath: Skill<SwimArgs> = {
   async run(ctx, args) {
     if (args.mode === 'surface') return surface.run(ctx, { ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}) });
     const target = ctx.adapter.blockAt(args.xyz!);
-    if (target !== null && args.mode === 'dry_shore' && WATER.has(target)) {
+    // 目标格不可查询（blockAt 返回 null，通常是区块未加载）就拒绝：底层 swimTo 对未知目标会按干岸验收，会把 water_point/dry_shore 静默重解释。
+    if (target === null) {
+      return fail('BAD_ARGS', `目标 (${args.xyz!.x},${args.xyz!.y},${args.xyz!.z}) 不可查询（blockAt 返回 null，通常是区块未加载）；不进入游泳控制器，避免把 mode:"${args.mode}" 静默当成干岸验收`, { target: args.xyz, blockKnown: false, mode: args.mode });
+    }
+    if (args.mode === 'dry_shore' && WATER.has(target)) {
       return fail('BAD_ARGS', `目标是水中 ${target}，不是干岸；要游到水中点用 mode:"water_point"`, { target: args.xyz, unsupportedTarget: target });
     }
-    if (target !== null && args.mode === 'water_point' && !WATER.has(target)) {
+    if (args.mode === 'water_point' && !WATER.has(target)) {
       return fail('BAD_ARGS', `目标格是 ${target}，不是水中点；要上岸用 mode:"dry_shore"`, { target: args.xyz, unsupportedTarget: target });
     }
     // 旧 swimTo 已有 water_point/dry_shore 的完成语义；这里只把参数收窄到明确的 xyz。

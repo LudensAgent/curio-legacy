@@ -38,6 +38,32 @@ test('swim_path 的 mode 与实际水面/干岸不一致时拒绝', async (t) =>
   assert.equal(wrong.status, 'failed');
   assert.equal(wrong.failureCode, 'BAD_ARGS');
   assert.match(wrong.summary, /水中/);
+
+  // 反向：目标是干方块却要求 water_point，同样显式拒绝。
+  const wrongPoint = await swimPath.run(ctx, { mode: 'water_point', xyz: { x: 2, y: 63, z: 0 } });
+  assert.equal(wrongPoint.status, 'failed');
+  assert.equal(wrongPoint.failureCode, 'BAD_ARGS');
+  assert.match(wrongPoint.summary, /不是水中点/);
+});
+
+test('swim_path 拒绝不可查询目标（blockAt 返回 null），不进入游泳控制器', async (t) => {
+  for (const mode of ['water_point', 'dry_shore'] as const) await t.test(mode, async (t) => {
+    const w = new FakeAdapter();
+    w.pos = { x: 0.5, y: 64, z: 0.5 };
+    let entered = false;
+    w.swimTo = async () => { entered = true; return { ok: true, landed: true, surfaced: true, oxygen: 20 }; };
+    // FakeAdapter 的返回类型收窄为 string；这里显式模拟目标格不可查询（生产适配器对未加载区块返回 null）。
+    w.blockAt = (() => null) as unknown as typeof w.blockAt;
+    const ctx = makeCtx(w);
+    t.after(() => ctx.memory.close());
+    const r = await swimPath.run(ctx, { mode, xyz: { x: 1, y: 63, z: 0 } });
+    assert.equal(r.status, 'failed');
+    assert.equal(r.failureCode, 'BAD_ARGS');
+    assert.deepEqual(r.data?.target, { x: 1, y: 63, z: 0 });
+    assert.equal(r.data?.blockKnown, false);
+    assert.equal(r.data?.mode, mode);
+    assert.equal(entered, false, '目标不可查询时不得进入 swimTo 的干岸回退');
+  });
 });
 
 test('boat_path 只驾驶已乘坐载具', async (t) => {

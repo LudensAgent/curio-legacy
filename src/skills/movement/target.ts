@@ -22,18 +22,27 @@ const finitePoint = (v: unknown): Vec3Like | null => {
  */
 export const resolveTarget: Skill<TargetArgs> = {
   name: 'resolve_target',
-  description: '把坐标、方向（如 "E 150"）、地标名、base、death 或工作站名解析成规范绝对目标，附带来源、维度、半径/不确定项。只读，不移动、不观察、不挖/放；找不到就报已知地标，不猜坐标。',
-  argsDoc: '{"target":"x,y,z | x,z | 地标名 | base | death | 工作站名 | 方向如 E 150", "headingOrigin"?:{"x","y","z"}}（方向单次最多 200 格；只给 x,z 时高度沿用当前脚高并标注 horizontalOnly）',
+  description: '把坐标、方向（如 "E 150"）、地标名、base、death 或工作站名解析成规范绝对目标，附带来源、维度、半径/不确定项。只读，不移动、不观察、不遗忘；工作站名只查记忆，不现场观察也不删除过时地标；找不到就报已知地标，不猜坐标。',
+  argsDoc: '{"target":"x,y,z | x,z | 地标名 | base | death | 工作站名 | 方向如 E 150", "headingOrigin"?:{"x","y","z"}}（方向单次最多 200 格；只给 x,z 时高度沿用当前脚高并标注 horizontalOnly；工作站名来自记忆，不观察、不遗忘）',
   timeoutMs: 3000,
   movement: false,
   readOnly: true,
   validate(raw, adapter) {
     const a = obj(raw);
     const target = a.target ?? a.to ?? a.pos;
-    if (typeof target !== 'string' && !finitePoint(target) && !(target && typeof target === 'object' && !Array.isArray(target))) {
+    if (typeof target === 'string') {
+      if (!target.trim()) return { ok: false, error: 'target 不能为空' };
+    } else if (target && typeof target === 'object' && !Array.isArray(target)) {
+      const p = target as Record<string, unknown>;
+      const finite = (k: string) => typeof p[k] === 'number' && Number.isFinite(p[k]);
+      const full = finite('x') && finite('y') && finite('z');
+      const horizontalOnly = p.y === undefined && finite('x') && finite('z');
+      if (!full && !horizontalOnly) {
+        return { ok: false, error: 'target 对象需要有限的 x、y、z，或至少 x、z' };
+      }
+    } else {
       return { ok: false, error: 'target 需要坐标字符串/对象、地标名、base、death、工作站名或方向如 "E 150"' };
     }
-    if (typeof target === 'string' && !target.trim()) return { ok: false, error: 'target 不能为空' };
     const origin = a.headingOrigin;
     if (origin !== undefined && !finitePoint(origin)) return { ok: false, error: 'headingOrigin 需要 {x,y,z} 有限数字' };
     const heading = typeof target === 'string' ? target.trim().toUpperCase().match(HEADING_TARGET) : null;
@@ -47,16 +56,12 @@ export const resolveTarget: Skill<TargetArgs> = {
       `${extra.label ?? `(${pos.x},${pos.y},${pos.z})`}：${extra.kind}，来源 ${extra.source}${extra.horizontalOnly ? '；只有水平坐标，高度沿用当前脚高' : ''}${extra.radius !== undefined ? `；半径约 ${extra.radius} 格，具体位置未确认` : ''}`,
       { target: pos, kind: extra.kind, label: extra.label ?? null, dim: s.dim, source: extra.source, ...(extra.radius !== undefined ? { radius: extra.radius } : {}), ...(extra.horizontalOnly ? { horizontalOnly: true } : {}), ...(extra.origin ? { headingOrigin: extra.origin } : {}), ...(extra.uncertain ? { uncertain: extra.uncertain } : {}) },
     );
-    // 对象坐标：x,y,z 或 x,z
-    if (args.target && typeof args.target === 'object' && !Array.isArray(args.target)) {
-      const p = args.target as unknown as Record<string, unknown>;
-      if (['x', 'y', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))) {
-        return point({ x: p.x as number, y: p.y as number, z: p.z as number }, { source: 'given', kind: 'point' });
-      }
-      if (['x', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))) {
-        return point({ x: p.x as number, y: s.pos.y, z: p.z as number }, { source: 'given', kind: 'point', horizontalOnly: true });
-      }
-      return failAt('target 对象需要有限的 x、y、z，或至少 x、z');
+    // 对象坐标：validate 已保证 x,y,z 或至少 x,z；没有 y 时高度沿用当前脚高。
+    if (typeof args.target !== 'string') {
+      const p = args.target as unknown as Record<string, number>;
+      return Number.isFinite(p.y)
+        ? point({ x: p.x, y: p.y, z: p.z }, { source: 'given', kind: 'point' })
+        : point({ x: p.x, y: s.pos.y, z: p.z }, { source: 'given', kind: 'point', horizontalOnly: true });
     }
     const raw = String(args.target).trim();
     const heading = raw.toUpperCase().match(HEADING_TARGET);
@@ -88,7 +93,7 @@ export const resolveTarget: Skill<TargetArgs> = {
     }
     if (/^[a-z_]+$/.test(lower) && (isStation(lower) || lower === 'bed' || lower.endsWith('_bed'))) {
       const names = lower === 'bed' || lower.endsWith('_bed') ? BED_NAMES : [lower];
-      const station = findStation(ctx, names, 160);
+      const station = findStation(ctx, names, 160, { readOnly: true });
       if (station) return point(station.pos, { label: `${station.from === 'memory' ? '记得的' : '看到的'} ${lower}`, source: 'station', kind: 'station', ...(station.radius !== undefined ? { radius: station.radius } : {}) });
     }
     const lm = ctx.memory.findLandmark(raw, s.dim);
