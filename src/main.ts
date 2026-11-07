@@ -30,6 +30,7 @@ import { WorldMemory } from './memory/store.ts';
 import { SpatialMemoryBackend } from './memory/spatial-backend.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
+import { capabilitySummary } from './spatial/capabilities.ts';
 import { startSpatialCheckpointScheduler } from './spatial/checkpoint-scheduler.ts';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from './spatial/host-shutdown.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
@@ -126,6 +127,12 @@ try {
       });
     },
   });
+  // 契约 §2.3/§13.1：启动时记录契约版本与各域为 false 的能力；只报告，不改启动流程。
+  const capabilities = capabilitySummary(spatial.capabilities());
+  bus.publish('spatial_capabilities', 'P3',
+    `空间记忆能力协商：契约 ${capabilities.contract}｜false 键 ${Object.entries(capabilities.library)
+      .flatMap(([domain, names]) => names.map((name) => `${domain}.${name}`)).join(', ') || '无'}`,
+    capabilities);
 } catch (error) {
   const kind = (error as { kind?: unknown })?.kind;
   writeSync(2, JSON.stringify({

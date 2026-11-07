@@ -259,6 +259,10 @@ function fakeSpatial(map: VoxelMap) {
     closing: false, paused: false, observationAdmitted: true,
     attach: () => ({}),
     detach: () => {},
+    recordWalkCorridor: (input: { fragment: { id: string }; segments: readonly unknown[] }) => ({
+      status: 'written' as const, fragmentId: input.fragment.id,
+      traversalIds: input.segments.map((_, i) => `offline-${i}`), stancesMarked: input.segments.length, deliveryError: null,
+    }),
   } as unknown as SharedSpatialSession;
 }
 

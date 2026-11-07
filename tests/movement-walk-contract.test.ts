@@ -22,6 +22,7 @@ function flatMap(nameAt: (x: number, y: number, z: number) => string, validityWi
   return map;
 }
 
+/** 离线夹具只模拟库执行环境与只读历史；写入入口显式桩掉，记录调用但不读真实库。 */
 function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}) {
   return {
     worldId: WORLD,
@@ -36,6 +37,10 @@ function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}
     closing: false, paused: false, observationAdmitted: true,
     attach: () => ({}),
     detach: () => {},
+    recordWalkCorridor: (input: { fragment: PathFragment; segments: readonly unknown[] }) => ({
+      status: 'written' as const, fragmentId: input.fragment.id,
+      traversalIds: input.segments.map((_, i) => `offline-${i}`), stancesMarked: input.segments.length, deliveryError: null,
+    }),
   } as unknown as SharedSpatialSession;
 }
 
