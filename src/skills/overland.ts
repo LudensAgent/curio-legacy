@@ -202,7 +202,7 @@ const parseTarget = (ctx: SkillCtx, raw: string, headingOrigin?: Vec3Like): { x:
 export const travel: Skill<TravelArgs> = {
   name: 'travel',
   description: '按地形在地表和水面步行、游泳前往目标（只在地表/水面，地下或悬空会失败）；已乘船时沿水路停靠，保持乘坐并反馈落脚处，不制造或切换载具；三维目标核对实际高度。完成条件：无 y 时水平 ≤2.5 格，带 y 时三维 ≤2.5 格；停靠不等于到达。后端 land_water_plan（步行/游泳）或 boat_ride（已乘船）。place:true 授权原地垫方块爬上 2 格以上的陡坡/高墙（消耗垫脚方块）；不提供 dig/tower 权限',
-  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）, "place"?: true（允许垫方块爬 2 格以上的坡）}；只在地表/水面用，地下或悬空先用 dig_at/climb_up 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
+  argsDoc: '{"to": "x,z | x,y,z | 地标名 | base | death | 方向如 E 150", "noBoat"?: true（只走和游，已乘船时需先自行下船）, "place"?: true（允许垫方块爬 2 格以上的坡）}；只在地表/水面用，地下或悬空先用 mine_cell/pillar_one 回地面；目标 2.5 格内算到达，带 y 时按三维距离核对；方向写法单次最多 200 格，超出会明确拒绝而不是缩短目标',
   timeoutMs: 600000,
   movement: true,
   validate(raw, adapter) {
@@ -224,7 +224,7 @@ export const travel: Skill<TravelArgs> = {
     }
     // travel 只声明 place；dig/tower 不是它的施工权限，静默忽略会让调用方误以为已授权。
     for (const flag of ['dig', 'tower'] as const) if (a[flag] !== undefined) {
-      return { ok: false, error: `travel 没有 ${flag} 权限：步行/游泳只提供 place:true 垫脚爬坡；挖墙用 dig_at，原地搭柱用 climb_up，指定历史路线用 follow_passage` };
+      return { ok: false, error: `travel 没有 ${flag} 权限：步行/游泳只提供 place:true 垫脚爬坡；挖墙用 mine_cell，原地搭柱用 pillar_one，指定历史路线用 plan_route {"source":"history"} 再 walk_path` };
     }
     let headingOrigin: Vec3Like | undefined;
     if (heading) {
@@ -408,5 +408,3 @@ export const travel: Skill<TravelArgs> = {
     }
   },
 };
-
-export const overlandSkills = [travel];

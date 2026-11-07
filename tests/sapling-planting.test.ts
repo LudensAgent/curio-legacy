@@ -159,7 +159,7 @@ test('place_at 土壤有效但看不到/够不到面时保留适配器细节，�
   assert.doesNotMatch(r.summary, /四周已看清|悬空/);
 });
 
-test('use_item 对坐标种树苗给出 place_at / 土壤方块名的明确指引', async (t) => {
+test('use_item 对坐标种树苗给出 place_cell / 土壤方块名的明确指引', async (t) => {
   const w = new TestWorld();
   w.inv.set('oak_sapling', 1);
   const c = makeCtx(w);
@@ -167,7 +167,7 @@ test('use_item 对坐标种树苗给出 place_at / 土壤方块名的明确指�
   const r = await useItem.run(c, { item: 'oak_sapling', on: { x: 0, y: 64, z: -1 } });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /place_at/);
+  assert.match(r.summary, /place_cell/);
   assert.match(r.summary, /grass_block/);
   assert.doesNotMatch(r.summary, /只支持满桶|打火石/, '不应落到桶/点火专用的报错');
   assert.equal(w.inv.get('oak_sapling'), 1, '未种下不应消耗树苗');
@@ -219,7 +219,7 @@ test('use_item 对坐标种红树苗同样给出树苗指引', async (t) => {
   const r = await useItem.run(c, { item: 'mangrove_propagule', on: { x: 0, y: 64, z: -1 } });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.match(r.summary, /place_at/);
+  assert.match(r.summary, /place_cell/);
   assert.match(r.summary, /mangrove_propagule/);
   assert.equal(w.inv.get('mangrove_propagule'), 1);
 });

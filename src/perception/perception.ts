@@ -48,7 +48,7 @@ export interface Percept {
     where?: { kind: WhereKind; text: string; depth?: number; building?: string };
     /** 抬头看到的第一个方块（只看正上方这一列，第一个实心方块之后的看不见）：分清“被树冠遮住”和“在地下” */
     overhead?: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' };
-    /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 dig_at/step/place_at 说出确切的格子 */
+    /** 身边的方块图（以脚为原点的 [前,上,右]，不透视），配合 mine_cell/move_step/place_cell 说出确切的格子 */
     local?: ReturnType<typeof localMap> };
   inventory: InvItem[];
   /** 身上的状态效果（名字） */
@@ -915,6 +915,6 @@ function doorText(adapter: Pick<GameAdapter, 'blockAt'>, x: number, y: number, z
     const d = Math.hypot(dx, dz);
     if (!best || d < best.d) best = { dx, dz, d };
   }
-  if (!best) return '出去要走门；没看到门的话，在墙上开一格（dig_at 写 "own":true），出去再补上';
+  if (!best) return '出去要走门；没看到门的话，在墙上开一格（mine_cell 写 "own":true），出去再补上';
   return `出去走门：门在 ${dirName(best.dx, best.dz)} 边 ${Math.max(1, Math.round(best.d))} 格（门能直接走过，plan_route → walk_path 过去就行）`;
 }

@@ -15,7 +15,6 @@ const AIR = new Set(['air', 'cave_air', 'void_air']);
 const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
 
 interface CellArgs { at: Rel; facing: Facing; xyz?: Vec3Like }
-interface StepArgs extends CellArgs {}
 interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string }
 interface PlaceArgs extends CellArgs { item: string }
 interface SupportArgs extends CellArgs { item: string }
@@ -64,7 +63,7 @@ function shapeOf(name: string, properties: Record<string, string | number | bool
  * 站到相邻一格的纯移动元语。
  * 只执行调用者明确指定的落点：不向下扫描并把“更低的落点”当成落点，不自动补支撑。
  */
-export const moveStep: Skill<StepArgs> = {
+export const moveStep: Skill<CellArgs> = {
   name: 'move_step',
   description: '站到身边相邻的一格（[前,上,右] 或 xyz）。同层要求目标格脚高与当前脚高一致；上一级可高 0.5–1 格（含半砖，向上半格用 [1,1,0]，会跳）；下一级按目标格支撑顶面可低 0.5–1 格；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（半砖、雪层、地毯可为分数脚高）。目标脚高不符、下方是空腔或落差超过 1 格时如实返回支撑格和落差，不自动改落点；补支撑用 place_support，更大落差用 descend_to。',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（前后/左右 ±1，上下 -1..1；[1,0,0] 同层（脚高须一致），[1,1,0] 上一级高 0.5–1 格（含半砖），[1,-1,0] 下一级支撑顶面低 0.5–1 格；同列 [0,1,0] 只在梯子上可爬）',

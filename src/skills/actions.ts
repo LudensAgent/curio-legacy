@@ -70,7 +70,7 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       const pos = args.on;
       // 按坐标右键种树没有“落点”语义（落点由命中的面决定）；直接给出能指定格子的入口，别落进桶/点火专用的报错。
       if (isTreeSaplingItem(args.item)) {
-        return fail('BAD_ARGS', `${args.item} 不能对坐标右键种下：要指定格子和下方的土壤用 place_at {"at":[前,上,右],"item":"${args.item}"}（树苗/红树苗正下方必须是草方块/泥土/砂土/灰化土/泥等土壤）；或把 on 写成 "grass_block"/"dirt"/"mud"，走到能看见的土壤旁右键种下`, { hint: 'place_at', item: args.item });
+        return fail('BAD_ARGS', `${args.item} 不能对坐标右键种下：要指定格子和下方的土壤用 place_cell {"at":[前,上,右],"item":"${args.item}"}（树苗/红树苗正下方必须是草方块/泥土/砂土/灰化土/泥等土壤）；或把 on 写成 "grass_block"/"dirt"/"mud"，走到能看见的土壤旁右键种下`, { hint: 'place_cell', item: args.item });
       }
       if (IGNITE_ITEMS.has(args.item)) {
         if (!adapter.useBlockAt) return fail('ERROR', '当前适配器不支持对坐标使用物品');
@@ -423,7 +423,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
     }
     if (!direction && !to) return { ok: false, error: '需要 direction 或 to' };
     for (const flag of ['dig', 'place', 'tower'] as const) if (a[flag] !== undefined) {
-      return { ok: false, error: `ride 不认 ${flag}：驾驶载具不会挖、放或搭柱；要施工先下船后用 dig_at/place_at/climb_up，下乘用 dismount` };
+      return { ok: false, error: `ride 不认 ${flag}：驾驶载具不会挖、放或搭柱；要施工先下船后用 mine_cell/place_cell/pillar_one，下乘用 dismount` };
     }
     const until = typeof a.until === 'string' && a.until.trim() ? a.until.trim().toLowerCase().slice(0, 80) : undefined;
     return { ok: true, args: { ...(direction ? { direction } : {}), ...(to ? { to } : {}), distance: clampInt(a.distance, 8, 240, 48), ...(until ? { until } : {}) } };
@@ -583,7 +583,7 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   async run(ctx, args) {
     const a = ctx.adapter;
     if (!a.diveTo) return fail('ERROR', '当前适配器不会潜水');
-    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 goto / step');
+    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 plan_route → walk_path，或逐格 move_step');
     const d = dist3(a.state().pos, args.xyz);
     if (d > 24) return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 有 ${Math.round(d)} 格远，一口气游不到；先游近一点`);
     try {
@@ -744,7 +744,7 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
     const horizontal = Math.hypot(after.pos.x - before.x, after.pos.z - before.z);
     const stuckJumping = !!args.keys.jump && !after.inWater && horizontal < 0.5;
     const data = { keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
-    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 step 或 climb_up' : ''}`;
+    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 move_step 或 pillar_one' : ''}`;
     return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
   },
 };

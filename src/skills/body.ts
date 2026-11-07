@@ -531,8 +531,6 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
   },
 };
 
-export const bodySkills = [dig, climbUp];
-
 /** 拆下来的东西掉哪去了：眼睛看得到的掉落物在哪、是不是泡在水里漂着；一个也看不到就照实说 */
 function dropsNear(ctx: SkillCtx, pos: Vec3Like) {
   return ctx.senses.perceivedEntities(24).filter((e) => e.kind === 'item').map((e) => {
