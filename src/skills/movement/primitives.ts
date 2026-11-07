@@ -6,6 +6,7 @@ import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
 import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedChestAt } from '../build.ts';
 import { noteEdit } from '../../mind/edits.ts';
+import { markSelfModified } from '../../spatial/shared-session.ts';
 import { PLACEABLE } from '../survival.ts';
 import { isStation, rememberStation } from '../stations.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from '../types.ts';
@@ -252,7 +253,10 @@ export const mineCell: Skill<MineArgs> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const raw = adapter.state().pos;
+    const origin = adapter.state();
+    const raw = origin.pos;
+    // 归因用动作开始时的维度：确认后再读 state().dim 可能已被传送改变，不能把旧格记到新维度。
+    const dim = origin.dim;
     const feet = feetCell(raw);
     const support = supportCell(raw);
     const digsSupport = args.xyz !== undefined
@@ -335,6 +339,8 @@ export const mineCell: Skill<MineArgs> = {
         cell: [...args.at], was: before, now, target: { ...pos }, ...after(ctx, args.facing, pos), ...fallFacts,
       });
     }
+    // 挖后复核已确认目标格是空气：这时才把这一格记成自身动作修改，失败/未确认不写。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'dig', pos);
     let got = '';
     let inBag: boolean | undefined;
@@ -382,7 +388,10 @@ export const placeCell: Skill<PlaceArgs> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const feet = feetCell(adapter.state().pos);
+    const origin = adapter.state();
+    const feet = feetCell(origin.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
     const key = `${pos.x},${pos.y},${pos.z}`;
     // stateAt 只判几何/占用；名称、材质说明只来自本次 visibleStates，未看清就如实写未看清。
@@ -408,6 +417,8 @@ export const placeCell: Skill<PlaceArgs> = {
     if (observed && observed.name !== args.item && !(args.item === 'torch' && observed.name === 'wall_torch')) {
       return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 实际出现的是 ${observed.name}，不是请求的 ${args.item}`, { placed: observed.name, requested: args.item, ...after(ctx, args.facing, pos) });
     }
+    // 放置效果已用目标格非空气且材料不符即失败的方式确认；确认后才记成自身动作修改。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'place', pos);
     if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
     return ok(
@@ -450,7 +461,10 @@ export const placeSupport: Skill<SupportArgs> = {
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
     const adapter = ctx.adapter;
-    const feet = feetCell(adapter.state().pos);
+    const origin = adapter.state();
+    const feet = feetCell(origin.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
     const key = `${pos.x},${pos.y},${pos.z}`;
     // stateAt 只判几何/支撑；名称与材质说明只来自本次 visibleStates，未看清就如实写未看清。
@@ -583,6 +597,8 @@ export const placeSupport: Skill<SupportArgs> = {
         ...after(ctx, args.facing, pos),
       });
     }
+    // 只有 verify() 确认目标格已形成可站立顶面才算 formed；未成支撑不记修改。
+    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'place', pos);
     const observed = seenAt();
     if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
@@ -615,8 +631,10 @@ export const pillarOne: Skill<{ item?: string }> = {
     const inv = adapter.state().inventory;
     const names = args.item && args.item !== 'any' ? [args.item] : PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0));
     if (!names.length || !inv.some((i) => names.includes(i.name) && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item && args.item !== 'any' ? args.item : '能垫的方块（泥土/圆石/木板…）'}`);
-    const before = adapter.state().pos;
-    const feet = feetCell(before);
+    const startState = adapter.state();
+    const feet = feetCell(startState.pos);
+    // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
+    const dim = startState.dim;
     const r = await adapter.pillarUp(names, ctx.signal);
     // 回执按这次实际 yaw 解析朝向，不再假定北向。
     const eye = adapter.eye();
@@ -639,6 +657,8 @@ export const pillarOne: Skill<{ item?: string }> = {
         climbed: rose, facing, ...(supportName !== null ? { support: { pos: { ...feet }, name: supportName } } : {}), ...after(ctx, facing),
       });
     }
+    // 已确认脚高正好 +1 且脚下是实测可站立支撑：垫脚块就在原脚的格子。
+    markSelfModified(ctx.spatial, dim, feet, ctx.taskId);
     return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）`, { climbed: 1, facing, support: { pos: { ...feet }, name: supportName }, ...after(ctx, facing) });
   },
 };
