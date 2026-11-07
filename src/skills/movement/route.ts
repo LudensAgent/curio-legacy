@@ -317,8 +317,8 @@ function historyStartFailure(
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划一条步行路线：用空间记忆库的 planRoute 做有界 WalkRouteSearch，或读取 Agent 明确指定/附近匹配的历史 fragment（walked/bridge/dug/built）并按当前证据复验。返回库签发的 routeId、路点、边界/阻断、置信度和过期时间；候选计划 executable:false。不移动、不转头、不观察、不写库。当前只支持 walk、exact 到达、同高 ±X/±Z、干燥整块；其他模式/台阶/下落/水面返回结构化 unsupported，不回退 pathfinder。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0}, "mode"?: "walk", "source"?: "auto|search|history", "pathId"?: "历史 fragment ID", "arrival"?:{"kind":"exact"}, "deadlineMs"?:绝对 epoch 毫秒}；to 必须是绝对坐标（名字先用 resolve_target）；history 必须给 pathId，或能按 ≤0.05 起点从历史召回；终点是否精确由库的 requestedTarget/resolvedTarget 结论给出。不支持 near/reach_block、非空 avoid、挖/放/搭柱。',
+  description: '只读规划步行路线：薄适配库 planRoute 做有界搜索，或按 ≤0.05 起点复验历史 fragment。返回库签发的单次 routeId、边界、置信度、过期时间；候选 executable:false。不移动/观察/写库，不重新搜索、无 pathfinder 兜底。当前只支持 walk、exact 到达、同高单格；其余模式/台阶/下落/水面返回结构化 unsupported。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0}, "mode"?:"walk", "source"?:"auto|search|history", "pathId"?:"历史 fragment ID", "arrival"?:{"kind":"exact"}, "deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（名字先用 resolve_target）；history 可给 pathId，或按 ≤0.05 起点召回，终点由库给出 requestedTarget/resolvedTarget。不支持 near/reach_block、非空 avoid、挖/放/搭柱。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
