@@ -62,21 +62,23 @@ export function myBed(memory: StationMemory,
   return best;
 }
 
-/** 先看视野/近期视觉记忆，再看自己记下的工作站地标；返回最近的一个 */
-export function findStation(ctx: SkillCtx, kinds: string[], maxDist: number): { pos: Vec3Like; dist: number; from: 'seen' | 'memory'; radius?: number } | null {
+/** 先看视野/近期视觉记忆，再看自己记下的工作站地标；返回最近的一个。readOnly 只查记忆，不观察、不删除过时地标。 */
+export function findStation(ctx: SkillCtx, kinds: string[], maxDist: number, opts: { readOnly?: boolean } = {}): { pos: Vec3Like; dist: number; from: 'seen' | 'memory'; radius?: number } | null {
   const s = ctx.adapter.state();
   const here = s.pos;
   const out: { pos: Vec3Like; dist: number; from: 'seen' | 'memory'; radius?: number }[] = [];
-  const known = ctx.senses.knownBlocks(kinds, maxDist);
-  const visibleContainers = new Set((ctx.senses.observeBlocks?.(known.filter((b) => isContainerLandmark(b.name)).slice(0, 32).map((b) => b.pos)) ?? [])
-    .filter((b) => kinds.includes(b.name)).map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`));
-  const seen = known.find((b) => !isContainerLandmark(b.name) || visibleContainers.has(`${b.pos.x},${b.pos.y},${b.pos.z}`));
-  if (seen) out.push({ pos: seen.pos, dist: Math.round(dist3(here, seen.pos)), from: 'seen' });
+  if (!opts.readOnly) {
+    const known = ctx.senses.knownBlocks(kinds, maxDist);
+    const visibleContainers = new Set((ctx.senses.observeBlocks?.(known.filter((b) => isContainerLandmark(b.name)).slice(0, 32).map((b) => b.pos)) ?? [])
+      .filter((b) => kinds.includes(b.name)).map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`));
+    const seen = known.find((b) => !isContainerLandmark(b.name) || visibleContainers.has(`${b.pos.x},${b.pos.y},${b.pos.z}`));
+    if (seen) out.push({ pos: seen.pos, dist: Math.round(dist3(here, seen.pos)), from: 'seen' });
+  }
   // 自己的（我的X）和看见过的（X）都算
   const labels = new Set(kinds.flatMap((k) => { const zh = interactiveName(k); return zh ? [`我的${zh}`, zh] : []; }));
   for (const l of ctx.memory.landmarks()) {
     if (!labels.has(l.label) || l.dim !== s.dim || (l.worldId && l.worldId !== s.worldId)) continue;
-    if (!stillThere(ctx.memory, l, here, (p) => ctx.senses.observeBlocks?.([p])[0]?.name ?? null, (n) => kinds.includes(n))) continue;
+    if (!opts.readOnly && !stillThere(ctx.memory, l, here, (p) => ctx.senses.observeBlocks?.([p])[0]?.name ?? null, (n) => kinds.includes(n))) continue;
     const location = isContainerLandmark(l.label) ? chestLocation(l) : { pos: l.pos, radius: 0 };
     const d = dist3(here, location.pos);
     if (d <= maxDist) out.push({ pos: location.pos, dist: Math.round(d), from: 'memory', radius: location.radius });

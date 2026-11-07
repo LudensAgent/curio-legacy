@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { deliberateSystem, glanceSystem, moveDetails } from '../src/mind/prompt.ts';
+import { swimPath } from '../src/skills/movement/index.ts';
 
 test('both thinking tiers expose direction and water movement tools with their effects and limits', () => {
   for (const system of [deliberateSystem(''), glanceSystem('')]) {
@@ -20,6 +21,15 @@ test('both thinking tiers expose direction and water movement tools with their e
 test('active uncommon tools like boat_path get full args on demand, and hidden tools stay out of the catalogs', () => {
   // 当前活动用到的、目录里没给完整参数的动作（如 ride）由 user 提醒用 moveDetails 给完整参数
   assert.match(moveDetails(['boat_path']), /^- boat_path .*"direction".*"to"/m);
+});
+
+test('swim_path argsDoc records delegated old names instead of silently keeping compatibility shells', () => {
+  const doc = swimPath.argsDoc;
+  assert.match(doc, /step\/dig_at\/place_at 不再注册/);
+  assert.match(doc, /move_step\/mine_cell\/place_cell/);
+  assert.match(doc, /自动 ≤4 格落差已移交 descend_to\/move_step/);
+  assert.match(doc, /水中上岸由 swim_path 完成/);
+  assert.match(doc, /jump\/climb_one 的替代是 pillar_one 与 move_step \[1,1,0\]/);
 });
 
 test('both thinking tiers distinguish current water contact, ground contact, and oxygen', () => {
