@@ -230,7 +230,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；容器/门/床/传送门是方块目标，先用 go_near {"target":{x,y,z}} 走到相邻站立格，再用 take_items/sleep/travel_portal，不要把这些方块坐标直接给 navigate_to/plan_route。要真的走到站立格：先 resolve_target/看清目的地站立格，优先用 navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]} 让宿主执行 3D 路线（不挖不放、无路/施工缺口会停）；也可以 plan_route 规划并按结果执行：memory 返回路点/过渡（walk 段可再 plan_route search 得 routeId 后 walk_path，或 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal 用对应现有动作或停下），spatial 返回的 steps 按步骤执行；带 historical 标记时是历史体素候选路线，当前可通行性未知，按现场事实逐步核实，失败再重新规划；search 才返回 routeId 交给 walk_path，而且 search 只走当前脚高、不处理换层（目标 y 不同时用 spatial 的 steps 或 move_step/assess_landings+descend_to）；plan_route 失败/gaps 时不要调用 walk_path。别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one 垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
+【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
@@ -258,7 +258,7 @@ const PRINCIPLES = `【原则】
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；绝对 xyz 的 x/z 必须是整数方块列，只有 y 是实测脚高（半砖可写 63.5），输出前不要给 x/z 加 0.5；move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试 move_step；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。place_cell 指方块占据格，place_support 补脚部目标下面一格。
-- [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。pillar_one 原地垫高（需头顶上方两格全空，两格高的隧道改用 mine_cell+move_step 阶梯）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 move_step。
+- [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。pillar_one 原地垫高（item 必填：方块名或 any；需头顶上方两格全空，两格高的隧道改用 mine_cell+move_step 阶梯）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 move_step。
 - place_support [1,-1,0] 会在 [1,0,0] 脚部目标格正下方补支撑；上下范围 -2..3，可以补下一级 [1,-1,0] 的支撑格 [1,-2,0]。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 

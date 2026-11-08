@@ -62,7 +62,11 @@ test('camera turns do not change a declared north frame across routine repetitio
   assert.ok(!('error' in draft), JSON.stringify(draft));
   const activity = createActivity(draft, '', 'llm', adapter.state());
   for (let step = nextStep(activity); step; step = nextStep(activity)) {
-    const result = await SKILLS[step.skill].run(ctx, step.args);
+    // 生产派发在 arbiter.start 会拿当前身体状态重新校验同一 args；这里直接调用 run 时照同样顺序，
+    // 避免把草案校验时记录的旧起点当成执行授权（连续两步本来就会改变起点）。
+    const validated = SKILLS[step.skill].validate(step.args, adapter);
+    if (!validated.ok) assert.fail(validated.error);
+    const result = await SKILLS[step.skill].run(ctx, validated.args);
     assert.equal(result.status, 'succeeded', result.summary);
   }
   assert.equal(Math.floor(adapter.pos.z), -2);

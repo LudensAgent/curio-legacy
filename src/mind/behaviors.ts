@@ -16,7 +16,7 @@ import { evalPredicate, isRecovery, isThreat, senseNow, situationOf, validatePre
  *
  *   {"name":"pillar-up-from-skeletons","description":"血少又被骷髅射时先垫高三格躲箭",
  *    "when":{"hp_below":8,"hostile":{"name":"skeleton","within":16}},
- *    "steps":[{"skill":"mine_cell","args":{"at":[0,2,0]}},{"skill":"pillar_one"} …],"priority":70,"overrides":["low-hp-flee"]}
+ *    "steps":[{"skill":"mine_cell","args":{"at":[0,2,0]}},{"skill":"pillar_one","args":{"item":"any"}} …],"priority":70,"overrides":["low-hp-flee"]}
  *
  * - auto（when 只有状态条件）：条件成立时身体自己做，像后天练出来的反射；可以用 overrides 换掉某个天生的本能。
  * - recover（when 含 after_failure）：手上某个动作失败时，身体先试这套做法再接着做，试过还不行才叫脑子。

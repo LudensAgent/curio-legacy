@@ -183,8 +183,8 @@ export function viewOf(p?: Percept): string | undefined {
 const GAP_EVIDENCE_FIELDS = [
   'movementNotAttempted', 'obscured', 'failureCause', 'pillarFailure', 'pillarClearance', 'reference', 'occupied',
   'problems', 'landingSupport', 'completedSteps', 'excavatedBlocks', 'ascendedLevels', 'descendedLevels',
-  'goalReached', 'climbed', 'spent', 'targetCell', 'target', 'was', 'drop', 'expectedFoot', 'below', 'partialStop',
-  'unsupportedGeometry', 'cavity', 'position', 'placed', 'consumed',
+  'goalReached', 'climbed', 'spent', 'targetCell', 'target', 'targetFoot', 'was', 'drop', 'expectedFoot', 'below', 'partialStop',
+  'unsupportedGeometry', 'problem', 'placementEffect', 'cavity', 'position', 'placed', 'consumed',
 ] as const;
 
 function gapEvidence(result: SkillResult): string {
