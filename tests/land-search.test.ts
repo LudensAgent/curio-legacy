@@ -269,3 +269,40 @@ test('分片搜索：异步入口按时间片让出事件循环，结果与同�
   const cancelled = await searchLandRouteAsync(map, request(feet, to, { signal: aborted.signal }), 2000);
   assert.equal(cancelled.status, 'CANCELLED');
 });
+
+
+test('异步分片：长搜索会 yield，最长同步片远小于总时长', async () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const N = 120;
+  for (let x = 0; x < N; x++) for (let z = 0; z < N; z++) {
+    fill(map, 'minecraft:stone', [at(x, -1, z)]);
+    fill(map, 'minecraft:air', [at(x, 0, z), at(x, 1, z)]);
+  }
+  const req = request(at(0.5, 0, 0.5), at(N - 0.5, 0, N - 0.5), {
+    maxNodes: 2048, maxEdges: 8192, maxSearchMs: 2000,
+  });
+  const t0 = performance.now();
+  const result = await searchLandRouteAsync(map, req, 2000);
+  const total = performance.now() - t0;
+  assert.equal(result.status, 'BUDGET_EXHAUSTED');
+  assert.ok(result.stats.yieldCount > 0, `yieldCount=${result.stats.yieldCount}`);
+  assert.ok(result.stats.maxSyncSliceMs < 80, `maxSyncSliceMs=${result.stats.maxSyncSliceMs}, total=${total}`);
+  assert.ok(total > result.stats.maxSyncSliceMs * 3, `total=${total}, slice=${result.stats.maxSyncSliceMs}`);
+});
+
+test('异步与同步入口对同一地图给出相同状态和节点/边计数', async () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  for (let x = 0; x < 16; x++) for (let z = 0; z < 4; z++) {
+    fill(map, 'minecraft:stone', [at(x, -1, z)]);
+    fill(map, 'minecraft:air', [at(x, 0, z), at(x, 1, z)]);
+  }
+  const req = request(at(0.5, 0, 0.5), at(15.5, 0, 0.5), { maxNodes: 2048, maxEdges: 8192 });
+  const sync = searchLandRoute(map, req, 2000);
+  const asyncResult = await searchLandRouteAsync(map, req, 2000);
+  assert.equal(asyncResult.status, sync.status);
+  assert.deepEqual(asyncResult.points, sync.points);
+  assert.deepEqual(asyncResult.transitions, sync.transitions);
+  assert.equal(asyncResult.stats.nodesExpanded, sync.stats.nodesExpanded);
+  assert.equal(asyncResult.stats.edgesEvaluated, sync.stats.edgesEvaluated);
+  assert.equal(asyncResult.stats.snapshotCount, 0);
+});
