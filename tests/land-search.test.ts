@@ -102,6 +102,22 @@ test('3D 搜索：预算不足明确报 BUDGET_EXHAUSTED', () => {
   assert.equal(result.status, 'BUDGET_EXHAUSTED');
 });
 
+test('3D 搜索：历史模式用过期体素给出候选路线，严格模式仍报 UNKNOWN', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
+  fill(map, 'minecraft:stone', [at(0, -1, 0), at(1, -1, 0), at(2, -1, 0), at(3, -1, 0)]);
+  const feet = at(0.5, 0, 0.5);
+  map.markStale(DIM, 'expired');
+  const strict = searchLandRoute(map, request(feet, at(3.5, 0, 0.5)), 2000);
+  assert.equal(strict.status, 'UNKNOWN');
+  const historical = searchLandRoute(map, request(feet, at(3.5, 0, 0.5), { allowStale: true }), 2000);
+  assert.equal(historical.status, 'FOUND');
+  assert.equal(historical.evidenceMode, 'historical');
+  assert.equal(historical.assurance, 'historical_geometry');
+  assert.ok(historical.transitions.length > 0);
+  assert.notEqual(historical.verification?.verdict, 'OPEN', '历史路线必须暴露它不是当前已验证的 OPEN 路线');
+});
+
 test('3D 复验：证据被标陈旧后不再 OPEN', () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));

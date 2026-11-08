@@ -143,19 +143,24 @@ test('plan_route source:"search" 仍明确报告固定脚高能力边界', async
   assert.match(r.summary, /fixed feet height 0/);
 });
 
-test('plan_route source:"spatial" 把过期证据归为 UNKNOWN，不冒充 NO_PATH', async (t) => {
+test('plan_route source:"spatial" 严格无路时用历史体素给出带 UNKNOWN 标记的候选路线', async (t) => {
   const map = flatWorld();
   map.markStale(DIM, 'expired');
   const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
   t.after(() => ctx.memory.close());
   clearRouteRecords();
   const r = await planRoute.run(ctx, { to: at(3, 0, 0), mode: 'walk', source: 'spatial', arrival: { kind: 'exact' } });
-  assert.equal(r.status, 'failed');
-  assert.match(r.summary, /UNKNOWN/);
-  assert.doesNotMatch(r.summary, /NO_PATH/, '过期证据不能被说成已观察地形断连');
-  assert.match(r.summary, /STALE|过期/);
-  const boundaries = r.data?.boundaries as { status: string }[] | undefined;
-  assert.ok(boundaries?.some((boundary) => boundary.status === 'STALE'), '保留 STALE 边界事实');
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.evidenceMode, 'historical');
+  assert.equal(r.data?.assurance, 'historical_geometry');
+  assert.equal(r.data?.currentPassability, 'UNKNOWN');
+  assert.match(r.summary, /历史体素路线/);
+  assert.match(r.summary, /当前可通行性未知/);
+  const verification = r.data?.verification as { verdict?: string; openPrefix?: number } | undefined;
+  assert.notEqual(verification?.verdict, 'OPEN', '历史路线必须暴露它不是当前已验证的 OPEN 路线');
+  const steps = r.data?.steps as { skill: string; args: Record<string, unknown> }[] | undefined;
+  assert.ok(steps?.length, '历史路线仍应给出可逐步执行的现有动作');
+  assert.ok(steps.every((step) => !!SKILLS[step.skill]));
 });
 
 test('plan_route source:"spatial" 无法确认时返回边界事实，不伪造 steps', async (t) => {
