@@ -193,7 +193,7 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。`;
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near；没把握就省略 done_when，做完再看结果。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
@@ -255,7 +255,7 @@ const PRINCIPLES = `【原则】
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
-const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；更大落差用 descend_to。place_cell 指方块占据格，place_support 补脚部目标下面一格。
+const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。place_cell 指方块占据格，place_support 补脚部目标下面一格。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。pillar_one 原地垫高（需头顶上方两格全空，两格高的隧道改用 mine_cell+move_step 阶梯）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 move_step。
 - place_support [1,-1,0] 会在 [1,0,0] 脚部目标格正下方补支撑；上下范围 -2..3，可以补下一级 [1,-1,0] 的支撑格 [1,-2,0]。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;

@@ -13,8 +13,13 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
   outcomeBoundary: true,
   validate(raw) {
     const value = obj(raw), target = obj(value.target);
+    if (value.mode !== undefined || value.nearest !== undefined) {
+      return { ok: false, error: 'descend_to 不接受 mode/nearest；请把 assess_landings 的 options[].target（或 options[].descend.target）原样放进 {"target":{"x":数值,"y":数值,"z":数值}}' };
+    }
     if (![target.x, target.y, target.z].every((n) => typeof n === 'number' && Number.isFinite(n))
-      || Math.abs(target.x) > 29_999_984 || Math.abs(target.z) > 29_999_984 || Math.abs(target.y) > 2048) return { ok: false, error: 'target 需要当前已观测落点的有限坐标' };
+      || Math.abs(target.x) > 29_999_984 || Math.abs(target.z) > 29_999_984 || Math.abs(target.y) > 2048) {
+      return { ok: false, error: 'target 需要当前已观测落点的有限坐标；请从 assess_landings 的 options[].target（或 options[].descend.target）复制，例如 {"target":{"x":1.5,"y":64,"z":0.5}}' };
+    }
     if (value.allowUnknownCorridor !== undefined && typeof value.allowUnknownCorridor !== 'boolean') return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
     return { ok: true, args: { target: { x: Math.floor(target.x) + 0.5, y: target.y, z: Math.floor(target.z) + 0.5 }, ...(value.allowUnknownCorridor === true ? { allowUnknownCorridor: true } : {}) } };
   },

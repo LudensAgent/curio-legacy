@@ -92,6 +92,58 @@ test('move_step 头/脚被挡且这段活在挖：先插入回执给的 mine_cel
   assert.equal(again.kind, 'stuck');
 });
 
+test('move_step 只错在同一目标格的实际脚高时，自动改写这一步再试', () => {
+  const { adapter, activity } = activityOf([{ skill: 'move_step', args: { at: [1, 0, 0], facing: 'N' } }]);
+  const step = nextStep(activity)!;
+  const failure = fail('BAD_ARGS', '没有执行迈步：目标格的实际脚高是 y=65.00，不是同层 y=64.00；同一相邻格的正确写法是 [1,1,0]', {
+    movementNotAttempted: true, remediation: { at: [1, 1, 0] }, targetCell: { x: 1, y: 65, z: -1 },
+  });
+  const verdict = afterStep(activity, step, failure, 5, adapter.state());
+  assert.equal(verdict.kind, 'continue', JSON.stringify(verdict));
+  const retried = nextStep(activity)!;
+  assert.deepEqual(retried.args, { at: [1, 1, 0], facing: 'N' });
+  assert.equal((retried as { origin?: string }).origin, 'execution_helper');
+  // 同一修正只做一次；再次报同一失败就交给心智，不无限改写。
+  activity.index = 1;
+  const again = afterStep(activity, activity.steps[0]!, failure, 5, adapter.state());
+  assert.equal(again.kind, 'stuck');
+  assert.deepEqual(activity.steps[0]!.args, { at: [1, 1, 0], facing: 'N' });
+});
+
+test('move_step 的修正若换了水平目标列，不自动应用', () => {
+  const { adapter, activity } = activityOf([{ skill: 'move_step', args: { at: [1, 0, 0], facing: 'N' } }]);
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('BAD_ARGS', '目标格实际脚高不符', {
+    movementNotAttempted: true, remediation: { at: [0, 1, 0] }, targetCell: { x: 0, y: 65, z: -1 },
+  }), 5, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.deepEqual(activity.steps[0]!.args, { at: [1, 0, 0], facing: 'N' });
+});
+
+test('move_step 绝对 xyz 只修正同一目标格的脚高', () => {
+  const { adapter, activity } = activityOf([{ skill: 'move_step', args: { at: [0, 0, 0], facing: 'E', xyz: { x: 1, y: 64, z: 0 } } }]);
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('BAD_ARGS', '支撑面在 y=63.50，与绝对脚高 64.00 不符', {
+    movementNotAttempted: true, remediation: { xyz: { x: 1, y: 63.5, z: 0 } }, targetCell: { x: 1, y: 64, z: 0 },
+  }), 5, adapter.state());
+  assert.equal(verdict.kind, 'continue', JSON.stringify(verdict));
+  const retried = nextStep(activity)!;
+  assert.deepEqual(retried.args, { facing: 'E', xyz: { x: 1, y: 63.5, z: 0 } });
+});
+
+test('move_step 的 >1 落差回执带出可复制的 descend_to 目标，但不自动选落点', () => {
+  const { adapter, activity } = activityOf([{ skill: 'move_step', args: { at: [1, 0, 0], facing: 'N' } }]);
+  const step = nextStep(activity)!;
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '目标格没有可站立面；同列下方 2 格才有落点', {
+    movementNotAttempted: true,
+    remediation: { assess: true, landing: { x: 1, y: 62, z: -1 }, drop: 2, descend: { target: { x: 1, y: 62, z: -1 } } },
+  }), 5, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /assess_landings/);
+  assert.match(verdict.why, /descend_to \{"target":\{"x":1,"y":62,"z":-1\}\}/);
+  assert.deepEqual(activity.steps[0]!.args, { at: [1, 0, 0], facing: 'N' }, '不自动改目标');
+});
+
 test('move_step 被挡但这段活没有挖掘授权：不自动插 mine_cell', () => {
   const { adapter, activity } = activityOf([{ skill: 'move_step', args: { at: [1, 0, 0], facing: 'N' } }]);
   const step = nextStep(activity)!;

@@ -11,6 +11,12 @@ test('descend_to 只接受明确的有限落点', () => {
   assert.equal(descendTo.name, 'descend_to');
   const bad = descendTo.validate({ target: { x: 1, y: Number.NaN, z: 0 } }, w);
   assert.equal(bad.ok, false);
+  const mode = descendTo.validate({ mode: 'nearest' }, w);
+  assert.equal(mode.ok, false);
+  assert.match(!mode.ok ? mode.error : '', /mode\/nearest.*assess_landings|assess_landings.*mode\/nearest/);
+  const empty = descendTo.validate({}, w);
+  assert.equal(empty.ok, false);
+  assert.match(!empty.ok ? empty.error : '', /assess_landings.*options\[\]\.target/);
 });
 
 test('swim_path surface 走有界上浮并如实报告', async (t) => {
