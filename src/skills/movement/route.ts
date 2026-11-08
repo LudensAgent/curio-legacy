@@ -272,9 +272,12 @@ function memoryRoute(spatial: NonNullable<SkillCtx['spatial']>, dim: string, fro
   }));
   const counts = legs.reduce<Record<string, number>>((all, leg) => ({ ...all, [leg.transition]: (all[leg.transition] ?? 0) + 1 }), {});
   const detail = Object.entries(counts).map(([transition, count]) => `${transition}×${count}`).join('、');
+  const p = (v: Vec3Like) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
+  const preview = legs.slice(0, 2).map((leg) => `第${leg.index + 1}段 ${leg.transition} ${p(leg.from)}→${p(leg.to)}`).join('；');
+  const more = legs.length > 2 ? `；另有 ${legs.length - 2} 段` : '';
   return {
     status: 'route' as const,
-    summary: `空间记忆路线 ${legs.length} 段（${detail || '无'}）：从 (${from.x.toFixed(1)},${from.y.toFixed(1)},${from.z.toFixed(1)}) 到 (${to.x.toFixed(1)},${to.y.toFixed(1)},${to.z.toFixed(1)})；这是历史几何，未验证当前可通；执行/复核可用 walk_path（同高段）、move_step（相邻过渡）、descend_to（落差），climb 需要梯子/垫高，由你决定`,
+    summary: `空间记忆路线 ${legs.length} 段（${detail || '无'}）：从 ${p(from)} 到 ${p(to)}；先按现有动作执行：${preview}${more}（walk 段可再 plan_route source:"search" 取得 routeId 后 walk_path，或用 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal/other 用对应现有动作或停下由你决定）；这是历史几何，未验证当前可通，完成后按当前证据重新规划`,
     facts: {
       source: 'memory', backend: 'spatial_topology', status: inspection.status,
       fromNodeId: inspection.fromNodeId, toNodeId: inspection.toNodeId,
@@ -320,12 +323,14 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
   const detail = Object.entries(counts).map(([kind, count]) => `${kind}×${count}`).join('、');
   const stepCounts = steps.reduce<Record<string, number>>((all, step) => ({ ...all, [step.skill]: (all[step.skill] ?? 0) + 1 }), {});
   const stepDetail = Object.entries(stepCounts).map(([skill, count]) => `${skill}×${count}`).join('、');
+  // 只给数量时模型无法执行这些步骤；把前几步参数放进摘要，明确“先执行它们，再重新规划”。
+  const stepPreview = steps.slice(0, 3).map((step) => `${step.skill} ${JSON.stringify(step.args)}`).join('；');
   return {
     result,
     steps,
     summary: result.status === 'FOUND'
-      ? `空间 3D 路线 ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。只读规划，不执行；drop>1 的 descend_to 仍要求当前可见落点`
-      : `空间 3D 搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实）`,
+      ? `空间 3D 路线 ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。先执行：${stepPreview}${steps.length > 3 ? '；…' : ''}；只读规划，不是执行授权，执行后按当前证据重新规划；drop>1 的 descend_to 仍要求当前可见落点`
+      : `空间 3D 搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实）；先规划更近的一段，或走近/看清后再试`,
     facts: {
       source: 'spatial', backend: 'spatial_voxel_search',
       assurance: result.assurance, executable: false,
@@ -343,8 +348,8 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。spatial 返回现有动作步骤（move_step/descend_to），不新增动作；不移动/观察/写库，不挖/放/搭柱。auto 依次 memory→spatial→search。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。memory 返回路点/过渡；spatial 返回 points/transitions 和现有动作 steps；都不是执行授权。',
+  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回路点/过渡，spatial 返回现有动作 steps（move_step/descend_to），search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。auto 依次 memory→spatial→search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；spatial 返回 points/transitions 和现有动作 steps；memory/spatial 都不是 routeId，也不直接授权执行。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -471,7 +476,7 @@ export const planRoute: Skill<PlanArgs> = {
     }
     const plan = result.plan;
     const data = planData(plan, scope, search);
-    return ok(`已知空间路线已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，执行前仍会按当前证据复核${cellNote}`, cell === undefined ? data : {
+    return ok(`已知空间路线已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，下一步用 walk_path（routeId 单次），执行前仍会按当前证据复核${cellNote}`, cell === undefined ? data : {
       ...data, targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance,
     });
   },

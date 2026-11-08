@@ -723,7 +723,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
 
 export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> = {
   name: 'press_keys',
-  description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护；不自动选目标或确认换气。',
+  description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护。guard 提前停键时如实报告已经走出的位移和停因（不是“没走成”）：崖边会提示接着用 move_step（一格）或 assess_landings+descend_to（更大落差）。不自动选目标、不自动绕路或确认换气。',
   argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）}；方向键相对当前朝向，时间到后松键',
   timeoutMs: 12000,
   movement: true,
@@ -751,7 +751,21 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
     const stuckJumping = !!args.keys.jump && !after.inWater && horizontal < 0.5;
     const data = { keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
     const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 move_step 或 pillar_one' : ''}`;
-    return result.ok ? ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data) : fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
+    const stopped = result.stopped;
+    const guardStop = stopped === 'cliff' || stopped === 'lava' || stopped === 'hurt_stop';
+    const movedEnough = result.moved >= 0.05 || horizontal >= 0.05;
+    const stopText = stopped === 'cliff' ? '在前方崖边提前停键'
+      : stopped === 'lava' ? '前方是岩浆/火，提前停键'
+        : stopped === 'hurt_stop' ? '受伤提前停键' : '';
+    const nextText = stopped === 'cliff'
+      ? '；下一步用 move_step 处理 1 格台阶，或先 assess_landings 看清落点再用 descend_to 处理更大落差；不要继续空按前进键'
+      : stopped === 'lava' ? '；不要进入岩浆/火' : '';
+    // guard 停键是保护性停止，不是“按键失败”：只要输入已执行且有位移，就按部分进展回报，
+    // 否则 Agent 会把“正在下坡/已到崖边”误判成原地没动，退回 look_around。
+    if (result.ok) return ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data);
+    if (guardStop && movedEnough) return ok(`按键 ${Object.keys(args.keys).join('+')} 已松开：${stopText}（输入已执行，已有位移）；${detail}${nextText}`, { ...data, guardStop: true, partial: true });
+    if (guardStop) return fail('EFFECT_NOT_CONFIRMED', `按键 ${Object.keys(args.keys).join('+')} ${stopText}，未前进；${detail}${nextText}`, { ...data, guardStop: true });
+    return fail('ERROR', `按键控制结束：${result.reason ?? '未知'}；${detail}`, data);
   },
 };
 

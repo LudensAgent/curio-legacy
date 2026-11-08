@@ -177,6 +177,11 @@ test('move_step 不自动改落点：目标列下方多格才有地面时拒绝'
   assert.equal(r.status, 'failed');
   assert.equal(r.data?.movementNotAttempted, true);
   assert.match(r.summary, /descend_to|可站立面/);
+  const remediation = r.data?.remediation as { assess?: boolean; landing?: Vec3Like; drop?: number } | undefined;
+  assert.equal(remediation?.assess, true);
+  assert.deepEqual(remediation?.landing, { x: 1, y: 62, z: 0 });
+  assert.equal(remediation?.drop, 2);
+  assert.match(r.summary, /assess_landings/);
 });
 
 test('move_step 绝对脚高与真实支撑不符时拒绝，不悄悄改落点', async (t) => {

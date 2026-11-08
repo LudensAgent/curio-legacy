@@ -169,14 +169,17 @@ export const moveStep: Skill<CellArgs> = {
       // 目标脚格没有支撑时，用“最近的同列可站立面相对当前脚高”判断它属于同层还是 ±1；
       // u 是目标格相对脚格的竖直偏移，不能直接按“下方第几格”硬套（半砖会让脚高与格偏移不一致）。
       const correctedU = below === null ? null : verticalStep(below.foot - baseFoot);
-      const remediation = correctedU === null
-        ? null
-        : absolute
+      const dropRemediation = correctedU === null && below !== null && below.drop > 1.01
+        ? { assess: true as const, landing: { x: target.x, y: below.foot, z: target.z }, drop: below.drop }
+        : null;
+      const remediation = correctedU !== null
+        ? absolute
           ? { xyz: { x: target.x, y: below!.foot, z: target.z } }
-          : { at: [rel[0], correctedU, rel[2]] as Rel };
+          : { at: [rel[0], correctedU, rel[2]] as Rel }
+        : dropRemediation;
       const correction = correctedU === null
         ? below
-          ? `同列下方 ${below.drop.toFixed(2)} 格才有可站立脚面 y=${below.foot.toFixed(2)}，与当前脚高相差 ${Math.abs(below.foot - baseFoot).toFixed(2)} 格，不符合 move_step 的同层/±1 规则；要下去用 descend_to，或补支撑后按同层走`
+          ? `同列下方 ${below.drop.toFixed(2)} 格才有可站立脚面 y=${below.foot.toFixed(2)}，与当前脚高相差 ${Math.abs(below.foot - baseFoot).toFixed(2)} 格，不符合 move_step 的同层/±1 规则；要下去先用 assess_landings 确认落点，再 descend_to（move_step 不处理 >1 落差），或补支撑后按同层走`
           : '同列下方没有找到可站立面；要补支撑用 place_support 目标脚下方那一格'
         : absolute
           ? `同一列可站立脚高是 y=${below!.foot.toFixed(2)}；把 y 写成 ${below!.foot.toFixed(2)}`
@@ -191,21 +194,29 @@ export const moveStep: Skill<CellArgs> = {
       const delta = direct - baseFoot;
       const corrected = verticalStep(delta);
       const correctedAt = corrected === null ? null : [rel[0], corrected, rel[2]] as Rel;
+      // >1 格的落差不是 move_step 能处理的；给出“先 assess_landings 再 descend_to”的结构化交接。
+      const dropBelow = correctedAt === null ? landingBelow(adapter, target) : null;
+      const dropRemediation = dropBelow && dropBelow.drop > 1.01
+        ? { assess: true as const, landing: { x: target.x, y: dropBelow.foot, z: target.z }, drop: dropBelow.drop }
+        : null;
+      const fix = correctedAt ? { at: correctedAt } : dropRemediation;
       // 预检失败也要给出同一相邻格的准确写法；不自动重放，由心智决定是否改用这个落点。
       const correction = correctedAt === null
         ? Math.abs(delta) < 0.49
           ? `实际高差 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} 格，不足半格，不能算同层或上下级`
-          : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围`
+          : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
         : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`;
       if (rel[1] === 0 && Math.abs(delta) > 0.01) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(correctedAt ? { remediation: { at: correctedAt } } : {}), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === -1 && (direct > baseFoot - 0.5 + 0.01 || direct < baseFoot - 1 - 0.01)) {
-        const hint = correctedAt === null ? '落点不符，先用 place_support 或 assess_landings/descend_to 确认' : correction;
-        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(correctedAt ? { remediation: { at: correctedAt } } : {}), ...after(ctx, args.facing, target) });
+        const hint = correctedAt === null
+          ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}`
+          : correction;
+        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === 1 && (direct < baseFoot + 0.5 - 0.01 || direct > baseFoot + 1 + 0.01)) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(correctedAt ? { remediation: { at: correctedAt } } : {}), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...after(ctx, args.facing, target) });
       }
     }
     const targetY = absolute ? target.y : direct;
@@ -683,8 +694,12 @@ export const placeSupport: Skill<SupportArgs> = {
         .map((a) => brief(`${a.stance}:${a.reason ?? '未放置'}${a.detail ? `（${a.detail}）` : ''}`))
         .join('；');
       const firstDetail = attempts.find((a) => a.detail)?.detail;
+      // 直接调用 place_support 时参照面不成立是参数/站位问题（BAD_ARGS）；但 excavate_run 的 fill
+      // 需要区分“仍缺支撑”和其他能力缺口，所以额外给出结构化的原因。
+      const referenceGap = attempts.some((a) => /^(NO_REFERENCE|NO_PLACEMENT_FACE|EDGE_)/.test(String(a.reason ?? '')));
       return fail('BAD_ARGS', `[${args.at}] 没能形成可站立支撑：${attemptText}`, {
         attempts, materials: [...names], consumed, targetCell: { ...pos },
+        ...(referenceGap ? { failureCause: 'reference' as const } : {}),
         remediation: {
           stance: '换到能看见目标格相邻实心面的站位再 place_support（例如目标格另一侧）',
           alternatives: ['descend_to 降到下一级后从下方补支撑', 'place_cell 在已有参照面的相邻格放置'],

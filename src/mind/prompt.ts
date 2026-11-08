@@ -226,9 +226,9 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
   ? `\n\n【技能书】每份一行：名字（自写＝你自己写的）［状态］一句用途。状态：文字＝只能读、不能 use_skill；可执行＝能调用（use_skill 或直接写成一步，自动/动作失败时先试/手动是触发方式）；候选可试＝use_skill trial:true 试用；不可执行、定义无效、候选不可用/未确认＝用 {"kind":"skill","name":"…"} 看原因。\n${skills.map((x) => `- ${brief ? x.replace(/］.*$/, '］') : x}`).join('\n')}` : '';
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
-const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。往某方向走先用 resolve_target {"target":"E 20"} 得到绝对落点，再 plan_route → walk_path，别自己算坐标；[前,上,右] 按指定 facing 换算。
+const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；要真的走过去，用 plan_route 规划并按结果执行：memory 返回路点/过渡（walk 段可再 plan_route search 得 routeId 后 walk_path，或 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal 用对应现有动作或停下），spatial 返回的 steps 按步骤执行，search 才返回 routeId 交给 walk_path；plan_route 失败/gaps 时不要调用 walk_path。别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one 垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下，更大落差用 descend_to。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
+【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one 垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
@@ -238,13 +238,13 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去记得的地方或坐标 → resolve_target 解析目标，再 plan_route 规划、walk_path 执行；找没见过的东西 → look_around + plan_route/walk_path；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去记得的地方或坐标 → resolve_target 算点 → plan_route 规划 → 按结果执行（memory 的 legs 按 transition 用现有动作，spatial 的 steps 逐步执行，search 的 routeId 交给 walk_path）；找没见过的东西 → look_around 只看当前视野，没看到就实际移动一段（执行 plan_route 的 steps，或 move_step/press_keys/descend_to）再观察，别原地重复 look_around/gather；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补这一格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- plan_route 的 source:"memory"/"spatial"/"auto" 可能返回路点/过渡或现有动作 steps（move_step/descend_to），不是 routeId：按过渡执行；climb 由你决定梯子/垫高
+- plan_route 只读：source:"memory"/"spatial"/"auto" 返回路点/过渡或现有动作 steps（move_step/descend_to），按 steps 执行；source:"search" 返回 routeId，才交给 walk_path。plan_route 失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段，走完/看清再规划；climb 由你决定梯子/垫高
 - plan_route/walk_path 不挖墙、不垫路、不搭柱；需要改变地形时显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】

@@ -170,7 +170,19 @@ test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划
   assert.ok(r.data?.confidence === 'verified' || r.data?.confidence === 'candidate');
   assert.ok((r.data?.points as unknown[]).length >= 2);
   assert.match(String(r.data?.routeId), /^rt_/);
+  assert.match(r.summary, /walk_path/, 'search 结果要明确下一步是 walk_path');
   assert.deepEqual(w.actions, []);
+});
+
+test('walk_path 拒绝 pending/占位 routeId，并指向 plan_route 的真实结果类型', () => {
+  const adapter = flatAdapter();
+  for (const routeId of ['pending', '$routeId', '<route>', 'auto', 'todo', 'later', '{routeId}']) {
+    const v = walkPath.validate({ routeId }, adapter);
+    assert.equal(v.ok, false, routeId);
+    assert.match(!v.ok ? v.error : '', /占位符|routeId/);
+  }
+  const valid = walkPath.validate({ routeId: 'rt_1790000000000_1' }, adapter);
+  assert.ok(valid.ok, !valid.ok ? valid.error : '');
 });
 
 test('walk_path 拒绝未知/过期 routeId 和缺失空间会话', async (t) => {
@@ -297,6 +309,7 @@ test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 rout
   assert.equal(r.data?.routeId, undefined);
   assert.deepEqual((r.data?.points as unknown[]).length, 3);
   assert.deepEqual((r.data?.legs as { transition: string }[]).map((leg) => leg.transition), ['walk', 'step']);
+  assert.match(r.summary, /第1段 walk/, '记忆路线摘要要带出前几段坐标，模型才知道先执行什么');
   assert.deepEqual(r.data?.targetCell, { x: 2, y: 64, z: 0 });
   assert.deepEqual(w.actions, [], '记忆规划不移动');
   const auto = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });

@@ -8,7 +8,8 @@ import { queryMechanics } from '../methods/mechanics.ts';
 import { boundedJson } from '../planner/prompt.ts';
 import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
-import { validateCondition } from '../projects/conditions.ts';
+import { evaluateCondition, validateCondition } from '../projects/conditions.ts';
+import type { Condition } from '../projects/types.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { validateSkill } from '../skills/types.ts';
 import { buildMindMessages, buildReflectionMessages, moveDetails, moveDirectory, type MindContext } from './prompt.ts';
@@ -104,6 +105,48 @@ export function inferKind(steps: Step[]): ActivityKind {
 /** 决定里能当场退回去改的毛病：步骤写错被丢、收工条件无效、next 被忽略 */
 const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已忽略/;
 
+// 只用“已知不会产生物品/不会移动”的技能集合做否定判断；未知的自学/代码技能一律当作可能，
+// 避免把合法的自定义步骤误判成不可能完成。
+const NON_PRODUCING_STEPS = new Set([
+  'look', 'look_around', 'resolve_target', 'plan_route', 'walk_path', 'move_step', 'press_keys',
+  'descend_to', 'assess_landings', 'find_item', 'observe_portal', 'inspect_block', 'wait', 'sleep',
+  'eat', 'store_items', 'toss_item', 'place_cell', 'place_support', 'pillar_one', 'swim_path',
+  'boat_path', 'travel_portal', 'recall_portal', 'guard', 'spatial_query', 'spatial_extrema',
+  'remember_place', 'sign_text', 'edit_book',
+]);
+const NON_MOVING_STEPS = new Set([
+  'look', 'look_around', 'resolve_target', 'plan_route', 'assess_landings', 'find_item',
+  'observe_portal', 'inspect_block', 'wait', 'sleep', 'eat', 'craft', 'remember_place',
+  'spatial_query', 'spatial_extrema', 'sign_text', 'edit_book',
+]);
+
+/**
+ * 只做“逻辑上不可能完成”的检查：done_when 要物品/位置，但这段 steps 全是已知不会产生物品/不会移动的动作。
+ * 未知技能（自学/代码技能）一律放行，不判断具体策略，也不替 Agent 选动作。
+ */
+function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
+  switch (condition.type) {
+    case 'inventory_min':
+      return [...skills].every((skill) => NON_PRODUCING_STEPS.has(skill))
+        ? `done_when 需要背包里有 ${condition.item}×${condition.count}，但这几步（${[...skills].join('、') || '无'}）都不会产生物品（只读/纯移动/消耗类）；把能产生它的采集/制作/拾取动作放进这段活，或换一个这段活能确认的收工条件`
+        : null;
+    case 'location_near':
+      return [...skills].every((skill) => NON_MOVING_STEPS.has(skill))
+        ? `done_when 需要到达 (${condition.pos.x},${condition.pos.y},${condition.pos.z}) 附近，但这几步（${[...skills].join('、') || '无'}）都不会移动（resolve_target/plan_route/look_around 只读，不算移动）；把移动步骤放进这段活，或换一个这段活能确认的收工条件`
+        : null;
+    case 'all_of':
+      return condition.conditions.map((child) => doneWhenGap(child, skills)).find((gap): gap is string => gap !== null) ?? null;
+    case 'any_of': {
+      const gaps = condition.conditions.map((child) => doneWhenGap(child, skills)).filter((gap): gap is string => gap !== null);
+      return gaps.length === condition.conditions.length
+        ? `done_when 的任一分支都无法由这段活的步骤确认：${gaps.join('；')}`
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
 /** 校验一段活：必需步骤必须可执行，可选步骤写错则丢掉并记录原因。 */
 export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldMemory, notes: string[], label = 'activity'): ActivityDraft | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `${label} 必须是对象` };
@@ -153,7 +196,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (requiredErrors.length) return { error: `${label} 必需步骤无法执行，整段未安排：${requiredErrors.join('；')}。请修正、明确删去或重新决定` };
   if (!steps.length) return { error: `${label} 没有可执行的动作：${errors.join('；')}` };
   if (errors.length) notes.push(`${label} 里丢掉了不能执行的步骤：${errors.join('；')}`.slice(0, 300));
-  let doneWhen;
+  let doneWhen: Condition | undefined;
   if (o.done_when !== undefined && o.done_when !== null) {
     try {
       const normalized = normalizeDoneWhen(o.done_when);
@@ -161,6 +204,11 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
       if (JSON.stringify(normalized) !== JSON.stringify(o.done_when)) notes.push(`${label}.done_when 的写法已规范化`);
     }
     catch (e) { notes.push(`${label}.done_when 无效已忽略：${e instanceof Error ? e.message : String(e)}`); }
+  }
+  // 已经满足的条件不在这里拦（Mind 开工前会收下并结束）；只拒绝这段 steps 逻辑上不可能达到的收工条件。
+  if (doneWhen && evaluateCondition(doneWhen, adapter.state()).status !== 'satisfied') {
+    const gap = doneWhenGap(doneWhen, new Set(steps.map((step) => step.skill)));
+    if (gap) return { error: `${label}.${gap}` };
   }
   const repeatRaw = o.repeat === 'until_done' ? (doneWhen ? 8 : 1) : Math.round(Number(o.repeat ?? 1));
   const repeat = Number.isFinite(repeatRaw) ? Math.max(1, Math.min(12, repeatRaw)) : 1;
