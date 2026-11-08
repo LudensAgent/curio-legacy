@@ -244,7 +244,7 @@ const CHOOSE = `【选动作】
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补这一格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- plan_route 的 source:"memory"/"auto" 可能返回历史路点/过渡而不是 routeId：按 legs 用 walk_path（同高段）、move_step（相邻）或 descend_to（落差）执行；climb 由你决定梯子/垫高
+- plan_route 的 source:"memory"/"spatial"/"auto" 可能返回路点/过渡或现有动作 steps（move_step/descend_to），不是 routeId：按过渡执行；climb 由你决定梯子/垫高
 - plan_route/walk_path 不挖墙、不垫路、不搭柱；需要改变地形时显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】
