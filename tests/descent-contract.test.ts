@@ -13,9 +13,11 @@ test('descend requires fresh local geometry, sufficient health or observed water
       surface, surfaceY: 64, drop: 6, horizontalDistance: 1, clearance: 'clear', corridor: 'clear', approach: 'adjacent', waterDepth: surface === 'water' ? 2 : 'unknown', unknowns: [],
       receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: 6, at: Date.now(), from: { ...state.pos } } };
     const calls: { target: MoveTarget; opts: MoveOpts }[] = [];
-    const ctx = { adapter: { state: () => structuredClone(state), async moveTo(target: MoveTarget, opts: MoveOpts) {
-      calls.push({ target, opts }); state.pos = { ...option.target }; state.inWater = surface === 'water'; state.onGround = !state.inWater;
-    } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
+    const ctx = { adapter: { state: () => structuredClone(state),
+      blockAt: (p: { x: number; y: number; z: number }) => surface === 'water' ? 'air' : (p.x === 1 && p.y === 63 && p.z === 0 ? 'stone' : 'air'),
+      async moveTo(target: MoveTarget, opts: MoveOpts) {
+        calls.push({ target, opts }); state.pos = { ...option.target }; state.inWater = surface === 'water'; state.onGround = !state.inWater;
+      } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
     return { state, option, calls, ctx };
   }
   const ground = fixture(), parsed = descend.validate({ target: ground.option.target }, ground.ctx.adapter);
@@ -62,6 +64,47 @@ test('descend requires fresh local geometry, sufficient health or observed water
   assert.equal(water.calls[0].opts.maxDropDown, 7); assert.equal(water.calls[0].opts.allowSwimming, true);
 });
 
+test('descend only accepts arrival in the selected column and exact foot height', async () => {
+  function fixture(end: { x: number; y: number; z: number }, opts: { supportAfter?: string; bodyBlocked?: boolean } = {}) {
+    const state = { connected: true, alive: true, observationReady: true, observationId: 5, sessionId: 'session', worldId: 'world', dim: 'overworld',
+      pos: { x: 0.5, y: 70, z: 0.5 }, hp: 20, onGround: true, inWater: false, inLava: false } as AgentState;
+    const option: LandingOption = { target: { x: 1.5, y: 64, z: 0.5 }, support: { pos: { x: 1, y: 63, z: 0 }, name: 'stone' },
+      surface: 'ground', surfaceY: 64, drop: 6, horizontalDistance: 1, clearance: 'clear', corridor: 'clear', approach: 'adjacent', waterDepth: 'unknown', unknowns: [],
+      receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: 6, at: Date.now(), from: { ...state.pos } } };
+    const ctx = { adapter: { state: () => structuredClone(state),
+      blockAt: (p: { x: number; y: number; z: number }) => opts.bodyBlocked && p.x === 1 && p.y === 65 && p.z === 0 ? 'stone'
+        : p.x === 1 && p.y === 63 && p.z === 0 ? opts.supportAfter ?? 'stone' : 'air',
+      async moveTo() {
+        state.pos = { ...end }; state.onGround = true; state.inWater = false;
+      } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 5000 } as unknown as SkillCtx;
+    return { option, ctx };
+  }
+  // 身体中心离目标中心 0.6 格，已在相邻列：旧实现按欧氏距离会接受。
+  const adjacent = fixture({ x: 2.1, y: 64, z: 0.5 });
+  const wrongColumn = await descend.run(adjacent.ctx, { target: adjacent.option.target });
+  assert.equal(wrongColumn.status, 'failed', wrongColumn.summary);
+  assert.equal(wrongColumn.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.deepEqual((wrongColumn.data as { arrival?: { satisfied?: boolean } } | undefined)?.arrival?.satisfied, false);
+  assert.deepEqual((wrongColumn.data as { position?: unknown } | undefined)?.position, { x: 2.1, y: 64, z: 0.5 });
+  // 在同一列但脚高低 0.2 格：旧实现 0.3 容差会当成功。
+  const lower = fixture({ x: 1.5, y: 63.8, z: 0.5 });
+  const wrongFoot = await descend.run(lower.ctx, { target: lower.option.target });
+  assert.equal(wrongFoot.status, 'failed', wrongFoot.summary);
+  assert.equal(wrongFoot.failureCode, 'EFFECT_NOT_CONFIRMED');
+  // 位置对，但落地后支撑被换掉：重新采样支撑顶面必须失败。
+  const lostSupport = fixture({ x: 1.5, y: 64, z: 0.5 }, { supportAfter: 'air' });
+  const noSupport = await descend.run(lostSupport.ctx, { target: lostSupport.option.target });
+  assert.equal(noSupport.status, 'failed', noSupport.summary);
+  assert.equal(noSupport.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal((noSupport.data as { arrival?: { measured?: { supportAfter?: unknown } } } | undefined)?.arrival?.measured?.supportAfter, false);
+  // 位置对，但落地后头格被方块占据：落地后的身体空间必须重新确认。
+  const blockedBody = fixture({ x: 1.5, y: 64, z: 0.5 }, { bodyBlocked: true });
+  const noSpace = await descend.run(blockedBody.ctx, { target: blockedBody.option.target });
+  assert.equal(noSpace.status, 'failed', noSpace.summary);
+  assert.equal(noSpace.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal((noSpace.data as { arrival?: { measured?: { bodySpace?: unknown } } } | undefined)?.arrival?.measured?.bodySpace, 'blocked');
+});
+
 test('descend verifies the selected ground support with the shared collision shape, not an integer foot guess', async () => {
   const state = { connected: true, alive: true, observationReady: true, observationId: 5, sessionId: 'session', worldId: 'world', dim: 'overworld',
     pos: { x: 0.5, y: 70, z: 0.5 }, hp: 20, onGround: true, inWater: false, inLava: false } as AgentState;
@@ -70,7 +113,7 @@ test('descend verifies the selected ground support with the shared collision sha
     receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: 6, at: Date.now(), from: { ...state.pos } } };
   let calls = 0;
   const ctx = { adapter: { state: () => structuredClone(state), blockStateAt: () => ({ name: 'oak_slab', properties: { type: 'bottom' } }),
-    async moveTo() { calls++; } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
+    blockAt: () => 'air', async moveTo() { calls++; } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
   const result = await descend.run(ctx, { target: option.target });
   assert.equal(result.status, 'failed', result.summary);
   assert.match(result.summary, /支撑面按碰撞形状在 y=63\.50/);

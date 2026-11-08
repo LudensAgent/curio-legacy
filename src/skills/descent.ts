@@ -1,7 +1,10 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { supportTop } from '../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, supportTop } from '../perception/geometry.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
+
+/** 落地后允许的服务端位置修正；方块顶面是精确的 /16 值，不需要更宽的容差。 */
+const ARRIVAL_FOOT_TOLERANCE = 0.05;
 
 /** An explicit observed edge; the model chooses the landing, never this primitive. */
 export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }> = {
@@ -98,10 +101,38 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
       // Pathfinder can resolve within a block of its node; wait briefly for actual contact.
       const settle = Math.min(end, Date.now() + 800);
       let actual = check();
-      const arrived = () => actual.connected && actual.alive && actual.observationReady && !actual.inLava && actual.hp > 0
-        && Math.hypot(actual.pos.x - target.x, actual.pos.z - target.z) <= 0.6 && actual.pos.y < initial.pos.y - 0.25
-        && (option.surface === 'water' ? actual.inWater && actual.pos.y >= target.y - 1 && actual.pos.y <= target.y + 1
-          : actual.onGround && !actual.inWater && !actual.inLava && Math.abs(actual.pos.y - target.y) <= 0.3);
+      // 到达必须是所选方块列，不是“离落点中心 0.6 格内”（那会包含相邻列）；
+      // 地面落点还要求实测脚高与所选脚高一致，不能把低 0.2–0.3 格的另一支撑当成功。
+      const inTargetColumn = () => Math.floor(actual.pos.x) === Math.floor(target.x) && Math.floor(actual.pos.z) === Math.floor(target.z);
+      // 落地后重新采样支撑顶面与身体空间；支撑被换掉、脚格/头格被填、或读不到状态都不能算 ARRIVED。
+      const geometryNow = () => {
+        const p = actual.pos, cx = Math.floor(p.x), cz = Math.floor(p.z), body = bodyBoxAt(p.y, cx, cz);
+        const states = bodyCells(p.y, cx, cz).map((cell) => {
+          const name = adapter.blockAt(cell);
+          return name === null ? null : { cell, name, properties: adapter.blockStateAt?.(cell)?.properties ?? {} };
+        });
+        const bodySpace = states.some((s) => s === null) ? 'unknown' as const
+          : states.some((s) => s !== null && blockCollidesBody(s.name, s.properties, s.cell, body)) ? 'blocked' as const : 'clear' as const;
+        const supportState = option.surface === 'water' ? null
+          : adapter.blockStateAt?.(option.support.pos) ?? (() => {
+            const name = adapter.blockAt(option.support.pos);
+            return name === null ? null : { name, properties: {} };
+          })();
+        const top = supportState ? supportTop(supportState.name, supportState.properties ?? {}) : null;
+        const supportAfter = option.surface === 'water' ? null
+          : top !== null && Math.abs(option.support.pos.y + top - target.y) <= 0.01;
+        return { bodySpace, supportAfter };
+      };
+      const arrived = () => {
+        if (!actual.connected || !actual.alive || !actual.observationReady || actual.inLava || actual.hp <= 0
+          || !inTargetColumn() || actual.pos.y >= initial.pos.y - 0.25) return false;
+        const geometry = geometryNow();
+        if (geometry.bodySpace !== 'clear') return false;
+        return option.surface === 'water'
+          ? actual.inWater && actual.pos.y >= target.y - 1 && actual.pos.y <= target.y + 1
+          : actual.onGround && !actual.inWater && !actual.inLava
+            && Math.abs(actual.pos.y - target.y) <= ARRIVAL_FOOT_TOLERANCE && geometry.supportAfter === true;
+      };
       while (!arrived() && actual.alive && actual.connected && Date.now() < settle) {
         await sleep(Math.min(50, settle - Date.now()), signal); actual = check();
       }
@@ -109,11 +140,12 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
       throwIfAborted(signal);
       const verified = actual.connected && actual.alive && actual.observationReady;
       const settled = arrived();
+      const landingGeometry = geometryNow();
       const data = { target, support: option.support, surface: option.surface, drop, estimatedDamageUpperBound,
         corridor: option.corridor, unknownCorridorAccepted,
         position: { ...actual.pos }, inWater: actual.inWater, hp: actual.hp, measuredAt: Date.now(),
         arrival: { mode: 'exact_cell', required: { target: { ...target }, surface: option.surface },
-          measured: { position: { ...actual.pos }, onGround: actual.onGround, inWater: actual.inWater }, satisfied: settled },
+          measured: { position: { ...actual.pos }, onGround: actual.onGround, inWater: actual.inWater, bodySpace: landingGeometry.bodySpace, supportAfter: landingGeometry.supportAfter }, satisfied: settled },
         effectEvidence: { verified, changed: verified && actual.pos.y < initial.pos.y - 0.25,
           reasons: [`实际脚位 ${initial.pos.y} → ${actual.pos.y}`, ...(actual.inWater ? ['当前实测已进入水中'] : [])] } };
       if (!settled) return fail('EFFECT_NOT_CONFIRMED', '下行寻路已结束，但没有确认在所选落点接触地面或进入水中', data);
