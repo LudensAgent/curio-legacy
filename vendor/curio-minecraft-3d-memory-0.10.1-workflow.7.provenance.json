@@ -1,0 +1,36 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.10.1-workflow.7"
+  },
+  "sourceHEAD": "898bed9896553ac8f70372165436d09f3eba0c56",
+  "artifactSHA256": "225a1935b7fabf874738f4ed0818e48eb43f59ab0600939e6913a69679e5233e",
+  "npmIntegrity": "sha512-hqaHDAK7i+bxkz7Nmj6VmNPETAq9qeO631SA83PxXRmyl91FgWLBmkTnb54ZaGc/PACxcS3YxUPQyGtHhYJi0w==",
+  "artifact": "curio-minecraft-3d-memory-0.10.1-workflow.7.tgz",
+  "artifactSize": 673504,
+  "sourceBinding": {
+    "clean": true,
+    "head": "898bed9896553ac8f70372165436d09f3eba0c56",
+    "note": "Packed from a clean detached worktree at sourceHEAD; version temporarily set for packing and restored. dist was built from the same sourceHEAD before packing; prepack skipped in the clean worktree."
+  },
+  "verification": {
+    "build": {
+      "status": "PASS",
+      "command": "npm run build"
+    },
+    "typecheck": {
+      "status": "PASS",
+      "command": "npm run typecheck"
+    },
+    "focusedTests": {
+      "status": "PASS",
+      "command": "npx vitest run tests/confirmed-corridor.test.ts (10/10); topology/fragment related 1343/1343"
+    },
+    "curio": {
+      "status": "PASS",
+      "command": "npx tsc --noEmit; spatial/topology/walk/traversal 28/28"
+    }
+  },
+  "contract": "memory-host-contract/1 (unchanged)",
+  "notes": "Cell-mode corridors adopt a legacy same-cell endpoint instead of rebasing a referenced node. Real Minecraft integration (H-01) was not run."
+}
