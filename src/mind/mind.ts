@@ -1029,7 +1029,9 @@ export class Mind {
     // 同一做法 + 同一区域 + 同一证据版本才算“重复同一路线”；换了区域或有了新区块/物品，版本会不同。
     const start = a.startPos ?? { x: 0, y: 0, z: 0 };
     const area = `${Math.floor(start.x / 16)},${Math.floor(start.z / 16)}`;
-    const evidence = `${this.d.memory.visitedChunkCount}|${plan.progressAt ?? 0}|${a.agendaId ?? ''}`;
+    const state = this.safe(() => this.d.adapter.state(), null);
+    const scope = state ? `${state.worldId}|${state.sessionId}|${state.dim}` : '';
+    const evidence = `${scope}|${this.d.memory.visitedChunkCount}|${plan.progressAt ?? 0}|${a.agendaId ?? ''}`;
     const sourceKey = `${gateSignatureOf(a.steps)}|${area}|${evidence}`;
     this.noProgressRuns = [...this.noProgressRuns.filter((run) => now - run.at < 30 * 60_000),
       { at: now, signature: gateSignatureOf(a.steps), sourceKey, what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
@@ -1129,7 +1131,7 @@ export class Mind {
     // 决策时的区域/证据版本：同一做法换了区域或有了新区块/物品，就不再算同一路线。
     const state = this.safe(() => this.d.adapter.state(), null);
     const fullKey = signature && state
-      ? `${signature}|${Math.floor(state.pos.x / 16)},${Math.floor(state.pos.z / 16)}|${this.d.memory.visitedChunkCount}|${this.d.self.plan()?.progressAt ?? 0}|${this.d.self.plan()?.agendaId ?? ''}`
+      ? `${signature}|${Math.floor(state.pos.x / 16)},${Math.floor(state.pos.z / 16)}|${state.worldId}|${state.sessionId}|${state.dim}|${this.d.memory.visitedChunkCount}|${this.d.self.plan()?.progressAt ?? 0}|${this.d.self.plan()?.agendaId ?? ''}`
       : null;
     const repeats = !!signature && (fullKey
       ? gate.signatures.includes(fullKey)
