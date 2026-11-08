@@ -15,6 +15,24 @@ import { Vision } from '../src/perception/vision.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
+test('同一位置连续路径失败时，用户提醒要求换动作类而不是重复路径', (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
+  t.after(() => { memory.close(); self.close(); });
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = perception.update(), state = adapter.state();
+  const failures = ['move_step', 'plan_route', 'move_step'].map((skill, i) => ({
+    skill, args: {}, failure_code: i === 1 ? 'BAD_ARGS' : 'PATH_NOT_FOUND', summary: '同一土台高差走不通',
+    position: { ...state.pos }, observed_at: new Date().toISOString(), repeats: 2,
+  }));
+  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept, state, self, memory, activity: null,
+    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '',
+    lastRecord: null, recentActionFailures: failures });
+  assert.match(user.content, /【局部恢复】/);
+  assert.match(user.content, /不要只写 move_step\/plan_route\/navigate_to/);
+  assert.match(user.content, /excavate_run/);
+  assert.match(user.content, /assess_landings 后再 descend_to/);
+});
+
 test('activity reference frame survives creation, description, and the completed record', () => {
   const adapter = new FakeAdapter();
   adapter.yaw = Math.PI;

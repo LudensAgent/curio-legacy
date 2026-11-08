@@ -2,6 +2,7 @@ export { moveStep, mineCell, placeCell, placeSupport, pillarOne, l1Primitives } 
 export { resolveTarget } from './target.ts';
 export { planRoute, consumeRoutePlan, releaseRoutePlan, clearRouteRecords, noteRouteScope } from './route.ts';
 export { walkPath } from './walk.ts';
+export { navigateTo } from './navigate.ts';
 export { descendTo } from './descend.ts';
 export { swimPath } from './water.ts';
 export { boatPath } from './boat.ts';
