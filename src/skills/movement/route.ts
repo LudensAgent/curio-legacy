@@ -331,8 +331,9 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
     return all;
   }, {});
   const boundaryDetail = Object.entries(boundaryCounts).map(([key, count]) => `${key}×${count}`).join('、');
+  const stale = result.stats.staleEdges > 0;
   const boundaryGuidance = result.status === 'UNKNOWN'
-    ? '还有未观察/不完整的边界，先靠近或看清再试'
+    ? `还有未观察/证据过期（STALE）的边界${stale ? '，当前证据已过期' : ''}；先 look_around/靠近刷新证据再试`
     : result.status === 'NO_PATH'
       ? '已观察地形里没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
       : result.status === 'BUDGET_EXHAUSTED'

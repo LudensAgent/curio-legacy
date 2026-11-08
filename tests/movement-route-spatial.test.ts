@@ -143,6 +143,21 @@ test('plan_route source:"search" 仍明确报告固定脚高能力边界', async
   assert.match(r.summary, /fixed feet height 0/);
 });
 
+test('plan_route source:"spatial" 把过期证据归为 UNKNOWN，不冒充 NO_PATH', async (t) => {
+  const map = flatWorld();
+  map.markStale(DIM, 'expired');
+  const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(3, 0, 0), mode: 'walk', source: 'spatial', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /UNKNOWN/);
+  assert.doesNotMatch(r.summary, /NO_PATH/, '过期证据不能被说成已观察地形断连');
+  assert.match(r.summary, /STALE|过期/);
+  const boundaries = r.data?.boundaries as { status: string }[] | undefined;
+  assert.ok(boundaries?.some((boundary) => boundary.status === 'STALE'), '保留 STALE 边界事实');
+});
+
 test('plan_route source:"spatial" 无法确认时返回边界事实，不伪造 steps', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fill(map, 'minecraft:stone', [at(0, -1, 0)]);
