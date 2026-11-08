@@ -1,4 +1,6 @@
 export { moveStep, mineCell, placeCell, placeSupport, pillarOne, l1Primitives } from './primitives.ts';
+export { L1_MANIFEST, type PrimitiveContract } from './manifest.ts';
+export { PRIMITIVE_PROBLEM_KINDS, type EffectKind, type PrimitiveProblemKind } from './receipt.ts';
 export { resolveTarget } from './target.ts';
 export { planRoute, consumeRoutePlan, releaseRoutePlan, clearRouteRecords, noteRouteScope } from './route.ts';
 export { walkPath } from './walk.ts';

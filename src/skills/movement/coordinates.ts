@@ -36,12 +36,12 @@ export function absValue(v: unknown): Vec3Like | null {
   return arr && arr.length === 3 && arr.every(Number.isFinite) ? { x: arr[0], y: arr[1], z: arr[2] } : null;
 }
 
-export function after(ctx: SkillCtx, facing: Facing, target?: Vec3Like) {
+export function after(ctx: SkillCtx, facing: Facing | null, target?: Vec3Like) {
   const s = ctx.adapter.state();
   return {
     position: { ...s.pos },
     ...(target ? { targetCell: { ...target } } : {}),
-    local: localMap(ctx.adapter, s.pos, facing, ctx.senses.observeBlocks?.bind(ctx.senses)),
+    ...(facing !== null ? { local: localMap(ctx.adapter, s.pos, facing, ctx.senses.observeBlocks?.bind(ctx.senses)) } : {}),
     around: surroundings(ctx.adapter).text,
   };
 }

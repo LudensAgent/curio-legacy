@@ -614,7 +614,7 @@ test('place_cell：放置请求的材料，已有不同材料只报占用', asyn
   assert.match(wrong.summary, /占据/);
 });
 
-test('place_cell：看不清名称时按实际方块状态确认，回执不写未观察的名称', async (t) => {
+test('place_cell：看不清名称时以权威方块状态确认请求材料，消耗待确认', async (t) => {
   const w = new NoInventoryDecrementWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.inv.set('cobblestone', 2);
@@ -623,9 +623,12 @@ test('place_cell：看不清名称时按实际方块状态确认，回执不写�
   const r = await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.observed, false);
-  assert.equal(r.data?.placed, null, '没有看清就不能写实际方块名');
-  assert.equal(r.data?.consumed, 0);
-  assert.equal(r.data?.consumptionVerified, false);
+  assert.equal(r.data?.placed, 'cobblestone', '以权威世界状态确认请求材料，不靠未观察的名称');
+  const inventory = r.data?.inventory as { verified?: boolean; pending?: boolean; consumed?: number } | undefined;
+  assert.equal(inventory?.consumed, 0);
+  assert.equal(inventory?.verified, false);
+  assert.equal(inventory?.pending, true);
+  assert.match(r.summary, /材料消耗未确认/);
   assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'cobblestone');
 });
 
@@ -638,8 +641,8 @@ test('place_cell：实际方块与请求不符时失败，不因放置回执 ok 
   const r = await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
-  assert.equal(r.data?.placed, null, '未看清时不泄漏实际名称');
-  assert.match(r.summary, /本次未看清名称/);
+  assert.equal(r.data?.placed, 'dirt', '目标格实际方块是本次动作的效果证据');
+  assert.match(r.summary, /dirt/);
 });
 
 test('place_cell：看得见请求材料时成功，但背包未回执不能写成消耗 0', async (t) => {
@@ -650,8 +653,10 @@ test('place_cell：看得见请求材料时成功，但背包未回执不能写�
   t.after(() => ctx.memory.close());
   const r = await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.consumed, 0);
-  assert.equal(r.data?.consumptionVerified, false);
+  const inventory = r.data?.inventory as { verified?: boolean; pending?: boolean; consumed?: number } | undefined;
+  assert.equal(inventory?.consumed, 0);
+  assert.equal(inventory?.verified, false);
+  assert.equal(inventory?.pending, true);
   assert.match(r.summary, /材料消耗未确认/);
   assert.doesNotMatch(r.summary, /消耗 0 块/);
 });
@@ -733,13 +738,13 @@ test('pillar_one：垫高一级；头顶受阻时返回具体失败', async (t) 
   w.inv.set('cobblestone', 2);
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
-  const r = await pillarOne.run(ctx, {});
+  const r = await pillarOne.run(ctx, { item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(Math.floor(w.pos.y), 61);
   assert.equal(w.blockAt({ x: 0, y: 60, z: 0 }), 'cobblestone');
 
   w.blocks.push({ name: 'stone', pos: { x: 0, y: 62, z: 0 } });
-  const blocked = await pillarOne.run(ctx, {});
+  const blocked = await pillarOne.run(ctx, { item: 'any' });
   assert.equal(blocked.status, 'failed');
   assert.match(blocked.summary, /头顶|跳跃空间/);
 });
@@ -748,11 +753,13 @@ test('pillar_one：材料回执延迟时保留 +1 事实但标记消耗未确认
   const w = pillarPocket(new LaggedPillarWorld());
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
-  const r = await pillarOne.run(ctx, {});
+  const r = await pillarOne.run(ctx, { item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.climbed, 1);
   assert.equal(r.data?.consumed, 0);
-  assert.equal(r.data?.consumptionVerified, false);
+  const inventory = r.data?.inventory as { verified?: boolean; pending?: boolean } | undefined;
+  assert.equal(inventory?.verified, false);
+  assert.equal(inventory?.pending, true);
   assert.match(r.summary, /材料消耗未确认/);
   assert.doesNotMatch(r.summary, /消耗 0 块/);
 });
@@ -872,7 +879,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   success.yaw = Math.PI / 2; // 面朝西
   const successCtx = makeCtx(success);
   t.after(() => successCtx.memory.close());
-  const r = await pillarOne.run(successCtx, {});
+  const r = await pillarOne.run(successCtx, { item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.facing, 'W');
   assert.equal((r.data?.local as { facing?: string } | undefined)?.facing, 'W');
@@ -883,7 +890,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   high.rise = 2;
   const highCtx = makeCtx(high);
   t.after(() => highCtx.memory.close());
-  const over = await pillarOne.run(highCtx, {});
+  const over = await pillarOne.run(highCtx, { item: 'any' });
   assert.equal(over.status, 'failed');
   assert.equal(over.failureCode, 'EFFECT_NOT_CONFIRMED');
   assert.equal(over.data?.facing, 'W');
@@ -893,7 +900,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   floating.placeSupportBlock = false;
   const floatingCtx = makeCtx(floating);
   t.after(() => floatingCtx.memory.close());
-  const air = await pillarOne.run(floatingCtx, {});
+  const air = await pillarOne.run(floatingCtx, { item: 'any' });
   assert.equal(air.status, 'failed');
   assert.equal(air.failureCode, 'EFFECT_NOT_CONFIRMED');
   assert.equal(air.data?.facing, 'W');
@@ -903,7 +910,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   blocked.blocks.push({ name: 'stone', pos: { x: 0, y: 62, z: 0 } });
   const blockedCtx = makeCtx(blocked);
   t.after(() => blockedCtx.memory.close());
-  const no = await pillarOne.run(blockedCtx, {});
+  const no = await pillarOne.run(blockedCtx, { item: 'any' });
   assert.equal(no.status, 'failed');
   assert.equal(no.data?.facing, 'W');
   assert.equal((no.data?.local as { facing?: string } | undefined)?.facing, 'W');
