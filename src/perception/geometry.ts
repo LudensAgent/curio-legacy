@@ -95,24 +95,52 @@ export function hasAnyCollision(name: string, properties: BlockProps = {}): bool
 }
 
 /**
- * 最高可站立顶面（cell-local Y）；无顶面或状态形状未确认返回 null。
+ * 一个方块状态里的可站立顶面：顶面高度（cell-local Y）和它在 x/z 上覆盖的范围。
+ * 楼梯、内/外角楼梯、箱子等不同顶面只覆盖方块的一部分；只保留高度不够描述支撑时，
+ * 局部高顶面会被误当成整格支撑。
+ */
+export interface SupportSurface { top: number; minX: number; maxX: number; minZ: number; maxZ: number }
+
+/**
+ * 一个方块状态的全部可站立顶面（cell-local）；形状未确认或无承重顶面返回空数组。
  * 只认水平跨度够大的顶面（宽、深均 ≥ 0.5），栅栏柱、梯子板、门板这类窄条不能站。
  */
-export function supportTop(name: string, properties: BlockProps = {}): number | null {
+export function supportSurfaces(name: string, properties: BlockProps = {}): SupportSurface[] {
   const boxes = collisionBoxes(name, properties);
-  if (!boxes.length || !shapeKnown(name, properties)) return null;
-  let top: number | null = null;
-  for (const box of boxes) {
-    if (box[3] - box[0] < 0.5 || box[5] - box[2] < 0.5) continue;
-    top = top === null ? box[4] : Math.max(top, box[4]);
-  }
-  return top;
+  if (!boxes.length || !shapeKnown(name, properties)) return [];
+  return boxes
+    .filter((box) => box[3] - box[0] >= 0.5 && box[5] - box[2] >= 0.5)
+    .map((box) => ({ top: box[4], minX: box[0], maxX: box[3], minZ: box[2], maxZ: box[5] }));
 }
 
-/** 方块 cell 的最高可站立面（世界 Y）；无水平承重顶面返回 null。 */
-function supportSurfaceTop(cell: Vec3Like, state: ObservedState | null): number | null {
+/** 最高可站立顶面（cell-local Y）；无顶面或状态形状未确认返回 null。 */
+export function supportTop(name: string, properties: BlockProps = {}): number | null {
+  const surfaces = supportSurfaces(name, properties);
+  return surfaces.length ? Math.max(...surfaces.map((s) => s.top)) : null;
+}
+
+/** 水平覆盖范围：用于判断某个支撑面是否真的位于身体脚底下方。 */
+export interface Footprint { minX: number; maxX: number; minZ: number; maxZ: number }
+
+/** 站在 cell 中心时的身体脚底范围（0.6×0.6）。 */
+const centeredFootprint = (cell: Vec3Like): Footprint => ({
+  minX: cell.x + 0.2, maxX: cell.x + 0.8, minZ: cell.z + 0.2, maxZ: cell.z + 0.8,
+});
+
+/** 顶面与脚底范围是否有正面积的水平交集；只贴边不算托住。 */
+function surfaceOverlaps(surface: SupportSurface, cell: Vec3Like, footprint: Footprint): boolean {
+  return cell.x + surface.maxX > footprint.minX && cell.x + surface.minX < footprint.maxX
+    && cell.z + surface.maxZ > footprint.minZ && cell.z + surface.minZ < footprint.maxZ;
+}
+
+/** cell 内与脚底范围相交的最高支撑面（世界 Y）；没有相交顶面返回 null。 */
+function supportSurfaceTop(cell: Vec3Like, state: ObservedState | null, footprint: Footprint): number | null {
   if (!state) return null;
-  const top = supportTop(state.name, state.properties ?? {});
+  let top: number | null = null;
+  for (const surface of supportSurfaces(state.name, state.properties ?? {})) {
+    if (!surfaceOverlaps(surface, cell, footprint)) continue;
+    top = top === null ? surface.top : Math.max(top, surface.top);
+  }
   return top === null ? null : cell.y + top;
 }
 
@@ -137,11 +165,12 @@ export function estimatedFallDamage(drop: number): number {
  *
  * cell 必须是方块格坐标（y 为整数格号），不是连续脚高；调用方要先用 feetCell()
  * 把实测脚位或目标脚高换算成脚所在格，否则分数 y 会被当成格坐标再算一次顶面。
+ * footprint 缺省按身体站在 cell 中心计算；身体偏心时要传入实测脚底范围。
  */
-export function footSurfaceY(cell: Vec3Like, at: StateAt): number | null {
-  const inCell = supportSurfaceTop(cell, at(cell));
+export function footSurfaceY(cell: Vec3Like, at: StateAt, footprint: Footprint = centeredFootprint(cell)): number | null {
+  const inCell = supportSurfaceTop(cell, at(cell), footprint);
   const belowCell = { ...cell, y: cell.y - 1 };
-  const below = supportSurfaceTop(belowCell, at(belowCell));
+  const below = supportSurfaceTop(belowCell, at(belowCell), footprint);
   if (inCell !== null && (below === null || inCell > below)) return inCell;
   return below;
 }
@@ -153,32 +182,39 @@ export interface BodyBox { minX: number; minY: number; minZ: number; maxX: numbe
 export interface BodySupport { pos: Vec3Like; top: number; name: string }
 
 /**
- * 扫描身体 0.6 宽 AABB 覆盖的所有列，返回顶面正好托住当前脚高的格子。
- * 只报已加载/已观察的实心承重面；未加载的格子不算支撑，也不猜。
+ * 扫描身体 0.6 宽 AABB 覆盖的所有列，返回实际与脚底范围相交、且顶面正好托住
+ * 当前脚高的格子。只报已加载/已观察的承重面；未加载的格子不算支撑，也不猜。
  * 身体中心在一列、AABB 却压到相邻列时（窄柱/边缘），这里会同时报出相邻的支撑格。
+ * 只存在于方块另一侧、与脚底不相交的局部高顶面不算支撑。
  */
 export function supportCellsUnderBody(pos: Vec3Like, at: StateAt): BodySupport[] {
   const y = Math.floor(pos.y - 0.05);
   const x0 = Math.floor(pos.x - 0.3), x1 = Math.floor(pos.x + 0.3);
   const z0 = Math.floor(pos.z - 0.3), z1 = Math.floor(pos.z + 0.3);
+  const footprint: Footprint = { minX: pos.x - 0.3, maxX: pos.x + 0.3, minZ: pos.z - 0.3, maxZ: pos.z + 0.3 };
   const out: BodySupport[] = [];
   for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) {
     for (const cellY of [y, y - 1]) {
       const state = at({ x, y: cellY, z });
       if (!state) continue;
-      const top = supportTop(state.name, state.properties ?? {});
-      if (top === null || Math.abs(cellY + top - pos.y) > 0.01) continue;
-      out.push({ pos: { x, y: cellY, z }, top: cellY + top, name: state.name });
+      const cell = { x, y: cellY, z };
+      const top = supportSurfaceTop(cell, state, footprint);
+      if (top === null || Math.abs(top - pos.y) > 0.01) continue;
+      out.push({ pos: cell, top, name: state.name });
     }
   }
   return out;
 }
 
+/**
+ * 身体 AABB：身体中心固定在整数列 cx/cz 的中心。调用方传入的是「身体中心所在列」，
+ * 不是任意连续坐标；身体偏心压在两列之间时，要先由调用方决定归位或传入正确列。
+ */
 export function bodyBoxAt(footY: number, cx: number, cz: number): BodyBox {
   return { minX: cx + 0.2, maxX: cx + 0.8, minY: footY, maxY: footY + 1.8, minZ: cz + 0.2, maxZ: cz + 0.8 };
 }
 
-/** 身体（脚高 footY、列 cx/cz）竖直方向实际覆盖的整数格。 */
+/** 身体（脚高 footY、中心列 cx/cz）竖直方向实际覆盖的整数格；只枚举中心列。 */
 export function bodyCells(footY: number, cx: number, cz: number): Vec3Like[] {
   const cells: Vec3Like[] = [];
   for (let y = Math.floor(footY); y <= Math.floor(footY + 1.8 - 1e-6); y++) cells.push({ x: cx, y, z: cz });
@@ -199,7 +235,11 @@ export function blockCollidesBody(name: string, properties: BlockProps, cell: { 
   return false;
 }
 
-/** 身体覆盖的格子中，哪些与碰撞形状相交、哪些还没观察。 */
+/**
+ * 身体覆盖的格子中，哪些与碰撞形状相交、哪些还没观察。
+ * 只扫描身体中心所在列：这只对「身体在格心」成立；偏心身体须先归位，
+ * 不能把这个结果当成任意连续站位的完整碰撞检测。
+ */
 export function bodyProbe(footY: number, cx: number, cz: number, at: StateAt): { blockers: { cell: Vec3Like; state: ObservedState }[]; unknown: Vec3Like[] } {
   const body = bodyBoxAt(footY, cx, cz);
   const blockers: { cell: Vec3Like; state: ObservedState }[] = [];
