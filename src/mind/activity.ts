@@ -1,7 +1,7 @@
 import type { AgentState } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
-import { feetCell } from '../perception/local.ts';
+import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { evaluateCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
@@ -238,6 +238,22 @@ export function softMiss(a: Activity | null | undefined, step: Step, result: Pic
   return !!a && ownStep(a, step)?.optional === true;
 }
 
+/**
+ * 放置的站位副作用改变脚格后，按上一动作开始前的锚点重解释下一步相对移动。
+ * 只有按旧锚点算出的世界目标正好是本次确认的支撑脚位时才返回绝对目标；不替 Agent 猜别的落点。
+ */
+export function rebindStanceTarget(args: unknown, gap: NonNullable<Activity['stanceGap']>) {
+  const intended = gap.intendedStandTarget, before = gap.before;
+  if (!intended || !before || !args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const normalized = args as { at?: unknown; facing?: unknown };
+  const at = normalized.at;
+  if (!Array.isArray(at) || at.length !== 3 || !at.every((n) => Number.isInteger(n))) return null;
+  if (!FACINGS.includes(normalized.facing as Facing)) return null;
+  const anchored = toWorld(feetCell(before), normalized.facing as Facing, at as [number, number, number]);
+  if (anchored.x !== intended.x || anchored.z !== intended.z) return null;
+  return { xyz: [intended.x, intended.y, intended.z] as [number, number, number], facing: normalized.facing, from: anchored };
+}
+
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
 export function nextStep(a: Activity): (Step & { id?: string }) | null {
   if (a.index >= a.steps.length) {
@@ -323,10 +339,30 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 只要脚格变了，就记下站位缺口，下一步若是相对动作先交回心智，不按旧站位继续。
   if ((step.skill === 'place_cell' || step.skill === 'place_support') && a.stepStart?.pos
     && JSON.stringify(feetCell(a.stepStart.pos)) !== JSON.stringify(feetCell(state.pos))) {
-    a.stanceGap = { skill: step.skill, pos: { ...state.pos } };
+    const intended = result.data?.intendedStandTarget as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+    a.stanceGap = {
+      skill: step.skill, pos: { ...state.pos }, before: { ...a.stepStart.pos },
+      ...(intended && ['x', 'y', 'z'].every((k) => typeof intended[k as 'x' | 'y' | 'z'] === 'number')
+        ? { intendedStandTarget: { x: intended.x as number, y: intended.y as number, z: intended.z as number } }
+        : {}),
+    };
   }
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
+    // 已确认的放置/支撑、挖掘和位移是这段活的实际效果；收工时和背包增减一起汇总，
+    // 避免「放了支撑、身体也挪了」仍被写成 changed:false。
+    const effect = result.data?.effect as { confirmed?: boolean; kind?: string } | undefined;
+    const cell = (result.data?.targetCell ?? result.data?.cell) as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+    const where = cell && ['x', 'y', 'z'].every((k) => typeof cell[k as 'x' | 'y' | 'z'] === 'number')
+      ? `${cell.x},${cell.y},${cell.z}` : undefined;
+    const movementChanged = (result.data?.movement as { changed?: boolean } | undefined)?.changed === true;
+    if (effect?.confirmed === true || movementChanged) {
+      a.effects ??= { placements: [], removed: 0, moved: false };
+      if (effect?.kind === 'block_placed') a.effects.placements.push(`${step.skill}${where ? `@${where}` : ''}`);
+      else if (effect?.kind === 'support_formed') a.effects.placements.push(`${step.skill}支撑${where ? `@${where}` : ''}`);
+      else if (effect?.kind === 'block_removed') a.effects.removed += 1;
+      if (effect?.kind === 'movement' || movementChanged) a.effects.moved = true;
+    }
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
     if ((step.skill === 'place_cell' || step.skill === 'place_support') && result.data?.placed
       || step.skill === 'mine_cell' && result.data?.was && result.data.was !== 'air'
