@@ -124,6 +124,22 @@ test('3D 搜索：允许 0 < drop < 1 从半砖/箱顶走出', () => {
   assert.equal(result.transitions[0]!.drop, 0.5);
 });
 
+test('3D 搜索：起点偏心贴角时按格心规划，不把身体 AABB 的斜角碰撞当成无路', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-2, 0, -2), at(4, 2, 2));
+  const floor: { x: number; y: number; z: number }[] = [];
+  for (let x = -2; x <= 4; x++) for (let z = -2; z <= 2; z++) floor.push(at(x, -1, z));
+  fill(map, 'minecraft:stone', floor);
+  // 四个斜角方块：身体站在格内偏左后侧时，0.6 宽的身体会同时擦到它们；
+  // 真实的人先回到格心再迈步，规划也必须按格心评估第一步。
+  fill(map, 'minecraft:stone', [at(-1, 0, -1), at(1, 0, -1), at(-1, 0, 1), at(1, 0, 1)]);
+  const result = searchLandRoute(map, request(at(0.25, 0, 0.25), at(3.5, 0, 0.5)), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.boundaries));
+  assert.ok(result.transitions.length >= 3);
+  assert.equal(result.points[0]?.x, 0.5, '规划起点归一到当前格心');
+  assert.equal(result.points[0]?.z, 0.5, '规划起点归一到当前格心');
+});
+
 test('3D 搜索：目标 y 不在真实站立顶面时吸附到最近顶面', () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));

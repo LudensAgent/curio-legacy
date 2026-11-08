@@ -272,20 +272,19 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   const limits = resolveLandLimits();
   const start = request.body.feet;
   const startCell = { x: Math.floor(start.x), z: Math.floor(start.z) };
+  // 规划节点按格心摆放，而不是沿用身体在格内的实际偏移。身体宽 0.6，站在格边
+  // （例如 z=-251.93 落在 -252 格内、身体 AABB 压进 -253 的墙角）时，任何一次
+  // 相邻移动都会在评估里蹭到斜角方块，把整条路误判成 NO_PATH；而人只要先回到
+  // 格心就能正常迈步。执行层仍从实测位置出发，并在相邻一步前归位。
+  const startStance: Vec3Like = { x: startCell.x + 0.5, y: start.y, z: startCell.z + 0.5 };
   const targetCell = { x: Math.floor(request.to.x), z: Math.floor(request.to.z) };
   // 站立格目标的 y 可能写的是方块 y 或略偏；吸附到该列真实可站立顶面
   // （半砖/雪层/台阶/箱子顶），不按整数层硬套。容器/门/床仍应由 go_near 处理。
   const targetSurfaces = standableSurfaces(map, request.dim, targetCell.x, targetCell.z, request.to.y, 2, 2);
   const targetY = targetSurfaces.length === 0 ? request.to.y
     : targetSurfaces.reduce((best, surface) => Math.abs(surface.y - request.to.y) < Math.abs(best - request.to.y) ? surface.y : best, targetSurfaces[0]!.y);
-  const resolvedTarget: Vec3Like = {
-    x: start.x + (targetCell.x - startCell.x),
-    y: targetY,
-    z: start.z + (targetCell.z - startCell.z),
-  };
-  const stanceFor = (x: number, y: number, z: number): Vec3Like => x === startCell.x && z === startCell.z && y === start.y
-    ? { ...start }
-    : { x: start.x + (x - startCell.x), y, z: start.z + (z - startCell.z) };
+  const resolvedTarget: Vec3Like = { x: targetCell.x + 0.5, y: targetY, z: targetCell.z + 0.5 };
+  const stanceFor = (x: number, y: number, z: number): Vec3Like => ({ x: x + 0.5, y, z: z + 0.5 });
   const heuristic = (x: number, y: number, z: number) =>
     Math.abs(x - targetCell.x) + Math.abs(z - targetCell.z) + Math.abs(y - targetY) * 2;
   const stats = { nodesExpanded: 0, edgesEvaluated: 0, openEdges: 0, blockedEdges: 0, unknownEdges: 0, staleEdges: 0, unsupportedEdges: 0, maxNodes, maxEdges };
@@ -293,13 +292,13 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
 
   const startKey = keyOf(startCell.x, start.y, startCell.z);
   if (startCell.x === targetCell.x && startCell.z === targetCell.z && Math.abs(start.y - targetY) <= EPS) {
-    return { status: 'FOUND', assurance, evidenceMode, executable: false, points: [{ ...start }], transitions: [], boundaries, cost: 0, resolvedTarget: { ...start }, stats };
+    return { status: 'FOUND', assurance, evidenceMode, executable: false, points: [{ ...startStance }], transitions: [], boundaries, cost: 0, resolvedTarget: { ...startStance }, stats };
   }
 
   const nodes = new Map<string, { cx: number; cy: number; cz: number; g: number; parent: string | null; via: LandSearchTransition | null; stance: Vec3Like }>();
   const best = new Map<string, number>();
   const open = new MinHeap();
-  nodes.set(startKey, { cx: startCell.x, cy: start.y, cz: startCell.z, g: 0, parent: null, via: null, stance: { ...start } });
+  nodes.set(startKey, { cx: startCell.x, cy: start.y, cz: startCell.z, g: 0, parent: null, via: null, stance: { ...startStance } });
   best.set(startKey, 0);
   open.push({ key: startKey, f: heuristic(startCell.x, start.y, startCell.z) });
   let found: string | null = null;

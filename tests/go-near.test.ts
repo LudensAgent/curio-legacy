@@ -61,6 +61,19 @@ test('go_near 走到箱子旁的可达相邻站立格，不打开箱子', async 
   assert.ok(!adapter.actions.some((a) => a.startsWith('useBlock')), 'go_near 不替 Agent 开箱/拿东西');
 });
 
+test('go_near 不把床的另一半当旁边的站立格', async (t) => {
+  const map = flatAroundTarget();
+  const { adapter, ctx } = setup(map);
+  adapter.blocks.push({ name: 'white_bed', pos: { x: 2, y: 64, z: 0 } }, { name: 'white_bed', pos: { x: 3, y: 64, z: 0 } });
+  t.after(() => ctx.memory.close());
+  const r = await goNear.run(ctx, {
+    target: { x: 2, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+  });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.notDeepEqual(r.data?.chosen, { x: 3, y: 64, z: 0 });
+  assert.notEqual(adapter.blockAt(r.data?.chosen as { x: number; y: number; z: number }), 'white_bed');
+});
+
 test('go_near 不把空气/站立格当交互方块', async (t) => {
   const map = flatAroundTarget();
   const { adapter, ctx } = setup(map);
