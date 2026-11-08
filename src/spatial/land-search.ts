@@ -3,6 +3,7 @@ import {
   evaluateWalkStep,
   resolveLandLimits,
   type BodyContext,
+  type CellEvidence,
   type HazardFact,
   type LandRules,
   type LandTransition,
@@ -43,18 +44,23 @@ export interface LandSearchRequest {
   /** 默认 8192。 */
   maxEdges?: number;
   rules: LandRules;
+  /** true 时用历史体素（含过期证据）做几何推导；输出必须标记为历史路线。 */
+  allowStale?: boolean;
   signal?: AbortSignal;
 }
 
 export interface LandSearchResult {
   status: LandSearchStatus;
-  assurance: 'geometry_only';
+  assurance: 'geometry_only' | 'historical_geometry';
+  evidenceMode: 'current' | 'historical';
   executable: false;
   points: Vec3Like[];
   transitions: LandSearchTransition[];
   boundaries: LandSearchBoundary[];
   cost: number;
   resolvedTarget: Vec3Like;
+  /** 历史模式下用严格当前证据复验已选路线；OPEN/STALE/BLOCKED 逐段保留。 */
+  verification?: LandRouteVerification;
   stats: {
     nodesExpanded: number;
     edgesEvaluated: number;
@@ -178,11 +184,57 @@ class MinHeap {
 }
 
 /**
+ * 历史体素视图：只读地把已记录但过期/旧会话的证据视为可供几何推导的观察。
+ * 不写回 VoxelMap、不改 observedAt；结果必须由调用方标记为历史路线，并由真实
+ * 当前证据复验后再执行。没有记录过的格子仍保持 unobserved，不做外推。
+ */
+function historicalMapView(map: VoxelMap, sessionId: string, now: number): VoxelMap {
+  type Section = { readonly revision: number; readonly evidence: ReadonlyMap<number, Readonly<CellEvidence>> };
+  const views = new WeakMap<object, Section>();
+  const viewOf = (section: Section | null): Section | null => {
+    if (section === null) return null;
+    const cached = views.get(section);
+    if (cached !== undefined) return cached;
+    const evidence = new Map<number, CellEvidence>();
+    for (const [index, cell] of section.evidence) {
+      const historical = cell.freshness === 'STALE' || cell.observation.sessionId !== sessionId || now > cell.validUntil;
+      if (!historical) {
+        evidence.set(index, cell);
+        continue;
+      }
+      const { staleReason: _staleReason, ...rest } = cell;
+      evidence.set(index, {
+        ...rest,
+        freshness: 'FRESH',
+        validUntil: Number.POSITIVE_INFINITY,
+        observation: { ...cell.observation, sessionId },
+      });
+    }
+    const view = Object.create(section) as Section;
+    Object.defineProperty(view, 'evidence', { value: evidence });
+    views.set(section, view);
+    return view;
+  };
+  return {
+    worldId: map.worldId,
+    sectionRef: (dim: string, x: number, y: number, z: number) => viewOf(map.sectionRef(dim, x, y, z)),
+    sectionAt: (dim: string, x: number, y: number, z: number) => viewOf(map.sectionAt(dim, x, y, z)),
+    sectionResidency: (key: Parameters<VoxelMap['sectionResidency']>[0]) => map.sectionResidency(key),
+    residencyGeneration: (dim: string, cx: number, cz: number, sy: number) => map.residencyGeneration(dim, cx, cz, sy),
+    cellAt: (dim: string, x: number, y: number, z: number) => map.cellAt(dim, x, y, z),
+  } as unknown as VoxelMap;
+}
+
+/**
  * 在已观测 VoxelMap 上做有界 3D A*：节点是脚格，边是 walk（同高 ±1 X/Z）、
  * step（上一级 ±1 X/Z）、drop（下一格到 maxDrop 格、±1 X/Z）。
- * 只走当前证据 OPEN 的边；未知/陈旧/不支持作为边界事实交回，不挖、不放、不探索。
+ * 默认只走当前证据 OPEN 的边；allowStale 时允许用历史体素推导候选路线，
+ * 但结果标记为 historical，并用严格当前证据附上逐段复验。不挖、不放、不探索。
  */
 export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now = Date.now()): LandSearchResult {
+  const evidenceMode = request.allowStale === true ? 'historical' as const : 'current' as const;
+  const assurance = evidenceMode === 'historical' ? 'historical_geometry' as const : 'geometry_only' as const;
+  const traversability = evidenceMode === 'historical' ? historicalMapView(map, request.sessionId, now) : map;
   const maxNodes = request.maxNodes ?? 2048;
   const maxEdges = request.maxEdges ?? 8192;
   const maxDrop = request.maxDrop ?? 4;
@@ -206,7 +258,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
 
   const startKey = keyOf(startCell.x, start.y, startCell.z);
   if (startCell.x === targetCell.x && startCell.z === targetCell.z && Math.abs(start.y - targetY) <= EPS) {
-    return { status: 'FOUND', assurance: 'geometry_only', executable: false, points: [{ ...start }], transitions: [], boundaries, cost: 0, resolvedTarget: { ...start }, stats };
+    return { status: 'FOUND', assurance, evidenceMode, executable: false, points: [{ ...start }], transitions: [], boundaries, cost: 0, resolvedTarget: { ...start }, stats };
   }
 
   const nodes = new Map<string, { cx: number; cy: number; cz: number; g: number; parent: string | null; via: LandSearchTransition | null; stance: Vec3Like }>();
@@ -219,7 +271,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   let budget = false;
 
   while (open.size > 0) {
-    if (request.signal?.aborted) return { status: 'CANCELLED', assurance: 'geometry_only', executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+    if (request.signal?.aborted) return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
     const head = open.pop()!;
     const node = nodes.get(head.key);
     if (node === undefined) continue;
@@ -239,7 +291,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
         const to = nx === targetCell.x && nz === targetCell.z && Math.abs(candidate.ny - targetY) <= EPS
           ? { ...resolvedTarget }
           : stanceFor(nx, candidate.ny, nz);
-        const check = checkTransition(map, request, candidate.kind, node.stance, to, limits, now);
+        const check = checkTransition(traversability, request, candidate.kind, node.stance, to, limits, now);
         stats.edgesEvaluated += 1;
         if (check.status === 'OPEN') stats.openEdges += 1;
         else if (check.status === 'BLOCKED') stats.blockedEdges += 1;
@@ -267,7 +319,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     // STALE 和 UNKNOWN 都是“证据不足”，不是“已观测地形断连”。把 stale 当成
     // NO_PATH 会让上层误报“没有路”，其实只需要重新观察刷新证据。
     const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : (stats.unknownEdges > 0 || stats.staleEdges > 0) ? 'UNKNOWN' : 'NO_PATH';
-    return { status, assurance: 'geometry_only', executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+    return { status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
   }
 
   const points: Vec3Like[] = [];
@@ -280,7 +332,11 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     if (node.via !== null) transitions.unshift(node.via);
     cursor = node.parent;
   }
-  return { status: 'FOUND', assurance: 'geometry_only', executable: false, points, transitions, boundaries, cost: nodes.get(found)!.g, resolvedTarget, stats };
+  return {
+    status: 'FOUND', assurance, evidenceMode, executable: false, points, transitions, boundaries,
+    cost: nodes.get(found)!.g, resolvedTarget, stats,
+    ...(evidenceMode === 'historical' ? { verification: verifyLandRoute(map, request, transitions, now) } : {}),
+  };
 }
 
 /** 对已选路线逐段复验；walk 用同高判定，step/drop 用 land transition 判定。 */
