@@ -30,11 +30,16 @@ test('passageRouteInspection：纯垂直下坠正向可走、反向不可走', (
   assert.equal(up.reason, 'disconnected');
 });
 
-test('passageRouteInspection：reverse 证据让纯垂直落差可双向', () => {
+test('passageRouteInspection：reverse/cut 证据让纯垂直落差可双向', () => {
   const drop = rec('drop', [at(0, 59, 0), at(0, 57, 0)], [{ a: at(0, 59, 0), b: at(0, 57, 0), reverse: true }]);
   const up = passageRouteInspection([drop], at(0, 57, 0), at(0, 59, 0), { near: 0.5 });
   assert.equal(up.status, 'route');
   assert.equal(up.legs[0]?.reversible, true);
+
+  const cut = rec('cut', [at(0, 59, 0), at(0, 57, 0)], [{ a: at(0, 59, 0), b: at(0, 57, 0), cut: true }]);
+  const cutUp = passageRouteInspection([cut], at(0, 57, 0), at(0, 59, 0), { near: 0.5, allowed: ['climb'] });
+  assert.equal(cutUp.status, 'route');
+  assert.equal(cutUp.legs[0]?.reversible, true);
 });
 
 test('passageRouteInspection：allowed 过滤在搜索时生效，并报告 disallowed_transition', () => {
