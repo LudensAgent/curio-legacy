@@ -179,6 +179,39 @@ test('a stopping condition records its actual evidence rather than claiming the 
   assert.equal(lesson.wins, 0, 'a stopping condition is not proof that the described task succeeded');
 });
 
+test('开工前已成立的 done_when 不能验收目标：活动记为 attempted，资源目标仍未完成', async (t) => {
+  const w = fixture(t);
+  w.adapter.inv.set('stone_axe', 1);
+  await w.tick();
+  await w.reply(0, { monologue: '找木料', decision: 'new', activity: {
+    what: '找木料砍原木', kind: 'gather', steps: [step()],
+    done_when: { type: 'inventory_min', item: 'stone_axe', count: 1 },
+  } });
+  assert.ok(w.mind.activity?.attemptOnly, '开工前已成立的条件不能当完成依据');
+  assert.equal(w.mind.activity?.doneWhen, undefined);
+  await w.finish(ok('步骤做完了'));
+  const end = w.bus.recent().slice().reverse().find((event) => event.type === 'attempt_end');
+  assert.equal(end?.data?.completion, 'attempt');
+  assert.equal(end?.data?.status, 'attempted');
+  assert.equal((end?.data?.resource as { goalIncomplete?: boolean } | undefined)?.goalIncomplete, true);
+  assert.match(end?.msg ?? '', /有界尝试/);
+  assert.match(end?.msg ?? '', /资源目标未完成/);
+});
+
+test('计划说走远找树但只有观察/采集：活动开始时报告计划覆盖缺口', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '走远找树', decision: 'new', activity: {
+    what: '沿地表走远找树砍原木', kind: 'gather', steps: [step()],
+  } });
+  assert.ok(w.mind.activity?.planCoverageGap);
+  const gap = w.bus.recent().slice().reverse().find((event) => event.type === 'plan_coverage_gap');
+  assert.match(gap?.msg ?? '', /没有会实际移动身体的动作/);
+  await w.finish(ok('做完一步'));
+  const end = w.bus.recent().slice().reverse().find((event) => event.type === 'attempt_end');
+  assert.match(end?.msg ?? '', /计划覆盖缺口/);
+});
+
 test('决定的校验：能纠正就纠正，关键部分错了才要求重答', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   assert.ok('error' in parseDecision({ decision: 'continue', monologue: '嗯' }, adapter, memory, false));

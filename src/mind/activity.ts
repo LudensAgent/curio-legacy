@@ -205,14 +205,14 @@ function digest(text: string): string {
   return (h >>> 0).toString(36);
 }
 
-export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory'>): Activity {
+export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory' | 'pos'>): Activity {
   return {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
     ...(draft.ifStuck ? { ifStuck: draft.ifStuck } : {}), ...(draft.agendaId ? { agendaId: draft.agendaId } : {}),
-    source, monologue, startedAt: Date.now(), failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
+    source, monologue, startedAt: Date.now(), startPos: { ...state.pos }, failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
   };
@@ -335,8 +335,15 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 只记录技能明确报告过的阶段（如 walk_path 的 nav.outcome、
   // 水面技能的 data.stage）；没有报告的技能保持没有，不由耗时或位置臆造阶段。
   const navStage = reportedStage(result);
+  // 只留能判定“定位/取得/位移/覆盖”的回执字段；整份 data（尤其 local 图）不进活动历史。
+  const RECEIPT_KEYS = new Set(['found', 'foundPos', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
+    'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall']);
+  const receipt = result.data
+    ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
+    : undefined;
   const recorded: Activity['results'][number] & { stage?: string } = {
-    skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: clipFeedback(result.summary), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {})
+    skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: clipFeedback(result.summary), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}),
+    ...(receipt && Object.keys(receipt).length ? { data: receipt } : {}),
   };
   if (navStage) recorded.stage = navStage;
   a.results.push(recorded);
@@ -625,12 +632,73 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   return { kind: 'stuck', why: clipFeedback(result.summary) };
 }
 
-export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string, state: AgentState): ActivityRecord {
+/** 资源型活动：步骤、标题或收工条件在要某样东西。只用于回执分类，不替 Agent 选资源。 */
+const RESOURCE_SKILLS = new Set(['gather', 'forage', 'hunt', 'fish', 'farm', 'take_items', 'mine_cell', 'craft', 'smelt', 'expedition', 'excavate_run']);
+const RESOURCE_WORDS = /木料|原木|木板|木棍|菌柄|木头|矿石|铁|煤|钻石|食物|材料|资源|gather|mine|wood|log|plank|stick|ore|iron|coal|diamond/i;
+const SEARCH_SKILLS = new Set(['look_around', 'gather', 'forage', 'hunt', 'fish', 'find_item', 'expedition']);
+const SEARCH_WORDS = /找|搜索|搜寻|探|扫|环顾|查看|look|search|explore|scout/i;
+
+function resourceIntentOf(a: Activity): boolean {
+  const done = a.doneWhen ? JSON.stringify(a.doneWhen) : '';
+  return a.steps.some((step) => RESOURCE_SKILLS.has(step.skill)
+    && (step.skill !== 'expedition' || !!(step.args as Record<string, unknown> | undefined)?.find))
+    || RESOURCE_WORDS.test(`${a.what} ${done}`);
+}
+
+function searchIntentOf(a: Activity): boolean {
+  return SEARCH_WORDS.test(a.what) || a.steps.some((step) => SEARCH_SKILLS.has(step.skill));
+}
+
+/**
+ * 计划声称要走远/换地方/找远处的资源，却没有任何会实际改变身体位置的动作：
+ * 这是计划覆盖缺口，只提示，不替 Agent 改步骤或阻止执行。
+ */
+export function planCoverageGap(a: Activity): string | null {
+  const travelIntent = /走远|走一段|远行|远走|探路|探索|找树|找.*(树|木|原木|菌柄|log|wood)|换.*(地方|方向)|过去|走到|前往|搜索|搜寻|search|explore|scout|wander/i.test(a.what);
+  const changesPosition = a.steps.some((step) => {
+    if (['move_step', 'navigate_to', 'walk_path', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
+    if (step.skill !== 'press_keys') return false;
+    const keys = (step.args as { keys?: Record<string, unknown> } | undefined)?.keys ?? {};
+    return ['forward', 'back', 'left', 'right', 'sprint'].some((key) => keys[key] === true);
+  });
+  if (!travelIntent || changesPosition) return null;
+  return '目标需要走到/换地方/扩大观察范围，但步骤里没有会实际移动身体的动作；只转头、观察或采集不会改变位置，不能当作远行或远处搜索';
+}
+
+/** 从每步执行回执的实测位置算覆盖；没有回执的位置不猜。 */
+function explorationOf(a: Activity, end: { x: number; y: number; z: number }, newChunks: number | null) {
+  const positions = [...a.results.map((result) => result.pos).filter((pos): pos is { x: number; y: number; z: number } => !!pos), end];
+  const start = a.startPos ?? end;
+  const maxHorizontal = Math.max(0, ...positions.map((pos) => Math.hypot(pos.x - start.x, pos.z - start.z)));
+  const searchIntent = searchIntentOf(a);
+  return {
+    start: { ...start }, end: { ...end },
+    maxHorizontal: Math.round(maxHorizontal * 100) / 100,
+    visitedCells: new Set(positions.map((pos) => `${Math.floor(pos.x)},${Math.floor(pos.z)}`)).size,
+    newChunks, searchIntent, localOnly: searchIntent && maxHorizontal < 8 && (newChunks ?? 0) <= 0,
+  };
+}
+
+export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string, state: AgentState, info: { newChunks?: number | null } = {}): ActivityRecord {
   const { gained, lost } = diffInventory(a.startInventory, inventoryOf(state));
+  const receipts = a.results.flatMap((result) => result.data ? [result.data] : []);
+  // 定位看“这一趟实际看见了/采到了什么”，不把 find_item 的历史记录或 go_near 的到达算成找到资源。
+  const located = receipts.some((data) => !!data.found || Number(data.dug ?? 0) > 0
+    || (Number(data.travelled ?? 0) > 0 && !!data.coverage));
+  const acquired = Object.keys(gained).length > 0
+    || receipts.some((data) => Number(data.dug ?? 0) > 0 || Number(data.moved ?? 0) > 0 || Number(data.crafted ?? 0) > 0);
+  const intent = resourceIntentOf(a);
+  const attemptOnly = !!a.attemptOnly;
+  const exploration = explorationOf(a, state.pos, info.newChunks ?? null);
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
-    ...(outcome === 'done' ? { completion: a.conditionTriggered ? 'condition' as const : 'steps' as const } : outcome === 'unmet' ? { completion: 'unmet' as const } : {}),
+    completion: attemptOnly ? 'attempt' as const
+      : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
+        : outcome === 'unmet' ? 'unmet' as const : undefined,
+    operationCompleted: outcome === 'done',
+    ...(intent || attemptOnly ? { resource: { intent, located, acquired, goalIncomplete: attemptOnly || (intent && !acquired) } } : {}),
+    ...(exploration.searchIntent ? { exploration } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
     at: Date.now(), signature: signatureOf(a.steps),
@@ -655,6 +723,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
   const stageOf = (r: Activity['results'][number]) => (r as { stage?: unknown }).stage;
   const lastStage = [...a.results].reverse().find((r) => typeof stageOf(r) === 'string');
+  const explore = explorationOf(a, state.pos, null);
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
@@ -662,6 +731,12 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),
+    ...(a.attemptOnly ? { attempt_only: a.attemptOnly.reason, original_done_when: a.attemptOnly.originalDoneWhen } : {}),
+    ...(a.planCoverageGap ? { plan_coverage_gap: a.planCoverageGap } : {}),
+    ...(explore.searchIntent ? { exploration: {
+      start: explore.start, end: explore.end, max_horizontal: explore.maxHorizontal,
+      visited_cells: explore.visitedCells, local_only_so_far: explore.localOnly,
+    } } : {}),
     ...(a.failures ? { failures: a.failures } : {}),
     ...(a.adaptations.length ? { body_adapted: a.adaptations } : {}),
     ...(a.dropped?.length ? { not_done_rejected: a.dropped } : {}),
