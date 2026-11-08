@@ -221,11 +221,15 @@ function standableSurfaces(
  */
 function historicalMapView(map: VoxelMap, sessionId: string, now: number): VoxelMap {
   type Section = { readonly revision: number; readonly evidence: ReadonlyMap<number, Readonly<CellEvidence>> };
-  const views = new WeakMap<object, Section>();
-  const viewOf = (section: Section | null): Section | null => {
+  // 按 Section 键 + revision 缓存。live section ref 每次都是新对象，用对象身份做 WeakMap
+  // 键永远命不中，会让每一次格子读取都重建整段证据 Map。
+  const views = new Map<string, Section>();
+  const viewOf = (dim: string, x: number, y: number, z: number): Section | null => {
+    const section = map.sectionRef(dim, x, y, z);
     if (section === null) return null;
-    const cached = views.get(section);
-    if (cached !== undefined) return cached;
+    const id = `${dim}|${x >> 4},${z >> 4},${y >> 4}`;
+    const cached = views.get(id);
+    if (cached !== undefined && cached.revision === section.revision) return cached;
     const evidence = new Map<number, CellEvidence>();
     for (const [index, cell] of section.evidence) {
       const historical = cell.freshness === 'STALE' || cell.observation.sessionId !== sessionId || now > cell.validUntil;
@@ -243,13 +247,14 @@ function historicalMapView(map: VoxelMap, sessionId: string, now: number): Voxel
     }
     const view = Object.create(section) as Section;
     Object.defineProperty(view, 'evidence', { value: evidence });
-    views.set(section, view);
+    views.set(id, view);
     return view;
   };
   return {
     worldId: map.worldId,
-    sectionRef: (dim: string, x: number, y: number, z: number) => viewOf(map.sectionRef(dim, x, y, z)),
-    sectionAt: (dim: string, x: number, y: number, z: number) => viewOf(map.sectionAt(dim, x, y, z)),
+    sectionRef: (dim: string, x: number, y: number, z: number) => viewOf(dim, x, y, z),
+    // 只用于只读求值；证据 Map 是副本，其余数组仍共享只读视图，不能写回。
+    sectionAt: (dim: string, x: number, y: number, z: number) => viewOf(dim, x, y, z),
     sectionResidency: (key: Parameters<VoxelMap['sectionResidency']>[0]) => map.sectionResidency(key),
     residencyGeneration: (dim: string, cx: number, cz: number, sy: number) => map.residencyGeneration(dim, cx, cz, sy),
     cellAt: (dim: string, x: number, y: number, z: number) => map.cellAt(dim, x, y, z),
