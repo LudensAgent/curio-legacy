@@ -44,7 +44,11 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
   const feet = { x: 0.5, y: height(0, 0) + 1, z: 0.5 };
   const to = { x: scenario.n - 0.5, y: height(scenario.n - 1, scenario.n - 1) + 1, z: scenario.n - 0.5 };
   const body = { feet, width: 0.6, height: 1.8, pose: 'standing' as const };
-  const samples: { totalMs: number; timerDelayMs: number; strictMs: number; historicalMs: number; nodes: number; edges: number; status: string; cancelReason: string | null }[] = [];
+  const samples: {
+    totalMs: number; timerDelayMs: number; strictMs: number; historicalMs: number;
+    nodes: number; edges: number; visitedSections: number; sectionReads: number;
+    snapshotCount: number; cloneCount: number; status: string; cancelReason: string | null;
+  }[] = [];
   for (let i = 0; i < REPEATS; i++) {
     const deadlineMs = Date.now() + BUDGET_MS;
     const request = { worldId: WORLD, dim: DIM, sessionId: SESSION, body, to, rules: walkLandRules, maxNodes: 2048, maxEdges: 8192, deadlineMs };
