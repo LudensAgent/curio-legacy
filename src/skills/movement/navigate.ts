@@ -100,6 +100,32 @@ export const navigateTo: Skill<NavigateArgs> = {
       if (historical.status === 'FOUND') result = historical;
     }
     if (result === null) {
+      // 1×1 平台/柱顶没有普通 A* 路线：Agent 明确允许 drop 且目标就在相邻列时，
+      // 直接尝试一次 descend_to。是否可见、净空、落差和摔伤仍由 descend_to 核实。
+      const from = feetCell(state.pos);
+      const dropTo = { x: Math.floor(args.to.x), y: args.to.y, z: Math.floor(args.to.z) };
+      const drop = from.y - dropTo.y;
+      if (args.allowed.includes('drop') && Math.abs(dropTo.x - from.x) + Math.abs(dropTo.z - from.z) === 1
+        && drop > 0.25 && drop <= 4.01) {
+        const validated = validateSkill(descendTo, {
+          target: { x: dropTo.x, y: dropTo.y, z: dropTo.z },
+          ...(args.allowUnknownCorridor ? { allowUnknownCorridor: true } : {}),
+        }, ctx.adapter);
+        if (validated.ok) {
+          const moved = await runSkill(ctx, descendTo, validated.args);
+          const position = { ...ctx.adapter.state().pos };
+          const transition = { kind: 'drop' as const, from: { ...state.pos }, to: { ...dropTo }, drop };
+          if (moved.status === 'succeeded') {
+            return ok(`navigate_to 没有普通 walk/step 路线；按你允许的 drop 直接下落到相邻目标 (${dropTo.x},${dropTo.y},${dropTo.z})（落差 ${drop.toFixed(2)}）`, {
+              ...routeFacts(strict), transitions: [transition], directDrop: true, executed: 1, total: 1, remaining: [], position,
+            });
+          }
+          const { local: _local, around: _around, ...nested } = (moved.data ?? {}) as Record<string, unknown>;
+          return fail(moved.failureCode ?? 'ERROR', `navigate_to 没有普通路线；直接下落也失败：${moved.summary}`, {
+            ...routeFacts(strict), transitions: [transition], directDrop: true, nested: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data: nested }, position,
+          });
+        }
+      }
       const code: FailureCode = strict.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT' : strict.status === 'UNKNOWN' ? 'NOT_FOUND' : 'PATH_NOT_FOUND';
       return fail(code, `navigate_to 找不到可执行的 walk/step/drop 路线：${strict.status}（${strict.boundaries.length} 个边界事实）；需要挖/垫/搭或换目标时由你决定`, { ...routeFacts(strict), position: { ...state.pos } });
     }

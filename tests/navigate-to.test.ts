@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { navigateTo } from '../src/skills/movement/index.ts';
+import type { LandingOption } from '../src/skills/types.ts';
+import type { MoveOpts, MoveTarget } from '../src/adapter/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -35,6 +37,13 @@ function fakeSpatial(map: VoxelMap) {
     session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
     closing: false, paused: false, observationAdmitted: true,
   } as unknown as SharedSpatialSession;
+}
+
+class DropWorld extends FakeAdapter {
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    if (target.kind === 'xyz') { this.pos = { x: target.x, y: target.y, z: target.z }; return; }
+    return super.moveTo(target, opts);
+  }
 }
 
 function setup(map: VoxelMap) {
@@ -70,6 +79,35 @@ test('navigate_to 当前证据无路时使用历史体素候选路线，但仍�
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.evidenceMode, 'historical');
   assert.equal(Math.floor(adapter.pos.x), 2);
+});
+
+test('navigate_to 从 1×1 平台用显式 2 格下落到真实站立面', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: { x: number; y: number; z: number }[] = [];
+  for (let x = -1; x <= 2; x++) for (let y = 60; y <= 65; y++) for (let z = -1; z <= 1; z++) air.push({ x, y, z });
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', [{ x: 0, y: 63, z: 0 }, { x: 1, y: 61, z: 0 }]);
+  const adapter = new DropWorld();
+  adapter.groundY = -100;
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 63, z: 0 } }, { name: 'stone', pos: { x: 1, y: 61, z: 0 } });
+  const option: LandingOption = {
+    target: { x: 1.5, y: 62, z: 0.5 }, support: { pos: { x: 1, y: 61, z: 0 }, name: 'stone' },
+    surface: 'ground', surfaceY: 62, drop: 2, horizontalDistance: 1, clearance: 'clear', corridor: 'clear',
+    approach: 'adjacent', waterDepth: 'unknown', unknowns: [],
+    receipt: { worldId: WORLD, sessionId: SESSION, dimension: DIM, observationId: 1, at: Date.now(), from: { ...adapter.pos }, onGround: true },
+  };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  const fresh = () => ({ ...option, receipt: { ...option.receipt, at: Date.now(), from: { ...adapter.pos }, observationId: adapter.state().observationId } });
+  ctx.senses.landingOptions = () => [fresh()];
+  t.after(() => ctx.memory.close());
+  const r = await navigateTo.run(ctx, {
+    to: { x: 1, y: 62, z: 0 }, allowed: ['walk', 'step', 'drop'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+  });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(Math.floor(adapter.pos.y), 62);
+  const transitions = r.data?.transitions as { kind: string; drop: number }[] | undefined;
+  assert.deepEqual(transitions?.map((transition) => [transition.kind, transition.drop]), [['drop', 2]]);
 });
 
 test('navigate_to 没有 walk/step/drop 路线时停下报边界，不移动', async (t) => {
