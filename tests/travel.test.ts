@@ -345,6 +345,33 @@ test('travel_portal timeout while confirmed inside names cooldown/latency instea
   assert.match(r.summary, /不要连续重进/);
 });
 
+test('快速往返：反向穿越在十分钟内时如实写进传送回执', async (t) => {
+  const w = new TestWorld();
+  w.dim = 'the_nether';
+  w.sessionId = 'nether-session';
+  w.pos = { x: 3.5, y: 64, z: 0.5 };
+  const portal = { x: 3, y: 64, z: 0 };
+  w.setBlock(portal, 'nether_portal');
+  const ctx = makeCtx(w);
+  ctx.memory.setWorld(w.worldId);
+  t.after(() => ctx.memory.close());
+  const store = travelStore(ctx.memory);
+  const nether = w.state();
+  const over = { ...nether, dim: 'overworld', sessionId: 'overworld-session', pos: { x: 0.5, y: 64, z: 0.5 }, observationId: nether.observationId + 1 };
+  const a = store.observe(over, { x: 0, y: 64, z: 0 }, 'nether_portal');
+  const b = store.observe(nether, portal, 'nether_portal');
+  store.record(a.id, b.id, over, nether);
+  const back = { ...over, sessionId: 'overworld-session-2', observationId: over.observationId + 1 };
+  w.enterPortalAt = (async () => ({
+    ok: true, from: nether, to: back, stand: back, leftPortal: true,
+    transition: { startedInPortal: false, entered: true, exitMs: null, outsideMs: null, insideMs: 1500, endDim: 'overworld' },
+  })) as any;
+  const r = await travelSkills.travel_portal.run(ctx, { portalId: b.id });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /快速往返/);
+  assert.ok(r.data?.quickReturn);
+});
+
 test('stale portal endpoint reports the actual block and record age, not a frame guess', async () => {
   const { adapter, memory, run } = setup();
   const endpoint = travelStore(memory).observe(adapter.state(), { x: 3, y: 64, z: 0 }, 'nether_portal');

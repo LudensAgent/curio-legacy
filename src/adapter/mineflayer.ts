@@ -3170,28 +3170,52 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    */
   private async driveOutOfPortal(kind: string, signal: AbortSignal, timeoutMs = 4000, fromDim?: string): Promise<{ left: boolean; dimChanged: boolean; interrupted: boolean; noExit: boolean }> {
     const deadline = Date.now() + timeoutMs;
-    while (this.bodyInPortal(kind) && Date.now() < deadline) {
+    // 不只是“离开门方块”：走到门外可站位的格心再停，并让身体面朝离开门的方向。
+    // 否则普通的前进动作会从门口原地再次踩回门里，维度行程看起来像自己取消。
+    let out: Vec3Like | null = null;
+    let portalCenter: Vec3Like | null = null;
+    let last = this.bot?.entity?.position?.clone?.() ?? null;
+    let still = 0;
+    while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (!this.ready) return { left: false, dimChanged: false, interrupted: true, noExit: false };
       const probe = this.transitionProbe();
       if (!probe.connected || !probe.alive) return { left: false, dimChanged: false, interrupted: true, noExit: false };
       // 退出门的过程中已经传送：别再按旧维度的格走，交给落地等待验收。
       if (fromDim && probe.dim !== fromDim) return { left: false, dimChanged: true, interrupted: false, noExit: false };
-      const feet = this.bot.entity.position.floored();
-      const near = [
-        feet,
-        ...[1, -1].flatMap((d) => [{ x: feet.x + d, y: feet.y, z: feet.z }, { x: feet.x + d, y: feet.y + 1, z: feet.z }]),
-        ...[1, -1].flatMap((d) => [{ x: feet.x, y: feet.y, z: feet.z + d }, { x: feet.x, y: feet.y + 1, z: feet.z + d }]),
-      ];
-      const approach = near
-        .filter((p) => this.blockAt(p) === kind)
-        .map((p) => computePortalApproach((q) => this.blockAt(q), p))
-        .find((a): a is { cell: Vec3Like; center: Vec3Like } => a !== null);
-      if (!approach) return { left: false, dimChanged: false, interrupted: false, noExit: true };
-      const out = { x: approach.cell.x + 0.5, y: approach.cell.y + 1.0, z: approach.cell.z + 0.5 };
-      await this.drive({ forward: true }, 250, signal, { facePoint: out });
+      const p = this.bot.entity.position;
+      const inside = this.bodyInPortal(kind);
+      if (!inside && out && Math.hypot(p.x - out.x, p.z - out.z) <= 0.45) break;
+      if (last && !inside && out && Math.hypot(p.x - last.x, p.z - last.z) < 0.01) {
+        if (++still >= 4) break;
+      } else still = 0;
+      last = p.clone();
+      if (inside || out === null) {
+        const feet = p.floored();
+        const near = [
+          feet,
+          ...[1, -1].flatMap((d) => [{ x: feet.x + d, y: feet.y, z: feet.z }, { x: feet.x + d, y: feet.y + 1, z: feet.z }]),
+          ...[1, -1].flatMap((d) => [{ x: feet.x, y: feet.y, z: feet.z + d }, { x: feet.x, y: feet.y + 1, z: feet.z + d }]),
+        ];
+        const portalBlock = near.find((cell) => this.blockAt(cell) === kind);
+        const approach = portalBlock ? computePortalApproach((q) => this.blockAt(q), portalBlock) : null;
+        if (!approach) {
+          if (inside) return { left: false, dimChanged: false, interrupted: false, noExit: true };
+          break;
+        }
+        portalCenter = portalBlock ? { x: portalBlock.x + 0.5, y: portalBlock.y + 0.5, z: portalBlock.z + 0.5 } : portalCenter;
+        out = { x: approach.cell.x + 0.5, y: approach.cell.y + 1.0, z: approach.cell.z + 0.5 };
+      }
+      await this.drive({ forward: true }, 150, signal, { facePoint: out });
     }
-    return { left: !this.bodyInPortal(kind), dimChanged: false, interrupted: false, noExit: false };
+    const left = !this.bodyInPortal(kind);
+    // 站稳后朝远离门的方向：普通前进（press_keys forward）不会立刻又踩回门里。
+    if (left && portalCenter && typeof this.bot?.look === 'function') {
+      const p = this.bot.entity.position;
+      const yaw = Math.atan2(-(p.x - portalCenter.x), -(p.z - portalCenter.z));
+      try { await this.bot.look(yaw, 0, true); } catch { /* 转身只是收尾，不改变已到达的事实 */ }
+    }
+    return { left, dimChanged: false, interrupted: false, noExit: false };
   }
 
   /** 传送循环专用轻量探针：只取维度/会话/存活/观测就绪，跳过全量背包与 structuredClone，避免饿死心跳 */

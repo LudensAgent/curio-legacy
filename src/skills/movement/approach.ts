@@ -144,7 +144,9 @@ export const goNear: Skill<ApproachArgs> = {
         target, targetName, chosen: chosen.to, navigation: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data },
       });
     }
-    return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${chosen.to.x},${chosen.to.y},${chosen.to.z})；现在可以用 take_items/sleep/travel_portal 指向原目标`, {
+    // 把原目标的精确坐标回显进摘要：模型只看到摘要，写“指向原目标”时经常丢掉 target。
+    const targetArg = JSON.stringify({ x: target.x, y: target.y, z: target.z });
+    return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${chosen.to.x},${chosen.to.y},${chosen.to.z})；后续动作的 target 写 ${targetArg}（容器用 take_items/store_items，床用 sleep，门/工作站用 interact_block/use_gui，传送门用 observe_portal/travel_portal）`, {
       target, targetName, chosen: chosen.to, evidenceMode: chosen.result.evidenceMode,
       navigation: moved.data, position: { ...ctx.adapter.state().pos },
     });
