@@ -20,7 +20,7 @@ import { WalkMoveExecutor, walkCollisionProvider } from '../../adapter/walk-rout
 import type { WalkBody, WalkLifecycle, WalkMoveRequestObservation, WalkTick } from '../../adapter/walk-route.ts';
 import { bodyLocalCells, observeCells } from '../walk-route.ts';
 import { fail, ok, obj, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
-import { clearRouteRecords, consumeRoutePlan, noteRouteScope, releaseRoutePlan } from './route.ts';
+import { clearRouteRecords, consumeRoutePlan, isRouteRegistryProblem, noteRouteScope, releaseRoutePlan } from './route.ts';
 
 const BODY = { width: 0.6, height: 1.8, pose: 'standing' as const };
 /** 没有新物理帧时，库重复拉取样本的最长复用时间；到点重新测量一次实测状态。 */
@@ -145,16 +145,11 @@ function registryMessage(routeId: string, problem: RoutePlanRegistryProblem['kin
 
 function registryResult(routeId: string, result: WalkPathResult): SkillResult {
   const reason = result.invalidation?.reason;
-  const problem = isRegistryProblem(reason) ? reason : 'route_not_found';
+  const problem = isRouteRegistryProblem(reason) ? reason : 'route_not_found';
   const code: FailureCode = problem === 'scope_mismatch'
     ? 'WRONG_DIMENSION'
     : problem === 'route_expired' ? 'EFFECT_NOT_CONFIRMED' : 'BAD_ARGS';
   return fail(code, registryMessage(routeId, problem), registryData(routeId, result));
-}
-
-function isRegistryProblem(reason: string | undefined): reason is RoutePlanRegistryProblem['kind'] {
-  return reason === 'invalid_request' || reason === 'route_not_found' || reason === 'route_consumed'
-    || reason === 'route_expired' || reason === 'scope_mismatch' || reason === 'route_not_executable';
 }
 
 function skillResult(plan: RoutePlan | null, result: WalkPathResult): SkillResult {

@@ -96,10 +96,13 @@ export const navigateTo: Skill<NavigateArgs> = {
     const start = { ...state.pos };
     const startChunks = ctx.memory.visitedChunkCount;
     const startObservedCells = voxel.checkpointFullCounts().observedCells;
-    const segmentFacts = (end: Vec3Like, facts: { executed: number; planned: number; remaining: number; invalidation: string | null; arrived: boolean }) => {
+    const segmentFacts = (end: Vec3Like, facts: { executed: number; planned: number; remaining: number; invalidation: string | null; arrived: boolean; backend?: 'land-search' | 'direct-drop' | 'none' }) => {
       const dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
       const horizontal = Math.hypot(dx, dz);
       const euclidean = Math.hypot(dx, dy, dz);
+      // 请求距离只按“实测段起点 → Agent 给的目标”算，不用计划点或段终点冒充。
+      const requestedHorizontal = Math.hypot(args.to.x - start.x, args.to.z - start.z);
+      const requestedEuclidean = Math.hypot(args.to.x - start.x, args.to.y - start.y, args.to.z - start.z);
       const newChunks = ctx.memory.visitedChunkCount - startChunks;
       const newObservedCells = voxel.checkpointFullCounts().observedCells - startObservedCells;
       const observationCoverage = newObservedCells > 0;
@@ -114,7 +117,10 @@ export const navigateTo: Skill<NavigateArgs> = {
           startStance: { ...start },
           endStance: { ...end },
           displacement: { horizontal: round2(horizontal), vertical: round2(dy), euclidean: round2(euclidean) },
+          requestedDistance: { horizontal: round2(requestedHorizontal), euclidean: round2(requestedEuclidean) },
           distanceFromStart: round2(euclidean),
+          // 实际产出本段的路线来源：land-search / 相邻下落直执行 / 无可用路线；由调用点如实传入。
+          backend: facts.backend ?? 'land-search',
           newChunks,
           newObservedCells,
           observationCoverage,
@@ -159,14 +165,14 @@ export const navigateTo: Skill<NavigateArgs> = {
           const position = { ...ctx.adapter.state().pos };
           const transition = { kind: 'drop' as const, from: { ...state.pos }, to: { ...dropTo }, drop };
           if (moved.status === 'succeeded') {
-            const facts = segmentFacts(position, { executed: 1, planned: 1, remaining: 0, invalidation: null, arrived: true });
+            const facts = segmentFacts(position, { executed: 1, planned: 1, remaining: 0, invalidation: null, arrived: true, backend: 'direct-drop' });
             return ok(`navigate_to 没有普通 walk/step 路线；按你允许的 drop 直接下落到相邻目标 (${dropTo.x},${dropTo.y},${dropTo.z})（落差 ${drop.toFixed(2)}）${segmentNote(facts.segment)}`, {
               ...routeFacts(strict), transitions: [transition], directDrop: true, executed: 1, total: 1, remaining: [], position,
               ...facts,
             });
           }
           const { local: _local, around: _around, ...nested } = (moved.data ?? {}) as Record<string, unknown>;
-          const facts = segmentFacts(position, { executed: 0, planned: 1, remaining: 1, invalidation: 'step_failed', arrived: false });
+          const facts = segmentFacts(position, { executed: 0, planned: 1, remaining: 1, invalidation: 'step_failed', arrived: false, backend: 'direct-drop' });
           return fail(moved.failureCode ?? 'ERROR', `navigate_to 没有普通路线；直接下落也失败：${moved.summary}${segmentNote(facts.segment)}`, {
             ...routeFacts(strict), transitions: [transition], directDrop: true, nested: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data: nested }, position,
             ...facts,
@@ -174,7 +180,7 @@ export const navigateTo: Skill<NavigateArgs> = {
         }
       }
       const code: FailureCode = strict.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT' : strict.status === 'UNKNOWN' ? 'NOT_FOUND' : 'PATH_NOT_FOUND';
-      const facts = segmentFacts(ctx.adapter.state().pos, { executed: 0, planned: 0, remaining: 0, invalidation: 'no_route', arrived: false });
+      const facts = segmentFacts(ctx.adapter.state().pos, { executed: 0, planned: 0, remaining: 0, invalidation: 'no_route', arrived: false, backend: 'none' });
       return fail(code, `navigate_to 找不到可执行的 walk/step/drop 路线：${strict.status}（${strict.boundaries.length} 个边界事实）；需要挖/垫/搭或换目标时由你决定${segmentNote(facts.segment)}`, {
         ...routeFacts(strict), position: { ...state.pos },
         ...facts,
