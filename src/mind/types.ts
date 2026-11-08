@@ -82,8 +82,18 @@ export interface Activity {
   suspendedAt?: number;
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
-  /** 上一步移动未确认到达：下一步校验后若为相对挖掘/放置则报告依赖缺口。 */
-  stanceGap?: { skill: string; pos: { x: number; y: number; z: number } };
+  /**
+   * 上一步放置/移动改变了脚格：下一步若为相对动作，先按上一动作开始前的锚点重绑定；
+   * 绑定不上才报告依赖缺口。intendedStandTarget 是 place_support 确认的支撑顶面上的脚位。
+   */
+  stanceGap?: {
+    skill: string; pos: { x: number; y: number; z: number };
+    /** 副作用发生前的身体位置（相对坐标的原锚点）。 */
+    before?: { x: number; y: number; z: number };
+    intendedStandTarget?: { x: number; y: number; z: number };
+  };
+  /** 这段活里已确认的物理效果；attempt_end 据此汇总，不把已放置/支撑 + 位移误报成“无变化”。 */
+  effects?: { placements: string[]; removed: number; moved: boolean };
 }
 
 export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';

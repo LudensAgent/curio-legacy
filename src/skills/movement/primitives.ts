@@ -906,6 +906,29 @@ const placeSupportSkill: Skill<SupportArgs> = {
     const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
     const key = `${pos.x},${pos.y},${pos.z}`;
+    const movementStart = { ...origin.pos };
+    // 支撑目标不等于要求玩家到达的脚位。这里只按确认的支撑顶面给出意图脚位和衔接状态：
+    // ready = 身体已站上该支撑；needs_rebind = 支撑已形成但相对坐标原点已变，下一步要显式重绑定；
+    // blocked = 支撑顶面上方身体空间不足，站不上去。
+    const standFacts = (topWorld: number | null) => {
+      const intended = topWorld === null ? null : { x: pos.x, y: topWorld, z: pos.z };
+      const now = adapter.state();
+      const body = intended === null ? null : inspectBody(at, intended.y, intended.x, intended.z);
+      const blocker = body?.blockers[0];
+      const onSupport = intended !== null && feetCell(now.pos).x === intended.x && feetCell(now.pos).z === intended.z
+        && Math.abs(now.pos.y - intended.y) <= 0.01;
+      return {
+        supportTarget: { ...pos },
+        supportConfirmed: topWorld !== null,
+        positionBefore: { ...movementStart },
+        positionAfter: { ...now.pos },
+        stanceChanged: Math.hypot(now.pos.x - movementStart.x, now.pos.z - movementStart.z) > 0.01 || Math.abs(now.pos.y - movementStart.y) > 0.01,
+        ...(intended ? { intendedStandTarget: intended } : {}),
+        continuation: topWorld === null || blocker ? 'blocked' as const
+          : onSupport ? 'ready' as const : 'needs_rebind' as const,
+        ...(blocker ? { intendedStandBlocked: { cell: { ...blocker.cell }, name: blocker.name } } : {}),
+      };
+    };
     // stateAt 只判几何/支撑；名称与材质说明只来自本次 visibleStates，未看清就如实写未看清。
     const seenAt = () => visibleStates(ctx, [pos]).get(key) ?? null;
     const inspected = inspectSupport(at, pos);
@@ -916,7 +939,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       const seen = seenAt();
       return ok(
         `[${args.at}] 已经有可站立支撑${seen ? ` ${seen.name}（${shapeOf(seen.name, seen.properties)}）` : '（本次未看清名称和形状）'}，没有另放 ${args.item}`,
-        { already: seen?.name ?? null, observed: seen !== null, supportTop: pos.y + top, standable: true, noop: true, consumed: 0, consumptionVerified: true, ...effectConfirmed('support_formed'), ...after(ctx, args.facing, pos) },
+        { already: seen?.name ?? null, observed: seen !== null, supportTop: pos.y + top, standable: true, noop: true, consumed: 0, consumptionVerified: true, ...standFacts(pos.y + top), ...effectConfirmed('support_formed'), ...after(ctx, args.facing, pos) },
       );
     }
     if (!isReplaceable(raw.name)) {
@@ -936,7 +959,6 @@ const placeSupportSkill: Skill<SupportArgs> = {
     // 库存更新可能滞后：看到净减少才算确认消耗；成功但暂时 0 消耗标为 pending，不冒充真实零消耗。
     const consumptionFacts = (effectExpected: boolean) => consumptionReceipt(adapter, names, beforeCount, { pendingWhenZero: effectExpected });
     const attempts: PlaceAttempt[] = [];
-    const movementStart = { ...origin.pos };
     let movementAttempted = false;
     // position = 尝试放置时的站位（适配器能报边缘站位就用它）；endPosition = 调用返回后身体实际在哪。
     const attemptFacts = (stance: string, position: Vec3Like, extra: Partial<PlaceAttempt> = {}) => {
@@ -1166,6 +1188,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       {
         placed: observed?.name ?? null, observed: observed !== null, materials: [...names], ...consumption,
         attempts, targetCell: { ...pos }, supportTop: supportTopY === null ? null : pos.y + supportTopY,
+        ...standFacts(supportTopY === null ? null : pos.y + supportTopY),
         ...effectConfirmed('support_formed'),
         ...movementFacts(), ...after(ctx, args.facing, pos),
       },

@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -651,8 +651,20 @@ export class Mind {
       if (!v.ok) {
         // 校验失败/被拒绝的步骤不会执行，不能消费尚未处理的站位缺口，留给后续步骤。
       } else if (relativeCellAction(step.skill, v.args)) {
-        this.finishActivity('stuck', `「${gap.skill}」没到新站位，身体现在在 (${gap.pos.x.toFixed(2)},${gap.pos.y.toFixed(2)},${gap.pos.z.toFixed(2)})；接着的「${step.skill}」是相对坐标，会打到错误位置。先确认实际站位或改用绝对坐标`);
-        return;
+        // 放置的站位副作用改变了相对坐标原点。若相对目标按“上一动作开始前的锚点”解释，
+        // 正好落在本次确认的支撑脚位上，就显式重绑定到该绝对落点；否则交回需要重绑定的缺口。
+        const rebound = step.skill === 'move_step' ? this.rebindStanceStep(step, v.args, gap) : null;
+        if (rebound) {
+          delete this.activity.stanceGap;
+          this.d.bus.publish('body_adapt', 'P2', `「${gap.skill}」改变了站位；下一步仍按原锚点去本次支撑的脚位 (${rebound.target.x},${rebound.target.y},${rebound.target.z})`, { planId: this.activity.id, skill: step.skill, from: rebound.from, target: rebound.target });
+        } else {
+          const intended = gap.intendedStandTarget;
+          const hint = intended
+            ? `；本次支撑形成的脚位是 (${intended.x},${intended.y},${intended.z})，下一步用 {"xyz":[${intended.x},${intended.y},${intended.z}]} 明确指向它`
+            : '；先确认实际站位或改用绝对坐标';
+          this.finishActivity('stuck', `「${gap.skill}」改变了站位，身体现在在 (${gap.pos.x.toFixed(2)},${gap.pos.y.toFixed(2)},${gap.pos.z.toFixed(2)})；接着的「${step.skill}」是相对坐标，按新位置会打到别的格${hint}。已确认的放置/支撑效果保留`);
+          return;
+        }
       } else {
         delete this.activity.stanceGap;
       }
@@ -686,6 +698,29 @@ export class Mind {
     const r = this.d.arbiter.start(dispatch, this.activity.source === 'rule' ? 'rule' : 'llm', schedule);
     if ('error' in r) this.handleStepResult(step, { status: 'failed', failureCode: 'BAD_ARGS', summary: r.error }, 0);
     else if (budget?.continuation) this.watchStepDeadline(r.id, step.skill, budget.deadlineMs);
+  }
+
+  /**
+   * 放置的站位副作用换了相对坐标原点后，用上一动作开始前的锚点重解释下一步相对动作。
+   * 只有按旧锚点算出的世界目标正好是本次确认的支撑脚位时才重绑定；不替 Agent 猜别的落点。
+   * 重绑定后的绝对目标仍走一遍执行前预检，不绕过距离/净空检查。
+   */
+  private rebindStanceStep(step: Step, args: unknown, gap: NonNullable<Activity['stanceGap']>) {
+    const a = this.activity;
+    if (!a) return null;
+    const rebound = rebindStanceTarget(args, gap);
+    if (!rebound) return null;
+    const reboundArgs = { xyz: rebound.xyz, facing: rebound.facing };
+    if (!this.d.arbiter.validate({ skill: step.skill, args: reboundArgs }).ok) return null;
+    const own = a.steps[Math.max(0, a.index - 1)];
+    const originalArgs = own?.args;
+    step.args = reboundArgs;
+    if (own && own.skill === step.skill && own.args !== reboundArgs) {
+      own.args = reboundArgs;
+      own.origin = 'execution_helper';
+      own.authorizedBy = { skill: step.skill, ...(own.id ? { stepId: own.id } : {}), args: originalArgs };
+    }
+    return { from: rebound.from, target: { x: rebound.xyz[0], y: rebound.xyz[1], z: rebound.xyz[2] } };
   }
 
   /** 自动续跑到原动作期限就取消本次执行；不延长，也不让新 taskId 重新计时。 */
@@ -815,6 +850,14 @@ export class Mind {
       this.lastStuck = null;
     }
     const gains = Object.entries(record.gained).map(([k, v]) => `${k}×${v}`).join('、');
+    const effects = a.effects;
+    const effectReasons = [
+      ...(effects?.placements.length ? [`已确认放置/支撑 ${effects.placements.join('、')}`] : []),
+      ...(effects?.removed ? [`已确认挖掉 ${effects.removed} 格`] : []),
+      ...(effects?.moved ? ['身体已实际移动'] : []),
+      ...(gains ? [`背包实增 ${gains}`] : []),
+    ];
+    const changed = !!gains || !!effects?.placements.length || !!effects?.removed || !!effects?.moved;
     this.d.self.think(`${a.what} → ${outcome === 'done' ? '收工' : outcome === 'stuck' ? '卡住了' : '停下了'}${gains ? `，得到 ${gains}` : ''}：${summary.slice(0, 180)}`, 'outcome');
     const status = outcome === 'done' ? 'succeeded' : outcome === 'unmet' ? 'condition_unmet' : outcome === 'stuck' ? 'failed' : 'interrupted';
     const goalType = ['tidy', 'social', 'other', 'experiment'].includes(a.kind) ? 'investigate' : a.kind;
@@ -822,7 +865,7 @@ export class Mind {
       steps: signatureOf(a.steps).split('>'), plan: a.steps, worldId: state.worldId, dimension: state.dim });
     this.d.bus.publish('attempt_end', outcome === 'stuck' ? 'P1' : 'P3', `一段活「${a.what}」→ ${outcome}：${summary}${gains ? `（得到 ${gains}）` : ''}`,
       { planId: a.id, status, outcome, ...(record.completion ? { completion: record.completion } : {}), gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
-        how: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`).join(' > ').slice(0, 300), effectEvidence: { verified: true, changed: !!gains, reasons: gains ? [`背包实增 ${gains}`] : [] } });
+        how: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`).join(' > ').slice(0, 300), effectEvidence: { verified: true, changed, reasons: effectReasons } });
     try { this.d.onGoalEnd?.(record.completion === 'condition' ? 'condition_met' : status); } catch { /* 习惯化失败不影响游玩 */ }
     if (outcome === 'done' && record.completion !== 'condition' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);
     // 绕路的事做完了：回到被打断的那段活
