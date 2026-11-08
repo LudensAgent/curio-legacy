@@ -71,13 +71,22 @@ test('3D 搜索：2 格安全下落 FOUND 且带 drop 过渡', () => {
   assert.equal(verifyLandRoute(map, request(feet, at(1.5, 0, 0.5)), result.transitions, 2000).verdict, 'OPEN');
 });
 
-test('3D 搜索：未知区域只报缺口，不伪造路线', () => {
+test('3D 搜索：未知区域只报缺口，不伪造路线；重复搜索稳定', () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fill(map, 'minecraft:stone', [at(0, -1, 0)]);
-  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(3.5, 0, 0.5)), 2000);
-  assert.notEqual(result.status, 'FOUND');
+  const req = request(at(0.5, 0, 0.5), at(3.5, 0, 0.5));
+  const result = searchLandRoute(map, req, 2000);
+  const again = searchLandRoute(map, req, 2000);
+  assert.equal(result.status, 'UNKNOWN');
   assert.ok(result.transitions.length === 0);
   assert.ok(result.boundaries.length > 0);
+  // UNKNOWN/INCOMPLETE 不能出现在 transitions 里被当成可走；边界必须原样暴露。
+  assert.ok(result.boundaries.every((boundary) => boundary.status === 'UNKNOWN'));
+  assert.ok(result.stats.unknownEdges > 0);
+  assert.deepEqual(again.transitions, result.transitions);
+  assert.deepEqual(again.boundaries, result.boundaries);
+  assert.equal(again.stats.unknownEdges, result.stats.unknownEdges);
+  assert.equal(result.stats.snapshotCount, 0);
 });
 
 test('3D 搜索：火不当作可走格子', () => {
@@ -189,6 +198,9 @@ test('3D 搜索：历史模式用过期体素给出候选路线，严格模式�
   map.markStale(DIM, 'expired');
   const strict = searchLandRoute(map, request(feet, at(3.5, 0, 0.5)), 2000);
   assert.equal(strict.status, 'UNKNOWN');
+  assert.equal(strict.transitions.length, 0, 'STALE 不当可走');
+  assert.equal(strict.executable, false);
+  assert.equal(strict.stats.snapshotCount, 0);
   const historical = searchLandRoute(map, request(feet, at(3.5, 0, 0.5), { allowStale: true }), 2000);
   assert.equal(historical.status, 'FOUND');
   assert.equal(historical.evidenceMode, 'historical');
@@ -288,6 +300,27 @@ test('异步分片：长搜索会 yield，最长同步片远小于总时长', as
   assert.ok(result.stats.yieldCount > 0, `yieldCount=${result.stats.yieldCount}`);
   assert.ok(result.stats.maxSyncSliceMs < 80, `maxSyncSliceMs=${result.stats.maxSyncSliceMs}, total=${total}`);
   assert.ok(total > result.stats.maxSyncSliceMs * 3, `total=${total}, slice=${result.stats.maxSyncSliceMs}`);
+});
+
+test('3D 搜索：同输入重复搜索的转移/边界与计数器稳定，且不产生 Section 快照', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(13, 2, 1));
+  fill(map, 'minecraft:stone', Array.from({ length: 13 }, (_, x) => at(x, -1, 0)));
+  const req = request(at(0.5, 0, 0.5), at(11.5, 0, 0.5));
+  const first = searchLandRoute(map, req, 2000);
+  const second = searchLandRoute(map, req, 2000);
+  assert.equal(first.status, 'FOUND', JSON.stringify(first.stats));
+  assert.deepEqual(second.points, first.points);
+  assert.deepEqual(second.transitions, first.transitions);
+  assert.deepEqual(second.boundaries, first.boundaries);
+  for (const key of [
+    'nodesExpanded', 'edgesEvaluated', 'openEdges', 'blockedEdges', 'unknownEdges',
+    'staleEdges', 'unsupportedEdges', 'visitedSections', 'sectionReads', 'snapshotCount', 'cloneCount',
+  ] as const) {
+    assert.equal(second.stats[key], first.stats[key], key);
+  }
+  assert.equal(first.stats.snapshotCount, 0);
+  assert.equal(second.stats.snapshotCount, 0);
 });
 
 test('异步与同步入口对同一地图给出相同状态和节点/边计数', async () => {

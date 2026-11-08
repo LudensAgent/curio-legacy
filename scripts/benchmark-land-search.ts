@@ -48,10 +48,12 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     totalMs: number; timerDelayMs: number; strictMs: number; historicalMs: number;
     nodes: number; edges: number; visitedSections: number; sectionReads: number;
     snapshotCount: number; cloneCount: number; status: string; cancelReason: string | null;
+    routeKey: string;
   }[] = [];
   const asyncSamples: {
     totalMs: number; timerDelayMs: number; yields: number; maxSyncSliceMs: number;
     status: string; cancelReason: string | null; historical: string | null;
+    nodes: number; edges: number; sectionReads: number; snapshotCount: number; cloneCount: number;
   }[] = [];
   for (let i = 0; i < REPEATS; i++) {
     const deadlineMs = Date.now() + BUDGET_MS;
@@ -72,6 +74,7 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
       visitedSections: strict.stats.visitedSections, sectionReads: strict.stats.sectionReads,
       snapshotCount: strict.stats.snapshotCount, cloneCount: strict.stats.cloneCount,
       status: strict.status, cancelReason: strict.stats.cancelReason,
+      routeKey: JSON.stringify({ points: strict.points, transitions: strict.transitions, boundaries: strict.boundaries }),
     });
 
     // The async entry yields about every 8ms of compute. Measure the longest
@@ -95,8 +98,33 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
       yields: asyncStrict.stats.yieldCount, maxSyncSliceMs: asyncStrict.stats.maxSyncSliceMs,
       status: asyncStrict.status, cancelReason: asyncStrict.stats.cancelReason,
       historical: asyncHistorical?.status ?? null,
+      nodes: asyncStrict.stats.nodesExpanded, edges: asyncStrict.stats.edgesEvaluated,
+      sectionReads: asyncStrict.stats.sectionReads, snapshotCount: asyncStrict.stats.snapshotCount,
+      cloneCount: asyncStrict.stats.cloneCount,
     });
   }
+  // Deterministic strict result: every repeat must take the same route and
+  // counters. status/cancelReason are deliberately excluded — the strict
+  // deadline is wall-clock based, so a loaded machine can legitimately stop
+  // with `time` instead of `edges`. A mismatch is reported as budget noise
+  // when a repeat hit `time`/`signal`, otherwise as a search regression.
+  const signature = (sample: (typeof samples)[number]) => JSON.stringify({
+    routeKey: sample.routeKey, nodes: sample.nodes, edges: sample.edges,
+    visitedSections: sample.visitedSections, sectionReads: sample.sectionReads,
+    snapshotCount: sample.snapshotCount, cloneCount: sample.cloneCount,
+  });
+  const expected = signature(samples[0]!);
+  const mismatch = samples.findIndex((sample) => signature(sample) !== expected);
+  const budgetStopped = samples.some((sample) => sample.cancelReason === 'time' || sample.cancelReason === 'signal');
+  if (mismatch !== -1) {
+    const stops = samples.map((sample) => `${sample.status}/${sample.cancelReason ?? '-'}`).join(', ');
+    throw new Error(budgetStopped
+      ? `budget/deadline exhaustion during repeats (${scenario.label}: ${stops}); routes not comparable, not a search regression`
+      : `non-deterministic strict result at repeat ${mismatch} in ${scenario.label} (${stops})`);
+  }
+  // snapshotCount is 0 after the SectionRef fix for both entries.
+  if (samples.some((sample) => sample.snapshotCount !== 0)) throw new Error(`section deep-copy (snapshotCount > 0) in ${scenario.label}`);
+  if (asyncSamples.some((sample) => sample.snapshotCount !== 0)) throw new Error(`section deep-copy (async snapshotCount > 0) in ${scenario.label}`);
   const pct = (values: number[], p: number) => {
     const sorted = [...values].sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;
@@ -107,6 +135,9 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     n: scenario.n,
     repeats: REPEATS,
     budgetMs: BUDGET_MS,
+    // Offline synthetic VoxelMap; timings are a proxy, not a live-server run.
+    synthetic: true,
+    checks: { strictDeterministic: true, snapshotCountZero: true },
     status: samples[0]!.status,
     cancelReason: samples[0]!.cancelReason,
     nodes: samples[0]!.nodes,
@@ -125,6 +156,11 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
       historical: asyncSamples[0]!.historical,
       yields: asyncSamples[0]!.yields,
       maxSyncSliceMs: asyncSamples[0]!.maxSyncSliceMs,
+      nodes: asyncSamples[0]!.nodes,
+      edges: asyncSamples[0]!.edges,
+      sectionReads: asyncSamples[0]!.sectionReads,
+      snapshotCount: asyncSamples[0]!.snapshotCount,
+      cloneCount: asyncSamples[0]!.cloneCount,
       totalMs: { p50: round(pct(asyncSamples.map((s) => s.totalMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.totalMs), 0.95)) },
       timerDelayMs: { p50: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.95)) },
     },
