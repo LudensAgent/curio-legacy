@@ -11,7 +11,7 @@ import type { Planner } from '../planner/planner.ts';
 import { evaluateCondition, validateCondition } from '../projects/conditions.ts';
 import type { Condition } from '../projects/types.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
-import { validateSkill } from '../skills/types.ts';
+import { validatePlanSkill } from '../skills/types.ts';
 import { buildMindMessages, buildReflectionMessages, moveDetails, moveDirectory, type MindContext } from './prompt.ts';
 import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
@@ -173,7 +173,9 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
       if (optional) { errors.push(error); dropped.push(`${raw}（没有这个动作）`); } else requiredErrors.push(error);
       continue;
     }
-    const v = validateSkill(skill, s?.args ?? {}, adapter);
+    // 计划录入只做静态校验：后续步骤是否相邻、落差多少，要等前一步执行后按最新位置预检，
+    // 不能拿当前起点一次性判定整段多步绝对坐标计划。
+    const v = validatePlanSkill(skill, s?.args ?? {}, adapter);
     if (!v.ok) {
       const error = `steps[${i}] ${name} 校验失败：${v.error}`;
       if (optional) { errors.push(error); dropped.push(`${raw}（${v.error.slice(0, 300)}）`); } else requiredErrors.push(error);
