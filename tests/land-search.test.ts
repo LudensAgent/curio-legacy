@@ -135,6 +135,36 @@ test('3D 搜索：目标 y 不在真实站立顶面时吸附到最近顶面', ()
   assert.equal(result.transitions[0]!.to.y, 0.5);
 });
 
+test('3D 搜索：0.875 雪层/灵魂沙/箱子顶都可作为真实脚高', () => {
+  for (const [name, properties] of [
+    ['minecraft:snow', { layers: '8' }],
+    ['minecraft:soul_sand', {}],
+    ['minecraft:chest', { type: 'single', facing: 'north' }],
+  ] as const) {
+    const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+    fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
+    fill(map, 'minecraft:stone', [at(0, -1, 0)]);
+    fill(map, name, [at(1, 0, 0)], properties);
+    const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(1.5, 0.875, 0.5)), 2000);
+    assert.equal(result.status, 'FOUND', `${name}: ${JSON.stringify(result.boundaries)}`);
+    assert.equal(result.resolvedTarget.y, 0.875, name);
+    assert.deepEqual(result.transitions.map((transition) => transition.kind), ['step'], name);
+    assert.equal(result.transitions[0]!.to.y, 0.875, name);
+  }
+});
+
+test('3D 搜索：传送门方块旁的箱子顶出口可站立；目标不是传送门方块本身', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 3, 1));
+  fill(map, 'minecraft:stone', [at(0, -1, 0)]);
+  fill(map, 'minecraft:chest', [at(1, 0, 0)], { type: 'single', facing: 'north' });
+  fill(map, 'minecraft:nether_portal', [at(2, 0, 0)], { axis: 'x' });
+  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(1.5, 0.875, 0.5)), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.boundaries));
+  assert.equal(result.resolvedTarget.y, 0.875);
+  assert.equal(result.transitions[0]!.to.y, 0.875);
+});
+
 test('3D 搜索：历史模式用过期体素给出候选路线，严格模式仍报 UNKNOWN', () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
