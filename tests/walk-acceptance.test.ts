@@ -267,13 +267,13 @@ test('integrityMatches：正确字节匹配 sha512 integrity，篡改字节不�
 test('packageMeta：当前可信 artifact 的来源/字节/锁/install 彼此对应', () => {
   const meta = packageMeta();
   assert.equal(meta.name, 'curio-minecraft-3d-memory');
-  assert.equal(meta.version, '0.10.1-workflow.5');
+  assert.equal(meta.version, '0.10.1-workflow.6');
   assert.equal(meta.lockVersion, meta.version);
   assert.equal(meta.lockResolved, meta.dependencySpec);
-  assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.10.1-workflow.5.tgz');
-  assert.equal(meta.tgzSha256, '07bb3dcdcceb6f02bcdcbf61f1cfc77a7f5a029953bbd30e8207aa8234e3d865');
-  assert.equal(meta.lockIntegrity, 'sha512-tcKAqODgLnF9QMRNuTtqkBF4t5CikxFClA5XXSawuWPl/1/9zRXp/1yolyOWstlyLY5jPmdZVg44iUgPffEhGA==');
-  assert.equal(meta.sourceHEAD, 'b6e115c6ee29605885e28af3d291b53ec0b72546');
+  assert.equal(meta.dependencySpec, 'file:vendor/curio-minecraft-3d-memory-0.10.1-workflow.6.tgz');
+  assert.equal(meta.tgzSha256, '52919b2c99fe66fc901907056474e424311fe51ba2a94120891a0b8d3e3f22b2');
+  assert.equal(meta.lockIntegrity, 'sha512-ZOGgIlrC2eTqBOQ2hOI8Jj0no6dGHe5VrQbykeL5q10AcRYW8QcF6xq3TU6ez1YNCSPYBdWtDKhJcmEps+yKUg==');
+  assert.equal(meta.sourceHEAD, '6ddfd55367cdba53af604e4062f7c6b0feae7445');
   assert.equal(meta.sourceBindingClean, true);
 });
 

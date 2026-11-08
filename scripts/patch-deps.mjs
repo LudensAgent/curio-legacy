@@ -151,19 +151,3 @@ function patch(rel, mark, anchor, replacement, done, missing) {
   patch('mineflayer/lib/plugins/inventory.js', mark, anchor, `${anchor}    ${mark}\n    if (typeof bot.beforeWindowClick === 'function') await bot.beforeWindowClick(slot, mouseButton, mode)\n`,
     'mineflayer 背包补丁已打上：每次界面点击前先过 bot.beforeWindowClick 钩子', '检查 clickWindow 的定义');
 }
-
-// 空间库 land-transition 的热路径每次读格子都 sectionAt 深拷贝整个 16³ Section 和其中全部证据；
-// step/drop 每评估一条边就复制一次，A* 几千条边会产生大量对象，GC 长时间停住事件循环。
-// step.js 已经用 sectionRef + 只在把观察交给外部 provider 时复制，这里按同一口径修；
-// 证据仍按格复制，读结果不会劫持 store 里的对象。
-{
-  const rel = 'curio-minecraft-3d-memory/dist/traversability/land-transition.js';
-  patch(rel, '/* curio-patch: land-transition live sections */',
-    `            section = map.sectionAt(dim, x, y, z);`,
-    `            /* curio-patch: land-transition live sections */\n            section = map.sectionRef(dim, x, y, z);`,
-    '空间库 land-transition 读格子改用 sectionRef，不再每条边深拷贝整段', '检查 readCell 的 section 读取');
-  patch(rel, '/* curio-patch: land-transition evidence copy */',
-    `        return { kind: 'observed', evidence };`,
-    `        return { kind: 'observed', evidence: { ...evidence, observation: cloneObservation(evidence.observation) } }; /* curio-patch: land-transition evidence copy */`,
-    '空间库 land-transition 只在观察离开求值时复制证据', '检查 readCell 的 observed 返回');
-}

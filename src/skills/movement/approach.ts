@@ -17,6 +17,8 @@ const KINDS: readonly Kind[] = ['walk', 'step', 'drop'];
 const AIR = /^(air|cave_air|void_air)$/;
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
 const Y_OFFSETS = [0, -1, 1] as const;
+/** Shared wall-clock budget for all candidate searches in one go_near call. */
+const GO_NEAR_SEARCH_MS = 5000;
 
 const point = (v: unknown): Vec3Like | null => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
@@ -74,10 +76,13 @@ export const goNear: Skill<ApproachArgs> = {
     if (targetName !== null && AIR.test(targetName)) {
       return fail('BAD_ARGS', `target (${target.x},${target.y},${target.z}) 是空气/站立格；go_near 只用于容器/门/床/传送门方块，走到站立格请用 navigate_to`, { target });
     }
+    // One deadline for every candidate and the historical fallback: a single
+    // go_near call must not multiply the per-search wall-clock budget by 12.
+    const deadlineMs = Date.now() + GO_NEAR_SEARCH_MS;
     const request = {
       worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
       body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
-      maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
+      maxDrop: 4, rules: walkLandRules, signal: ctx.signal, deadlineMs,
     };
     const targetStem = targetName?.replace(/^minecraft:/, '') ?? '';
     const sameKind = (name: string) => {
@@ -116,10 +121,12 @@ export const goNear: Skill<ApproachArgs> = {
     const chosen = usable[0];
     if (!chosen) {
       const attempts = strictResults.map(({ to, result }) => ({
-        to, status: result.status, boundaries: result.boundaries.length,
+        to, status: result.status, cancelReason: result.stats.cancelReason,
+        searchMs: result.stats.durationMs, boundaries: result.boundaries.length,
       }));
-      return fail('PATH_NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格；不会把目标方块本身当站立格`, {
-        target, targetName, candidates: attempts, position: { ...state.pos },
+      const timeBudgetHit = strictResults.some(({ result }) => result.stats.cancelReason === 'time');
+      return fail('PATH_NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格${timeBudgetHit ? `（搜索时间预算 ${GO_NEAR_SEARCH_MS}ms 已耗尽，先缩小范围或走近再试）` : ''}；不会把目标方块本身当站立格`, {
+        target, targetName, candidates: attempts, budgetMs: GO_NEAR_SEARCH_MS, timeBudgetHit, position: { ...state.pos },
       });
     }
     const nested = validateSkill(navigateTo, {

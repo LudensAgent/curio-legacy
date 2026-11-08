@@ -209,3 +209,41 @@ test('3D 复验：证据被标陈旧后不再 OPEN', () => {
   assert.equal(verification.verdict, 'STALE');
   assert.equal(verification.openPrefix, 0);
 });
+
+test('3D 搜索：时间预算到点后返回 BUDGET_EXHAUSTED/time，不继续扫完整张图', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const N = 80;
+  for (let x = 0; x < N; x++) for (let z = 0; z < N; z++) {
+    fill(map, 'minecraft:stone', [at(x, -1, z)]);
+    fill(map, 'minecraft:air', [at(x, 0, z), at(x, 1, z)]);
+  }
+  const t0 = Date.now();
+  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(N - 0.5, 0, N - 0.5), {
+    maxSearchMs: 15,
+    maxNodes: 100_000,
+    maxEdges: 1_000_000,
+  }), 2000);
+  assert.equal(result.status, 'BUDGET_EXHAUSTED');
+  assert.equal(result.stats.cancelReason, 'time');
+  assert.equal(result.stats.maxSearchMs, 15);
+  assert.ok(result.stats.durationMs >= 10 && result.stats.durationMs < 2000, `durationMs=${result.stats.durationMs}`);
+  assert.ok(Date.now() - t0 < 2000, '时间预算不得退化成完整搜索');
+});
+
+test('3D 搜索：signal 在边评估之间也能停止并保留 cancelReason=signal', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const N = 40;
+  for (let x = 0; x < N; x++) for (let z = 0; z < N; z++) {
+    fill(map, 'minecraft:stone', [at(x, -1, z)]);
+    fill(map, 'minecraft:air', [at(x, 0, z), at(x, 1, z)]);
+  }
+  const controller = new AbortController();
+  controller.abort();
+  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(N - 0.5, 0, N - 0.5), {
+    signal: controller.signal,
+    maxNodes: 100_000,
+    maxEdges: 1_000_000,
+  }), 2000);
+  assert.equal(result.status, 'CANCELLED');
+  assert.equal(result.stats.cancelReason, 'signal');
+});
