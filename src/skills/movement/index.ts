@@ -3,6 +3,7 @@ export { resolveTarget } from './target.ts';
 export { planRoute, consumeRoutePlan, releaseRoutePlan, clearRouteRecords, noteRouteScope } from './route.ts';
 export { walkPath } from './walk.ts';
 export { navigateTo } from './navigate.ts';
+export { goNear } from './approach.ts';
 export { descendTo } from './descend.ts';
 export { swimPath } from './water.ts';
 export { boatPath } from './boat.ts';

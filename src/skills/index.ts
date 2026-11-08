@@ -28,12 +28,12 @@ import { useSkill } from './use-skill.ts';
 import { spatialQuery } from './spatial-query.ts';
 import { spatialExtrema } from './spatial-extrema.ts';
 import { editBook, signText } from './text.ts';
-import { boatPath, descendTo, excavateRun, mineCell, moveStep, navigateTo, pillarOne, placeCell, placeSupport, planRoute, resolveTarget, swimPath, walkPath } from './movement/index.ts';
+import { boatPath, descendTo, excavateRun, goNear, mineCell, moveStep, navigateTo, pillarOne, placeCell, placeSupport, planRoute, resolveTarget, swimPath, walkPath } from './movement/index.ts';
 import { isSkillDisabled } from './disabled.ts';
 
 /** 技能白名单：LLM 只能从这里选择技能，参数必须通过各自的 validate。 */
 export const SKILLS: Record<string, Skill> = Object.fromEntries(
-  [gather, craft, mergeTools, mergeStacks, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, lookAround, unstuck, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, ...Object.values(flightSkills), useSkill, signText, editBook, spatialQuery, spatialExtrema, moveStep, mineCell, placeCell, placeSupport, pillarOne, descendTo, swimPath, boatPath, excavateRun, resolveTarget, planRoute, walkPath, navigateTo].map((s) => [s.name, s]),
+  [gather, craft, mergeTools, mergeStacks, eat, hunt, pickupItems, shelter, build, buildingArchive, buildingReview, sleepSkill, placeTorch, smelt, collectFurnace, storeItems, takeItems, findItem, collectSeeds, farm, expedition, flee, defend, lookAround, unstuck, ...Object.values(travelSkills), ...Object.values(equipmentSkills), ...Object.values(dragonSkills), ...Object.values(structureSkills), ...reservationSkills, ...baseSkills, ...actionSkills, ...handSkills, ...guiSkills, fish, wait, glance, forage, inspectBlock, rememberPlace, interactBlock, assessLandings, ...Object.values(flightSkills), useSkill, signText, editBook, spatialQuery, spatialExtrema, moveStep, mineCell, placeCell, placeSupport, pillarOne, descendTo, swimPath, boatPath, excavateRun, resolveTarget, planRoute, walkPath, navigateTo, goNear].map((s) => [s.name, s]),
 );
 
 /** 只给反射层/填充行为使用、不让 LLM 主动规划的技能 */
