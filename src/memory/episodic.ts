@@ -5,7 +5,8 @@ import type { AgentState } from '../adapter/types.ts';
 import { EventBus, type AgentEvent } from '../events.ts';
 import type { WorldMemory } from './store.ts';
 import { registerMemoryBackend } from './registry.ts';
-import type { MemoryBackend, MemoryContext, MemoryEntry, MemoryEpisode, MemoryRecall, MemorySettings } from './types.ts';
+import type { MemoryBackend, MemoryContext, MemoryEntry, MemoryEpisode, MemoryRecall, MemorySettings, RecallDiagnostics, RecallFailure } from './types.ts';
+import { MemoryRequestError } from './hindsight.ts';
 import { recallText } from './recollection.ts';
 import { chestLocation, isContainerLandmark } from './chest-memory.ts';
 
@@ -93,11 +94,11 @@ export class EpisodicMemory implements MemoryRecall {
       archived: this.archive.length, lastError: this.lastError };
   }
 
-  private warn(message: string): void {
+  private warn(message: string, data?: Record<string, unknown>): void {
     this.lastError = message;
     if (Date.now() - this.lastWarningAt < 60_000) return;
     this.lastWarningAt = Date.now();
-    this.bus.publish('memory_status', 'P2', message);
+    this.bus.publish('memory_status', 'P2', message, data);
   }
 
   private load(): void {
@@ -255,7 +256,7 @@ export class EpisodicMemory implements MemoryRecall {
     return parts.filter(Boolean).join('\n').slice(0, 1800);
   }
 
-  private local(query: string, dimension: string): MemoryEntry[] {
+  private local(query: string, dimension: string): { entries: MemoryEntry[]; dropped: string[] } {
     const m = this.memory;
     const extensions = m as WorldMemory & MemoryExtensions;
     const records: Candidate[] = [
@@ -280,65 +281,138 @@ export class EpisodicMemory implements MemoryRecall {
     const q = terms(query);
     const now = Date.now();
     const seen = new Set<string>();
-    return records.filter((r) => (!r.worldId || r.worldId === this.settings.worldId) && (!r.dimension || r.dimension === dimension))
+    const dropped = new Set<string>();
+    const scoped = records.filter((r) => {
+      if (r.worldId && r.worldId !== this.settings.worldId) { dropped.add('world_scope'); return false; }
+      if (r.dimension && r.dimension !== dimension) { dropped.add('dimension_scope'); return false; }
+      return true;
+    });
+    const scored = scoped
       .map((r) => {
         const overlap = [...terms(r.searchText ?? r.entry.text)].filter((t) => q.has(t)).length;
         return { ...r, overlap, score: overlap * 10 + 1 / (1 + Math.max(0, now - r.ts) / 86_400_000) };
       })
-      .filter((r) => !q.size || r.overlap > 0)
+      .filter((r) => { if (q.size && !r.overlap) { dropped.add('no_overlap'); return false; } return true; })
       .sort((a, b) => b.score - a.score)
-      .filter((r) => { if (seen.has(r.entry.text)) return false; seen.add(r.entry.text); return true; })
-      .slice(0, 20).map((r) => ({ ...r.entry, worldId: r.worldId, dimension: r.dimension, historical: true,
-        text: recallText(r.entry.text, m, r.dimension, r.entry.kind === 'experience' || r.entry.kind === 'fact' ? r.ts : 0) }));
+      .filter((r) => { if (seen.has(r.entry.text)) { dropped.add('duplicate'); return false; } seen.add(r.entry.text); return true; });
+    if (scored.length > 20) dropped.add('cap_20');
+    const entries = scored.slice(0, 20).map((r) => ({ ...r.entry, worldId: r.worldId, dimension: r.dimension, historical: true,
+      text: recallText(r.entry.text, m, r.dimension, r.entry.kind === 'experience' || r.entry.kind === 'fact' ? r.ts : 0) }));
+    return { entries, dropped: [...dropped] };
   }
 
   /** JSON byte budget includes the query, provenance, and all other returned metadata. */
-  private bounded(source: MemoryContext['source'], query: string, memories: MemoryEntry[]): MemoryContext {
+  private bounded(source: MemoryContext['source'], query: string, memories: MemoryEntry[]): { context: MemoryContext; dropped: string[] } {
     const budget = Math.max(64, this.settings.maxContextBytes);
     const result: MemoryContext = { source, query: query.slice(0, 1800), memories: [] };
+    const dropped = new Set<string>();
     while (Buffer.byteLength(result.query, 'utf8') > Math.floor(budget / 4)) result.query = result.query.slice(0, Math.floor(result.query.length / 2));
     while (bytes(result) > budget && result.query.length) result.query = result.query.slice(0, Math.floor(result.query.length / 2));
+    if (result.query.length < query.slice(0, 1800).length) dropped.add('query_budget');
     for (const candidate of memories) {
-      if (!candidate || typeof candidate.text !== 'string' || typeof candidate.id !== 'string' || typeof candidate.source !== 'string') continue;
+      if (!candidate || typeof candidate.text !== 'string' || typeof candidate.id !== 'string' || typeof candidate.source !== 'string') { dropped.add('invalid'); continue; }
       const entry: MemoryEntry = { id: candidate.id.slice(0, 200), text: candidate.text.slice(0, 6000), source: candidate.source.slice(0, 100), historical: true,
         ...(candidate.worldId ? { worldId: candidate.worldId.slice(0, 160) } : {}), ...(candidate.dimension ? { dimension: candidate.dimension.slice(0, 160) } : {}) };
       if (typeof candidate.observedAt === 'string') entry.observedAt = candidate.observedAt.slice(0, 50);
       if (candidate.mentionedAt) entry.mentionedAt = candidate.mentionedAt.slice(0, 50);
       if (typeof candidate.kind === 'string') entry.kind = candidate.kind.slice(0, 30);
       result.memories.push(entry);
-      while (bytes(result) > budget && entry.text.length) entry.text = entry.text.slice(0, Math.floor(entry.text.length * 0.75));
-      if (!entry.text.length || bytes(result) > budget) result.memories.pop();
+      while (bytes(result) > budget && entry.text.length) { entry.text = entry.text.slice(0, Math.floor(entry.text.length * 0.75)); dropped.add('text_trim'); }
+      if (!entry.text.length || bytes(result) > budget) { result.memories.pop(); dropped.add('budget'); }
     }
-    return result;
+    return { context: result, dropped: [...dropped] };
+  }
+
+  /** Classify a failed request by type and HTTP status only; response bodies never reach diagnostics. */
+  private failure(error: unknown): RecallFailure {
+    if (error instanceof MemoryRequestError) return { type: error.errorType, ...(error.status ? { status: error.status } : {}) };
+    if (error instanceof Error && error.message === 'Memory request cancelled') return { type: 'Timeout' };
+    return { type: error instanceof Error ? error.name : 'Error' };
+  }
+
+  /** Emit body-free diagnostics to the event log; degradation keeps using the existing warn channel. */
+  private report(diagnostics: RecallDiagnostics): void {
+    const failure = diagnostics.error;
+    const detail = [
+      `backend=${diagnostics.backend}`,
+      `requestId=${diagnostics.requestId ?? 'missing'}`,
+      `durationMs=${diagnostics.elapsedMs}`,
+      `hits=${diagnostics.hits}`,
+      `selected=${diagnostics.memoryIds.length}`,
+      `degraded=${diagnostics.degraded}`,
+      ...(failure ? [`error=${failure.type}${failure.status ? ` status=${failure.status}` : ''}`] : []),
+      ...(diagnostics.fallback ? [`fallback=${diagnostics.fallback}`] : []),
+      ...(diagnostics.dropped.length ? [`dropped=${diagnostics.dropped.join(',')}`] : []),
+    ].join(' ');
+    const data = { backend: diagnostics.backend, requestId: diagnostics.requestId ?? null, durationMs: diagnostics.elapsedMs,
+      hits: diagnostics.hits, selectedIds: diagnostics.memoryIds, degraded: diagnostics.degraded,
+      errorType: failure?.type ?? null, status: failure?.status ?? null,
+      ...(diagnostics.fallback ? { fallback: diagnostics.fallback } : {}), dropped: diagnostics.dropped };
+    this.bus.publish('memory_recall', diagnostics.degraded ? 'P2' : 'P3', `记忆检索 ${detail}`, data);
+    if (diagnostics.degraded) this.warn(diagnostics.backend === 'unavailable'
+      ? `记忆检索与本地回忆均不可用（${detail}）。`
+      : `记忆检索暂不可用；使用当前情境相关的本地回忆（${detail}）。`, data);
   }
 
   async recall(context: RecallContext, explicitQuery?: string): Promise<MemoryContext> {
+    const recallStarted = Date.now();
     let query = '';
+    let remoteFailure: { elapsedMs: number; error: unknown } | null = null;
+    let remoteElapsed: number | null = null;
+    let remoteRequestId: string | undefined;
+    let fallback: RecallDiagnostics['fallback'];
     try {
       query = this.query(context, explicitQuery);
       const dimension = context.percept.self.dim;
-      if (this.started && this.remoteEnabled() && this.recallGeneration !== this.generation && Date.now() >= this.nextRecallAt) {
+      const remoteReady = this.started && this.remoteEnabled() && Date.now() >= this.nextRecallAt;
+      if (remoteReady && this.recallGeneration === this.generation) {
+        fallback = 'in_flight';
+      } else if (remoteReady) {
         const generation = this.generation;
         this.recallGeneration = generation;
+        const started = Date.now();
         try {
-          const memories = await this.request((signal) => this.backend!.recall({ query, worldId: this.settings.worldId, dimension }, signal));
+          const memories = await this.request((signal) => this.backend!.recall({ query, worldId: this.settings.worldId, dimension,
+            onRequestId: (id) => { remoteRequestId = id; } }, signal));
           if (generation === this.generation && this.started) {
             this.recallFailures = 0;
             this.nextRecallAt = 0;
-            if (memories.length) return this.bounded('hindsight', query, memories.map((entry) => ({ ...entry, worldId: this.settings.worldId, dimension,
-              text: recallText(entry.text, this.memory, dimension, entry.kind === 'experience' && entry.observedAt ? Date.parse(entry.observedAt) : 0) })));
+            if (memories.length) {
+              const bounded = this.bounded('hindsight', query, memories.map((entry) => ({ ...entry, worldId: this.settings.worldId, dimension,
+                text: recallText(entry.text, this.memory, dimension, entry.kind === 'experience' && entry.observedAt ? Date.parse(entry.observedAt) : 0) })));
+              this.report({ backend: 'hindsight', elapsedMs: Date.now() - started, degraded: false, hits: memories.length,
+                memoryIds: bounded.context.memories.map((entry) => entry.id), dropped: bounded.dropped,
+                ...(remoteRequestId ? { requestId: remoteRequestId } : {}) });
+              return bounded.context;
+            }
+            remoteElapsed = Date.now() - started;
+            fallback = 'empty';
           }
-        } catch {
+        } catch (error) {
           if (generation === this.generation) {
+            remoteFailure = { elapsedMs: Date.now() - started, error };
             this.recallFailures++;
             this.nextRecallAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(6, this.recallFailures - 1));
-            this.warn('记忆检索暂不可用；使用当前情境相关的本地回忆。');
           }
         } finally { if (this.recallGeneration === generation) this.recallGeneration = null; }
+      } else if (this.started && this.remoteEnabled()) {
+        fallback = 'cooldown';
       }
-      return this.bounded('local', query, this.local(query, dimension));
-    } catch {
-      return this.bounded('unavailable', query, []);
+      const localStarted = Date.now();
+      const local = this.local(query, dimension);
+      const bounded = this.bounded('local', query, local.entries);
+      const failure = remoteFailure ? this.failure(remoteFailure.error) : undefined;
+      this.report({ backend: 'local', elapsedMs: remoteFailure?.elapsedMs ?? remoteElapsed ?? Date.now() - localStarted,
+        degraded: !!remoteFailure, hits: local.entries.length,
+        memoryIds: bounded.context.memories.map((entry) => entry.id),
+        dropped: [...new Set([...local.dropped, ...bounded.dropped])],
+        ...(remoteRequestId ? { requestId: remoteRequestId } : {}),
+        ...(failure ? { error: failure } : {}), ...(fallback ? { fallback } : {}) });
+      return bounded.context;
+    } catch (error) {
+      const bounded = this.bounded('unavailable', query, []);
+      this.report({ backend: 'unavailable', elapsedMs: Date.now() - recallStarted, degraded: true, hits: 0, memoryIds: [], dropped: bounded.dropped, error: this.failure(error) });
+      return bounded.context;
     }
   }
 }
