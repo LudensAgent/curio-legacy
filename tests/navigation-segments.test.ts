@@ -111,6 +111,10 @@ test('100 格目标由同委托多段 navigate_to 完成；每段起点=上段�
 
   let previousEnd = { ...adapter.pos };
   let segments = 0;
+  // P25-F 指标：实测段数、确认段数、实测位移累计、失效数。段界 maxSteps 不是失效；
+  // 这里不单独统计“重规划事件”——每个显式步骤都是一次新的搜索，没有单独的重规划计数器。
+  let executedTotal = 0, actualDistance = 0;
+  const invalidations: string[] = [];
   for (let guard = 0; guard < 12; guard++) {
     const step = nextStep(activity);
     if (!step) break;
@@ -130,7 +134,10 @@ test('100 格目标由同委托多段 navigate_to 完成；每段起点=上段�
     const result = await navigateTo.run(ctx, validated.args);
     const state = adapter.state();
     const segment = result.data?.segment as {
-      startStance?: { x: number }; backend?: string; requestedDistance?: { horizontal: number; euclidean: number };
+      startStance?: { x: number }; backend?: string;
+      requestedDistance?: { horizontal: number; euclidean: number };
+      displacement?: { horizontal: number };
+      invalidation?: string | null;
     } | undefined;
     assert.equal(segment?.startStance?.x, previousEnd.x, '执行器报告的段起点与实测一致');
     assert.equal(segment?.backend, 'land-search', '段回执写明路线 backend');
@@ -138,12 +145,21 @@ test('100 格目标由同委托多段 navigate_to 完成；每段起点=上段�
     assert.ok(Math.abs((segment?.requestedDistance?.horizontal ?? -1) - expectedRequested) < 0.01,
       '请求距离按实测起点→原目标如实计算，不用计划点冒充');
     const verdict = afterStep(activity, step, result, 0, state);
+    const executed = Number(result.data?.executed ?? 0);
+    executedTotal += executed;
+    actualDistance += segment?.displacement?.horizontal ?? 0;
+    const invalidation = segment?.invalidation;
+    if (invalidation && !['max_steps', 'deadline', 'prefix_boundary'].includes(invalidation)) invalidations.push(invalidation);
     segments += 1;
     previousEnd = { ...state.pos };
     if (verdict.kind !== 'continue') break;
   }
 
   assert.ok(segments >= 2, '100 格必须由多段完成，而不是单段全走完');
+  assert.ok(executedTotal >= 100, `确认段数跨段累计 ≥100（实际 ${executedTotal}）`);
+  assert.ok(Math.abs(actualDistance - 100) < 0.5, `实测位移累计≈100（实际 ${actualDistance.toFixed(2)}）`);
+  assert.deepEqual(invalidations, [], '正常段界不计为 route handle 失效');
+  assert.equal(activity.failures, 0, '有确认段的段结束不按失败累计');
   assert.equal(Math.floor(adapter.pos.x), DESTINATION.x, '最终到达原目的地');
   assert.equal(nav.phase, 'arrived');
   assert.equal(nav.destination?.x, DESTINATION.x, '到达后原目的地仍是 100');
