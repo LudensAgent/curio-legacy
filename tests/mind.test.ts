@@ -1589,3 +1589,36 @@ test('换维度时观测暂时不可用不算断线，落地后按换了地方�
   const ended = w.bus.recent().filter((e) => e.type === 'attempt_end').at(-1);
   assert.match(ended?.msg ?? '', /换了世界\/维度/);
 });
+
+test('换维度后，预先排好的 next 不启动，等按新位置重新评估', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '在下界挖掘', steps: [step()] },
+    next: { what: '砍菌柄', steps: [{ skill: 'mind_step', args: { n: 2 } }] } });
+  assert.equal(w.mind.activity?.what, '在下界挖掘');
+  assert.equal(w.mind.queuedNext?.draft.what, '砍菌柄');
+  assert.deepEqual(w.mind.queuedNext?.scope, { worldId: w.adapter.worldId, dim: 'overworld', sessionId: 'fake-session' });
+  // 意外换维：连接和生命都还在，观测恢复后按新地方继续想。
+  w.adapter.dim = 'the_nether';
+  w.adapter.sessionId = 'session-after-portal';
+  await w.tick();
+  assert.equal(w.mind.activity, null, '换维度中断原活动');
+  assert.equal(w.mind.queuedNext, null, '旧作用域预排的 next 不能自动启动');
+  assert.ok(w.bus.recent().some((e) => e.type === 'decision_stale' && /砍菌柄/.test(e.msg)), '作废要留下可复盘的事实');
+  assert.ok(!w.bus.recent().some((e) => e.type === 'activity_start' && /砍菌柄/.test(e.msg)));
+  assert.ok(w.bus.recent().some((e) => e.type === 'llm_request' && /换了个地方|第一次来到/.test(e.msg)), '换地方后要求重新想');
+});
+
+test('预排 next 的作用域与当前不符时不启动，并请求重新决定', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  (w.mind as any).queuedNext = {
+    draft: { what: '旧世界的下一步', steps: [step(2)] }, monologue: '', at: Date.now(),
+    scope: { worldId: 'other-world', dim: 'the_nether', sessionId: 'old-session' }, epoch: (w.mind as any).decisionEpoch,
+  };
+  await w.tick();
+  assert.equal(w.mind.activity, null);
+  assert.equal(w.mind.queuedNext, null);
+  assert.ok(w.bus.recent().some((e) => e.type === 'decision_stale' && /旧世界的下一步/.test(e.msg)));
+  assert.ok(!w.bus.recent().some((e) => e.type === 'activity_start' && /旧世界的下一步/.test(e.msg)));
+});

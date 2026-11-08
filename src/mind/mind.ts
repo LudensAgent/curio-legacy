@@ -125,14 +125,17 @@ const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'go_near',
 export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
-  queuedNext: { draft: ActivityDraft; monologue: string; at: number } | null = null;
+  /** 预排的下一段活；scope/epoch 记录它是按哪个世界、维度、会话和决定批次想的。 */
+  queuedNext: { draft: ActivityDraft; monologue: string; at: number; scope?: { worldId: string; dim: string; sessionId: string }; epoch?: number } | null = null;
   paused = false;
   staleDropped = 0;
   readonly attention = new Attention();
   lastDecision: MindDecision | null = null;
   private timing: typeof DEFAULT_TIMING;
   private generation = 0;
-  private thinking: { controller: AbortController; reason: string; tier: 'glance' | 'deliberate'; startedAt: number; generation: number; activityId: string | null; noticed: Noticing[] } | null = null;
+  /** 作用域决定批次：换世界/维度/会话时递增，旧批次回来的决定和预排 next 一并失效。 */
+  private decisionEpoch = 0;
+  private thinking: { controller: AbortController; reason: string; tier: 'glance' | 'deliberate'; startedAt: number; generation: number; epoch: number; activityId: string | null; noticed: Noticing[] } | null = null;
   private timer: NodeJS.Timeout | null = null;
   private listening = false;
   private suspendedBy = new Set<string>();
@@ -355,7 +358,17 @@ export class Mind {
     }
     this.seenAlive = true;
     this.d.memory.setWorld(state.worldId);
-    if (this.lastSession && this.lastSession !== state.sessionId && !travelling) {
+    const sessionChanged = !!this.lastSession && this.lastSession !== state.sessionId;
+    // 换作用域后，在途思考和预排 next 都绑定旧世界的观察/坐标，先作废；重新评估后才启动。
+    // 主动 travel_portal 与非预期传送都适用：跨维度的下一步应在到达后按新位置重新确认。
+    if (sessionChanged) {
+      this.decisionEpoch++;
+      if (this.queuedNext) {
+        this.d.bus.publish('decision_stale', 'P3', `换了地方，提前排好的「${this.queuedNext.draft.what}」先作废，等按新位置重新确认`, { was: this.queuedNext.draft.what, scope: this.queuedNext.scope });
+        this.queuedNext = null;
+      }
+    }
+    if (sessionChanged && !travelling) {
       // 换了世界/维度：手上的活里的坐标都不再适用；穿门前本来在做什么先记下，落地后接着做或改主意，别一脸懵又穿回去
       const was = this.activity?.what?.slice(0, 60);
       this.dropActivity('interrupted', '换了世界/维度，重新看看周围');
@@ -635,6 +648,15 @@ export class Mind {
     if (!this.activity && this.queuedNext) {
       const q = this.queuedNext;
       this.queuedNext = null;
+      // 预排的 next 绑定排它时的世界/维度/会话和决定批次；换了地方或批次作废就不能直接接着做。
+      const current = this.d.adapter.state();
+      const stale = (q.epoch !== undefined && q.epoch !== this.decisionEpoch)
+        || (q.scope !== undefined && (q.scope.worldId !== current.worldId || q.scope.dim !== current.dim || q.scope.sessionId !== current.sessionId));
+      if (stale) {
+        this.d.bus.publish('decision_stale', 'P2', `提前想好的「${q.draft.what}」是在旧作用域排的（${q.scope?.dim ?? '?'}/${q.scope?.sessionId ?? '?'}），现在（${current.dim}/${current.sessionId}）不能直接接着做`, { was: q.draft.what, scope: q.scope ?? null });
+        this.requestThink(`提前想好的「${q.draft.what}」是在换地方之前排的，坐标和前提可能已变；先按当前位置重新确认再决定`, 'deliberate');
+        return;
+      }
       const problem = this.safe(() => this.queuedProblem(q), '当前无法确认所需物品，重新检查计划');
       if (problem) {
         this.requestThink(`提前想好的「${q.draft.what}」需要重新想：${problem}`, 'deliberate');
@@ -824,6 +846,11 @@ export class Mind {
     if (!a) return;
     if (outcome !== 'stuck') this.lastStuckAttempt = null;
     this.activity = null;
+    // 父活动被中断时，预排的 next 同样基于旧前提：先作废，等重新评估后再启动。
+    if (outcome === 'interrupted' && this.queuedNext) {
+      this.queuedNext = null;
+      this.d.bus.publish('decision_stale', 'P3', '当前活动被中断，提前排好的下一段先作废，等重新评估');
+    }
     // A thought started before this result cannot account for the failure. Retry with
     // the actual result before starting another activity; preserve urgent and operator thoughts.
     const thought = this.thinking;
@@ -1321,12 +1348,14 @@ export class Mind {
     try { percept = this.d.perception.update(); } catch { return; }
     this.trackTrip(percept, state);
     const generation = this.generation;
+    // 这一念看到的世界：回来时若已换作用域，决定不能覆盖新世界的活动。
+    const decisionEpoch = this.decisionEpoch;
     const controller = new AbortController();
     const activityId = this.activity?.id ?? null;
     const thoughtRunning = this.d.arbiter.info();
     const knownResults = new Set(this.activity?.results ?? []);
     const noticed = this.attention.drain();
-    this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, activityId, noticed };
+    this.thinking = { controller, reason, tier, startedAt: Date.now(), generation, epoch: decisionEpoch, activityId, noticed };
     const urgent = noticed.some((n) => n.level === 'urgent');
     const reflect = tier === 'deliberate' && this.finishedSinceReflect >= 4;
     this.pruneFailures();
@@ -1421,7 +1450,7 @@ export class Mind {
     this.d.thinker.think(ctx, controller.signal).then((decision) => {
       if (this.thinking?.controller !== controller) { this.staleDropped++; dropToolFact(); return; }
       this.thinking = null;
-      if (generation !== this.generation || this.paused) { this.staleDropped++; dropToolFact(); return; }
+      if (generation !== this.generation || decisionEpoch !== this.decisionEpoch || this.paused) { this.staleDropped++; dropToolFact(); return; }
       // 绕路完成后可能已经恢复了另一段活；绕路时提前想的决定不能改写那段活或它的下一段。
       if (reason === Mind.NEAR_END_REASON && activityId && this.activity && this.activity.id !== activityId) {
         this.staleDropped++;
@@ -1643,7 +1672,13 @@ export class Mind {
     }
     // 无进展闸门在动作入口生效：签名和最近无进展的做法相同就拒绝一次，要求换地点/方法或改计划。
     if (!this.enforceProgressGate(decision, info)) return;
-    if (decision.next) this.queuedNext = { draft: decision.next, monologue: '', at: Date.now() };
+    if (decision.next) {
+      const current = this.d.adapter.state();
+      this.queuedNext = {
+        draft: decision.next, monologue: '', at: Date.now(),
+        scope: { worldId: current.worldId, dim: current.dim, sessionId: current.sessionId }, epoch: this.decisionEpoch,
+      };
+    }
 
     const sameActivity = !!this.activity && this.activity.id === thoughtAboutActivity;
     if (decision.kind === 'continue') { this.activityThoughtAt = Date.now(); return; }
