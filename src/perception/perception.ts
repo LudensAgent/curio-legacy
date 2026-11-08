@@ -692,7 +692,8 @@ export class Perception {
         const placed = this.adapter.recentPlaced?.(this.lastPlacedAt) ?? [];
         if (placed.length) {
           this.lastPlacedAt = placed[placed.length - 1].ts;
-          for (const p of placed) {
+          // 只有确认目标格出现请求材料的记录才是世界修改；attempted 只推进游标，不写空间记忆。
+          for (const p of placed.filter((entry) => entry.status === 'confirmed')) {
             this.memory.putPlaced(p.pos, p.name, s.dim);
             this.placedSupports.add(supportKey(p.pos));
           }
