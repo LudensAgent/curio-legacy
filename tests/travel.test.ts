@@ -1,7 +1,4 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { EventBus } from '../src/events.ts';
@@ -11,7 +8,7 @@ import { equipmentSkills } from '../src/skills/equipment.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { travelSkills, useEndGateway } from '../src/skills/travel.ts';
 import { travel } from '../src/skills/overland.ts';
-import { TravelStore, travelStore } from '../src/travel/store.ts';
+import { travelStore } from '../src/travel/store.ts';
 import { AbortedError, sleep } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
@@ -21,6 +18,7 @@ const setup = () => {
   const adapter = new FakeAdapter();
   adapter.speed = 1000;
   const memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
   const bus = new EventBus();
   const vision = new Vision(adapter);
   const arbiter = new Arbiter(adapter, memory, bus, vision);
@@ -192,23 +190,19 @@ test('cancelled portal entry never persists a transition and wrong-dimension IDs
   assert.equal(adapter.actions.length, actions);
 });
 
-test('portal store persists actual two-end evidence and isolates other servers', () => {
-  const { adapter } = setup();
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-travel-test-'));
-  const file = path.join(directory, 'travel-memory.json');
-  try {
-    const store = new TravelStore(file);
-    const from = adapter.state();
-    const a = store.observe(from, { x: 1, y: 64, z: 0 }, 'nether_portal');
-    adapter.dim = 'the_nether'; adapter.sessionId = 'second-session';
-    const to = adapter.state();
-    const b = store.observe(to, { x: 70, y: 40, z: -11 }, 'nether_portal');
-    store.record(a.id, b.id, from, to);
-    const restored = new TravelStore(file);
-    assert.equal(restored.snapshot('fake-world').routes.length, 1);
-    assert.deepEqual(restored.snapshot('unrelated-world'), { endpoints: [], routes: [], gateways: [] });
-    assert.throws(() => store.record(a.id, b.id, from, { ...to, observationReady: false }), /Unverified/);
-  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+test('portal store keeps actual two-end evidence and isolates other servers', () => {
+  const { adapter, memory } = setup();
+  const store = travelStore(memory);
+  const from = adapter.state();
+  const a = store.observe(from, { x: 1, y: 64, z: 0 }, 'nether_portal');
+  adapter.dim = 'the_nether'; adapter.sessionId = 'second-session';
+  const to = adapter.state();
+  const b = store.observe(to, { x: 70, y: 40, z: -11 }, 'nether_portal');
+  store.record(a.id, b.id, from, to);
+  const restored = travelStore(memory);
+  assert.equal(restored.snapshot('fake-world').routes.length, 1);
+  assert.deepEqual(restored.snapshot('unrelated-world'), { endpoints: [], routes: [], gateways: [] });
+  assert.throws(() => store.record(a.id, b.id, from, { ...to, observationReady: false }), /Unverified/);
 });
 
 test('missing existing End frames fail without crafting or manufacturing frames', async () => {

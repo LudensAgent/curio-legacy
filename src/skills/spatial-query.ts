@@ -53,7 +53,7 @@ const HOST_COMPOSED_CAPABILITIES = {
     segments: true,
     portals: true,
     resourceAnchors: true,
-    containerAnchors: false,
+    containerAnchors: true,
     containerContents: false,
   },
   plan: {
@@ -114,7 +114,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     '只读查询共享空间记忆的契约端口（契约 §5）：15 种 kind —— cells、fragments、traversals、nodes、edges、historyRoute、anchor、components、segments、portals、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
     + '返回契约 SpatialQueryResult 信封（status/contract/worldId/dim/sessionId/computedAt/readOnly:true/executable:false/data/problem/total/nextAfter）；data 是库的原样分页/投影，不再由宿主改写。'
     + '历史几何与最近观测都不代表当前可通行、可执行或在线观察；不观察、不移动、不加载 Section、不刷新证据时间、不写库。'
-    + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；本宿主未配置容器分类器，containerAnchors 如实 unsupported。'
+    + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；containerAnchors 由宿主分类器识别 exact 位置的容器/熔炉锚点，contents 仍由宿主精确账本回答。'
     + '旧 kind 已移除：fragment 改用 fragments（含完整 polyline），route 改用 historyRoute 或 nodes/edges，ids 模式改用过滤条件 + after/limit。'
     + 'kind==="capabilities" 时，库报告原样在信封的 data.capabilities；信封顶层另加 hostComposed（与信封 data 同级、owner:"host_composed"）列出宿主真实能力。',
   argsDoc:
@@ -130,7 +130,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     + '{"kind":"segments","fragmentId":"f1"}  // 未知片段返回 not_found\n'
     + '{"kind":"portals","after":"cursor","limit":100}\n'
     + '{"kind":"resourceAnchors","dim":"overworld","tag":"...","label":"x","after":"cursor","limit":100}\n'
-    + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // 本宿主无分类器，固定 unsupported\n'
+    + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // exact 容器/熔炉锚点；gone 项仍需调用方检查\n'
     + '{"kind":"containerContents","dim":"overworld"}  // 固定 unsupported + host_ledger，无 data\n'
     + '{"kind":"snapshot"}\n'
     + '{"kind":"capabilities"}  // 技能结果 data.data.capabilities 是库报告；技能结果 data.hostComposed（信封顶层，与信封 data 同级）是宿主组合报告（owner:"host_composed"）\n'

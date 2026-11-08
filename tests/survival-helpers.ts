@@ -68,8 +68,13 @@ export function stubSenses(adapter: FakeAdapter, extra: Partial<Senses> = {}): S
 }
 
 export function makeCtx(adapter: FakeAdapter, opts: { memory?: WorldMemory; senses?: Partial<Senses>; deadlineMs?: number } = {}): SkillCtx {
+  const memory = opts.memory ?? (() => {
+    const created = new WorldMemory(null);
+    created.setWorld(adapter.state().worldId);
+    return created;
+  })();
   return {
-    adapter, memory: opts.memory ?? new WorldMemory(null), bus: new EventBus(), signal: new AbortController().signal,
+    adapter, memory, bus: new EventBus(), signal: new AbortController().signal,
     deadline: Date.now() + (opts.deadlineMs ?? 60000), taskId: 'test', progress() {}, senses: stubSenses(adapter, opts.senses),
   };
 }

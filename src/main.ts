@@ -27,7 +27,9 @@ import { config, envFile } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
 import { WorldMemory } from './memory/store.ts';
-import { SpatialMemoryBackend } from './memory/spatial-backend.ts';
+import { ContainerLedger } from './memory/container-ledger.ts';
+import { SpatialSemanticStore } from './spatial/semantic-store.ts';
+import { checkMigrationGate } from './spatial/migration-state.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
 import { capabilitySummary } from './spatial/capabilities.ts';
@@ -147,6 +149,29 @@ try {
   }) + '\n');
   process.exit(1);
 }
+// 只读迁移门禁：旧 JSON/travel/.placed 或没有迁移标记的既有空间记录都拒绝启动。
+// 新世界（空库且无旧文件）允许继续，并在语义层就绪后写入空迁移标记。
+const worldMemoryPath = path.join(config.dataDir, 'world-memory.json');
+const migrationGate = checkMigrationGate({
+  topology: spatial.session.topology,
+  history: spatial.session.history,
+  ledger: spatial.session.ledger,
+  worldMemoryPath,
+  dataDir: config.dataDir,
+  databasePath: config.spatial.databasePath,
+  worldId: adapter.state().worldId,
+});
+if (!migrationGate.ok) {
+  writeSync(2, JSON.stringify({
+    event: 'spatial_migration_required',
+    worldId: adapter.state().worldId,
+    databasePath: config.spatial.databasePath,
+    reason: migrationGate.reason,
+    details: migrationGate.details,
+    command: migrationGate.command,
+  }) + '\n');
+  process.exit(1);
+}
 // 常规运行时每 30 秒在物理 tick 之外走同一条公开 checkpoint 路径；只汇报实际
 // 保存结果与剩余 dirty，最终 flush/close 仍由 finishShutdown 的 spatial.shutdown 负责。
 const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) => {
@@ -165,20 +190,13 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
     { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
 });
-const memory = new WorldMemory(path.join(config.dataDir, 'world-memory.json'));
-// 空间库是空间语义的唯一落盘权威：启动时装载，之后 WorldMemory 的语义变更写回
-// fragments/nodes/ledger；world-memory.json 只保留非空间事实。
-try {
-  memory.attachSpatial(new SpatialMemoryBackend(spatial.session, adapter.state().worldId));
-} catch (error) {
-  writeSync(2, JSON.stringify({
-    event: 'spatial_cutover_required',
-    worldId: adapter.state().worldId,
-    databasePath: config.spatial.databasePath,
-    error: { name: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error) },
-  }) + '\n');
-  process.exit(1);
-}
+const containers = new ContainerLedger(path.join(config.dataDir, 'containers.json'), adapter.state().worldId);
+const semantic = new SpatialSemanticStore(spatial.session, containers, {
+  sessionId: adapter.state().sessionId,
+  worldId: adapter.state().worldId,
+});
+if (!semantic.migrationMarker()) semantic.writeMigrationMarker();
+const memory = new WorldMemory(worldMemoryPath, { semantic });
 const vision = new Vision(adapter, config.vision, spatial);
 // Task-level journal wiring remains an explicit seam in Arbiter. It is not
 // injected in production until a real evidence source exists; the previous
@@ -990,7 +1008,6 @@ async function finishShutdown(code: number) {
   attempt('perception.stop', () => perception.stop());
   let servicePromise: Promise<ShutdownResult> | null = null;
   let serviceCallError: unknown = null;
-  try { servicePromise = spatial.shutdown(); } catch (error) { serviceCallError = error; }
   attempt('executive.stop', () => executive.stop());
   attempt('actionChat.stop', () => actionChat.stop());
   attempt('live.stop', () => live?.stop());
@@ -1003,6 +1020,8 @@ async function finishShutdown(code: number) {
   attempt('observerTasks.dispose', () => observerTasks?.dispose());
   attempt('feed.dispose', () => feed?.dispose());
   attempt('memory.close', () => memory.close());
+  // 语义写入已经进入 library 内存；非空间 JSON/容器账本关闭后再启动最终 checkpoint/close。
+  try { servicePromise = spatial.shutdown(); } catch (error) { serviceCallError = error; }
   attempt('adapter.quit', () => adapter.quit());
   attempt('processHealth.dispose', () => processHealth.dispose());
   attempt('runStats.stop', () => runStats.stop());

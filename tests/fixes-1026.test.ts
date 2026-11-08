@@ -79,7 +79,10 @@ test('缺料时不拆自家房子当原料：dig_at / dig 拒绝并说清楚为�
   const { buildingArchiveFor, ownBuildingAt } = await import('../src/skills/build.ts');
   const { compileBuilding, DEFAULT_SPEC, materialCost, rotatePosition } = await import('../src/building/spec.ts');
   const { mineCell } = await import('../src/skills/movement/primitives.ts');
-  const w = new LostDropWorld(), ctx = makeCtx(w, { memory: new (await import('../src/memory/store.ts')).WorldMemory(path.join(tmp(), 'world-memory.json')) });
+  const w = new LostDropWorld();
+  const { semanticMemory } = await import('./semantic-fixture.ts');
+  const { memory } = semanticMemory(w.worldId, path.join(tmp(), 'world-memory.json'));
+  const ctx = makeCtx(w, { memory });
   t.after(() => ctx.memory.close());
   ctx.memory.setWorld(w.worldId);
   const s = w.state();

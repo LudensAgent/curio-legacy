@@ -14,6 +14,7 @@ import { storeItems, takeItems } from '../src/skills/economy.ts';
 import { mineCell, placeCell } from '../src/skills/movement/primitives.ts';
 import { rememberStation } from '../src/skills/stations.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
+import { semanticMemory } from './semantic-fixture.ts';
 
 const box = { x: 3, y: 64, z: 0 };
 
@@ -58,19 +59,18 @@ test('chestLocation 位置恒精确，不再按时间淡化成区域', (t) => {
   assert.deepEqual(facilities[0].pos, pos);
 });
 
-test('v3 旧印象加载时直接丢弃，只保留箱子身份，不假装刚看过', (t) => {
+test('旧 world-memory.json 空间键不再被运行期加载', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-memory-container-'));
   const file = path.join(directory, 'world-memory.json'), ts = Date.now() - 25 * 3600_000;
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   fs.writeFileSync(file, JSON.stringify({ version: 3, worldId: 'w', chests: { 'w:overworld:3,64,0': {
     worldId: 'w', dim: 'overworld', pos: box, ts, uses: 1, traces: [{ item: 'coal', kind: 'put', qty: 'some', ts, op: 1, times: 1 }],
   } } }));
-  const memory = new WorldMemory(file);
-  assert.equal(memory.chests()[0].ts, ts);
-  assert.deepEqual(memory.chests()[0].contents.items, []);
-  assert.equal(memory.chests()[0].contents.possiblyStale, true);
-  assert.equal(chestLocation(memory.chests()[0]).precise, true);
+  const { memory } = semanticMemory('w', file);
+  assert.deepEqual(memory.chests(), []);
   memory.close();
+  const disk = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+  assert.equal('chests' in disk, false);
 });
 
 test('unopened historical containers are candidates and facilities without automatically opening them', async (t) => {
@@ -171,19 +171,15 @@ test('placing two adjacent containers keeps both, and digging one invalidates on
   assert.deepEqual(memory.landmarks().filter((l) => l.label === '我的箱子').map((l) => l.pos), [adjacent]);
 });
 
-test('loading own/plain container twins removes only the duplicate at the identical cell', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-container-twins-')), file = path.join(directory, 'world-memory.json');
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+test('own/plain container twins share one cell anchor', (t) => {
+  const { memory } = semanticMemory('w');
+  t.after(() => memory.close());
   const adjacent = { ...box, z: box.z + 1 };
-  fs.writeFileSync(file, JSON.stringify({ version: 3, worldId: 'w', landmarks: [
-    { id: 'own', kind: 'discovery', label: '我的箱子', worldId: 'w', dim: 'overworld', pos: box, ts: 100 },
-    { id: 'same', kind: 'discovery', label: '箱子', worldId: 'w', dim: 'overworld', pos: box, ts: 100 },
-    { id: 'next', kind: 'discovery', label: '箱子', worldId: 'w', dim: 'overworld', pos: adjacent, ts: 100 },
-  ] }));
-  const memory = new WorldMemory(file);
-  assert.deepEqual(memory.landmarks().map((l) => l.id).sort(), ['next', 'own']);
-  assert.ok(memory.landmarks().every((l) => l.ts === 100));
-  memory.close();
+  memory.addLandmark('discovery', '我的箱子', 'overworld', box, 0.1);
+  assert.equal(memory.addLandmark('discovery', '箱子', 'overworld', box, 0.1), null);
+  memory.addLandmark('discovery', '箱子', 'overworld', adjacent, 0.1);
+  assert.deepEqual(memory.landmarks().map((l) => l.label).sort(), ['我的箱子', '箱子'].sort());
+  assert.deepEqual(memory.landmarks().filter((l) => l.label === '箱子').map((l) => l.pos), [adjacent]);
 });
 
 test('partial storage records only the actual transfer even when the request fails', async (t) => {

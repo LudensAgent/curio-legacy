@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { FragmentStore, TopologyStore } from 'curio-minecraft-3d-memory';
-import { LedgerStore } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { AgentState } from '../src/adapter/types.ts';
-import { SpatialMemoryBackend } from '../src/memory/spatial-backend.ts';
-import { WorldMemory } from '../src/memory/store.ts';
 import { travelStore } from '../src/travel/store.ts';
+import { semanticMemory } from './semantic-fixture.ts';
 
 const W = 'world-1';
 
@@ -18,12 +15,7 @@ function state(overrides: Partial<AgentState>): AgentState {
 }
 
 test('portal endpoints and traversals use spatial nodes and the ledger', () => {
-  const history = new FragmentStore(W);
-  const topology = new TopologyStore(history);
-  const ledger = new LedgerStore(W);
-  const backend = new SpatialMemoryBackend({ history, topology, ledger }, W);
-  const memory = new WorldMemory(null);
-  memory.attachSpatial(backend, { allowEmptyStore: true });
+  const { memory, stores } = semanticMemory(W);
   const store = travelStore(memory);
 
   const overworld = store.observe(state({ dim: 'overworld', pos: { x: 10, y: 64, z: 10 } }), { x: 10, y: 64, z: 10 }, 'nether_portal');
@@ -41,7 +33,7 @@ test('portal endpoints and traversals use spatial nodes and the ledger', () => {
   assert.equal(snap.routes.length, 1);
   assert.equal(snap.routes[0]?.fromId, overworld.id);
   assert.equal(snap.routes[0]?.returnVerified, false);
-  assert.equal(ledger.portalTraversals().length, 1);
+  assert.equal(stores.ledger.portalTraversals().length, 1);
 
   // Re-observing the same portal updates the same endpoint instead of adding another.
   store.observe(state({ dim: 'overworld', pos: { x: 10, y: 64, z: 10 } }), { x: 10, y: 64, z: 10 }, 'nether_portal');
