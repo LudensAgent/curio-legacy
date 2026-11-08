@@ -11,8 +11,8 @@ import { PLACEABLE } from '../survival.ts';
 import { isStation, rememberStation } from '../stations.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from '../types.ts';
 import { absValue, after, facingArg, parseRel, relValue, toRel, visibleCells, visibleStates, type Rel } from './coordinates.ts';
-import { consumptionReceipt, countItems, inspectBody, inspectStandableBelow, inspectSupport, inspectSupportDigRisk, reconcileBlockMutation, stateAt, stateReader } from './facts.ts';
-import { effectConfirmed, effectUnconfirmed, placementProblem, problemOf, REFERENCE_PROBLEMS, withExecutionLink, type PrimitiveProblemKind } from './receipt.ts';
+import { consumptionReceipt, consumptionText, countItems, inspectBody, inspectStandableBelow, inspectSupport, inspectSupportDigRisk, reconcileBlockMutation, stateAt, stateReader } from './facts.ts';
+import { effectConfirmed, effectUnconfirmed, placementMayHaveExecuted, placementProblem, problemOf, REFERENCE_PROBLEMS, withExecutionLink, type PrimitiveProblemKind } from './receipt.ts';
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const KEEPSAKE = /_bed$|^(crafting_table|furnace|smoker|blast_furnace|chest|barrel|anvil|jukebox|ender_chest|enchanting_table|brewing_stand|cartography_table|smithing_table|loom|stonecutter|grindstone)$|_door$|shulker_box$/;
@@ -23,11 +23,16 @@ const WALL_TORCH: Record<string, string> = { torch: 'wall_torch', soul_torch: 's
  * 1 格是 move_step 明确接受的同一级落差；2 格以上必须由调用者显式接受风险。
  */
 const SAFE_UNCONSENTED_SUPPORT_DROP = 1;
+/**
+ * validate 与 run 之间身体连续位置的容许漂移（格）。只比脚格不够：同一列内从 0.15 挪到
+ * 0.85 时脚格没变，但身体已经压到边缘，起跳/贴边条件已经不同。
+ */
+const START_POSITION_TOLERANCE = 0.05;
 
 interface CellArgs { at: Rel; facing: Facing; xyz?: Vec3Like }
 interface OriginSnapshot { pos: Vec3Like; feet: Vec3Like; worldId: string; sessionId: string; dim: string }
 interface MoveArgs extends CellArgs { origin?: OriginSnapshot }
-interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string }
+interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string; allowUnknownAdjacent?: boolean }
 interface PlaceArgs extends CellArgs { item: string }
 interface SupportArgs extends CellArgs { item: string }
 type PlaceAttempt = {
@@ -119,17 +124,29 @@ const moveStepSkill: Skill<MoveArgs> = {
         await sleep(50, ctx.signal);
       }
     }
+    // 等待结束不等于已经稳定：期限用完仍在空中时如实拒绝，不把超时当成落地。
+    const settled = adapter.state();
+    if (!settled.onGround && !settled.inWater && !settled.inLava && !settled.riding && adapter.blockAt(feetCell(settled.pos)) !== 'ladder') {
+      return fail('EFFECT_NOT_CONFIRMED', '身体尚未稳定，暂不执行普通迈步：等待落地超时，仍未触地', {
+        movementNotAttempted: true,
+        ...problemOf('BODY_NOT_STABLE', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing),
+      });
+    }
     // 一次快照解析起点：连续位置、脚格、会话都从这里取，run 内不再各自推导。
     const startState = adapter.state();
     const startPos = { ...startState.pos };
     const feet = { ...feetCell(startPos) };
+    const drift = args.origin === undefined ? 0 : Math.hypot(
+      startPos.x - args.origin.pos.x, startPos.y - args.origin.pos.y, startPos.z - args.origin.pos.z,
+    );
     const startChanged = args.origin !== undefined && (
-      args.origin.feet.x !== feet.x || args.origin.feet.y !== feet.y || args.origin.feet.z !== feet.z
+      drift > START_POSITION_TOLERANCE
+      || args.origin.feet.x !== feet.x || args.origin.feet.y !== feet.y || args.origin.feet.z !== feet.z
       || args.origin.worldId !== startState.worldId || args.origin.sessionId !== startState.sessionId || args.origin.dim !== startState.dim
     );
     if (startChanged) {
-      return fail('BAD_ARGS', '没有执行迈步：计划检查后起点已经变化（脚下格、维度或会话不同），旧计划不再成立', {
-        origin: { ...args.origin!.pos }, originFeet: { ...args.origin!.feet }, currentFeet: { ...feet },
+      return fail('BAD_ARGS', '没有执行迈步：计划检查后起点已经变化（连续位置、脚下格、维度或会话不同），旧计划不再成立', {
+        origin: { ...args.origin!.pos }, originFeet: { ...args.origin!.feet }, currentFeet: { ...feet }, positionDrift: drift,
         movementNotAttempted: true, ...effectUnconfirmed('movement'), ...problemOf('START_CHANGED', 'precondition'), ...after(ctx, args.facing),
       });
     }
@@ -249,12 +266,12 @@ const moveStepSkill: Skill<MoveArgs> = {
       // 同列有可站立面但落差超出 ±1：这是能力边界，不是普通“寻路无解”；
       // problem.kind 已结构化分类，failureCode 也用 BAD_ARGS + unsupportedGeometry 明确标出。
       const unsupported = problemKind === 'UNSUPPORTED_STEP_HEIGHT';
-      return fail(unsupported ? 'BAD_ARGS' : correctedU === null ? 'PATH_NOT_FOUND' : 'BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 在当前脚高 ${wanted.toFixed(2)} 没有可站立面；${correction}`, { ...facts, movementNotAttempted: true, ...(unsupported ? { unsupportedGeometry: true } : {}), ...(remediation ? { remediation } : {}), ...problemOf(problemKind, 'precondition'), ...after(ctx, args.facing, target) });
+      return fail(unsupported ? 'BAD_ARGS' : correctedU === null ? 'PATH_NOT_FOUND' : 'BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 在当前脚高 ${wanted.toFixed(2)} 没有可站立面；${correction}`, { ...facts, movementNotAttempted: true, ...(unsupported ? { unsupportedGeometry: true } : {}), ...(remediation ? { remediation } : {}), ...problemOf(problemKind, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
     }
     // 绝对 xyz 的 y 是调用者指定的脚高：支撑面必须与它一致，不能悄悄改成实际支撑面。
     if (absolute && Math.abs(direct - targetFoot!) > 0.01) {
       const stair = Math.abs(direct - baseFoot) > 1.01 ? stairHandoff(feet, target, direct - baseFoot) : null;
-      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${targetFoot!.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步${stair ? `；${stairHint(stair)}` : ''}`, { targetCell: target, expectedFoot: targetFoot, actualSupport: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z }, ...(stair ? { stairs: stair } : {}) }, ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...after(ctx, args.facing, target) });
+      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${targetFoot!.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步${stair ? `；${stairHint(stair)}` : ''}`, { targetCell: target, expectedFoot: targetFoot, actualSupport: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z }, ...(stair ? { stairs: stair } : {}) }, ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
     }
     if (!absolute) {
       const delta = direct - baseFoot;
@@ -277,16 +294,16 @@ const moveStepSkill: Skill<MoveArgs> = {
           : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
         : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`) + (stair ? `；${stairHint(stair)}` : '');
       if (rel[1] === 0 && Math.abs(delta) > 0.01) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === -1 && (direct > baseFoot - 0.5 + 0.01 || direct < baseFoot - 1 - 0.01)) {
         const hint = correctedAt === null
           ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}${stair ? `；${stairHint(stair)}` : ''}`
           : correction;
-        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === 1 && (direct < baseFoot + 0.5 - 0.01 || direct > baseFoot + 1 + 0.01)) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
     }
     const targetY = absolute ? targetFoot! : direct;
@@ -354,8 +371,8 @@ const moveStepSkill: Skill<MoveArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 const mineCellSkill: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格未看清时默认不挖（无法排除侧后方液体流入）；allowUnknownAdjacent:true 显式接受未知邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {
@@ -368,13 +385,15 @@ const mineCellSkill: Skill<MineArgs> = {
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
       if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      // 方块动作的目标是整数格；分数坐标不能静默当成相邻格。
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-1, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能挖到的范围：${rel}；先走近` };
-      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
     }
     const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
-    return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}) } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -428,7 +447,7 @@ const mineCellSkill: Skill<MineArgs> = {
     const neighborPositions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
       .map(([dx, dy, dz]) => ({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }));
     const seenNeighbors = visibleCells(ctx, neighborPositions);
-    // 未知邻格不当作空气或安全：单独列出，让 Agent 自己决定要不要再看一眼。
+    // 未知邻格不当作空气或安全：默认阻止挖掘，避免侧后方液体流入；显式授权才继续。
     const unknownAdjacent = neighborPositions
       .filter((p) => !seenNeighbors.has(`${p.x},${p.y},${p.z}`))
       .map((p) => toRel(feet, args.facing, p));
@@ -439,6 +458,11 @@ const mineCellSkill: Skill<MineArgs> = {
     if (blocked.length) {
       return fail('BAD_ARGS', `[${args.at}] 挖开会有液体流进来：${wet.map((w) => `${w.name} 在 [${toRel(feet, args.facing, w.pos)}]`).join('、')}；写 wet:true 或 lava:true 明确接受后再挖`, {
         wet: wet[0]?.name, wetCells: wet.map((w) => toRel(feet, args.facing, w.pos)), ...(unknownAdjacent.length ? { unknownAdjacent } : {}), ...problemOf('LIQUID_RISK_UNAUTHORIZED', 'precondition'), ...effectUnconfirmed('block_removed'), ...after(ctx, args.facing, pos),
+      });
+    }
+    if (unknownAdjacent.length && args.allowUnknownAdjacent !== true) {
+      return fail('BAD_ARGS', `[${args.at}] 挖开时还有邻格没看清（无法排除液体流入）：${unknownAdjacent.map((r) => `[${r}]`).join('、')}；先看清这些格子再挖，或写 allowUnknownAdjacent:true 明确接受未知风险`, {
+        unknownAdjacent, ...problemOf('UNKNOWN_ADJACENT_UNAUTHORIZED', 'precondition'), ...effectUnconfirmed('block_removed'), ...after(ctx, args.facing, pos),
       });
     }
     type FallFacts = {
@@ -519,8 +543,13 @@ const mineCellSkill: Skill<MineArgs> = {
       });
     }
     // 挖后复核已确认目标格是空气：这时才把这一格记成自身动作修改，失败/未确认不写。
-    markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
-    noteEdit(ctx.taskId, 'dig', pos);
+    // 适配器抛错期间世界也可能被别的动作/玩家改变；目标格已空只证明当前世界状态，
+    // 不能证明一定是本次挖掘造成的，这时不写自身修改记录。
+    const causedByThisAction = adapterError === undefined;
+    if (causedByThisAction) {
+      markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
+      noteEdit(ctx.taskId, 'dig', pos);
+    }
     // 挖掉脚下支撑后身体可能仍在落，或被相邻方块边缘托住：等落地/读实际支撑，再回执。
     // 只对“挖的是脚下支撑格”补这段事实；挖别的格子不替 Agent 推断身体会不会掉。
     const fall = digsSupport ? await (async () => {
@@ -569,7 +598,7 @@ const mineCellSkill: Skill<MineArgs> = {
     return ok(`挖掉了 [${args.at}] 的 ${before}${adapterError ? `（适配器回执异常：${adapterError}；已核对目标格为空）` : ''}${got}${fallText}`, {
       cell: [...args.at], was: before,
       ...effectConfirmed('block_removed'),
-      ...(adapterError ? { adapterError, reconciled: true } : {}),
+      ...(adapterError ? { adapterError, reconciled: true, causedByThisAction: 'unknown' as const } : {}),
       ...(locomotion ? { locomotion } : {}),
       ...(digInfo.noDrop !== undefined ? { noDrop: digInfo.noDrop } : {}),
       ...(digInfo.ms !== undefined ? { digMs: digInfo.ms } : {}),
@@ -585,7 +614,7 @@ const mineCellSkill: Skill<MineArgs> = {
 const placeCellSkill: Skill<PlaceArgs> = {
   name: 'place_cell',
   description: '在身边指定格放一块确切材料（[前,上,右] 或 xyz）。目标格已有同名方块算完成；已有别的方块（含半砖、雪层、地毯、门、火把）如实报占用，不把错误材料当成功。只放这一格，不负责找站位、不补支撑、不原地垫高。',
-  argsDoc: '{"at":[前,上,右], "item":"方块名", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名"}（前后/左右 ±2，上下 -2..3）',
+  argsDoc: '{"at":[前,上,右], "item":"方块名", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名"}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）',
   timeoutMs: 15000,
   movement: false,
   validate(raw, adapter) {
@@ -600,6 +629,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
       if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-2, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能放置的范围：${rel}；先走近` };
       return { ok: true, args: { at: rel, facing: facing as Facing, xyz, item } };
@@ -691,12 +721,13 @@ const placeCellSkill: Skill<PlaceArgs> = {
     noteEdit(ctx.taskId, 'place', pos);
     if (isStation(now.name)) rememberStation(ctx, now.name, pos);
     return ok(
-      `在 [${args.at}] 放了 ${now.name}${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumption.consumptionPending ? '材料消耗未确认（库存尚未反映，不能写成 0）' : `净消耗 ${consumed} 块`}`,
+      `在 [${args.at}] 放了 ${now.name}${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumptionText(consumption)}`,
       {
         placed: now.name, requested: args.item, observed: observed !== null,
         ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError, reconciled: true } : {}),
         consumed, inventory: {
           item: args.item, before: consumption.before, after: consumption.after, consumed,
+          inventoryDelta: consumption.inventoryDelta, inventorySync: consumption.inventorySync,
           verified: consumption.consumptionVerified, ...(consumption.consumptionPending ? { pending: true } : {}),
         },
         ...effectConfirmed('block_placed'),
@@ -710,7 +741,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
 const placeSupportSkill: Skill<SupportArgs> = {
   name: 'place_support',
   description: '在指定格形成可站立支撑（[前,上,右] 或 xyz）。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。已有可站立顶面（整块、半砖、雪层等）就算满足，不要求与 item 同名，也不再消耗材料；只有空气/可替换植物才放 item。支持脚下一格和脚下两格；当前站位看不到参照面时会后退/侧移或潜行到支撑块边缘再放。脚下两格的边缘放置需要支撑块下方那一格是同层实心参照方块；没有就如实失败，改用 descend_to 或换到能看见参照面的站位。成功回执返回 consumed=放置前后目标材料总数之差；失败回执返回每次尝试的实际站位与参照面事实。只放这一格，不换材料、不换目标，不自动清障/垫高。',
-  argsDoc: '{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any；前后/左右 ±2，上下 -2..3）',
+  argsDoc: '{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any；xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）',
   timeoutMs: 20000,
   movement: true,
   validate(raw, adapter) {
@@ -728,6 +759,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
       if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-2, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能放置的范围：${rel}；先走近` };
       return { ok: true, args: { at: rel, facing: facing as Facing, xyz, item } };
@@ -803,10 +835,15 @@ const placeSupportSkill: Skill<SupportArgs> = {
         changed: effect.state !== null && !isReplaceable(effect.state.name),
       };
     };
-    /** 异常/超时可能已经产生效果：短暂等待后再核对一次，但不无限重试。 */
+    /**
+     * 异常/超时可能已经产生效果：短暂等待后再核对一次，但不无限重试。
+     * 目标格一旦确认、发生变化或变得不可读就停止等待，立即按当前世界状态结算。
+     */
     const waitForEffect = async (ms: number) => {
       const until = Math.min(ctx.deadline, Date.now() + ms);
-      while (!readTarget().confirmed && Date.now() < until) {
+      while (Date.now() < until) {
+        const effect = readTarget();
+        if (effect.confirmed || effect.changed || effect.unknown) return;
         throwIfAborted(ctx.signal);
         await sleep(50, ctx.signal);
       }
@@ -851,6 +888,8 @@ const placeSupportSkill: Skill<SupportArgs> = {
     try {
       const r = await adapter.placeBlockAt(pos, names, ctx.signal);
       receiptOk = r.ok;
+      // 模糊失败（超时/无说明）可能已经产生放置；先给服务器更新一个有限窗口再核对。
+      if (!r.ok && placementMayHaveExecuted(r.reason)) await waitForEffect(250);
       outcome = reconcile('current', currentStance, {
         ...(r.ok ? {} : { reason: r.reason ?? r.detail ?? 'not placed' }),
         ...(r.detail ? { detail: r.detail } : {}),
@@ -883,6 +922,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       try {
         const edge = await adapter.sneakPlaceAt(pos, names, ctx.signal);
         edgeReceiptOk = edge.ok;
+        if (!edge.ok && placementMayHaveExecuted(edge.reason)) await waitForEffect(250);
         outcome = reconcile('edge', edge.stance ?? edgeEntry, {
           ...(edge.ok ? {} : { reason: edge.reason ?? 'not placed' }),
           ...(edge.attemptedFaces?.length ? { attemptedFaces: edge.attemptedFaces } : {}),
@@ -916,15 +956,33 @@ const placeSupportSkill: Skill<SupportArgs> = {
         await adapter.moveTo({ kind: 'near', pos: { x: stance.pos.x + 0.5, y: origin.pos.y, z: stance.pos.z + 0.5 }, range: 0.3 }, { signal: ctx.signal, timeoutMs: Math.min(2500, ctx.deadline - Date.now()), constructionSafe: true, allowSwimming: false });
       } catch (e) {
         if (isAbort(e)) throw e;
+        const afterMove = { ...adapter.state().pos };
+        const moved = Math.hypot(afterMove.x - beforeMove.x, afterMove.z - beforeMove.z) > 0.05
+          || Math.abs(afterMove.y - beforeMove.y) > 0.05;
         attemptFacts(stance.name, beforeMove, { reason: `move:${(e as Error).message}`, effect: 'not_attempted' });
+        // 移动异常前可能已经走了半程：旧起点生成的候选站位不再成立，不能继续按旧计划换站位。
+        if (moved) {
+          return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 换到 ${stance.name} 站位时移动出错，身体已经离开原位置（${beforeMove.x.toFixed(2)},${beforeMove.y.toFixed(2)},${beforeMove.z.toFixed(2)} → ${afterMove.x.toFixed(2)},${afterMove.y.toFixed(2)},${afterMove.z.toFixed(2)}）；不再按旧起点继续换站位`, {
+            attempts, materials: [...names], targetCell: { ...pos }, stanceMove: { from: beforeMove, to: afterMove },
+            ...movementFacts(), ...problemOf('STANCE_MOVE_PARTIAL', 'execution', true), ...effectUnconfirmed('support_formed', true), ...after(ctx, args.facing, pos),
+          });
+        }
         continue;
       }
-      const at = { ...adapter.state().pos };
+      // moveTo 返回不等于站位可用：落地、脚格和脚高都要与候选站位一致，再执行放置。
+      const stanceState = adapter.state();
+      const stanceAt = { ...stanceState.pos };
+      const atCell = feetCell(stanceAt);
+      if (!stanceState.onGround || atCell.x !== stance.pos.x || atCell.z !== stance.pos.z || Math.abs(stanceAt.y - origin.pos.y) > 0.51) {
+        attemptFacts(stance.name, stanceAt, { reason: 'stance-not-confirmed', effect: 'not_attempted' });
+        continue;
+      }
       let stanceReceiptOk = false;
       try {
         const r = await adapter.placeBlockAt(pos, names, ctx.signal);
         stanceReceiptOk = r.ok;
-        outcome = reconcile(stance.name, at, {
+        if (!r.ok && placementMayHaveExecuted(r.reason)) await waitForEffect(250);
+        outcome = reconcile(stance.name, stanceAt, {
           ...(r.ok ? {} : { reason: r.reason ?? r.detail ?? 'not placed' }),
           ...(r.detail ? { detail: r.detail } : {}),
           ...(r.attemptedFaces?.length ? { attemptedFaces: r.attemptedFaces } : {}),
@@ -933,7 +991,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       } catch (e) {
         if (isAbort(e)) throw e;
         await waitForEffect(250);
-        outcome = reconcile(stance.name, at, { reason: `adapter_error:${(e as Error).message}`, ambiguous: true });
+        outcome = reconcile(stance.name, stanceAt, { reason: `adapter_error:${(e as Error).message}`, ambiguous: true });
       }
       if (outcome === 'formed') break;
       const stanceStopped = stoppedByEffect(outcome);
@@ -976,7 +1034,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
     const supportTopY = inspectSupport(at, pos).top;
     return ok(
-      `[${args.at}] 形成可站立支撑${observed ? ` ${observed.name}` : '（实际材料名称本次未看清）'}，${consumption.consumptionPending ? '材料消耗未确认（库存尚未反映，不能写成 0）' : `净消耗 ${consumption.consumed} 块`}`,
+      `[${args.at}] 形成可站立支撑${observed ? ` ${observed.name}` : '（实际材料名称本次未看清）'}，${consumptionText(consumption)}`,
       {
         placed: observed?.name ?? null, observed: observed !== null, materials: [...names], ...consumption,
         attempts, targetCell: { ...pos }, supportTop: supportTopY === null ? null : pos.y + supportTopY,
@@ -1035,6 +1093,7 @@ const pillarOneSkill: Skill<{ item?: string }> = {
     const consumed = consumption.consumed;
     const inventory = {
       items: [...names], before: consumption.before, after: consumption.after, consumed,
+      inventoryDelta: consumption.inventoryDelta, inventorySync: consumption.inventorySync,
       verified: consumption.consumptionVerified, ...(consumption.consumptionPending ? { pending: true } : {}),
     };
     const end = feetCell(adapter.state().pos);
@@ -1083,7 +1142,7 @@ const pillarOneSkill: Skill<{ item?: string }> = {
     }
     // 已确认脚高正好 +1 且脚下是实测可站立支撑：垫脚块就在原脚的格子。
     markSelfModified(ctx.spatial, dim, feet, ctx.taskId);
-    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumption.consumptionPending ? '材料消耗未确认（库存尚未反映，不能写成 0）' : `净消耗 ${consumed} 块`}`, {
+    return ok(`原地垫了一块，站高了一格（现在 y=${end.y}）${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumptionText(consumption)}`, {
       climbed: 1, facing, support: { pos: { ...feet }, name: supportName }, consumed, inventory,
       ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError, reconciled: true } : {}),
       ...effectConfirmed('movement'), ...after(ctx, facing),

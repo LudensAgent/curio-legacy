@@ -18,7 +18,10 @@ export function stateAt(
   pos: Vec3Like,
 ): ObservedState | null {
   const name = adapter.blockAt(pos);
-  return name === null ? null : { name, properties: adapter.blockStateAt?.(pos)?.properties ?? {} };
+  if (name === null) return null;
+  const state = adapter.blockStateAt?.(pos);
+  // 属性读取器不可用时只保留名字，不把空对象冒充完整 blockstate。
+  return state ? { name, properties: state.properties } : { name };
 }
 
 /** 把已加载方块读取器固定成一个 StateAt，供多个纯几何函数共用同一快照口径。 */
@@ -106,6 +109,13 @@ export function reconcileBlockMutation(at: StateAt, cell: Vec3Like, accepts: (st
   return { state, kind: classifyObserved(state), matched: state !== null && accepts(state) };
 }
 
+/** 把净消耗/同步状态写成回执摘要；库存反而增加时不能说成零消耗。 */
+export function consumptionText(receipt: { consumed: number; inventoryDelta: number; inventorySync: string; consumptionPending?: boolean }): string {
+  if (receipt.inventorySync === 'conflicted') return `库存差值为 ${receipt.inventoryDelta}（反而增加），无法归因本次消耗`;
+  if (receipt.consumptionPending) return '材料消耗未确认（库存尚未反映，不能写成 0）';
+  return `净消耗 ${receipt.consumed} 块`;
+}
+
 /** 背包里这些物品的总数；放置/垫高的净消耗统一从这里取同一口径。 */
 export function countItems(
   adapter: { state(): { inventory: { name: string; count: number }[] } },
@@ -117,6 +127,8 @@ export function countItems(
 /**
  * 放置/垫高后的材料净消耗。看到净减少才算 verified；
  * effectExpected 但暂时没看到减少时标 pending，不把“没观察到”写成真实零消耗。
+ * 库存差值只能证明库存变化，不能单独证明来自本次动作；inventorySync 明确这一点：
+ * confirmed = 看见净减少；conflicted = 反而增加（同步/并发异常）；pending = 应消耗但尚未反映。
  */
 export function consumptionReceipt(
   adapter: { state(): { inventory: { name: string; count: number }[] } },
@@ -127,7 +139,8 @@ export function consumptionReceipt(
   const after = countItems(adapter, names);
   const raw = before - after;
   return {
-    before, after, consumed: Math.max(0, raw), consumptionVerified: raw > 0,
+    before, after, consumed: Math.max(0, raw), inventoryDelta: raw, consumptionVerified: raw > 0,
+    inventorySync: raw > 0 ? 'confirmed' as const : raw < 0 ? 'conflicted' as const : opts.pendingWhenZero ? 'pending' as const : 'unchanged' as const,
     ...(opts.pendingWhenZero && raw === 0 ? { consumptionPending: true } : {}),
   };
 }
