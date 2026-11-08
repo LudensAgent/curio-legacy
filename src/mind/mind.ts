@@ -56,6 +56,8 @@ export interface MindDeps {
 }
 
 /** 一步的“原样”：动作 + 参数（朝向不算） */
+/** 无进展闸门用的动作签名：保留具体目标（不同箱子/门算不同做法），专门抓“同一地点/同一路线”的循环。 */
+const gateSignatureOf = (steps: Activity['steps']) => steps.map((step) => targetKeyOf(step)).join('>');
 const exactSig = (step: { skill: string; args?: unknown }) => {
   const a = step.args && typeof step.args === 'object' ? { ...(step.args as Record<string, unknown>) } : {};
   delete a.facing;
@@ -195,6 +197,17 @@ export class Mind {
   private inReview = false;
   /** 回想时觉得主目标可以放下了：留到下一次阶段回顾时告诉它 */
   private keptHint: string | null = null;
+  /**
+   * 主目标级无进展闸门：连续若干段活没有物品、清单或新区块进展时，强制换一个
+   * 能带来新信息的做法。它只阻止重复已试过的动作签名，不替 Agent 选去哪/做什么。
+   */
+  private progressGate: { at: number; agendaId: string | null; signatures: string[]; activities: { what: string; outcome: string; summary: string }[] } | null = null;
+  private progressGateRejects = 0;
+  private lastProgressGateAt = 0;
+  private noProgressRuns: { at: number; signature: string; what: string; outcome: string; summary: string }[] = [];
+  static readonly PROGRESS_GATE_ACTIVITIES = 8;
+  static readonly PROGRESS_GATE_COOLDOWN_MS = 10 * 60_000;
+  static readonly PROGRESS_GATE_REJECT_LIMIT = 2;
   /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
   static REVIEW_GAP_MIN: [number, number] = [45, 90];
   private reviewGapMs = 45 * 60_000;
@@ -831,11 +844,17 @@ export class Mind {
     const state = this.d.adapter.state();
     if (a.dropped?.length) summary = `${summary}；计划里这些步骤未通过校验，没有执行：${a.dropped.join('、')}`;
     const record = recordOf(a, outcome, summary, state);
+    const planBefore = this.d.self.plan()?.progressAt;
+    const chunksBefore = this.d.memory.visitedChunkCount;
     const failed = [...a.results].reverse().find((r) => r.status === 'failed' && !(SKILLS[r.skill]?.readOnly && r.failureCode === 'NOT_FOUND'));
     if (outcome === 'done') { this.recentEnds = []; this.attention.resetLoop(); }
     this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
       { pos: { ...state.pos }, outcome, skill: failed?.skill, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, summary, at: record.at }].slice(-256);
     this.d.self.record(record);
+    // 物品、清单或新区块都没动：记一笔无进展。整条链只在这里观察，不替 Agent 判断原因。
+    const planAfter = this.d.self.plan()?.progressAt;
+    this.noteProgressOutcome(a, record, Object.keys(record.gained).length > 0
+      || this.d.memory.visitedChunkCount > chunksBefore || planAfter !== planBefore);
     this.lastRecord = record;
     this.finishedSinceReflect++;
     this.d.self.creditAgenda(a.agendaId);
@@ -888,7 +907,8 @@ export class Mind {
       }
     }
     if (outcome === 'unmet') {
-      this.requestThink(unmet?.reason ?? `「${a.what}」收工条件未满足：${summary}`,
+      // 无进展闸门已经安排了更强的重想；不再用普通收工反馈覆盖它。
+      if (!this.progressGate) this.requestThink(unmet?.reason ?? `「${a.what}」收工条件未满足：${summary}`,
         unmet?.known && !this.needsBigPicture() && this.attention.highest() < URGENT ? 'glance' : 'deliberate');
     }
     if (outcome === 'stuck') {
@@ -904,8 +924,91 @@ export class Mind {
       this.lastStuckAttempt = failed?.failureCode ? { step: { skill: failed.skill, args: failed.args }, code: failed.failureCode,
         summary: failed.summary, pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: Date.now() } : null;
       const urgent = this.attention.highest() >= URGENT || state.hp <= 12 || state.inWater || state.inLava;
-      this.requestThink(`「${a.what}」卡住了：${summary}${repeated ? `；刚才相同动作也失败：${previous!.summary}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
+      if (!this.progressGate) this.requestThink(`「${a.what}」卡住了：${summary}${repeated ? `；刚才相同动作也失败：${previous!.summary}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
     }
+  }
+
+  /**
+   * 一段活结束时记无进展。只有物品、清单和新区块都没动才累计；达到阈值后要求
+   * 认真想一次，并把"继续同一条路不会产生新信息"作为必须回应的事实。
+   */
+  private noteProgressOutcome(a: Activity, record: ActivityRecord, progressed: boolean) {
+    const plan = this.d.self.plan();
+    const now = Date.now();
+    if (!plan || a.agendaId !== plan.agendaId || progressed) {
+      this.noProgressRuns = [];
+      this.progressGate = null;
+      this.progressGateRejects = 0;
+      return;
+    }
+    if (record.outcome === 'interrupted') return;
+    this.noProgressRuns = [...this.noProgressRuns.filter((run) => now - run.at < 30 * 60_000),
+      { at: now, signature: gateSignatureOf(a.steps), what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
+    if (this.noProgressRuns.length < Mind.PROGRESS_GATE_ACTIVITIES) return;
+    if (this.progressGate || this.review || now < this.dangerUntil || this.order || this.userSuggestion) return;
+    if (now - this.lastProgressGateAt < Mind.PROGRESS_GATE_COOLDOWN_MS) return;
+    const activities = this.noProgressRuns.slice(-Mind.PROGRESS_GATE_ACTIVITIES)
+      .map(({ what, outcome, summary }) => ({ what, outcome, summary: summary.slice(0, 120) }));
+    this.progressGate = {
+      at: now, agendaId: plan.agendaId,
+      signatures: [...new Set(this.noProgressRuns.map((run) => run.signature))],
+      activities,
+    };
+    this.lastProgressGateAt = now;
+    const repeated = [...new Set(activities.map((entry) => entry.what))].slice(0, 4).join('；');
+    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块进展：${repeated}。需要换一个能带来新信息的做法`, {
+      agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
+    });
+    this.requestThink(`最近 ${activities.length} 段活没有物品/清单/新区块进展（反复：${repeated}）；继续同一条路不会产生新信息。先看已知地点、已见物资和可用的长距离搜索方式，再决定换地点、换方法或调整主目标`, 'deliberate');
+  }
+
+  /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */
+  private progressGateFacts() {
+    const gate = this.progressGate;
+    if (!gate) return null;
+    return {
+      goal: this.d.self.plan()?.goal ?? null,
+      no_progress_activities: gate.activities.length,
+      recent: gate.activities.map((entry) => `${entry.what} → ${entry.outcome}：${entry.summary}`),
+      repeated_signatures: gate.signatures.map((signature) => signature.length > 160 ? `${signature.slice(0, 159)}…` : signature),
+      available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点见【记得的地方】。',
+      rule: '同一条路线不会产生新信息：继续原目标必须换成不同签名的一步（换地点/换方法）；也可以写 plan 换清单或主目标并说明理由。上面列出的签名会被拒绝一次。',
+    };
+  }
+
+  /**
+   * 闸门真正加在动作入口：无进展列表里已经出现过的动作签名，拒绝一次并要求重想。
+   * 连续两次仍选同一条路时解除闸门，避免把模型困死；选择不同地点/方法则放行并清除。
+   */
+  private enforceProgressGate(decision: MindDecision, info: { urgent?: boolean }): boolean {
+    const gate = this.progressGate;
+    if (!gate || info.urgent || this.order) return true;
+    if (Date.now() - gate.at > 15 * 60_000) { this.progressGate = null; this.progressGateRejects = 0; return true; }
+    const signature = decision.activity ? gateSignatureOf(decision.activity.steps)
+      : decision.next ? gateSignatureOf(decision.next.steps) : null;
+    const repeats = !!signature && gate.signatures.includes(signature);
+    const idleContinue = decision.kind === 'continue' && !signature && !this.activity;
+    if (!repeats && !idleContinue) {
+      this.progressGate = null;
+      this.progressGateRejects = 0;
+      this.d.bus.publish('progress_gate_cleared', 'P3', `换了一个没在无进展列表里的做法：${decision.activity?.what ?? decision.next?.what ?? '新计划'}`);
+      return true;
+    }
+    this.progressGateRejects += 1;
+    const note = `最近无进展的动作签名包含「${(signature ?? decision.kind).slice(0, 100)}」，这一步会被拒绝：请换成不同地点/不同方法，或写 plan 说明换清单/主目标`;
+    decision.notes.push(note);
+    this.d.bus.publish('progress_gate_repeat', 'P2', note, { signature });
+    if (this.progressGateRejects <= Mind.PROGRESS_GATE_REJECT_LIMIT) {
+      this.requestThink(`${note}。近期无进展的是：${gate.activities.map((entry) => entry.what).slice(-4).join('；')}；可用搜索：look_around 当前视野、gather 已见/记得、expedition {find} 长距离沿路扫`, 'deliberate');
+    } else {
+      this.d.bus.publish('progress_gate_unresolved', 'P2', '连续两次仍选择无进展的同一做法；闸门解除，但这段循环已记录', { signature });
+      this.progressGate = null;
+      this.progressGateRejects = 0;
+    }
+    decision.activity = undefined;
+    decision.next = undefined;
+    decision.kind = 'continue';
+    return false;
   }
 
   private dropActivity(outcome: ActivityOutcome, why: string) {
@@ -1296,6 +1399,7 @@ export class Mind {
       materials: ledger ? this.safe(() => ({ wood: ledger.materialTally('wood'), ore: ledger.materialTally('ore') }), null) : null,
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
+      ...(this.progressGate && tier === 'deliberate' ? { progressGate: this.safe(() => this.progressGateFacts(), null) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
       toolFact: toolFact?.text ?? null,
@@ -1537,6 +1641,8 @@ export class Mind {
         else this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
       }
     }
+    // 无进展闸门在动作入口生效：签名和最近无进展的做法相同就拒绝一次，要求换地点/方法或改计划。
+    if (!this.enforceProgressGate(decision, info)) return;
     if (decision.next) this.queuedNext = { draft: decision.next, monologue: '', at: Date.now() };
 
     const sameActivity = !!this.activity && this.activity.id === thoughtAboutActivity;
@@ -1701,7 +1807,12 @@ export class Mind {
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
       const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus }) : null;
       if (set && same && p.switchReason) this.d.self.think(`改了「${set.goal}」的清单：${p.switchReason}`, 'monologue');
-      if (set) this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
+      if (set) {
+        // 认真写了新计划（换清单或换主目标）就是对无进展循环的回应：闸门放行。
+        this.progressGate = null;
+        this.progressGateRejects = 0;
+        this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
+      }
       else {
         const item = focus?.startsWith('a_') ? this.d.self.agenda().find((a) => a.id === focus) : undefined;
         decision.notes.push(item && item.kind !== 'goal'
@@ -1721,7 +1832,12 @@ export class Mind {
       const s = this.d.adapter.state(), percept = this.safe(() => this.d.perception.snapshot(), undefined);
       const refused: string[] = [];
       const checked = this.d.self.checkPlan(p.done, (c) => evaluateCondition(c, s, s.worldId, [], percept).status === 'satisfied', refused);
-      if (checked.length) this.d.bus.publish('plan_check', 'P3', `勾掉：${checked.join('、')}`);
+      if (checked.length) {
+        // 勾掉清单项是真实进展：无进展闸门放行。
+        this.progressGate = null;
+        this.progressGateRejects = 0;
+        this.d.bus.publish('plan_check', 'P3', `勾掉：${checked.join('、')}`);
+      }
       if (refused.length) decision.notes.push(`没勾掉「${refused.join('、')}」：它的 done_when 条件实际还没达到`);
       const now = this.d.self.plan();
       if (!opts.skipGoalCompletion && now && now.steps.length && now.steps.every((st) => st.done)) {

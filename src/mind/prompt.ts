@@ -92,6 +92,8 @@ export interface MindContext {
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
   stageReview?: Record<string, unknown>;
+  /** 主目标级无进展闸门：最近几段活没有物品/清单/新区块进展，重复的动作签名会被拒绝一次 */
+  progressGate?: Record<string, unknown> | null;
   /** 自己写的可执行技能一览（带成败） */
   learnedSkills?: string[];
   /** 本能现状：哪些身体会自己做（躲苦力怕、还手这些现在可能没开） */
@@ -815,6 +817,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ['身体', bodyState(p, s, ctx.activity, self.habits())],
     ...(focusBlock(ctx) ? [['专注', focusBlock(ctx)!] as [string, Record<string, unknown>]] : []),
     ...(ctx.stageReview ? [['阶段回顾', ctx.stageReview] as [string, Record<string, unknown>]] : []),
+    ...(ctx.progressGate ? [['无进展', ctx.progressGate] as [string, Record<string, unknown>]] : []),
     ['此刻', {
       why_thinking_now: ctx.reason,
       ...(ctx.recentActionFailures?.length ? { recent_action_failures: { note: '动作结束时的实际反馈，位置和环境可能随后改变', entries: ctx.recentActionFailures } } : {}),
