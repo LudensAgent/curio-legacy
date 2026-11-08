@@ -319,6 +319,12 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (navStage) recorded.stage = navStage;
   a.results.push(recorded);
   if (a.results.length > 16) a.results = a.results.slice(-16);
+  // 放置/补支撑也会为了让出参照面而轻推身体。0.25 格就足以跨过格边界，让后续相对坐标换到另一列；
+  // 只要脚格变了，就记下站位缺口，下一步若是相对动作先交回心智，不按旧站位继续。
+  if ((step.skill === 'place_cell' || step.skill === 'place_support') && a.stepStart?.pos
+    && JSON.stringify(feetCell(a.stepStart.pos)) !== JSON.stringify(feetCell(state.pos))) {
+    a.stanceGap = { skill: step.skill, pos: { ...state.pos } };
+  }
   if (result.status === 'succeeded') {
     a.consecutiveFailures = 0;
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
@@ -492,7 +498,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const retryScope = `${step.skill}:${digest(JSON.stringify(step.args ?? {}))}:${code}`;
   const retryMark = `retry:${retryScope}:${digest(gapEvidence(result))}`;
   const retries = a.adaptations.filter((item) => item.startsWith(`retry:${retryScope}:`)).length;
-  const physicallyMoved = !!baseline?.pos && Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5;
+  // 0.5 格阈值抓不住“只挪 0.25 但跨过格边界”：相对坐标按 floor(脚位) 取格，跨边界就等于换了落点格。
+  const movedCell = !!baseline?.pos && JSON.stringify(feetCell(baseline.pos)) !== JSON.stringify(feetCell(state.pos));
+  const physicallyMoved = !!baseline?.pos && (movedCell || Math.hypot(state.pos.x - baseline.pos.x, state.pos.y - baseline.pos.y, state.pos.z - baseline.pos.z) >= 0.5);
   // 相对 step 只有“前/上/右”偏移，没有固定世界目标。失败后身体已经换位时，自动重试会
   // 用新站位重新解释同一个 [1,-1,0]，实际变成下一格（空腔里会一路下沉/换列）。这不是
   // 同一个逻辑动作的复验，交回心智按实测位置重新选择；绝对 step/xyz 仍可按原目标复验。

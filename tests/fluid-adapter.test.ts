@@ -5,8 +5,12 @@ import { setImmediate } from 'node:timers/promises';
 import { Vec3 } from 'vec3';
 import type { Block } from 'prismarine-block';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
+import { useItem } from '../src/skills/actions.ts';
+import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx } from './survival-helpers.ts';
 
 const require = createRequire(import.meta.url);
 const registry = require('minecraft-data')('1.20.1');
@@ -61,8 +65,39 @@ test('a top-face request below the support top is rejected before any bucket use
   const result = await f.adapter.useBucketAt(target, 'water_bucket', signal());
   assert.equal(result.ok, false);
   assert.match(result.reason ?? '', /^NO_PLACEMENT_FACE/);
+  assert.match(result.detail ?? '', /参照 \(2,64,0\)|不可点击/, '未发送使用动作时也要带回参照面事实');
   assert.equal(f.uses(), 0);
   assert.equal(f.inventory.get('water_bucket'), 1);
+});
+
+test('fluid NO_REFERENCE returns the six-neighbour facts', async () => {
+  const f = fixture();
+  const target = new Vec3(10, 70, 10);
+  const result = await f.adapter.useBucketAt(target, 'water_bucket', signal());
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? '', /^NO_REFERENCE/);
+  assert.match(result.detail ?? '', /目标格六邻/);
+  assert.match(result.detail ?? '', /10,69,10=air/);
+  assert.equal(f.uses(), 0);
+});
+
+class FluidNoReference extends FakeAdapter {
+  override async useBucketAt(pos: Vec3Like) {
+    return { ok: false as const, reason: `NO_REFERENCE:(${pos.x},${pos.y},${pos.z}) 四周没有实心方块可贴面，倒不进去`, detail: '目标格六邻：2,63,0=air；倒流体需要紧贴实心块' };
+  }
+}
+
+test('use_item 倒水 NO_REFERENCE 返回 BAD_ARGS 和目标格事实', async (t) => {
+  const w = new FluidNoReference();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('water_bucket', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await useItem.run(ctx, { item: 'water_bucket', on: { x: 2, y: 64, z: 0 } });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS', '目标格没有贴面是参数/选择问题，不是“没有路”');
+  assert.match(r.summary, /NO_REFERENCE/);
+  assert.match(r.summary, /六邻/);
 });
 
 test('precise bucket placement refuses to use when raycasting is unavailable', async () => {

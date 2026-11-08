@@ -111,6 +111,8 @@ test('place_support 失败回执带实际站位、参照面和替代动作', asy
   t.after(() => ctx.memory.close());
   const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS', '参照面不成立是参数/站位问题，不是“没有路”');
+  assert.match(r.summary, /相邻实心方块|视线被挡/, '参照面细节必须进摘要，不能只留在 data');
   const attempts = r.data?.attempts as { stance: string; position: Vec3Like; attemptedFaces?: PlacementFaceAttempt[] }[];
   assert.ok(Array.isArray(attempts) && attempts.length >= 1);
   assert.equal(attempts[0].stance, 'current');

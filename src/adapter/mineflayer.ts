@@ -2189,14 +2189,32 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const cur = b.blockAt(target);
     if (cur && cur.boundingBox === 'block') return { ok: false, reason: `BLOCKED:(${target.x},${target.y},${target.z}) 不是空气，是 ${cur.name}` };
     const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    const neighborFacts = faces.map((f) => {
+      const p = target.plus(f);
+      return `${p.x},${p.y},${p.z}=${b.blockAt(p)?.name ?? '未加载'}`;
+    });
     const refs = faces.map((f) => ({ f, ref: b.blockAt(target.plus(f)) }))
       .filter((x) => x.ref && x.ref.boundingBox === 'block')
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
-    if (!refs.length) return { ok: false, reason: `NO_REFERENCE:(${target.x},${target.y},${target.z}) 四周没有实心方块可贴面，倒不进去` };
+    if (!refs.length) {
+      const facts = `目标格六邻：${neighborFacts.join('、')}`;
+      return { ok: false, reason: `NO_REFERENCE:(${target.x},${target.y},${target.z}) 四周没有实心方块可贴面，倒不进去`, detail: `${facts}；倒流体需要紧贴实心块的空气格`, effectEvidence: { verified: true, changed: false, reasons: [facts] } };
+    }
     const before = this.invCountOf(item), beforeEmpty = this.invCountOf('bucket');
     // 水桶命中未含水的可含水块时，会填入参照块自身；这不是本次指定的相邻空气格。
-    const face = typeof b.world?.raycast === 'function' ? refs.find(({ f, ref }) => (item !== 'water_bucket' || ref.getProperties().waterlogged !== false) && this.canClickPlacementFace(ref, f.scaled(-1))) : undefined;
-    if (!face) return { ok: false, reason: 'NO_PLACEMENT_FACE:没有确认可点击的目标面，未发送使用动作', effectEvidence: { verified: true, changed: false, reasons: ['目标面被挡、太远、参照块会吸收水或射线不可用'] } };
+    // 保留“无 raycast 时拒绝”的旧契约：不能把看不见的面当成可点击。
+    const canCheck = typeof b.world?.raycast === 'function';
+    const checked = refs.map(({ f, ref }) => ({
+      f, ref,
+      clickable: canCheck && (item !== 'water_bucket' || ref.getProperties().waterlogged !== false) && this.canClickPlacementFace(ref, f.scaled(-1)),
+    }));
+    const face = checked.find((x) => x.clickable);
+    if (!face) {
+      const facts = checked
+        .map(({ f, ref, clickable }) => `参照 (${ref.position.x},${ref.position.y},${ref.position.z}) ${ref.name} 的 [${-f.x},${-f.y},${-f.z}] 面${clickable ? '可点击' : '不可点击（被挡/超距/含水）'}`)
+        .join('；');
+      return { ok: false, reason: 'NO_PLACEMENT_FACE:没有确认可点击的目标面，未发送使用动作', detail: `${facts}${canCheck ? '' : '；raycast 不可用，无法确认面'}；换到这些面的另一侧或靠近再倒`, effectEvidence: { verified: true, changed: false, reasons: [facts, ...(canCheck ? [] : ['raycast 不可用'])] } };
+    }
     const { f, ref } = face;
     const sneak = OPENS_ON_CLICK.test(ref.name);
     const epoch = this.actionEpoch;

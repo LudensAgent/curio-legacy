@@ -146,6 +146,31 @@ export function footSurfaceY(cell: Vec3Like, at: StateAt): number | null {
 /** 身体 AABB（0.6×1.8）：脚底在 footY，水平居中于整数列 (cx, cz)。 */
 export interface BodyBox { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number }
 
+/** 身体 AABB 下、顶面与当前脚高齐平的承重格；身体跨格时会包含相邻块边缘。 */
+export interface BodySupport { pos: Vec3Like; top: number; name: string }
+
+/**
+ * 扫描身体 0.6 宽 AABB 覆盖的所有列，返回顶面正好托住当前脚高的格子。
+ * 只报已加载/已观察的实心承重面；未加载的格子不算支撑，也不猜。
+ * 身体中心在一列、AABB 却压到相邻列时（窄柱/边缘），这里会同时报出相邻的支撑格。
+ */
+export function supportCellsUnderBody(pos: Vec3Like, at: StateAt): BodySupport[] {
+  const y = Math.floor(pos.y - 0.05);
+  const x0 = Math.floor(pos.x - 0.3), x1 = Math.floor(pos.x + 0.3);
+  const z0 = Math.floor(pos.z - 0.3), z1 = Math.floor(pos.z + 0.3);
+  const out: BodySupport[] = [];
+  for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) {
+    for (const cellY of [y, y - 1]) {
+      const state = at({ x, y: cellY, z });
+      if (!state) continue;
+      const top = supportTop(state.name, state.properties ?? {});
+      if (top === null || Math.abs(cellY + top - pos.y) > 0.01) continue;
+      out.push({ pos: { x, y: cellY, z }, top: cellY + top, name: state.name });
+    }
+  }
+  return out;
+}
+
 export function bodyBoxAt(footY: number, cx: number, cz: number): BodyBox {
   return { minX: cx + 0.2, maxX: cx + 0.8, minY: footY, maxY: footY + 1.8, minZ: cz + 0.2, maxZ: cz + 0.8 };
 }
