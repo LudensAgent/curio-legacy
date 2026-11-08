@@ -79,9 +79,21 @@ export const goNear: Skill<ApproachArgs> = {
       body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
       maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
     };
+    const targetStem = targetName?.replace(/^minecraft:/, '') ?? '';
+    const sameKind = (name: string) => {
+      const n = name.replace(/^minecraft:/, '');
+      if (targetStem === 'nether_portal') return n === 'nether_portal';
+      if (targetStem.endsWith('_bed')) return n.endsWith('_bed');
+      return n === targetStem;
+    };
+    const columnYs = [target.y - 1, target.y, target.y + 1, target.y + 2];
     const candidates = DIRS.flatMap(([dx, dz]) => Y_OFFSETS.map((dy) => ({
       x: target.x + dx, y: target.y + dy, z: target.z + dz,
-    })));
+    }))).filter((to) => !columnYs.some((y) => {
+      // 床的另一半、传送门同平面的另一格、双箱子的邻箱都不是“旁边的站立格”。
+      const name = ctx.adapter.blockAt({ x: to.x, y, z: to.z })?.replace(/^minecraft:/, '');
+      return name !== undefined && name !== null && sameKind(name);
+    }));
     const usable = candidates.flatMap((to) => {
       const strict = searchLandRoute(spatial.session.voxel, { ...request, to });
       const historical = strict.status === 'FOUND' || !args.historical

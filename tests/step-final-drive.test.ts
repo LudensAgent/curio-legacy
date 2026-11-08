@@ -72,7 +72,7 @@ function physicsBot(world: ReturnType<typeof stepWorld>, startFootY: number) {
     inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
     setControlState(name: string, value: boolean) { control[name] = value; },
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
-    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
+    async look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
     pathfinder: { goto: async () => {}, setGoal() {}, stop() {}, setMovements() {}, isMoving: () => false, isBuilding: () => false },
   });
   const physics = Physics(data, world);
@@ -261,6 +261,51 @@ test('显式相邻一步绕过 pathfinder：NoPath 时仍由身体控制完成',
   assert.equal(calls, 0, '相邻一步不应调用整段 pathfinder');
   assert.equal(Math.floor(bot.entity.position.z), -1);
   assert.ok(Math.abs(bot.entity.position.y - 63.9375) < 0.02);
+});
+
+test('相邻一步前，身体偏心时先潜行归位到格心，再迈步', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  bot.entity.position = new Vec3(0.8, 64, 0.5);
+  bot.blockAt = (pos: any) => world.getBlock(pos);
+  const a = adapter(bot);
+  const steadied: { x: number; z: number }[] = [];
+  const steady = (a as any).steady.bind(a);
+  (a as any).steady = async (cell: { x: number; z: number }, signal: AbortSignal, check: () => void) => {
+    steadied.push({ ...cell });
+    await steady(cell, signal, check);
+  };
+  await a.moveTo(
+    { kind: 'xyz', x: 0, y: 63.9375, z: -1 },
+    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false, adjacentStep: true },
+  );
+  assert.deepEqual(steadied, [{ x: 0, z: 0 }], '偏心 x=0.8 先归位到当前格心');
+  assert.equal(Math.floor(bot.entity.position.x), 0);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+  assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.02);
+});
+
+test('相邻一步向上整块高度差会起跳，而不只是平走', async (t) => {
+  const world = {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const solid = p.y <= 63 || (p.x === 0 && p.y === 64 && p.z === -1);
+      const block = Block.fromStateId(solid ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  bot.blockAt = (pos: any) => world.getBlock(pos);
+  const a = adapter(bot);
+  await a.moveTo(
+    { kind: 'xyz', x: 0, y: 65, z: -1 },
+    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false, adjacentStep: true },
+  );
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+  assert.ok(Math.abs(bot.entity.position.y - 65) <= 0.02, `脚高 ${bot.entity.position.y}`);
 });
 
 test('寻路直接报 NoPath 时不启动前推', async (t) => {

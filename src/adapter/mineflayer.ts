@@ -1577,6 +1577,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
     if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return 'blocked';
+    if (Date.now() >= deadline) return 'timeout';
+    // 身体中心偏离格心超过 0.2 时，0.6 宽的身体已经压进相邻列；从偏心的实测位置
+    // 直接朝相邻格走，第一步可能被斜角方块挡住。先在原地潜行归位到脚下格心，
+    // 再执行这一步；不改目标、不换落点。
+    const signal = check.signal ?? new AbortController().signal;
+    const recentre = this.edgeSupport() ?? this.spanningCell();
+    if (recentre) {
+      await this.steady(recentre, signal, check);
+      check();
+    }
     const tx = Math.floor(target.x) + 0.5, tz = Math.floor(target.z) + 0.5;
     const fx = Math.floor(target.x), fz = Math.floor(target.z);
     const settled = () => {
@@ -1594,6 +1604,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p0.x), -(tz - p0.z)), 0, true); } catch { /* ignore */ } }
     b.clearControlStates();
     b.setControlState('forward', true);
+    // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
+    // 只在这段身体控制里补一次跳跃；目标/落点仍由调用方决定。
+    const needsJump = target.y > p0y + 0.6;
+    if (needsJump) b.setControlState('jump', true);
+    const jumpReleaseAt = Date.now() + 180;
     // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍（停稳系数 ≈ 1/(1-0.546) ≈ 2.2），
     // 空中摩擦约 0.91 倍（停稳系数 ≈ 1/(1-0.91) ≈ 11.1，见 prismarine-physics）。
     const GROUND_STOP = 1 / (1 - 0.546);
@@ -1607,6 +1622,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
       while (!settled() && Date.now() < deadline) {
         check();
+        if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
         const d = dist();
         const v = b.entity.velocity;
         const speed = v ? Math.hypot(v.x, v.z) : 0;
@@ -1619,7 +1635,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
       }
     } finally {
-      if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
+      if (ownsControls()) {
+        try { b.setControlState('forward', false); } catch { /* ignore */ }
+        try { b.setControlState('jump', false); } catch { /* ignore */ }
+      }
     }
     if (overshot) return 'overshot';
     // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住
