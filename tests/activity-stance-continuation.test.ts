@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { afterStep, createActivity, nextStep, rebindStanceTarget } from '../src/mind/activity.ts';
+import { afterStep, createActivity, nextStep, rebindStanceTarget, stanceReached } from '../src/mind/activity.ts';
 import { placeSupport } from '../src/skills/movement/index.ts';
 import type { SkillResult } from '../src/skills/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -65,4 +65,11 @@ test('rebindStanceTarget 只把落在本次支撑脚位上的相对移动改成�
   assert.equal(rebindStanceTarget({ at: [1, 0, 0], facing: 'E' }, gap), null);
   assert.equal(rebindStanceTarget({ at: [1, 0, 0] }, gap), null, '缺少参考朝向时不猜');
   assert.equal(rebindStanceTarget({ at: [1, 0, 0], facing: 'W' }, { ...gap, intendedStandTarget: undefined }), null);
+});
+
+test('边缘放置已把身体带到意图脚位时，后续相对移动视为已达成而不是再走一格', () => {
+  // 日志场景：放置前脚格 -493，边缘潜行后身体在 -493.06（脚格 -494），恰好就是支撑顶面脚位。
+  assert.equal(stanceReached({ x: -493.06, y: 79, z: -256.5 }, { x: -494, y: 79, z: -257 }), true);
+  assert.equal(stanceReached({ x: -492.36, y: 79, z: -256.5 }, { x: -494, y: 79, z: -257 }), false);
+  assert.equal(stanceReached({ x: -493.06, y: 79, z: -256.5 }, { x: -494, y: 79.5, z: -257 }), false, '脚高不符不算到达');
 });

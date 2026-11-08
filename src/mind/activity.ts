@@ -254,6 +254,12 @@ export function rebindStanceTarget(args: unknown, gap: NonNullable<Activity['sta
   return { xyz: [intended.x, intended.y, intended.z] as [number, number, number], facing: normalized.facing, from: anchored };
 }
 
+/** 身体是否已经站在给定脚位（脚格与脚高一致）。 */
+export function stanceReached(pos: { x: number; y: number; z: number }, intended: { x: number; y: number; z: number }): boolean {
+  const feet = feetCell(pos);
+  return feet.x === intended.x && feet.z === intended.z && Math.abs(pos.y - intended.y) <= 0.01;
+}
+
 /** 下一个动作；这一轮做完了就开始下一轮；都做完返回 null */
 export function nextStep(a: Activity): (Step & { id?: string }) | null {
   if (a.index >= a.steps.length) {
