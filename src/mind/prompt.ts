@@ -32,6 +32,8 @@ import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
 export { noteGoneSpots } from '../memory/recollection.ts';
 
+const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'walk_path']);
+
 export interface MindContext {
   tier: 'glance' | 'deliberate';
   reason: string;
@@ -109,7 +111,7 @@ export interface MindContext {
  */
 
 /** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'defend', 'gather', 'look', 'look_around', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
+export const COMMON_MOVES = ['navigate_to', 'move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'defend', 'gather', 'look', 'look_around', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
   'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'press_keys', 'build', 'inspect_block', 'interact_block', 'use_item', 'use_skill', 'merge_tools'];
 
 /**
@@ -226,7 +228,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
   ? `\n\n【技能书】每份一行：名字（自写＝你自己写的）［状态］一句用途。状态：文字＝只能读、不能 use_skill；可执行＝能调用（use_skill 或直接写成一步，自动/动作失败时先试/手动是触发方式）；候选可试＝use_skill trial:true 试用；不可执行、定义无效、候选不可用/未确认＝用 {"kind":"skill","name":"…"} 看原因。\n${skills.map((x) => `- ${brief ? x.replace(/］.*$/, '］') : x}`).join('\n')}` : '';
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
-const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；要真的走过去，用 plan_route 规划并按结果执行：memory 返回路点/过渡（walk 段可再 plan_route search 得 routeId 后 walk_path，或 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal 用对应现有动作或停下），spatial 返回的 steps 按步骤执行；带 historical 标记时是历史体素候选路线，当前可通行性未知，按现场事实逐步核实，失败再重新规划；search 才返回 routeId 交给 walk_path，而且 search 只走当前脚高、不处理换层（目标 y 不同时用 spatial 的 steps 或 move_step/assess_landings+descend_to）；plan_route 失败/gaps 时不要调用 walk_path。别自己算坐标；[前,上,右] 按指定 facing 换算。
+const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；要真的走过去：先 resolve_target/看清目的地站立格，优先用 navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]} 让宿主执行 3D 路线（不挖不放、无路/施工缺口会停）；也可以 plan_route 规划并按结果执行：memory 返回路点/过渡（walk 段可再 plan_route search 得 routeId 后 walk_path，或 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal 用对应现有动作或停下），spatial 返回的 steps 按步骤执行；带 historical 标记时是历史体素候选路线，当前可通行性未知，按现场事实逐步核实，失败再重新规划；search 才返回 routeId 交给 walk_path，而且 search 只走当前脚高、不处理换层（目标 y 不同时用 spatial 的 steps 或 move_step/assess_landings+descend_to）；plan_route 失败/gaps 时不要调用 walk_path。别自己算坐标；[前,上,右] 按指定 facing 换算。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one 垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -463,11 +465,17 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const revision = planRevisionHint(ctx);
   if (revision) out.push(revision);
-  // 同一动作在同一带反复失败：先想这一步怎么改，别整段推倒重来（卡住→整段重写的死循环）
-  const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
-  if (repeatFails.length) {
-    const f = repeatFails[0];
-    out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：先想这一步怎么改——换方向、垫方块、改用辅助或换个站位；不必把整段活推倒重来`);
+  // 同一位置连续移动/规划失败：不要再把整段活重复成 move_step/plan_route（卡住→整段重写的死循环）
+  const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
+  if (pathFails.length >= 3) {
+    const f = pathFails[0];
+    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。这段地形没有可执行的 walk/step/drop 路线；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标，或用 excavate_run/place_support/pillar_one 施工，或 assess_landings 后再 descend_to；由你决定。`);
+  } else {
+    const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
+    if (repeatFails.length) {
+      const f = repeatFails[0];
+      out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：先想这一步怎么改——换方向、垫方块、改用辅助或换个站位；不必把整段活推倒重来`);
+    }
   }
   const where = p.self.where?.kind;
   // 旧通道是历史记忆，不保证现在仍然可通。

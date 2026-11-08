@@ -118,6 +118,8 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   };
 }
 
+const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'walk_path']);
+
 export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
@@ -633,6 +635,19 @@ export class Mind {
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
+    // 同一站位附近已经确定性移动/规划失败过多次：这段活若仍然只有同类 path 动作，
+    // 先停下让心智选择施工、观察、换目标或下行，而不是把同一个死循环再跑一遍。
+    const localFails = this.localPathFailures(this.d.adapter.state());
+    if (localFails.length >= 3 && LOCAL_PATH.has(step.skill)) {
+      // 必须在本步之前已经做过观察/施工/下行等不同动作；把 look_around 放在 move_step
+      // 后面不算，否则同一段活仍会先把失败的移动重放一遍。
+      const before = this.activity.steps.slice(0, Math.max(0, this.activity.index - 1));
+      if (!before.some((candidate) => !LOCAL_PATH.has(candidate.skill))) {
+        const last = localFails[localFails.length - 1]!;
+        this.finishActivity('stuck', `同一位置附近已经 ${localFails.length} 次移动/规划失败（最近：${last.summary}）；这一步之前还没有观察、施工、换目标或下行。先重新决定，不要原样重试 move_step/plan_route/navigate_to`);
+        return;
+      }
+    }
     // 上一步移动未确认到达：本步校验后若为相对挖掘/放置，报告依赖缺口，不执行本步。
     const gap = this.activity.stanceGap;
     if (gap) {
@@ -925,6 +940,8 @@ export class Mind {
       this.sameFails.set(sig, { n: same ? prev!.n + 1 : 1, last: Date.now(), code: String(result.failureCode ?? ''), why, summary: clipFeedback(result.summary, 200) });
     } else if (result.status === 'succeeded') {
       this.sameFails.delete(exactSig(step));
+      // 成功走出一步就是新的局部局面；过去的移动/规划失败不再作为“禁止再走”的依据。
+      if (LOCAL_PATH.has(step.skill)) this.recentActionFailures = this.recentActionFailures.filter((f) => !LOCAL_PATH.has(f.step.skill));
       if (result.caveat) {
         const st = this.d.adapter.state();
         this.recentActionCaveats.push({ step: structuredClone(step), caveat: result.caveat, pos: { ...st.pos }, worldId: st.worldId, sessionId: st.sessionId, dim: st.dim, at: Date.now() });
@@ -1027,6 +1044,17 @@ export class Mind {
     this.d.bus.publish('body_adapt', 'P3', `${why}，没有别的学会的做法，交给心智`, { planId: a.id, skill: name });
     this.finishActivity('stuck', `${failure.skill} 没成：${clipFeedback(String(failure.summary ?? ''), 200)}；${why}：${clipFeedback(result.summary, 200)}`);
     return true;
+  }
+
+  /** 同一站位附近、近期确定性移动/规划失败；用来阻止把整段活重复成同一种 path 动作。 */
+  private localPathFailures(state: AgentState) {
+    const now = Date.now();
+    return this.recentActionFailures.filter((f) =>
+      f.worldId === state.worldId && f.sessionId === state.sessionId && f.dim === state.dim
+      && now - f.at < 2 * 60_000
+      && Math.hypot(f.pos.x - state.pos.x, f.pos.y - state.pos.y, f.pos.z - state.pos.z) <= 2
+      && LOCAL_PATH.has(f.step.skill)
+      && ['BAD_ARGS', 'PATH_NOT_FOUND', 'EFFECT_NOT_CONFIRMED', 'NOT_FOUND'].includes(String(f.code)));
   }
 
   private pruneFailures() {
