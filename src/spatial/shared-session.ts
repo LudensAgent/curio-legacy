@@ -64,6 +64,17 @@ const MAX_FRAGMENT_LINKS = 16_384;
 /** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
 const MAX_WALK_TOPOLOGY_NODES = 8;
 const MAX_WALK_TOPOLOGY_EDGES = 8;
+/** 有界开挖最多 8 步（最多 9 节点/8 边）；给 dug 路线留出独立上限。 */
+const MAX_ROUTE_TOPOLOGY_NODES = 16;
+const MAX_ROUTE_TOPOLOGY_EDGES = 16;
+
+/** 已确认 corridor 写入的拓扑参数：walk 与 excavate 共用同一套历史/证据规则。 */
+interface CorridorWriteOptions {
+  topologyNamespace: string;
+  edgeSource: string;
+  maxTopologyNodes: number;
+  maxTopologyEdges: number;
+}
 
 /** 宿主侧待加载原始证据的硬上限；超出时保留时间/数量并显式报告，不静默覆盖。 */
 export const MAX_PENDING_OBSERVATIONS = 256;
@@ -194,7 +205,8 @@ export interface WalkCorridorSegment {
   observedAt: number | null;
   source: string;
   executionId: string;
-  mode: 'walk';
+  /** 实测移动方式；缺省表示只记录几何，不猜移动模式。 */
+  mode?: TraversalEvidence['mode'];
 }
 
 /** walk_path 已确认通道的写入请求；只有实测确认的段与终点允许进入。 */
@@ -492,7 +504,7 @@ function walkConnectionType(from: Vec3Like, to: Vec3Like): ConnectionType {
  * 用实测端点的 floor 格，重走可复用同一批 id。只使用实测 from/to 与真实
  * traversal id；不生成反向边，也不补计划点。
  */
-function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[]) {
+function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[], namespace = 'walk') {
   const points = [{ ...segments[0]!.from }, ...segments.map((segment) => ({ ...segment.to }))];
   const types = segments.map((segment) => walkConnectionType(segment.from, segment.to));
   const headings = segments.map((_, i) => {
@@ -505,7 +517,7 @@ function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[])
   const nodes = points.map((point, index) => {
     const cell = { x: Math.floor(point.x), y: Math.floor(point.y), z: Math.floor(point.z) };
     return {
-      id: `walk:${dim}:${cell.x},${cell.y},${cell.z}`,
+      id: `${namespace}:${dim}:${cell.x},${cell.y},${cell.z}`,
       pos: { ...point },
       kind: (index === 0
         ? 'entrance'
@@ -525,7 +537,7 @@ function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[])
     const from = nodes[i]!;
     const to = nodes[i + 1]!;
     const type = types[i]!;
-    const id = `walk:${dim}:${from.id}->${to.id}:${type}`;
+    const id = `${namespace}:${dim}:${from.id}->${to.id}:${type}`;
     const modes: MoveMode[] = type === 'DROP' ? ['drop'] : type === 'CLIMB' ? ['climb'] : ['walk'];
     const existing = byId.get(id);
     if (existing !== undefined) existing.evidenceIds.push(segment.id);
@@ -907,13 +919,32 @@ export class SharedSpatialSession {
   }
 
   /**
-   * walk_path 的已确认通道证据：先保存历史几何并逐确认段写实测 traversal/站位，
-   * 再在历史前缀之上写无语义路由节点与有向边。容量在历史写入后、拓扑写入前检查：
-   * 超限时保留 fragment/traversal 并跳过拓扑。拓扑失败也保留历史前缀，且已写入的
-   * 拓扑节点/边可能保留（前缀语义）。空段只保存 fragment、不写拓扑。不把未确认段、
-   * 计划坐标或时间接近补成亲历证据；记忆失败不改身体结果。
+   * 已确认通道证据：先保存历史几何并逐确认段写实测 traversal/站位，再在历史前缀
+   * 之上写无语义路由节点与有向边。容量在历史写入后、拓扑写入前检查：超限时保留
+   * fragment/traversal 并跳过拓扑。拓扑失败也保留历史前缀，且已写入的拓扑节点/边
+   * 可能保留（前缀语义）。空段只保存 fragment、不写拓扑。不把未确认段、计划坐标
+   * 或时间接近补成亲历证据；记忆失败不改身体结果。
    */
   recordWalkCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
+    return this.recordCorridor(input, {
+      topologyNamespace: 'walk',
+      edgeSource: 'confirmed_walk_path',
+      maxTopologyNodes: MAX_WALK_TOPOLOGY_NODES,
+      maxTopologyEdges: MAX_WALK_TOPOLOGY_EDGES,
+    });
+  }
+
+  /** excavate_run 的已确认路线：与 walk 共用写入规则，但用 dug 命名空间/来源和独立上限。 */
+  recordRouteCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
+    return this.recordCorridor(input, {
+      topologyNamespace: 'dug',
+      edgeSource: 'confirmed_excavate_run',
+      maxTopologyNodes: MAX_ROUTE_TOPOLOGY_NODES,
+      maxTopologyEdges: MAX_ROUTE_TOPOLOGY_EDGES,
+    });
+  }
+
+  private recordCorridor(input: WalkCorridorEvidence, opts: CorridorWriteOptions): WalkMemoryOutcome {
     const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
     // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
     // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
@@ -951,13 +982,13 @@ export class SharedSpatialSession {
       if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
     }
 
-    const topology = input.segments.length === 0 ? null : planWalkTopology(input.fragment.dim, input.segments);
-    if (topology !== null && (topology.nodes.length > MAX_WALK_TOPOLOGY_NODES || topology.edges.length > MAX_WALK_TOPOLOGY_EDGES)) {
+    const topology = input.segments.length === 0 ? null : planWalkTopology(input.fragment.dim, input.segments, opts.topologyNamespace);
+    if (topology !== null && (topology.nodes.length > opts.maxTopologyNodes || topology.edges.length > opts.maxTopologyEdges)) {
       return {
         status: 'failed', stage: 'capacity',
         message: `history written (fragment + ${base.traversalIds.length} traversal(s)); topology skipped: `
           + `confirmed corridor needs ${topology.nodes.length} node(s)/${topology.edges.length} edge(s), `
-          + `host cap ${MAX_WALK_TOPOLOGY_NODES}/${MAX_WALK_TOPOLOGY_EDGES}`,
+          + `host cap ${opts.maxTopologyNodes}/${opts.maxTopologyEdges}`,
         ...base,
       };
     }
@@ -989,7 +1020,7 @@ export class SharedSpatialSession {
           }
           movedNodeIds.add(node.id);
         }
-        const label = `walk:${input.fragment.id}`;
+        const label = `${opts.topologyNamespace}:${input.fragment.id}`;
         // 重走时先去掉本次将要重建的边，才能把节点位置校准到本次实测端点；
         // 库要求 evidence 端点与节点位置逐值相等，位置漂移不能让旧端点继续冒充本次证据。
         for (const edge of topology.edges) {
@@ -1009,7 +1040,7 @@ export class SharedSpatialSession {
           this.session.topology.saveEdge({
             id: edge.id, from: edge.from, to: edge.to, type: edge.type,
             basis: 'traversed', evidenceIds: edge.evidenceIds,
-            fragmentId: input.fragment.id, source: 'confirmed_walk_path',
+            fragmentId: input.fragment.id, source: opts.edgeSource,
             directed: true, modes: edge.modes,
           });
         }

@@ -281,12 +281,51 @@ test('excavate_run 每个复核为空气的格都标记', async () => {
     const result = await excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 1 });
     assert.equal(result.status, 'succeeded', result.summary);
     assert.ok(w.digs.length > 0, 'stairs 应至少挖空一格');
-    // 标记集合必须正好是每次 dig 后复核为空气的格，不含站位或相邻格。
+    // modified 集合必须正好是每次 dig 后复核为空气的格；落点另记 traversed，不混进 modified 断言。
     assert.deepEqual(
-      changedCells(spatial).sort(),
+      changedCells(spatial).filter((cell) => cell.includes(':m')).map((cell) => `${cell.split(':')[0]}:m`).sort(),
       w.digs.map((p) => `${p.x},${p.y},${p.z}:m`).sort(),
       '标记的格必须正是实际挖空并复核为空气的格',
     );
+    // 已确认路线同时写成 dug fragment + traversal + 拓扑边，供查询/规划复用。
+    const dug = spatial.session.history.fragments({ dim: DIM, limit: 100 }).items.find((fragment) => fragment.id.startsWith(`dug:${ACTION}:`));
+    assert.ok(dug, 'excavate_run 应写入 dug fragment');
+    assert.equal(dug.kind, 'dug');
+    assert.equal(dug.geometrySource, 'traversal');
+    assert.equal(dug.deepestY, Math.min(...dug.polyline.map((point) => point.y)));
+    assert.equal(dug.links?.length, 1, '每个确认段写一条真实 links');
+    assert.equal((dug.metadata as { curio?: { type?: string } } | undefined)?.curio?.type, 'route');
+    const traversals = spatial.session.history.traversals({ fragmentId: dug.id, limit: 100 });
+    assert.equal(traversals.items.length, 1, '每个确认段写一条 traversal');
+    const edges = spatial.session.topology.edges({ dim: DIM, limit: 100 });
+    assert.ok(edges.items.some((edge) => edge.source === 'confirmed_excavate_run' && edge.fragmentId === dug.id), '确认路线写拓扑边');
+    assert.equal((result.data?.routeMemory as { status?: string } | undefined)?.status, 'written');
+  } finally {
+    await closeSession(spatial, dir);
+  }
+});
+
+test('excavate_run 中途失败：只记录已确认落地的前缀', async () => {
+  const { spatial, dir } = await openSession();
+  try {
+    const w = new (class extends FakeAdapter {
+      moves = 0;
+      override async moveTo(target: Parameters<FakeAdapter['moveTo']>[0], options: Parameters<FakeAdapter['moveTo']>[1]) {
+        this.moves += 1;
+        if (this.moves === 2) throw new Error('simulated move failure');
+        return super.moveTo(target, options);
+      }
+    })();
+    Object.assign(w, { pos: { x: 0.5, y: 64, z: 0.5 }, worldId: WORLD, sessionId: SESSION, dim: DIM });
+    w.inv.set('iron_pickaxe', 1);
+    const ctx = { ...makeCtx(w, { deadlineMs: 30000 }), spatial, taskId: 'partial-task' };
+    const result = await excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 3 });
+    assert.equal(result.status, 'failed', result.summary);
+    const dug = spatial.session.history.fragments({ dim: DIM, limit: 100 }).items.find((fragment) => fragment.id.startsWith('dug:partial-task:'));
+    assert.ok(dug, '已确认前缀仍要写入');
+    assert.equal(dug.links?.length, 1, '只记录第一步确认落地');
+    assert.equal(spatial.session.history.traversals({ fragmentId: dug.id, limit: 100 }).items.length, 1);
+    assert.equal((result.data?.routeMemory as { status?: string } | undefined)?.status, 'written');
   } finally {
     await closeSession(spatial, dir);
   }

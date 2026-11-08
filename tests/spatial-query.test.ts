@@ -525,7 +525,8 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(host.owner, 'host_composed');
     assert.equal(host.contract, 'memory-host-contract/1');
     assert.equal(rec(host.memory).checkpoint, true);
-    assert.equal(rec(host.memory).markTraversed, false);
+    assert.equal(rec(host.memory).markTraversed, true);
+    assert.equal(rec(host.memory).markModified, true);
     assert.equal(rec(host.memory).saveFragment, true);
     assert.equal(rec(host.query).containerContents, false);
     assert.equal(rec(host.plan).walkAuto, true);
