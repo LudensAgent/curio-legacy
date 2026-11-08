@@ -38,11 +38,14 @@ export function absValue(v: unknown): Vec3Like | null {
 
 export function after(ctx: SkillCtx, facing: Facing | null, target?: Vec3Like) {
   const s = ctx.adapter.state();
+  // 局部图和 around 用同一位置、同一触觉事实：身体压着的门/水格必须出现在局部图里，
+  // 不能一份摘要说“在门里”、另一份把身体格写成 null。
+  const around = surroundings(ctx.adapter, s.pos);
   return {
     position: { ...s.pos },
     ...(target ? { targetCell: { ...target } } : {}),
-    ...(facing !== null ? { local: localMap(ctx.adapter, s.pos, facing, ctx.senses.observeBlocks?.bind(ctx.senses)) } : {}),
-    around: surroundings(ctx.adapter).text,
+    ...(facing !== null ? { local: localMap(ctx.adapter, s.pos, facing, ctx.senses.observeBlocks?.bind(ctx.senses), undefined, { feet: around.feet.block, head: around.head.block }) } : {}),
+    around: around.text,
   };
 }
 
