@@ -14,10 +14,12 @@ import {
 } from 'curio-minecraft-3d-memory';
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkCollisionProvider } from '../../adapter/walk-route.ts';
+import { walkLandRules } from '../../adapter/land-rules.ts';
+import { searchLandRoute, type LandSearchResult } from '../../spatial/land-search.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 
 type Scope = { worldId: string; dim: string; sessionId: string };
-type RouteSource = 'auto' | 'search' | 'memory';
+type RouteSource = 'auto' | 'search' | 'memory' | 'spatial';
 type PlanArgs = {
   to: Vec3Like;
   mode: 'walk';
@@ -283,15 +285,66 @@ function memoryRoute(spatial: NonNullable<SkillCtx['spatial']>, dim: string, fro
   };
 }
 
+const facingOf = (from: Vec3Like, to: Vec3Like): 'N' | 'E' | 'S' | 'W' => {
+  const dx = to.x - from.x, dz = to.z - from.z;
+  if (Math.abs(dx) >= Math.abs(dz)) return dx >= 0 ? 'E' : 'W';
+  return dz >= 0 ? 'S' : 'N';
+};
+
+/** 3D 搜索结果只翻译成现有动作：walk/step/drop=1 → move_step，drop>1 → descend_to。 */
+export function landSearchSteps(result: LandSearchResult) {
+  return result.transitions.map((transition) => {
+    // L1 move_step 的绝对 xyz 是“方块格”坐标；descend_to 的 target 也会规整到格心。
+    const fromCell = { x: Math.floor(transition.from.x), y: transition.from.y, z: Math.floor(transition.from.z) };
+    const toCell = { x: Math.floor(transition.to.x), y: transition.to.y, z: Math.floor(transition.to.z) };
+    return transition.kind === 'drop' && transition.drop > 1
+      ? { skill: 'descend_to', args: { target: { x: toCell.x, y: toCell.y, z: toCell.z } } }
+      : {
+          skill: 'move_step',
+          args: { xyz: [toCell.x, toCell.y, toCell.z], facing: facingOf(fromCell, toCell) },
+        };
+  });
+}
+
+function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal) {
+  const result = searchLandRoute(spatial.session.voxel, {
+    worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
+    body: { feet: { ...state.pos }, width: BODY.width, height: BODY.height, pose: BODY.pose },
+    to,
+    maxDrop: 4,
+    rules: walkLandRules,
+    signal,
+  });
+  const steps = result.status === 'FOUND' ? landSearchSteps(result) : [];
+  const counts = result.transitions.reduce<Record<string, number>>((all, transition) => ({ ...all, [transition.kind]: (all[transition.kind] ?? 0) + 1 }), {});
+  const detail = Object.entries(counts).map(([kind, count]) => `${kind}×${count}`).join('、');
+  const stepCounts = steps.reduce<Record<string, number>>((all, step) => ({ ...all, [step.skill]: (all[step.skill] ?? 0) + 1 }), {});
+  const stepDetail = Object.entries(stepCounts).map(([skill, count]) => `${skill}×${count}`).join('、');
+  return {
+    result,
+    steps,
+    summary: result.status === 'FOUND'
+      ? `空间 3D 路线 ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。只读规划，不执行；drop>1 的 descend_to 仍要求当前可见落点`
+      : `空间 3D 搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实）`,
+    facts: {
+      source: 'spatial', backend: 'spatial_voxel_search',
+      assurance: result.assurance, executable: false,
+      points: result.points, transitions: result.transitions, steps: result.status === 'FOUND' ? steps : [],
+      boundaries: result.boundaries, cost: result.cost, resolvedTarget: result.resolvedTarget, stats: result.stats,
+    },
+  };
+}
+
 /**
- * 只读路线规划：共享空间记忆的 topology 历史路线 + 库的已知空间搜索。
+ * 只读路线规划：共享空间记忆的 topology 历史路线 + 3D 体素搜索 + 库的已知空间搜索。
  * 不移动、不转头、不观察、不写库；不重新搜索、无 pathfinder 兜底、不自造 routeId。
- * `source:"memory"` 只查历史拓扑；`auto` 先查历史、没有可用路线再查同高空间搜索。
+ * `source:"memory"` 只查历史拓扑；`spatial` 在已观测 VoxelMap 上做 3D A*；
+ * `auto` 依次尝试 memory → spatial → 同高 search。
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划步行路线：共享空间记忆 topology 的历史路线（source:"memory"/"auto"），或库的同高空间搜索（source:"search"）。返回记忆路点/过渡或 routeId；不移动/观察/写库，不挖/放/搭柱。auto 先记忆后搜索；历史几何不代表当前可通。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。memory 返回记忆路点/过渡，不是执行授权；search 仍只支持同高单格。',
+  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。spatial 返回现有动作步骤（move_step/descend_to），不新增动作；不移动/观察/写库，不挖/放/搭柱。auto 依次 memory→spatial→search。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。memory 返回路点/过渡；spatial 返回 points/transitions 和现有动作 steps；都不是执行授权。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -305,7 +358,7 @@ export const planRoute: Skill<PlanArgs> = {
     const mode = a.mode ?? 'walk';
     if (mode !== 'walk') return { ok: false, error: 'plan_route 当前只支持 mode:"walk"；游泳用 swim_path，船用 boat_path' };
     const source = a.source ?? 'auto';
-    if (source !== 'auto' && source !== 'search' && source !== 'memory') return { ok: false, error: 'source 必须是 auto、memory 或 search' };
+    if (source !== 'auto' && source !== 'search' && source !== 'memory' && source !== 'spatial') return { ok: false, error: 'source 必须是 auto、memory、spatial 或 search' };
     const arrival = a.arrival ?? { kind: 'exact' };
     if (!arrival || typeof arrival !== 'object' || Array.isArray(arrival) || (arrival as Record<string, unknown>).kind !== 'exact') {
       return { ok: false, error: 'arrival 当前只支持 {"kind":"exact"}；要走到附近请指定具体目标格' };
@@ -356,6 +409,25 @@ export const planRoute: Skill<PlanArgs> = {
       return fail('NOT_CONNECTED', 'plan_route source:"memory" 需要共享空间会话的查询端口');
     }
 
+    // 已观测体素上的 3D 搜索：结果只翻译成现有 move_step/descend_to，
+    // 不新增动作，也不把步骤当执行授权。
+    let spatialGap: { summary: string; facts: Record<string, unknown> } | null = null;
+    if (args.source === 'spatial' || args.source === 'auto') {
+      if (!spatial.session?.voxel) {
+        if (args.source === 'spatial') return fail('NOT_CONNECTED', 'plan_route source:"spatial" 需要共享空间 VoxelMap');
+      } else {
+        const candidate = spatialRoute(spatial, state, stance, ctx.signal);
+        const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
+        if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
+        if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };
+        if (args.source === 'spatial') {
+          const code: FailureCode = candidate.result.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT' : candidate.result.status === 'UNKNOWN' ? 'NOT_FOUND' : 'PATH_NOT_FOUND';
+          return fail(code, `${candidate.summary}${cellNote}`, facts);
+        }
+        spatialGap = { summary: candidate.summary, facts };
+      }
+    }
+
     const search = new WalkRouteSearch(spatial.session.voxel, {
       now: Date.now,
       maxNodes: args.constraints?.maxNodes ?? SEARCH_DEFAULTS.maxNodes,
@@ -386,10 +458,15 @@ export const planRoute: Skill<PlanArgs> = {
     if (result.plan === undefined) {
       const problem: PlanProblem = result.problem ?? { kind: 'unavailable', detail: 'route planning returned neither a plan nor a problem' };
       const outcome = planProblemResult(problem, result.message, search);
-      return cell === undefined ? outcome : {
+      const annotated = cell === undefined ? outcome : {
         ...outcome,
         summary: `${outcome.summary}${cellNote}`,
         data: { ...(outcome.data ?? {}), targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance },
+      };
+      return spatialGap === null ? annotated : {
+        ...annotated,
+        summary: `${annotated.summary}；空间 3D：${spatialGap.summary}`,
+        data: { ...(annotated.data ?? {}), spatialGap: spatialGap.facts },
       };
     }
     const plan = result.plan;

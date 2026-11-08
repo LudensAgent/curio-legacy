@@ -105,7 +105,7 @@ test('plan_route 薄适配库 planRoute：库签发 routeId、保存完整计划
   assert.deepEqual(w.actions, [], '规划阶段不移动');
 });
 
-test('auto 没有记忆查询端口时回退 search', async (t) => {
+test('auto 没有记忆查询端口时使用 spatial 3D 搜索', async (t) => {
   const w = flatAdapter();
   const ctx = { ...makeCtx(w), spatial: fakeSpatial(flatMap((_x, y) => y === 63 ? 'stone' : 'air')) };
   t.after(() => ctx.memory.close());
@@ -113,9 +113,9 @@ test('auto 没有记忆查询端口时回退 search', async (t) => {
 
   const r = await planRoute.run(ctx, ask({ x: 1.5, y: 64, z: 0.5 }, 'auto'));
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.source, 'search');
-  assert.equal(r.data?.executable, true);
-  assert.deepEqual(r.data?.start, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(r.data?.source, 'spatial');
+  const steps = r.data?.steps as { skill: string }[];
+  assert.ok(steps.length > 0 && steps.every((step) => step.skill === 'move_step'));
 });
 
 test('source:"memory" 没有查询端口时明确失败，不伪造历史', async (t) => {
