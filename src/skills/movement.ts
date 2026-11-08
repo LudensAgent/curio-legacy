@@ -1,4 +1,5 @@
 import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
+import { facingOfYaw } from '../perception/local.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { DIRS } from '../perception/perception.ts';
@@ -67,7 +68,9 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       return { searched: views > 0, scanViews: views, turned: views > 0,
         ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
         alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
-        ...(eye ? { finalView: { yaw: eye.yaw, pitch: eye.pitch } } : {}),
+        // directionInspected 只说明扫过这个扇区；currentFacing 是扫描结束时身体的实际朝向。
+        // 扫视不等于转向完成，后续按世界方向移动要显式定向。
+        ...(eye ? { finalView: { yaw: eye.yaw, pitch: eye.pitch }, currentFacing: facingOfYaw(eye.yaw) } : {}),
         ...(hit ? { found: hit.what, dist: hit.dist, ...(hit.pos ? { foundPos: hit.pos } : {}), source: 'current_vision' } : {}) };
     };
     if (args.for) {
@@ -96,7 +99,8 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     const end = ctx.adapter.eye();
     if (end) { await ctx.adapter.look(end.yaw, -0.05); ctx.senses.refresh(); }
     if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}；旧记忆不算本次看见，视野外或遮挡后的情况仍未知`, facts(yaws.length));
-    return ok(args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈', facts(yaws.length));
+    const facingNote = end ? `（扫完身体朝向 ${facingOfYaw(end.yaw)}，扫视不等于转向）` : '';
+    return ok(args.direction ? `看了看 ${args.direction} 方向${facingNote}` : `环顾了一圈${facingNote}`, facts(yaws.length));
   },
 };
 

@@ -4,7 +4,7 @@ export type Condition =
   | { type: 'inventory_min'; item: string; count: number }
   | { type: 'location_near'; dimension: string; pos: Vec3Like; radius: number; landmarkId?: string }
   | { type: 'self_state'; field: 'held' | 'riding'; equals: string | null }
-  | { type: 'self_state'; field: 'inWater' | 'inLava' | 'onGround'; equals: boolean }
+  | { type: 'self_state'; field: 'inWater' | 'inLava' | 'onGround' | 'inPortal'; equals: boolean }
   /** 维度验收：“真的换到了另一维度”直接用 dim，而不是拿一个在本维度永远不成立的位置条件硬凑 */
   | { type: 'self_state'; field: 'dim'; equals: string }
   | { type: 'sky_visible'; equals: boolean }

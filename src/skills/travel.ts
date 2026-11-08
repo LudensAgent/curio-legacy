@@ -223,9 +223,18 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
       const waypointLabel = leftPortal === undefined ? `传送到达 ${destination.id}` : `传送到达 ${destination.id} 门外站位`;
       ctx.memory.addLandmark('waypoint', waypointLabel, to.dim, stand.pos, 3);
     }
-    const settleNote = leftPortal === undefined ? '' : leftPortal ? '；已离开门口' : '；到达后仍在门方块里';
+    // 离开门口以落点观测里的身体门接触状态为准；适配器的 leftPortal 只是执行回执，
+    // 两者不一致时如实并列，不把“已离开门口”当成确认事实。
+    const standBodyPortal = stand.bodyPortal ?? null;
+    const leftPortalConfirmed = leftPortal === undefined ? null : standBodyPortal === null;
+    const settleNote = leftPortal === undefined ? ''
+      : leftPortalConfirmed
+        ? '；已离开门口'
+        : leftPortal
+          ? `；适配器报告已离开门口，但落点观测仍显示身体在 ${standBodyPortal} 里`
+          : '；到达后仍在门方块里';
     const dwellNote = result.transition && result.transition.insideMs > 0 ? `；门内停留 ${(result.transition.insideMs / 1000).toFixed(1)}s 后切换` : '';
-    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, transition: result.transition, roundTripVerified });
+    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, standBodyPortal, leftPortalConfirmed, transition: result.transition, roundTripVerified });
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 

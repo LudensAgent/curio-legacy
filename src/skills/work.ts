@@ -294,7 +294,10 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
-            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}`, { searched, ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}) });
+            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}`, {
+              searched, coverage: { mode: 'seen_or_remembered', knownRadius: 256, unknownBeyond: true },
+              ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}),
+            });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);

@@ -44,8 +44,8 @@ const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(
 function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || depth > 4) return raw;
   const o = { ...raw } as Record<string, any>;
-  const aliases: Record<string, string> = { in_water: 'inWater', in_lava: 'inLava', on_ground: 'onGround', skyVisible: 'sky_visible' };
-  const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'dim', 'sky_visible', 'underground'];
+  const aliases: Record<string, string> = { in_water: 'inWater', in_lava: 'inLava', on_ground: 'onGround', bodyPortal: 'inPortal', body_portal: 'inPortal', body_in_portal: 'inPortal', in_portal: 'inPortal', skyVisible: 'sky_visible' };
+  const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'inPortal', 'dim', 'sky_visible', 'underground'];
   const fieldName = (field: unknown) => typeof field === 'string' ? aliases[field] ?? field : undefined;
   if (o.type === undefined) {
     if (Array.isArray(o.conditions)) o.type = o.any === true || o.mode === 'any' ? 'any_of' : 'all_of';
@@ -82,7 +82,7 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
     if (o.equals === undefined) o.equals = o.value ?? o.is ?? o[o.type];
   }
   if ((o.type === 'sky_visible' || o.type === 'underground'
-    || o.type === 'self_state' && ['inWater', 'inLava', 'onGround'].includes(o.field)) && ['true', 'false'].includes(o.equals)) o.equals = o.equals === 'true';
+    || o.type === 'self_state' && ['inWater', 'inLava', 'onGround', 'inPortal'].includes(o.field)) && ['true', 'false'].includes(o.equals)) o.equals = o.equals === 'true';
   if (o.type === 'inventory_full' && o.free_slots === undefined) o.free_slots = o.freeSlots ?? o.slots ?? o.count ?? 0;
   if (o.type === 'inventory_space_min' && o.free_slots === undefined) o.free_slots = o.freeSlots ?? o.slots ?? o.count;
   if ((o.type === 'all_of' || o.type === 'any_of') && Array.isArray(o.conditions)) o.conditions = o.conditions.map((c: unknown) => normalizeDoneWhen(c, depth + 1));

@@ -36,7 +36,7 @@ test('press_keys is available to plans and reports the observed outcome without 
   const valid = pressKeys.validate({ keys: { jump: true }, ms: 5000, guard: false }, adapter);
   assert.ok(valid.ok);
   const result = await pressKeys.run(makeCtx(adapter), valid.args);
-  assert.deepEqual(call, { keys: { jump: true }, ms: 5000, options: { guard: false } });
+  assert.deepEqual(call, { keys: { jump: true }, ms: 5000, options: { guard: false, allowPortal: false } });
   assert.equal(result.status, 'succeeded');
   assert.equal(result.data?.oxygen, 3);
   assert.equal(result.data?.inWater, true);
@@ -104,6 +104,20 @@ test('guard CLIFF without displacement reports the stop as a failure with facts'
   assert.match(result.summary, /move_step|descend_to/);
 });
 
+test('普通移动在传送门前停键：报告事实并指向 travel_portal', async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.onGround = true;
+  adapter.drive = async (): Promise<DriveResult> => ({ ok: false, reason: 'PORTAL_AHEAD', stopped: 'portal', moved: 0, ms: 500 });
+  const result = await pressKeys.run(ctx, { keys: { forward: true }, ms: 500, guard: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal(result.data?.stopped, 'portal');
+  assert.match(result.summary, /传送门/);
+  assert.match(result.summary, /travel_portal/);
+});
+
 test('a land jump is reported as airborne without inventing a water exit', async (t) => {
   const adapter = new TestWorld(), ctx = makeCtx(adapter);
   t.after(() => ctx.memory.close());
@@ -158,8 +172,8 @@ test('a learned combination can validate and execute the chosen key controls', a
   const result = await SKILLS[learned.name].run(ctx, {});
   assert.equal(result.status, 'succeeded');
   assert.deepEqual(calls, [
-    { keys: { jump: true }, ms: 2500, options: { guard: false } },
-    { keys: { forward: true }, ms: 100, options: { guard: true } },
+    { keys: { jump: true }, ms: 2500, options: { guard: false, allowPortal: false } },
+    { keys: { forward: true }, ms: 100, options: { guard: true, allowPortal: false } },
   ]);
   library.forget(learned.name, '测试结束');
   ctx.memory.close();
@@ -208,4 +222,47 @@ test('a learned macro runs swim_path surface then a dry-shore target with the va
     ctx.memory.close();
     t.mock.restoreAll();
   }
+});
+
+test('press_keys 回执带朝向、门接触和作用域事实；意外换维不冒充原方向探索成功', async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.yaw = -Math.PI / 2; // 面朝东
+  adapter.bodyPortal = 'nether_portal';
+  const yawBefore = adapter.yaw;
+  adapter.drive = async (keys, ms) => {
+    adapter.pos = { x: 1.7, y: 64, z: -1.5 };
+    adapter.yaw = -0.2696530531825392; // 偏北、略向东
+    adapter.sessionId = 'new-session';
+    adapter.dim = 'the_nether';
+    adapter.bodyPortal = null;
+    return { ok: true, ms, moved: 2 };
+  };
+  const v = pressKeys.validate({ keys: { forward: true, sprint: true }, ms: 800 }, adapter);
+  assert.ok(v.ok);
+  const result = await pressKeys.run(ctx, v.args);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.data?.yawBefore, yawBefore);
+  assert.equal(result.data?.facingBefore, 'E');
+  assert.equal(result.data?.facingAfter, 'N');
+  assert.equal(result.data?.bodyPortalBefore, 'nether_portal');
+  assert.equal(result.data?.bodyPortalAfter, null);
+  assert.deepEqual(result.data?.scopeBefore, { worldId: adapter.worldId, sessionId: 'fake-session', dim: 'overworld' });
+  assert.deepEqual(result.data?.scopeAfter, { worldId: adapter.worldId, sessionId: 'new-session', dim: 'the_nether' });
+  assert.equal(result.data?.scopeChanged, true);
+  assert.match(result.summary, /按键期间换了作用域/);
+  assert.match(result.summary, /不代表原方向探索成功/);
+  assert.match(result.summary, /身体朝向 N/);
+});
+
+test('allowPortal 是显式传送委托策略：默认停键，显式 true 才允许按进去', () => {
+  const adapter = new FakeAdapter();
+  const defaulted = pressKeys.validate({ keys: { forward: true }, ms: 500 }, adapter);
+  assert.ok(defaulted.ok);
+  assert.equal(defaulted.args.allowPortal, false, '普通移动默认不在传送门前继续按键');
+  const allowed = pressKeys.validate({ keys: { forward: true }, ms: 500, allowPortal: true }, adapter);
+  assert.ok(allowed.ok);
+  assert.equal(allowed.args.allowPortal, true);
+  assert.equal(pressKeys.validate({ keys: { forward: true }, ms: 500, allowPortal: 'no' }, adapter).ok, false);
 });

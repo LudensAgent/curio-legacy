@@ -6,6 +6,8 @@ import { WorldMemory } from '../src/memory/store.ts';
 const ctx = (m: WorldMemory, inventory: { name: string; count: number }[] = []) => ({
   adapter: { state: () => ({ inventory, pos: { x: 0.5, y: 64, z: 0.5 }, dim: 'overworld' }) },
   memory: m,
+  // find_item 现在会把附近未打开的容器说进摘要；纯记忆测试里没有可见方块。
+  senses: { refresh() {}, knownBlocks: () => [], observeBlocks: () => [] },
   signal: new AbortController().signal,
 });
 
@@ -24,6 +26,30 @@ test('find_item 只返回最近、其次数量最多的箱子，并给合计', a
   assert.deepEqual(d.chest.pos, { x: 2, y: 64, z: 1 });
   assert.equal(d.inChests, 109);
   assert.equal(d.total, 109);
+});
+
+test('find_item 没有打开记录时，列出看见的未打开容器和 target', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  const block = { name: 'chest', pos: { x: 2, y: 64, z: 0 }, dist: 2 };
+  const c = {
+    adapter: { state: () => ({ inventory: [], pos: { x: 0.5, y: 64, z: 0.5 }, dim: 'overworld', worldId: 'w' }) },
+    memory: m,
+    senses: {
+      refresh() {},
+      knownBlocks: () => [block],
+      observeBlocks: (positions: { x: number; y: number; z: number }[]) => positions.map((pos) => ({
+        name: 'chest', pos, properties: {}, worldId: 'w', sessionId: 's', dimension: 'overworld',
+        observationId: 1, observedAt: Date.now(), source: 'vision' as const,
+      })),
+    },
+    signal: new AbortController().signal,
+  };
+  const r = await findItem.run(c as any, { item: 'diamond' });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /附近有未打开的容器/);
+  assert.ok(r.summary.includes('target {"x":2,"y":64,"z":0}'), r.summary);
 });
 
 test('find_item 背包也计入总计，没有时给空', async (t) => {
