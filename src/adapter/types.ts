@@ -380,8 +380,13 @@ export interface DriveOptions {
   faceEntity?: number; facePoint?: Vec3Like;
   /** 默认 true：前面是岩浆/火、或者一脚下去会摔三格以上就停下（身体本能，不是打法） */
   guard?: boolean;
+  /**
+   * 是否允许走进传送门（显式委托策略）。默认 true：门会接住人并传送，不是地形危险；
+   * false 时把前方门方块当作停键条件。guard 不隐含“不会误入传送门”。
+   */
+  allowPortal?: boolean;
 }
-export interface DriveResult extends ActionResult { moved: number; ms: number; stopped?: 'lava' | 'cliff' | 'hurt_stop' }
+export interface DriveResult extends ActionResult { moved: number; ms: number; stopped?: 'lava' | 'cliff' | 'hurt_stop' | 'portal' }
 
 export interface GameAdapter {
   on(event: AdapterEvent, cb: (...args: any[]) => void): this;

@@ -211,6 +211,19 @@ function knownContainersHint(ctx: SkillCtx): string {
   return candidates.length ? `；记得的容器：${candidates.map((c) => `${c.label} ${c.location.text}`).join('、')}` : '';
 }
 
+/**
+ * 把容器候选写成可执行事实：位置、是否打开过、可直接复制的 target。
+ * 只陈述事实，不替 Agent 选容器。
+ */
+function containerFacts(candidates: ReturnType<typeof containerCandidates>, limit = 3): string {
+  return candidates.slice(0, limit).map((candidate) => {
+    const label = candidate.label && candidate.label !== candidate.location.text
+      ? `${String(candidate.label).slice(0, 24)} ` : '容器 ';
+    const target = candidate.target === undefined ? '' : `，target ${JSON.stringify(candidate.target)}`;
+    return `${label}${candidate.location.text}${target}（${candidate.contents.slice(0, 80)}）`;
+  }).join('；');
+}
+
 /** A historical area is a cue to look again, never a concealed exact interaction target. */
 async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
   const state = ctx.adapter.state();
@@ -271,7 +284,10 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
     return { ok: true, args: { items, ...(target !== undefined ? { target } : {}), ...(note ? { note } : {}) } };
   },
   async run(ctx, args) {
-    if (args.target === undefined) return fail('BAD_ARGS', `尚未指定存入哪只容器${knownContainersHint(ctx)}；选定并重新看见后，用 target 指定这一只存入`, { candidates: containerCandidates(ctx) });
+    if (args.target === undefined) {
+      const candidates = containerCandidates(ctx), facts = containerFacts(candidates);
+      return fail('BAD_ARGS', `尚未指定存入哪只容器${facts ? `；${facts}` : ''}；用 target 指定其中一只（坐标或地标 ID）再存`, { candidates });
+    }
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;
     const rememberedFree = selected.rememberedFree;
@@ -335,7 +351,8 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
     if (args.target === undefined) {
       const hints = ctx.memory.recallChests(args.item, { from: state.pos }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall, recall.dist) }));
       const hintText = hints.length ? `；${hints.map((h) => h.text).join('；')}` : '；不记得哪个箱子里有它';
-      return fail('BAD_ARGS', `尚未指定翻哪只容器（未自动搜索）${hintText}；选定并重新看见后，用 target 指定这一只查看或取物`, { candidates: containerCandidates(ctx), hints });
+      const candidates = containerCandidates(ctx), facts = containerFacts(candidates);
+      return fail('BAD_ARGS', `尚未指定翻哪只容器（未自动搜索）${hintText}${facts ? `；${facts}` : ''}；用 target 指定其中一只（坐标或地标 ID）再取物`, { candidates, hints });
     }
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;
@@ -384,7 +401,15 @@ export const findItem: Skill<{ item: string }> = {
     const total = backpack + inChests;
     // 只返回最近的那个箱子，距离相同再挑数量最多的
     const nearest = recalls.slice().sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity) || b.count - a.count)[0];
-    if (!backpack && !nearest) return ok(`背包和记得的箱子里都没有 ${args.item}；没打开过的箱子内容未知`, { item: args.item, backpack: 0, chest: null, total: 0 });
+    if (!backpack && !nearest) {
+      // 只查“打开过的记录”不等于箱子是空的：把附近未打开的容器说清楚，
+      // 否则模型会把“不记得”误读成“箱子里没有”，转头去别处找。
+      const unopened = containerCandidates(ctx).filter((candidate) => candidate.contents.includes('未打开过')).slice(0, 3);
+      const facts = containerFacts(unopened);
+      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录的箱子）${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
+        item: args.item, backpack: 0, chest: null, total: 0, ...(unopened.length ? { unopened } : {}),
+      });
+    }
     const chest = nearest ? { pos: nearest.chest.pos, count: nearest.count, dist: nearest.dist ?? Math.round(Math.hypot(nearest.chest.pos.x - s.pos.x, nearest.chest.pos.z - s.pos.z)), note: nearest.chest.note, observedAt: nearest.observedAt } : null;
     const chestText = chest ? `${chest.note ? `${chest.note}的箱子` : '箱子'} (${chest.pos.x},${chest.pos.y},${chest.pos.z}) 有 ${args.item}×${chest.count}（${chest.dist} 格外）` : '';
     return ok(`${args.item}：背包×${backpack}${chestText ? `；最近的${chestText}` : ''}；箱子里合计×${inChests}、总计×${total}`, { item: args.item, backpack, chest, inChests, total });
@@ -512,17 +537,25 @@ export const farm: Skill<{ crop: string; size: number }> = {
 };
 
 // ===================================================================== 远征
-export const expedition: Skill<{ direction: string; distance: number; torches?: boolean; eat_below?: number }> = {
+/** 远征找方块时沿路线两侧检查的范围（格）；结果只覆盖这个范围，不据此断言世界其它地方没有。 */
+const EXPEDITION_SCAN_RADIUS = 32;
+export const expedition: Skill<{ direction: string; distance: number; find?: string; torches?: boolean; eat_below?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 plan_route → walk_path 沿路标走',
-  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；可选 find 指定要找的方块，边走边查路线两侧约 32 格，找到就停并报坐标，走完没看到只说明这段路线附近没有（更远处/遮挡后未知，不是“世界上没有”）。路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 plan_route → walk_path 沿路标走',
+  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "find"?: "要沿路找的方块（如 log、oak_log、crimson_stem）", "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
   timeoutMs: 900000,
   movement: true,
-  validate(raw) {
+  validate(raw, adapter) {
     const a = obj(raw);
     const d = String(a.direction ?? '').toUpperCase();
     if (!DIRS[d]) return { ok: false, error: `direction 必须是 ${Object.keys(DIRS).join('/')}` };
-    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240), ...(a.torches === true ? { torches: true } : {}), ...(a.eat_below !== undefined ? { eat_below: clampInt(a.eat_below, 2, 19, 12) } : {}) } };
+    let find: string | undefined;
+    if (a.find !== undefined) {
+      const wanted = String(a.find).trim();
+      if (!wanted || !adapter.resolveBlockNames(wanted).length) return { ok: false, error: `未知方块：${wanted || '（空）'}` };
+      find = wanted;
+    }
+    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240), ...(find ? { find } : {}), ...(a.torches === true ? { torches: true } : {}), ...(a.eat_below !== undefined ? { eat_below: clampInt(a.eat_below, 2, 19, 12) } : {}) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
@@ -531,23 +564,52 @@ export const expedition: Skill<{ direction: string; distance: number; torches?: 
     if (food < 3) return fail('MISSING_MATERIALS', `食物只有 ${food} 个，远征至少带 3 个熟食`);
     const [dx, dz] = DIRS[args.direction];
     const start = s0.pos;
-    let travelled = 0, waypoints = 0, failures = 0;
+    const targets = args.find ? [...new Set(adapter.resolveBlockNames(args.find))] : [];
+    // 搜索覆盖度随结果一起返回：只说明“这段路线两侧扫过”，不能升级成“世界其它地方没有”。
+    const coverage = {
+      target: args.find ?? null, dimension: s0.dim, start: { ...s0.pos }, end: { ...s0.pos },
+      travelled: 0, scanRadius: targets.length ? EXPEDITION_SCAN_RADIUS : 0,
+      scans: 0, mode: 'known_sightings_along_route' as const, unknownBeyond: true as const,
+      found: null as null | { name: string; pos: Vec3Like; dist: number },
+    };
+    const scan = () => {
+      if (!targets.length) return null;
+      ctx.senses.refresh();
+      coverage.scans += 1;
+      return ctx.senses.knownBlocks(targets, EXPEDITION_SCAN_RADIUS)[0] ?? null;
+    };
+    const discover = (hit: { name: string; pos: Vec3Like; dist: number }) => {
+      coverage.found = { name: hit.name, pos: { ...hit.pos }, dist: hit.dist };
+      return ok(`远征向 ${args.direction} 走了 ${coverage.travelled} 格，在路线附近发现 ${hit.name} 于 (${hit.pos.x},${hit.pos.y},${hit.pos.z})（约 ${hit.dist} 格外）；已停在发现处，去不去挖由你决定`, {
+        travelled: coverage.travelled, found: { ...coverage.found }, coverage, direction: args.direction,
+      });
+    };
+    if (targets.length) {
+      const atStart = scan();
+      if (atStart) return discover(atStart);
+    }
+    let travelled = 0, waypoints = 0, failures = 0, blocked = false;
     const chunks0 = memory.visitedChunkCount;
     while (travelled < args.distance && Date.now() < ctx.deadline - 5000) {
-      const hop = Math.min(48, args.distance - travelled);
+      // 有目标时缩短单跳，保证每次扫描的 32 格范围有重叠，不会从两跳之间漏过去。
+      const hop = Math.min(targets.length ? 24 : 48, args.distance - travelled);
       const p = adapter.state().pos;
       try {
         await adapter.moveTo({ kind: 'xz', x: p.x + dx * hop, z: p.z + dz * hop, range: 6 }, { signal, timeoutMs: 60000 });
         failures = 0;
       } catch (e) {
         if (isAbort(e)) throw e;
-        if (++failures >= 3) break;
+        if (++failures >= 3) { blocked = true; break; }
         // 绕一下：斜着走一段
         const side = failures % 2 ? 1 : -1;
         await adapter.moveTo({ kind: 'xz', x: p.x - dz * side * 16, z: p.z + dx * side * 16, range: 4 }, { signal, timeoutMs: 20000 }).catch((er) => { if (isAbort(er)) throw er; });
       }
       const now = adapter.state();
       travelled = Math.round(Math.hypot(now.pos.x - start.x, now.pos.z - start.z));
+      coverage.travelled = travelled;
+      coverage.end = { ...now.pos };
+      const hit = scan();
+      if (hit) return discover(hit);
       if (travelled >= (waypoints + 1) * 64) {
         waypoints++;
         memory.addLandmark('waypoint', `路标 ${args.direction}-${waypoints}`, now.dim, now.pos, 8);
@@ -557,11 +619,16 @@ export const expedition: Skill<{ direction: string; distance: number; torches?: 
         }
       }
       if (args.eat_below && now.food <= args.eat_below && adapter.hasFood()) await adapter.eat(signal).catch((er) => { if (isAbort(er)) throw er; });
-      if (now.hp <= 8) break;
+      if (now.hp <= 8) { blocked = true; break; }
       ctx.progress(travelled / args.distance, `远征 ${args.direction}：${travelled}/${args.distance} 格，路标 ${waypoints}`);
       await sleep(50, signal);
     }
     const newChunks = memory.visitedChunkCount - chunks0;
+    if (targets.length) {
+      const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${blocked ? '（中途受阻）' : ''}`;
+      const data = { travelled, found: null, coverage, direction: args.direction, ...(blocked ? { blocked: true } : {}) };
+      return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', msg, data);
+    }
     const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标`;
     return travelled >= args.distance * 0.5 ? ok(msg, { travelled }) : fail('PATH_NOT_FOUND', `${msg}（中途受阻）`);
   },

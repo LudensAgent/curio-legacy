@@ -1,4 +1,5 @@
 import { DIRS } from '../perception/perception.ts';
+import { facingOfYaw } from '../perception/local.ts';
 import { isTreeSaplingItem } from '../perception/surroundings.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
@@ -733,10 +734,10 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
   },
 };
 
-export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> = {
+export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean; allowPortal?: boolean }> = {
   name: 'press_keys',
-  description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护。guard 提前停键时如实报告已经走出的位移和停因（不是“没走成”）：崖边会提示接着用 move_step（一格）或 assess_landings+descend_to（更大落差）。不自动选目标、不自动绕路或确认换气。',
-  argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）}；方向键相对当前朝向，时间到后松键',
+  description: '按住所选方向、跳跃、潜行等按键 50–10000 毫秒后松开；水中按 jump 可上浮。方向键相对松键前的身体朝向。默认移动时检测前方岩浆、火及地面高处边缘并停止，guard:false 关闭此保护。普通移动默认在前方是传送门时停键，避免按方向键意外换维度；确实要走进门用 travel_portal，或显式 allowPortal:true。guard 提前停键时如实报告已经走出的位移和停因（不是“没走成”）。回执带按键前后的身体朝向、门接触状态和作用域；“按键完成”只说明输入执行过，不代表朝某个世界方向探索成功。不自动选目标、不自动绕路或确认换气。',
+  argsDoc: '{"keys":{"forward"?:boolean,"back"?:boolean,"left"?:boolean,"right"?:boolean,"jump"?:boolean（水中上浮）,"sprint"?:boolean,"sneak"?:boolean},"ms":50-10000,"guard"?:boolean（false 关闭地形保护）,"allowPortal"?:boolean（默认 false：前方是传送门就停键；显式 true 才允许按进去）}；方向键相对当前朝向，时间到后松键',
   timeoutMs: 12000,
   movement: true,
   validate(raw) {
@@ -750,28 +751,47 @@ export const pressKeys: Skill<{ keys: DriveKeys; ms: number; guard: boolean }> =
     if (!Object.keys(keys).length) return { ok: false, error: 'keys 至少选择一个按键' };
     if (!Number.isInteger(a.ms) || a.ms < 50 || a.ms > 10000) return { ok: false, error: 'ms 必须是 50 到 10000 的整数毫秒' };
     if (a.guard !== undefined && typeof a.guard !== 'boolean') return { ok: false, error: 'guard 必须是 boolean' };
-    return { ok: true, args: { keys, ms: a.ms, guard: a.guard !== false } };
+    if (a.allowPortal !== undefined && typeof a.allowPortal !== 'boolean') return { ok: false, error: 'allowPortal 必须是 boolean' };
+    return { ok: true, args: { keys, ms: a.ms, guard: a.guard !== false, allowPortal: a.allowPortal === true } };
   },
   async run(ctx, args) {
     const adapter = ctx.adapter;
     if (!adapter.drive) return fail('ERROR', '当前适配器不支持按键控制');
     const initial = adapter.state();
     const before = { ...initial.pos };
-    const result = await adapter.drive(args.keys, args.ms, ctx.signal, { guard: args.guard });
+    const eyeBefore = adapter.eye();
+    const result = await adapter.drive(args.keys, args.ms, ctx.signal, { guard: args.guard, allowPortal: args.allowPortal });
     const after = adapter.state();
     const horizontal = Math.hypot(after.pos.x - before.x, after.pos.z - before.z);
     const stuckJumping = !!args.keys.jump && !after.inWater && horizontal < 0.5;
-    const data = { keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos, inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen, ...(result.stopped ? { stopped: result.stopped } : {}) };
-    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 move_step 或 pillar_one' : ''}`;
+    const eyeAfter = adapter.eye();
+    // 朝向以按键前后的实测 yaw 为准；“按了 forward”不代表身体真的朝计划中的世界方向。
+    const yawBefore = eyeBefore?.yaw ?? null, yawAfter = eyeAfter?.yaw ?? null;
+    const scopeBefore = { worldId: initial.worldId, sessionId: initial.sessionId, dim: initial.dim };
+    const scopeAfter = { worldId: after.worldId, sessionId: after.sessionId, dim: after.dim };
+    const scopeChanged = scopeBefore.worldId !== scopeAfter.worldId || scopeBefore.sessionId !== scopeAfter.sessionId || scopeBefore.dim !== scopeAfter.dim;
+    const data = {
+      keys: args.keys, ms: result.ms, moved: result.moved, horizontal: Math.round(horizontal * 100) / 100, before, position: after.pos,
+      inWater: after.inWater, onGround: after.onGround, oxygen: after.oxygen, oxygenBefore: initial.oxygen,
+      yawBefore, yawAfter, facingBefore: yawBefore === null ? null : facingOfYaw(yawBefore), facingAfter: yawAfter === null ? null : facingOfYaw(yawAfter),
+      bodyPortalBefore: initial.bodyPortal, bodyPortalAfter: after.bodyPortal, scopeBefore, scopeAfter, scopeChanged, allowPortal: args.allowPortal,
+      ...(result.stopped ? { stopped: result.stopped } : {}),
+    };
+    const facingText = yawAfter === null ? '朝向未知' : `松键时身体朝向 ${data.facingAfter}（yaw ${yawAfter.toFixed(3)}）`;
+    const portalText = after.bodyPortal ? `；身体正压在 ${after.bodyPortal} 里` : initial.bodyPortal ? '；已离开按键前的门方块接触' : '';
+    const scopeText = scopeChanged ? `；按键期间换了作用域（${scopeBefore.dim}/${scopeBefore.sessionId} → ${scopeAfter.dim}/${scopeAfter.sessionId}），这次按键完成不代表原方向探索成功` : '';
+    const detail = `松键时位置 (${after.pos.x.toFixed(1)},${after.pos.y.toFixed(1)},${after.pos.z.toFixed(1)})，${after.inWater ? '在水中' : '当前未接触水'}，${after.onGround ? '当前触地' : '未触地'}，水平前进 ${horizontal.toFixed(1)} 格，${facingText}${portalText}，氧气 ${after.oxygen}/20（按键前 ${initial.oxygen}/20）${initial.inWater && !after.inWater && !after.onGround ? '；离水但未触地，尚未确认上岸' : ''}${stuckJumping ? '；已不在水里，按 jump 只会原地跳、不前进——陆上走路松掉 jump 用 forward，上一两格高的坎用 move_step 或 pillar_one' : ''}${scopeText}`;
     const stopped = result.stopped;
-    const guardStop = stopped === 'cliff' || stopped === 'lava' || stopped === 'hurt_stop';
+    const guardStop = stopped === 'cliff' || stopped === 'lava' || stopped === 'hurt_stop' || stopped === 'portal';
     const movedEnough = result.moved >= 0.05 || horizontal >= 0.05;
     const stopText = stopped === 'cliff' ? '在前方崖边提前停键'
       : stopped === 'lava' ? '前方是岩浆/火，提前停键'
-        : stopped === 'hurt_stop' ? '受伤提前停键' : '';
+        : stopped === 'portal' ? '前方是传送门，普通移动已停键'
+          : stopped === 'hurt_stop' ? '受伤提前停键' : '';
     const nextText = stopped === 'cliff'
       ? '；下一步用 move_step 处理 1 格台阶，或先 assess_landings 看清落点再用 descend_to 处理更大落差；不要继续空按前进键'
-      : stopped === 'lava' ? '；不要进入岩浆/火' : '';
+      : stopped === 'lava' ? '；不要进入岩浆/火'
+        : stopped === 'portal' ? '；跨维度用 travel_portal（先 observe_portal 记录门）；确实要按键走进门时显式 allowPortal:true' : '';
     // guard 停键是保护性停止，不是“按键失败”：只要输入已执行且有位移，就按部分进展回报，
     // 否则 Agent 会把“正在下坡/已到崖边”误判成原地没动，退回 look_around。
     if (result.ok) return ok(`按键 ${Object.keys(args.keys).join('+')} 已松开；${detail}`, data);

@@ -123,3 +123,16 @@ test('method branches and postconditions use fresh observations, and an unknown 
     if (unknown) assert.match(trial.reason, /未知/);
   }
 });
+
+test('inPortal 验收以身体门接触状态为准：离开门要求 bodyPortal 为 null', (t) => {
+  const f = fixture(t);
+  const base = { ...f.state };
+  const condition = validateCondition({ type: 'self_state', field: 'inPortal', equals: false }, f.adapter, f.memory, base);
+  const inside = evaluateCondition(condition, { ...base, bodyPortal: 'nether_portal' });
+  assert.equal(inside.status, 'unsatisfied');
+  assert.deepEqual(inside.actual, { field: 'inPortal', inPortal: true, bodyPortal: 'nether_portal' });
+  const outside = evaluateCondition(condition, { ...base, bodyPortal: null });
+  assert.equal(outside.status, 'satisfied');
+  assert.equal(evaluateCondition(validateCondition({ type: 'self_state', field: 'inPortal', equals: true }, f.adapter, f.memory, base), { ...base, bodyPortal: 'nether_portal' }).status, 'satisfied');
+  assert.throws(() => validateCondition({ type: 'self_state', field: 'inPortal', equals: 'no' }, f.adapter, f.memory, base), /inPortal/);
+});

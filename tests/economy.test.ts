@@ -1,4 +1,4 @@
-import { storeItems } from '../src/skills/economy.ts';
+import { expedition, storeItems } from '../src/skills/economy.ts';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
@@ -10,6 +10,7 @@ import { Vision } from '../src/perception/vision.ts';
 import { ruleProposal } from '../src/planner/plan.ts';
 import { pickVariant, resolveItemAlias } from '../src/skills/work.ts';
 import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx } from './survival-helpers.ts';
 
 const runSkill = async (adapter: FakeAdapter, skill: string, args: unknown, memory = new WorldMemory(null)) => {
   const vision = new Vision(adapter);
@@ -201,6 +202,57 @@ test('仓储未指定 target 只返回线索，make:true 也不制造或放置�
     assert.equal(a.chests.size, 0);
     assert.equal(memory.chests().length, 0);
   }
+});
+
+test('expedition 带 find：沿路扫到目标就停，并报告覆盖范围', async (t) => {
+  const a = new FakeAdapter();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  a.inv.set('bread', 5);
+  const target = { x: 40, y: 64, z: 0 };
+  const ctx = makeCtx(a, { senses: { knownBlocks: (names, maxDist) => {
+    const dist = Math.hypot(target.x - a.pos.x, target.y - a.pos.y, target.z - a.pos.z);
+    return dist <= maxDist && names.includes('oak_log') ? [{ name: 'oak_log', pos: target, dist }] : [];
+  } } });
+  t.after(() => ctx.memory.close());
+  const validated = expedition.validate({ direction: 'E', distance: 100, find: 'oak_log' }, a);
+  assert.ok(validated.ok);
+  const r = await expedition.run(ctx, validated.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal((r.data?.found as { name?: string } | null)?.name, 'oak_log');
+  assert.equal((r.data?.coverage as { unknownBeyond?: boolean } | undefined)?.unknownBeyond, true);
+  assert.match(r.summary, /路线附近发现 oak_log/);
+  assert.ok(a.pos.x < 40, '找到目标就停下，不继续走完全程');
+});
+
+test('expedition 带 find 走完没看到：只说路线两侧未知，不断言世界没有', async (t) => {
+  const a = new FakeAdapter();
+  a.pos = { x: 0.5, y: 64, z: 0.5 };
+  a.inv.set('bread', 5);
+  const ctx = makeCtx(a, { senses: { knownBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  const validated = expedition.validate({ direction: 'E', distance: 100, find: 'oak_log' }, a);
+  assert.ok(validated.ok);
+  const r = await expedition.run(ctx, validated.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.found, null);
+  assert.match(r.summary, /路线两侧约 32 格内没看见 oak_log/);
+  assert.match(r.summary, /更远处和遮挡后仍未知/);
+  const coverage = r.data?.coverage as { unknownBeyond?: boolean; scans?: number } | undefined;
+  assert.equal(coverage?.unknownBeyond, true);
+  assert.ok((coverage?.scans ?? 0) > 0);
+  assert.ok(a.pos.x > 90, '走完指定距离才下结论');
+});
+
+test('take_items 未指定 target 时，把看见的容器和可复制 target 写进摘要', async (t) => {
+  const a = new FakeAdapter(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  a.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
+  const { o } = await runSkill(a, 'take_items', { item: 'coal', count: 4 }, memory);
+  assert.equal(o.result.status, 'failed');
+  assert.equal(o.result.failureCode, 'BAD_ARGS');
+  assert.match(o.result.summary, /chest \(2,64,0\)/);
+  assert.ok(o.result.summary.includes('target {"x":2,"y":64,"z":0}'), o.result.summary);
+  assert.equal((o.result.data?.candidates as unknown[]).length, 1);
 });
 
 test('smelt make:true reaches the adapter prepare option; default stays false', async () => {

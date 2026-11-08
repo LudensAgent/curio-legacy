@@ -191,7 +191,7 @@ export function moveDetails(names: string[]): string {
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
-{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
+{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround|inPortal","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
