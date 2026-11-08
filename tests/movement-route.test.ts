@@ -325,3 +325,20 @@ test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 rout
   assert.equal(auto.data?.source, 'memory', 'auto 先查共享记忆');
   assert.deepEqual((auto.data?.legs as { transition: string }[]).map((leg) => leg.transition), ['walk', 'step']);
 });
+
+test('plan_route：有效能力显式 plan.walkSearch=false 时不调用库路线搜索', async (t) => {
+  const w = flatAdapter();
+  const spatial = fakeSpatial(flatMap((_x, y) => y === 63 ? 'stone' : 'air'));
+  const base = spatial.capabilities();
+  (spatial as unknown as { capabilities: () => unknown }).capabilities = () => ({
+    ...base,
+    effective: { ...base.effective, plan: { walkSearch: false } },
+  });
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'NOT_CONNECTED');
+  assert.deepEqual((r.data as { capability?: unknown } | undefined)?.capability, { domain: 'plan', name: 'walkSearch' });
+});

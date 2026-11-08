@@ -431,6 +431,8 @@ export const planRoute: Skill<PlanArgs> = {
     if (spatial.closing || spatial.paused || !spatial.observationAdmitted) return fail('NOT_CONNECTED', '共享空间会话未就绪/已暂停/已关闭，不能规划路线');
     const deadline = Math.min(args.deadlineMs ?? ctx.deadline, ctx.deadline);
     if (Date.now() >= deadline) return fail('TIMEOUT', 'plan_route 期限在开始前已耗尽', { classification: 'TIMEOUT' });
+    // 有效能力取库报告与宿主声明的交集；显式 false 不调用对应库接口。
+    const effectiveCaps = spatial.capabilities().effective;
     const scope: Scope = { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId };
     // 换会话/换维：旧 routeId 必须失效；重启由进程内注册表天然满足。
     noteRouteScope(scope);
@@ -443,7 +445,9 @@ export const planRoute: Skill<PlanArgs> = {
     let memoryGap: { summary: string; facts: Record<string, unknown> } | null = null;
     // 共享空间记忆优先：所有 kind 的历史通道在同一张拓扑图里，不按旧矿道/桥分支。
     if ((args.source === 'memory' || args.source === 'auto') && typeof spatial.query === 'function') {
-      const memory = memoryRoute(spatial, state.dim, from, stance);
+      const memory = effectiveCaps.query?.historyRoute === false
+        ? { status: 'gap' as const, summary: '有效能力报告未授予 query.historyRoute，未查询历史拓扑', facts: { source: 'memory', executable: false, currentPassability: 'UNKNOWN' as const, capability: { domain: 'query', name: 'historyRoute' } } }
+        : memoryRoute(spatial, state.dim, from, stance);
       const facts = { ...memory.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
       if (memory.status === 'route') return ok(`${memory.summary}${cellNote}`, facts);
       if (args.source === 'memory') return fail('PATH_NOT_FOUND', `${memory.summary}${cellNote}`, facts);
@@ -485,6 +489,12 @@ export const planRoute: Skill<PlanArgs> = {
       });
     }
 
+    if (effectiveCaps.plan?.walkSearch === false) {
+      return fail('NOT_CONNECTED', '有效能力报告未授予 plan.walkSearch，未调用库路线搜索', {
+        classification: 'CAPABILITY_UNAVAILABLE', capability: { domain: 'plan', name: 'walkSearch' },
+        ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}),
+      });
+    }
     const search = new WalkRouteSearch(spatial.session.voxel, {
       now: Date.now,
       maxNodes: args.constraints?.maxNodes ?? SEARCH_DEFAULTS.maxNodes,

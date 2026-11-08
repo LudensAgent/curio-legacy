@@ -25,6 +25,11 @@ const MAX_POINTS = 8;
 const TELEPORT = 24;
 const RECORD_STEP = 1;
 const BRIDGE_SUPPORT_RATIO = 0.5;
+/**
+ * 这么久没有新的已确认记录点，说明这段位移已经结束。观测间隔约 0.7s；
+ * 主动落盘短段，否则一次短距离步行会一直留在内存里，直到下次断点或进程退出才写入。
+ */
+const IDLE_FLUSH_MS = 3000;
 
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const cellKey = (p: Vec3Like) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
@@ -74,8 +79,12 @@ export class TraversalRecorder {
     if (![pos.x, pos.y, pos.z].every(Number.isFinite)) return;
     const previous = this.last;
     const moved = previous === null ? Number.POSITIVE_INFINITY : d3(previous.pos, pos);
-    // 站着不动不结束当前段，也不写 0 长度 segment。
-    if (previous !== null && moved === 0) return;
+    // 站着不动不写 0 长度 segment；但停走已超过阈值时，当前段确实结束了，
+    // 主动落盘并保留最后已确认记录点作为下一段的 seam，避免已确认位移只留在内存里。
+    if (previous !== null && moved === 0) {
+      if (this.run !== null && this.now() - this.run.lastAt >= IDLE_FLUSH_MS) this.flush(true);
+      return;
+    }
     const discontinuous = previous !== null && (
       previous.worldId !== worldId
       || previous.dim !== dim
@@ -120,7 +129,11 @@ export class TraversalRecorder {
       // 继续把本次观测作为 seam 的终点，进入下面的同一段追加逻辑。
     }
     const from = this.run.points.at(-1)!;
-    if (d3(from, pos) < RECORD_STEP) return;
+    if (d3(from, pos) < RECORD_STEP) {
+      // 格子内抖动/慢速移动不产生记录点，但同样按停走阈值落盘，不能让它无限期留在内存。
+      if (this.now() - this.run.lastAt >= IDLE_FLUSH_MS) this.flush(true);
+      return;
+    }
     if (!observedStep(from, pos)) {
       // 相邻记录点之间发生了不连续位移：不把这段接成同一条路。
       this.flush();
@@ -155,7 +168,9 @@ export class TraversalRecorder {
   flush(carry = false): void {
     const run = this.run;
     this.run = null;
-    if (carry && run !== null && run.segments.length > 0) {
+    // carry 时即使本段还没有 segment，也要保留最后已确认记录点：否则 8 点 flush 之后
+    // 若先停走/抖动再落盘，会把拼接同一个 exact 节点的 seam 悄悄丢掉。
+    if (carry && run !== null) {
       this.pendingStart = { worldId: run.worldId, dim: run.dim, sessionId: run.sessionId, pos: { ...run.points.at(-1)! } };
     } else if (!carry) {
       this.pendingStart = null;
