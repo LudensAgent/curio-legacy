@@ -1,6 +1,6 @@
 import type { PlacementFaceAttempt, Vec3Like } from '../../adapter/types.ts';
 import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
-import { estimatedFallDamage, isReplaceable, supportCellsUnderBody, supportTop } from '../../perception/geometry.ts';
+import { estimatedFallDamage, isReplaceable, supportCellsUnderBody, supportTop, type StateAt } from '../../perception/geometry.ts';
 import { LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
@@ -53,6 +53,20 @@ function stairHint(stair: ReturnType<typeof stairHandoff>): string {
   return `这是 ${stair.steps} 格高差，move_step 不处理；可朝 ${stair.direction} 用 excavate_run {"mode":"${stair.mode}","direction":"${stair.direction}","steps":${stair.steps}} 开挖阶梯，或 ${stair.mode === 'stairs_up' ? 'place_support/pillar_one 补一级' : 'assess_landings 选相邻落点后用 descend_to'}（由你决定）`;
 }
 
+/**
+ * 候选脚高是不是真的能站：方块顶面只是 surfaceCandidateY，上方两格被占时不能当作可站立脚高。
+ * 返回阻挡事实；没有阻挡返回 null。
+ */
+function standableFootProblem(at: StateAt, footY: number, cell: Vec3Like): { kind: PrimitiveProblemKind; blocker?: { cell: Vec3Like; name: string } } | null {
+  const body = inspectBody(at, footY, cell.x, cell.z);
+  const blocker = body.blockers[0];
+  if (blocker) return {
+    kind: blocker.cell.y <= Math.floor(footY + 0.05) ? 'TARGET_BLOCKED' : 'HEAD_BLOCKED',
+    blocker: { cell: blocker.cell, name: blocker.name },
+  };
+  return body.unknown.length ? { kind: 'UNKNOWN_GEOMETRY' } : null;
+}
+
 function shapeOf(name: string, properties: Record<string, string | number | boolean> = {}): string {
   const top = supportTop(name, properties);
   if (name === 'snow') return `雪层（${String(properties.layers ?? 1)} 层）`;
@@ -77,6 +91,22 @@ const moveStepSkill: Skill<MoveArgs> = {
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；[1,0,0] 同层（脚高须一致），[1,1,0] 上一级高 0.5–1 格（含半砖），[1,-1,0] 下一级支撑顶面低 0.5–1 格；同列 [0,1,0] 只在梯子上可爬）',
   timeoutMs: 8000,
   movement: true,
+  // 计划录入只检查写法；相邻性、落差、支撑和净空由每一步执行前的 validate + run 用最新位置确认。
+  validatePlan(raw, adapter) {
+    const a = obj(raw);
+    const facing = facingArg(a.facing, adapter);
+    if (typeof facing !== 'string' || !['N', 'E', 'S', 'W'].includes(facing)) return { ok: false, error: String(facing) };
+    const xyz = a.xyz ?? a.abs ?? a.world;
+    if (xyz !== undefined) {
+      const p = absValue(xyz);
+      if (!p) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (!Number.isInteger(p.x) || !Number.isInteger(p.z)) return { ok: false, error: 'xyz 的 x/z 必须是整数方块列；y 才是可分数的脚高' };
+      return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz: p } };
+    }
+    const to = parseRel(relValue(a), { f: 1, u: [-1, 1], r: 1 });
+    if (typeof to === 'string') return { ok: false, error: to };
+    return { ok: true, args: { at: to, facing: facing as Facing } };
+  },
   validate(raw, adapter) {
     const a = obj(raw);
     const xyz = a.xyz ?? a.abs ?? a.world;
@@ -240,6 +270,18 @@ const moveStepSkill: Skill<MoveArgs> = {
       const correctedU = below === null ? null : verticalStep(below.foot - baseFoot);
       const stair = below !== null && Math.abs(below.foot - baseFoot) > 1.01
         ? stairHandoff(feet, target, below.foot - baseFoot) : null;
+      // 顶面候选不等于可站立脚高：候选处身体空间被占/未知时，先给真实阻挡，不给必败的“改脚高”。
+      const standable = correctedU !== null && below !== null ? standableFootProblem(at, below.foot, target) : null;
+      if (standable !== null) {
+        const where = standable.blocker
+          ? `候选脚高 y=${below!.foot.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          : `候选脚高 y=${below!.foot.toFixed(2)} 处有未加载格`;
+        return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${below!.foot.toFixed(2)}，但那不是可站立脚高：${where}；move_step 不给脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
+          ...facts, surfaceCandidateY: below!.foot, standableFootY: null, movementNotAttempted: true,
+          ...(standable.blocker ? { blocker: standable.blocker } : {}),
+          ...problemOf(standable.kind, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target),
+        });
+      }
       const dropRemediation = correctedU === null && below !== null && below.drop > 1.01
         ? { assess: true as const, landing: { x: target.x, y: below.foot, z: target.z }, drop: below.drop,
             descend: { target: { x: target.x, y: below.foot, z: target.z } } }
@@ -270,13 +312,37 @@ const moveStepSkill: Skill<MoveArgs> = {
     }
     // 绝对 xyz 的 y 是调用者指定的脚高：支撑面必须与它一致，不能悄悄改成实际支撑面。
     if (absolute && Math.abs(direct - targetFoot!) > 0.01) {
+      const standable = standableFootProblem(at, direct, target);
+      if (standable !== null) {
+        const where = standable.blocker
+          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          : `候选脚高 y=${direct.toFixed(2)} 处有未加载格`;
+        return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${direct.toFixed(2)}，但那不是可站立脚高：${where}；不提供脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
+          targetCell: target, expectedFoot: targetFoot, surfaceCandidateY: direct, standableFootY: null, movementNotAttempted: true,
+          ...(standable.blocker ? { blocker: standable.blocker } : {}),
+          ...problemOf(standable.kind, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target),
+        });
+      }
       const stair = Math.abs(direct - baseFoot) > 1.01 ? stairHandoff(feet, target, direct - baseFoot) : null;
-      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${targetFoot!.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步${stair ? `；${stairHint(stair)}` : ''}`, { targetCell: target, expectedFoot: targetFoot, actualSupport: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z }, ...(stair ? { stairs: stair } : {}) }, ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${targetFoot!.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步${stair ? `；${stairHint(stair)}` : ''}`, { targetCell: target, expectedFoot: targetFoot, actualSupport: direct, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z }, ...(stair ? { stairs: stair } : {}) }, ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
     }
     if (!absolute) {
       const delta = direct - baseFoot;
       const corrected = verticalStep(delta);
       const correctedAt = corrected === null ? null : [rel[0], corrected, rel[2]] as Rel;
+      // 支撑顶面只是候选：两格高的整块墙会把顶面算到下一层，但那一层的身体空间仍被占。
+      // 这种情况下先报真实阻挡，不给出一个下一轮必败的“上一级”修正。
+      const standable = corrected !== null ? standableFootProblem(at, direct, target) : null;
+      if (standable !== null) {
+        const where = standable.blocker
+          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          : `候选脚高 y=${direct.toFixed(2)} 处有未加载格`;
+        return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${direct.toFixed(2)}，但那不是可站立脚高：${where}；不提供脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
+          actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: null, targetCell: target, movementNotAttempted: true,
+          ...(standable.blocker ? { blocker: standable.blocker } : {}),
+          ...problemOf(standable.kind, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target),
+        });
+      }
       // >1 格的落差不是 move_step 能处理的；给出“先 assess_landings 再 descend_to”的结构化交接。
       const stair = Math.abs(delta) > 1.01 ? stairHandoff(feet, target, delta) : null;
       const dropBelow = correctedAt === null ? inspectStandableBelow(at, target, wanted).landing : null;
@@ -294,16 +360,16 @@ const moveStepSkill: Skill<MoveArgs> = {
           : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
         : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`) + (stair ? `；${stairHint(stair)}` : '');
       if (rel[1] === 0 && Math.abs(delta) > 0.01) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === -1 && (direct > baseFoot - 0.5 + 0.01 || direct < baseFoot - 1 - 0.01)) {
         const hint = correctedAt === null
           ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}${stair ? `；${stairHint(stair)}` : ''}`
           : correction;
-        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === 1 && (direct < baseFoot + 0.5 - 0.01 || direct > baseFoot + 1 + 0.01)) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
     }
     const targetY = absolute ? targetFoot! : direct;
@@ -362,7 +428,7 @@ const moveStepSkill: Skill<MoveArgs> = {
     const damage = drop > 0 ? estimatedFallDamage(drop) : 0;
     return ok(`站到了 [${rel}]（脚高 y=${targetY.toFixed(2)}）${drop > 0 ? `，下落 ${drop.toFixed(2)} 格` : ''}${damage ? `（预计约 ${damage} 点摔伤）` : ''}`, {
       // moved 是实测脚所在格相对起点的差；绝对 xyz 的分数脚高不冒充位移向量。
-      moved: [target.x - feet.x, target.y - feet.y, target.z - feet.z], targetFoot: targetY, ...effectConfirmed('movement'),
+      moved: [target.x - feet.x, target.y - feet.y, target.z - feet.z], targetFoot: targetY, standableFootY: targetY, ...effectConfirmed('movement'),
       ...(drop > 0 ? { drop, fall: { drop, damage } } : {}), ...after(ctx, args.facing, target),
     });
   },
@@ -375,6 +441,25 @@ const mineCellSkill: Skill<MineArgs> = {
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
+  // 计划录入只检查写法；目标是否在挖得到的范围、邻格和落点由执行前按最新位置确认。
+  validatePlan(raw, adapter) {
+    const a = obj(raw);
+    const facing = facingArg(a.facing, adapter);
+    if (typeof facing !== 'string') return { ok: false, error: String(facing) };
+    const tool = a.tool;
+    if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
+    const flags = { ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
+      return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz, ...flags } };
+    }
+    const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
+    if (typeof at === 'string') return { ok: false, error: at };
+    return { ok: true, args: { at, facing: facing as Facing, ...flags } };
+  },
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
@@ -617,6 +702,26 @@ const placeCellSkill: Skill<PlaceArgs> = {
   argsDoc: '{"at":[前,上,右], "item":"方块名", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名"}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）',
   timeoutMs: 15000,
   movement: false,
+  // 计划录入只检查写法；目标是否在放置范围由执行前按最新位置确认。
+  validatePlan(raw, adapter) {
+    const a = obj(raw);
+    const facing = facingArg(a.facing, adapter);
+    if (typeof facing !== 'string') return { ok: false, error: String(facing) };
+    const item = String(a.item ?? a.block ?? '').trim().replace(/^minecraft:/, '');
+    if (!item) return { ok: false, error: 'place_cell 需要 item（方块名）' };
+    if (!/^[a-z0-9_]{1,80}$/.test(item) || !adapter.isKnownItem(item)) return { ok: false, error: `未知方块：${item}` };
+    if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是实体，不是方块` };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
+      return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz, item } };
+    }
+    const at = parseRel(relValue(a), { f: 2, u: [-2, 3], r: 2 });
+    if (typeof at === 'string') return { ok: false, error: at };
+    return { ok: true, args: { at, facing: facing as Facing, item } };
+  },
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);
@@ -744,6 +849,29 @@ const placeSupportSkill: Skill<SupportArgs> = {
   argsDoc: '{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any；xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）',
   timeoutMs: 20000,
   movement: true,
+  // 计划录入只检查写法；目标是否在放置范围由执行前按最新位置确认。
+  validatePlan(raw, adapter) {
+    const a = obj(raw);
+    const facing = facingArg(a.facing, adapter);
+    if (typeof facing !== 'string') return { ok: false, error: String(facing) };
+    const explicit = a.item ?? a.block;
+    if (explicit === undefined || explicit === null || String(explicit).trim() === '') {
+      return { ok: false, error: 'place_support 需要 item：已知方块名或字面 "any"（不会默认自选材料）' };
+    }
+    const item = String(explicit).trim().replace(/^minecraft:/, '');
+    if (item !== 'any' && (!/^[a-z0-9_]{1,80}$/.test(item) || !adapter.isKnownItem(item))) return { ok: false, error: `item 需要已知方块名或 "any"` };
+    if (/_(boat|raft)$/.test(item)) return { ok: false, error: `${item} 是实体，不是方块` };
+    const rawXyz = a.xyz ?? a.abs ?? a.world;
+    if (rawXyz !== undefined) {
+      const xyz = absValue(rawXyz);
+      if (!xyz) return { ok: false, error: 'xyz 需要 [x,y,z] 三个有限数字' };
+      if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
+      return { ok: true, args: { at: [0, 0, 0] as Rel, facing: facing as Facing, xyz, item } };
+    }
+    const at = parseRel(relValue(a), { f: 2, u: [-2, 3], r: 2 });
+    if (typeof at === 'string') return { ok: false, error: at };
+    return { ok: true, args: { at, facing: facing as Facing, item } };
+  },
   validate(raw, adapter) {
     const a = obj(raw);
     const facing = facingArg(a.facing, adapter);

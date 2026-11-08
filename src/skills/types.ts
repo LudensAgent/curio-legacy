@@ -120,6 +120,12 @@ export interface Skill<A = any> {
   /** 下一步取决于本次实际发现/产出；自主计划在结果返回后重新选择，不能预设成功后的尾部。 */
   outcomeBoundary?: boolean;
   validate(raw: unknown, adapter: GameAdapter): Validation<A>;
+  /**
+   * 计划录入时的静态校验：只检查名字、参数类型、枚举和数值边界，不用当前站位预判
+   * 未来步骤是否已在可达距离内。执行前仍由 validate + run 按最新位置重新预检。
+   * 只有位置相关的动作需要覆盖它；没有覆盖的技能沿用 validate。
+   */
+  validatePlan?(raw: unknown, adapter: GameAdapter): Validation<A>;
   run(ctx: SkillCtx, args: A): Promise<SkillResult>;
 }
 
@@ -128,6 +134,15 @@ export function validateSkill<A>(skill: Skill<A>, raw: unknown, adapter: GameAda
   const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
   if (options.make !== undefined && typeof options.make !== 'boolean') return { ok: false, error: 'make 必须是 boolean' };
   const validation = skill.validate(raw, adapter);
+  if (!validation.ok) return validation;
+  return { ok: true, args: { ...validation.args, ...(options.make !== undefined ? { make: options.make as boolean } : {}) } };
+}
+
+/** 计划录入校验：位置相关动作用静态检查，其余动作照常完整校验；不把未来步骤绑到当前起点。 */
+export function validatePlanSkill<A>(skill: Skill<A>, raw: unknown, adapter: GameAdapter): Validation<A & { make?: boolean }> {
+  const options = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  if (options.make !== undefined && typeof options.make !== 'boolean') return { ok: false, error: 'make 必须是 boolean' };
+  const validation = (skill.validatePlan ?? skill.validate)(raw, adapter);
   if (!validation.ok) return validation;
   return { ok: true, args: { ...validation.args, ...(options.make !== undefined ? { make: options.make as boolean } : {}) } };
 }

@@ -581,3 +581,40 @@ test('place_cell 占用分类使用 TARGET_OCCUPIED，而不是 PATH_NOT_FOUND �
   assert.equal(r.status, 'failed');
   assert.equal(problemKind(r), 'TARGET_OCCUPIED');
 });
+
+test('move_step 两格高整块墙：返回真实阻挡，不给必败的上一级修正', async (t) => {
+  const w = flat();
+  w.pos = { x: 0.5, y: 79, z: 0.5 };
+  w.groundY = 78;
+  // 相邻列 y79、y80 都是完整方块：y80 只是表面候选，不是可站立脚高。
+  w.blocks.push({ name: 'obsidian', pos: { x: 1, y: 79, z: 0 } }, { name: 'obsidian', pos: { x: 1, y: 80, z: 0 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.data?.movementNotAttempted, true);
+  assert.equal(problemKind(r), 'TARGET_BLOCKED');
+  assert.equal(r.data?.surfaceCandidateY, 80);
+  assert.equal(r.data?.standableFootY, null);
+  assert.equal(r.data?.remediation, undefined, '被占的候选脚高不能作为脚高修正建议');
+  assert.deepEqual(w.pos, { x: 0.5, y: 79, z: 0.5 });
+});
+
+test('move_step 一格台阶：上方空气时给出经身体净空预检的上一级建议并可执行', async (t) => {
+  const w = flat();
+  w.pos = { x: 0.5, y: 79, z: 0.5 };
+  w.groundY = 78;
+  w.blocks.push({ name: 'cobblestone', pos: { x: 1, y: 79, z: 0 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'failed', '同层写法与真实脚高不符，先如实拒绝');
+  assert.equal(problemKind(r), 'FOOT_HEIGHT_MISMATCH');
+  assert.deepEqual(r.data?.remediation, { at: [1, 1, 0] });
+  assert.equal(r.data?.surfaceCandidateY, 80);
+  assert.equal(r.data?.standableFootY, 80);
+
+  const corrected = await moveStep.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(corrected.status, 'succeeded', corrected.summary);
+  assert.equal(w.pos.y, 80);
+});
