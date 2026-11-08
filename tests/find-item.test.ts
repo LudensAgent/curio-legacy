@@ -24,6 +24,8 @@ test('find_item 只返回最近、其次数量最多的箱子，并给合计', a
   assert.equal(d.backpack, 0);
   assert.equal(d.chest.count, 8, '同近（约 2 格）选数量多的');
   assert.deepEqual(d.chest.pos, { x: 2, y: 64, z: 1 });
+  assert.deepEqual(d.target, { x: 2, y: 64, z: 1 }, 'find_item 直接给出可复制的 target');
+  assert.match(r.summary, /take_items \{"item":"iron_ingot","target":\{"x":2,"y":64,"z":1\}\}/);
   assert.equal(d.inChests, 109);
   assert.equal(d.total, 109);
 });

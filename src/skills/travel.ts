@@ -250,7 +250,38 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
 export const travelPortal: Skill<{ portalId: string }> = {
   name: 'travel_portal', description: '进入一个已观察的传送门，等待实际维度切换和新出生观察后记录真实出口；到达下界另一侧后会尝试把身体挪出目的地门方块（最多约 4 秒，leftPortal 如实报告）。', argsDoc: '{"portalId":"portal_id"}', timeoutMs: 100000, movement: true,
   validate(raw) { const portalId = String(obj(raw).portalId ?? '').trim(); return portalId ? { ok: true, args: { portalId } } : { ok: false, error: '缺少 portalId' }; },
-  async run(ctx, args) { const store = travelStore(ctx.memory); const worldId = ctx.adapter.state().worldId; const endpoint = store.get(args.portalId, worldId); return endpoint ? traverse(ctx, endpoint) : fail('NOT_FOUND', `没有传送门 ${args.portalId}；当前世界记得的门：${knownPortals(store, worldId)}`); },
+  async run(ctx, args) {
+    const store = travelStore(ctx.memory);
+    const state = ctx.adapter.state();
+    const worldId = state.worldId;
+    const requested = args.portalId.trim();
+    const key = requested.toLowerCase();
+    // The model repeatedly asked for "auto"/"nearest" after observe_portal.
+    // Resolve those words deterministically to the nearest *observed* portal in
+    // the current dimension; the agent still chose the selection rule, and the
+    // resolved id is reported back.
+    if (key === 'auto' || key === 'nearest') {
+      const candidates = store.snapshot(worldId).endpoints
+        .filter((endpoint) => endpoint.dim === state.dim && endpoint.portalObserved && endpoint.kind !== 'end_gateway')
+        .sort((a, b) => dist3(state.pos, a.pos) - dist3(state.pos, b.pos) || a.id.localeCompare(b.id));
+      const endpoint = candidates[0];
+      if (!endpoint) {
+        return fail('NOT_FOUND', `当前维度 ${state.dim} 没有已观察的可用传送门；先 observe_portal 或走近后再试。当前世界记得的门：${knownPortals(store, worldId)}`, {
+          requestedPortalId: requested, dim: state.dim, candidates: [],
+        });
+      }
+      const result = await traverse(ctx, endpoint);
+      return {
+        ...result,
+        summary: `${result.summary}（按 ${key} 选择 ${endpoint.id}）`,
+        data: { ...(result.data ?? {}), requestedPortalId: requested, resolvedPortalId: endpoint.id },
+      };
+    }
+    const endpoint = store.get(requested, worldId);
+    return endpoint
+      ? traverse(ctx, endpoint)
+      : fail('NOT_FOUND', `没有传送门 ${requested}；当前世界记得的门：${knownPortals(store, worldId)}`, { requestedPortalId: requested });
+  },
 };
 
 export const recallPortal: Skill<{ returnId: string }> = {

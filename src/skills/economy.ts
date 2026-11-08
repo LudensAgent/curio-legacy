@@ -411,8 +411,12 @@ export const findItem: Skill<{ item: string }> = {
       });
     }
     const chest = nearest ? { pos: nearest.chest.pos, count: nearest.count, dist: nearest.dist ?? Math.round(Math.hypot(nearest.chest.pos.x - s.pos.x, nearest.chest.pos.z - s.pos.z)), note: nearest.chest.note, observedAt: nearest.observedAt } : null;
+    const target = chest ? { x: chest.pos.x, y: chest.pos.y, z: chest.pos.z } : null;
     const chestText = chest ? `${chest.note ? `${chest.note}的箱子` : '箱子'} (${chest.pos.x},${chest.pos.y},${chest.pos.z}) 有 ${args.item}×${chest.count}（${chest.dist} 格外）` : '';
-    return ok(`${args.item}：背包×${backpack}${chestText ? `；最近的${chestText}` : ''}；箱子里合计×${inChests}、总计×${total}`, { item: args.item, backpack, chest, inChests, total });
+    const useText = target
+      ? `；用 go_near {"target":${JSON.stringify(target)}} 到旁边，再 take_items {"item":"${args.item}","target":${JSON.stringify(target)}}`
+      : '';
+    return ok(`${args.item}：背包×${backpack}${chestText ? `；最近的${chestText}` : ''}；箱子里合计×${inChests}、总计×${total}${useText}`, { item: args.item, backpack, chest, target, inChests, total });
   },
 };
 
