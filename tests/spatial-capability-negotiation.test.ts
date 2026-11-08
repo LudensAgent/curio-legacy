@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { composeCapabilities } from 'curio-minecraft-3d-memory';
 import type { MemoryHostCapabilities, SpatialQueryResult } from 'curio-minecraft-3d-memory';
 import {
   capabilityGate,
@@ -24,10 +25,14 @@ const DIM = 'overworld';
 
 /** 受控能力报告：独立副本，不污染共享会话启动时记录的真实报告。 */
 function forcedReport(library: MemoryHostCapabilities, overrides: Partial<{ [K in keyof MemoryHostCapabilities['memory']]: boolean }>): HostCapabilityReport {
+  const libraryWithOverrides = { ...library, memory: { ...library.memory, ...overrides } };
+  const composed = composeCapabilities(libraryWithOverrides);
   return {
     owner: 'host_composed', contract: library.contract,
-    library: { ...library, memory: { ...library.memory, ...overrides } },
+    library: libraryWithOverrides,
     host: { checkpoint: true, flush: true, close: true },
+    effective: composed.effective,
+    overclaims: composed.overclaims,
   };
 }
 

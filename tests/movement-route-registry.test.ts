@@ -47,6 +47,14 @@ function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}
       },
     },
     closing: false, paused: false, observationAdmitted: true,
+    capabilities: () => ({
+      owner: 'host_composed',
+      contract: 'memory-host-contract/1',
+      library: { execute: { walk: true } },
+      host: {},
+      effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
+      overclaims: [],
+    }),
     attach: () => ({}),
     detach: () => {},
   } as unknown as SharedSpatialSession;

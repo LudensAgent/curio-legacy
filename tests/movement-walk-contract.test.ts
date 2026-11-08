@@ -35,6 +35,17 @@ function fakeSpatial(map: VoxelMap, fragments: Record<string, PathFragment> = {}
       },
     },
     closing: false, paused: false, observationAdmitted: true,
+    // Effective capability report used by the walk entry gate.
+    capabilities: () => ({
+      owner: 'host_composed',
+      contract: 'memory-host-contract/1',
+      library: { execute: { walk: true } },
+      host: {},
+      effective: {
+        execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true },
+      },
+      overclaims: [],
+    }),
     attach: () => ({}),
     detach: () => {},
     recordWalkCorridor: (input: { fragment: PathFragment; segments: readonly unknown[] }) => ({
