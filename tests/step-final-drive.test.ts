@@ -250,6 +250,19 @@ test('身体离目标太远时不盲目前推', async (t) => {
   assert.equal(forwardSets.some((v) => v === true), false, '不该为远离目标启动前推');
 });
 
+test('显式相邻一步绕过 pathfinder：NoPath 时仍由身体控制完成', async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  let calls = 0;
+  bot.pathfinder.goto = async () => { calls++; throw Object.assign(new Error('No path to the goal!'), { name: 'NoPath' }); };
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, timeoutMs: 2000, adjacentStep: true });
+  assert.equal(calls, 0, '相邻一步不应调用整段 pathfinder');
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+  assert.ok(Math.abs(bot.entity.position.y - 63.9375) < 0.02);
+});
+
 test('寻路直接报 NoPath 时不启动前推', async (t) => {
   const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
   const { bot, timer } = physicsBot(world, 64);

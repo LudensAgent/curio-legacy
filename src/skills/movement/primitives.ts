@@ -260,7 +260,7 @@ export const moveStep: Skill<CellArgs> = {
       });
     }
     try {
-      await adapter.moveTo({ kind: 'xyz', x: target.x, y: targetY, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false });
+      await adapter.moveTo({ kind: 'xyz', x: target.x, y: targetY, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false, adjacentStep: true });
     } catch (e) {
       if (isAbort(e)) {
         (e as Error & { partial?: Record<string, unknown> }).partial = partial({ targetFoot: targetY });

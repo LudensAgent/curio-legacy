@@ -174,6 +174,8 @@ export type MoveTarget =
   | { kind: 'away_from'; pos: Vec3Like; distance: number };
 
 export interface MoveOpts {
+  /** 只执行一个相邻格：绕过 pathfinder 的整段搜索，直接用身体控制走/跳/下；仅 move_step 使用。 */
+  adjacentStep?: boolean;
   signal: AbortSignal;
   timeoutMs: number;
   constructionSafe?: boolean;

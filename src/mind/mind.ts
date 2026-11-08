@@ -154,6 +154,7 @@ export class Mind {
   /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
   private sameFails = new Map<string, { n: number; last: number; code: string; why: string; summary: string }>();
   private lastStuckAttempt: { step: { skill: string; args?: unknown }; code: string; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number } | null = null;
+  private lastLocalRecoveryNoticeAt = 0;
   static readonly SAME_FAIL_LIMIT = 3;
   static readonly SAME_FAIL_MS = 10 * 60_000;
   private learnedActivities = new Set<string>();
@@ -635,18 +636,13 @@ export class Mind {
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
     if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
-    // 同一站位附近已经确定性移动/规划失败过多次：这段活若仍然只有同类 path 动作，
-    // 先停下让心智选择施工、观察、换目标或下行，而不是把同一个死循环再跑一遍。
+    // 局部恢复只作为事实提醒，不拦截 Agent 已明确选择的新一步；否则“先往东挪一格”
+    // 这类合法尝试会被同一位置的历史失败误伤，反而把行动锁死。
     const localFails = this.localPathFailures(this.d.adapter.state());
-    if (localFails.length >= 3 && LOCAL_PATH.has(step.skill)) {
-      // 必须在本步之前已经做过观察/施工/下行等不同动作；把 look_around 放在 move_step
-      // 后面不算，否则同一段活仍会先把失败的移动重放一遍。
-      const before = this.activity.steps.slice(0, Math.max(0, this.activity.index - 1));
-      if (!before.some((candidate) => !LOCAL_PATH.has(candidate.skill))) {
-        const last = localFails[localFails.length - 1]!;
-        this.finishActivity('stuck', `同一位置附近已经 ${localFails.length} 次移动/规划失败（最近：${last.summary}）；这一步之前还没有观察、施工、换目标或下行。先重新决定，不要原样重试 move_step/plan_route/navigate_to`);
-        return;
-      }
+    if (localFails.length >= 3 && LOCAL_PATH.has(step.skill) && Date.now() - this.lastLocalRecoveryNoticeAt > 30_000) {
+      this.lastLocalRecoveryNoticeAt = Date.now();
+      const last = localFails[localFails.length - 1]!;
+      this.d.bus.publish('notice', 'P2', `同一位置附近已经 ${localFails.length} 次移动/规划失败（最近：${last.summary}）；仍按你这次的选择执行，若失败再考虑观察/施工/换目标/下行`, { skill: step.skill, count: localFails.length });
     }
     // 上一步移动未确认到达：本步校验后若为相对挖掘/放置，报告依赖缺口，不执行本步。
     const gap = this.activity.stanceGap;
