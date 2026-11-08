@@ -432,12 +432,14 @@ export const planRoute: Skill<PlanArgs> = {
       ? ''
       : `；目标格 (${cell.x},${cell.y},${cell.z})，按当前脚下偏移取格内站位 (${stance.x.toFixed(2)},${stance.y},${stance.z.toFixed(2)})`;
 
+    let memoryGap: { summary: string; facts: Record<string, unknown> } | null = null;
     // 共享空间记忆优先：所有 kind 的历史通道在同一张拓扑图里，不按旧矿道/桥分支。
     if ((args.source === 'memory' || args.source === 'auto') && typeof spatial.query === 'function') {
       const memory = memoryRoute(spatial, state.dim, from, stance);
       const facts = { ...memory.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
       if (memory.status === 'route') return ok(`${memory.summary}${cellNote}`, facts);
       if (args.source === 'memory') return fail('PATH_NOT_FOUND', `${memory.summary}${cellNote}`, facts);
+      memoryGap = { summary: memory.summary, facts };
     } else if (args.source === 'memory') {
       return fail('NOT_CONNECTED', 'plan_route source:"memory" 需要共享空间会话的查询端口');
     }
@@ -466,11 +468,12 @@ export const planRoute: Skill<PlanArgs> = {
     // 说明 memory/spatial 都没有给出可执行路线，直接把换层事实和边界交回。
     const heightChange = Math.abs(stance.y - from.y) > 0.01;
     if (args.source === 'auto' && heightChange) {
-      const gap = spatialGap ? `；空间 3D：${spatialGap.summary}` : '';
-      return fail('BAD_ARGS', `目标脚高 ${stance.y} 与当前 ${from.y} 不同（${(stance.y - from.y).toFixed(2)} 格），同高 search 只支持固定脚高 ${from.y}，不能表示换层${gap}；换层由你用相邻一格 move_step，或更大落差先 assess_landings 再 descend_to 显式处理（不自动改目标）${cellNote}`, {
-        ...(spatialGap?.facts ?? {}),
+      const gaps = [memoryGap ? `历史拓扑：${memoryGap.summary}` : '', spatialGap ? `空间 3D：${spatialGap.summary}` : ''].filter(Boolean).join('；');
+      return fail('BAD_ARGS', `目标脚高 ${stance.y} 与当前 ${from.y} 不同（${(stance.y - from.y).toFixed(2)} 格），同高 search 只支持固定脚高 ${from.y}，不能表示换层${gaps ? `；${gaps}` : ''}；换层由你用相邻一格 move_step，或更大落差先 assess_landings 再 descend_to 显式处理（不自动改目标）${cellNote}`, {
+        ...(spatialGap?.facts ?? {}), ...(memoryGap?.facts ?? {}),
         targetFoot: stance.y, currentFoot: from.y, heightChange: stance.y - from.y,
         ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }),
+        ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}),
       });
     }
 
@@ -509,10 +512,11 @@ export const planRoute: Skill<PlanArgs> = {
         summary: `${outcome.summary}${cellNote}`,
         data: { ...(outcome.data ?? {}), targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance },
       };
-      return spatialGap === null ? annotated : {
+      const gaps = [memoryGap ? `历史拓扑：${memoryGap.summary}` : '', spatialGap ? `空间 3D：${spatialGap.summary}` : ''].filter(Boolean);
+      return gaps.length === 0 ? annotated : {
         ...annotated,
-        summary: `${annotated.summary}；空间 3D：${spatialGap.summary}`,
-        data: { ...(annotated.data ?? {}), spatialGap: spatialGap.facts },
+        summary: `${annotated.summary}；${gaps.join('；')}`,
+        data: { ...(annotated.data ?? {}), ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}) },
       };
     }
     const plan = result.plan;

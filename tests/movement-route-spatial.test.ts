@@ -163,6 +163,34 @@ test('plan_route source:"spatial" 严格无路时用历史体素给出带 UNKNOW
   assert.ok(steps.every((step) => !!SKILLS[step.skill]));
 });
 
+test('plan_route auto 失败时带出历史拓扑缺口，而不是只说空间 3D 没路', async (t) => {
+  const map = flatWorld();
+  fillBox(map, 'minecraft:stone', at(2, 0, -1), at(2, 2, 1));
+  const { w, ctx: base } = ctxAt(map, at(0.5, 0, 0.5));
+  const spatial = {
+    ...fakeSpatial(map),
+    query: () => ({
+      status: 'ok',
+      data: {
+        kind: 'historyRoute',
+        inspection: {
+          status: 'DISCONNECTED', message: 'history fragments are disconnected',
+          points: [], segments: [], gaps: [], fromNodeId: null, toNodeId: null,
+        },
+      },
+    }),
+  } as unknown as SharedSpatialSession;
+  const ctx = { ...base, spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(3, 0, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /历史拓扑/);
+  assert.match(r.summary, /DISCONNECTED|disconnected/);
+  assert.ok(r.data?.memoryGap, '保留 memory gap facts');
+  assert.equal((r.data?.memoryGap as { status?: string }).status, 'DISCONNECTED');
+});
+
 test('plan_route source:"spatial" 无法确认时返回边界事实，不伪造 steps', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fill(map, 'minecraft:stone', [at(0, -1, 0)]);
