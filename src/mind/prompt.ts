@@ -242,13 +242,13 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去记得的地方或坐标 → resolve_target 算点 → plan_route 规划 → 按结果执行（memory 的 legs 按 transition 用现有动作，spatial 的 steps 逐步执行，search 的 routeId 交给 walk_path）；找没见过的东西 → look_around 只看当前视野，没看到就实际移动一段（执行 plan_route 的 steps，或 move_step/press_keys/descend_to）再观察，别原地重复 look_around/gather；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去记得的地方或坐标 → resolve_target 算点 → plan_route 规划 → 按结果执行（memory 的 legs 按 transition 用现有动作，spatial 的 steps 逐步执行，search 的 routeId 交给 walk_path）；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：navigate_to 的 maxSteps 或 plan_route 的 steps 一次走一段（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补这一格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- plan_route 只读：source:"memory"/"spatial"/"auto" 返回路点/过渡或现有动作 steps（move_step/descend_to），按 steps 执行；source:"search" 返回 routeId，才交给 walk_path。plan_route 失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段，走完/看清再规划；climb 由你决定梯子/垫高
+- plan_route 只读：source:"memory"/"spatial"/"auto" 返回路点/过渡或现有动作 steps（move_step/descend_to），按 steps 执行；source:"search" 返回 routeId，才交给 walk_path。plan_route 失败/gaps 时不要调用 walk_path；远目标/未知区域用有界分段：navigate_to 的 maxSteps 或 plan_route 的 steps 每次只推进一段，段后重新观察；分段只限本次执行步数，不缩短原目标；navigate_to 分段执行后的摘要会给出实测位移、新区块数和新观测格数；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算（新区块不算观测覆盖）；climb 由你决定梯子/垫高
 - plan_route/walk_path 不挖墙、不垫路、不搭柱；需要改变地形时显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】

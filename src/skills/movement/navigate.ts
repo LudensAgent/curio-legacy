@@ -28,6 +28,7 @@ const point = (v: unknown): Vec3Like | null => {
 
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
 const sameCell = (a: Vec3Like, b: Vec3Like) => a.x === b.x && a.y === b.y && a.z === b.z;
+const round2 = (v: number) => Math.round(v * 100) / 100;
 
 function facingOf(from: Vec3Like, to: Vec3Like): keyof typeof DIRS {
   const dx = to.x - from.x, dz = to.z - from.z;
@@ -89,6 +90,46 @@ export const navigateTo: Skill<NavigateArgs> = {
     const state = ctx.adapter.state();
     if (!state.alive || !state.connected || !state.observationReady) return fail('NOT_CONNECTED', 'navigate_to 需要有效的存活观测');
     if (state.worldId !== spatial.worldId) return fail('WRONG_DIMENSION', '当前世界与空间会话不一致');
+    // 有界分段的实测事实：起点、区块访问数、已观测格都在段前取快照，段后按差值报告。
+    // 新区块数是“身体进入过”的计数，不是观测覆盖；覆盖只认 VoxelMap 里新增的已观测格。
+    const voxel = spatial.session.voxel;
+    const start = { ...state.pos };
+    const startChunks = ctx.memory.visitedChunkCount;
+    const startObservedCells = voxel.checkpointFullCounts().observedCells;
+    const segmentFacts = (end: Vec3Like, facts: { executed: number; planned: number; remaining: number; invalidation: string | null; arrived: boolean }) => {
+      const dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+      const horizontal = Math.hypot(dx, dz);
+      const euclidean = Math.hypot(dx, dy, dz);
+      const newChunks = ctx.memory.visitedChunkCount - startChunks;
+      const newObservedCells = voxel.checkpointFullCounts().observedCells - startObservedCells;
+      const observationCoverage = newObservedCells > 0;
+      const movedCells = !sameCell(cell(start), cell(end));
+      // 有意义的进展只认新观测覆盖、进入新区块/扩大区域覆盖或到达选定站位；
+      // 单纯移动不算进展（位移仍作为实测事实报告）。进入新区块不算“观测覆盖”。
+      const reason = observationCoverage ? 'new_observation'
+        : newChunks > 0 ? 'new_chunk'
+          : facts.arrived ? 'arrived_at_target' : 'none';
+      return {
+        segment: {
+          startStance: { ...start },
+          endStance: { ...end },
+          displacement: { horizontal: round2(horizontal), vertical: round2(dy), euclidean: round2(euclidean) },
+          distanceFromStart: round2(euclidean),
+          newChunks,
+          newObservedCells,
+          observationCoverage,
+          movedCells,
+          arrivedAtTarget: facts.arrived,
+          remainingTarget: { ...args.to },
+          remainingTransitions: facts.remaining,
+          bounds: { maxSteps: args.maxSteps, plannedTransitions: facts.planned, executed: facts.executed },
+          invalidation: facts.invalidation,
+          progress: { meaningful: reason !== 'none', reason },
+        },
+      };
+    };
+    const segmentNote = (s: ReturnType<typeof segmentFacts>['segment']) =>
+      `；实测位移 ${s.displacement.horizontal} 格、新区块 ${s.newChunks}、新观测格 ${s.newObservedCells}，${s.progress.meaningful ? '本段有进展' : '本段无新进展'}`;
     const request = {
       worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
       body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
@@ -118,23 +159,33 @@ export const navigateTo: Skill<NavigateArgs> = {
           const position = { ...ctx.adapter.state().pos };
           const transition = { kind: 'drop' as const, from: { ...state.pos }, to: { ...dropTo }, drop };
           if (moved.status === 'succeeded') {
-            return ok(`navigate_to 没有普通 walk/step 路线；按你允许的 drop 直接下落到相邻目标 (${dropTo.x},${dropTo.y},${dropTo.z})（落差 ${drop.toFixed(2)}）`, {
+            const facts = segmentFacts(position, { executed: 1, planned: 1, remaining: 0, invalidation: null, arrived: true });
+            return ok(`navigate_to 没有普通 walk/step 路线；按你允许的 drop 直接下落到相邻目标 (${dropTo.x},${dropTo.y},${dropTo.z})（落差 ${drop.toFixed(2)}）${segmentNote(facts.segment)}`, {
               ...routeFacts(strict), transitions: [transition], directDrop: true, executed: 1, total: 1, remaining: [], position,
+              ...facts,
             });
           }
           const { local: _local, around: _around, ...nested } = (moved.data ?? {}) as Record<string, unknown>;
-          return fail(moved.failureCode ?? 'ERROR', `navigate_to 没有普通路线；直接下落也失败：${moved.summary}`, {
+          const facts = segmentFacts(position, { executed: 0, planned: 1, remaining: 1, invalidation: 'step_failed', arrived: false });
+          return fail(moved.failureCode ?? 'ERROR', `navigate_to 没有普通路线；直接下落也失败：${moved.summary}${segmentNote(facts.segment)}`, {
             ...routeFacts(strict), transitions: [transition], directDrop: true, nested: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data: nested }, position,
+            ...facts,
           });
         }
       }
       const code: FailureCode = strict.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT' : strict.status === 'UNKNOWN' ? 'NOT_FOUND' : 'PATH_NOT_FOUND';
-      return fail(code, `navigate_to 找不到可执行的 walk/step/drop 路线：${strict.status}（${strict.boundaries.length} 个边界事实）；需要挖/垫/搭或换目标时由你决定`, { ...routeFacts(strict), position: { ...state.pos } });
+      const facts = segmentFacts(ctx.adapter.state().pos, { executed: 0, planned: 0, remaining: 0, invalidation: 'no_route', arrived: false });
+      return fail(code, `navigate_to 找不到可执行的 walk/step/drop 路线：${strict.status}（${strict.boundaries.length} 个边界事实）；需要挖/垫/搭或换目标时由你决定${segmentNote(facts.segment)}`, {
+        ...routeFacts(strict), position: { ...state.pos },
+        ...facts,
+      });
     }
     const disallowed = result.transitions.find((transition) => !args.allowed.includes(transition.kind));
     if (disallowed) {
-      return fail('BAD_ARGS', `navigate_to 路线第一段是 ${disallowed.kind}，不在 allowed（${args.allowed.join('、')}）；没有执行任何一步`, {
+      const facts = segmentFacts(ctx.adapter.state().pos, { executed: 0, planned: result.transitions.length, remaining: result.transitions.length, invalidation: 'disallowed_transition', arrived: false });
+      return fail('BAD_ARGS', `navigate_to 路线第一段是 ${disallowed.kind}，不在 allowed（${args.allowed.join('、')}）；没有执行任何一步${segmentNote(facts.segment)}`, {
         ...routeFacts(result), position: { ...state.pos }, disallowed: disallowed,
+        ...facts,
       });
     }
     // 历史候选的逐段复验已在搜索层按当前证据完成：BLOCKED 段之前的前缀才交给身体，
@@ -147,15 +198,19 @@ export const navigateTo: Skill<NavigateArgs> = {
     let last: AgentState = state;
     for (const [index, transition] of transitions.entries()) {
       if (Date.now() >= ctx.deadline) {
-        return fail('TIMEOUT', `navigate_to 期限耗尽：已执行 ${executed}/${result.transitions.length} 段；下一步重新规划`, {
+        const facts = segmentFacts(ctx.adapter.state().pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - index, invalidation: 'deadline', arrived: false });
+        return fail('TIMEOUT', `navigate_to 期限耗尽：已执行 ${executed}/${result.transitions.length} 段；下一步重新规划${segmentNote(facts.segment)}`, {
           ...routeFacts(result), executed, remaining: result.transitions.slice(index), position: { ...ctx.adapter.state().pos },
+          ...facts,
         });
       }
       const current = ctx.adapter.state();
       const from = cell(transition.from);
       if (!sameCell(cell(feetCell(current.pos)), cell({ ...transition.from, y: current.pos.y }))) {
-        return fail('EFFECT_NOT_CONFIRMED', `navigate_to 起点漂移：第 ${index + 1} 段应在 ${JSON.stringify(from)}，实际脚下在 ${JSON.stringify(feetCell(current.pos))}；没有继续执行`, {
+        const facts = segmentFacts(current.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'start_drift', arrived: false });
+        return fail('EFFECT_NOT_CONFIRMED', `navigate_to 起点漂移：第 ${index + 1} 段应在 ${JSON.stringify(from)}，实际脚下在 ${JSON.stringify(feetCell(current.pos))}；没有继续执行${segmentNote(facts.segment)}`, {
           ...routeFacts(result), executed, stepIndex: index, transition, position: { ...current.pos },
+          ...facts,
         });
       }
       const to = cell(transition.to);
@@ -165,17 +220,25 @@ export const navigateTo: Skill<NavigateArgs> = {
           target: { x: to.x, y: transition.to.y, z: to.z },
           ...(args.allowUnknownCorridor ? { allowUnknownCorridor: true } : {}),
         }, ctx.adapter);
-        if (!validated.ok) return fail('BAD_ARGS', `navigate_to 生成 descend_to 参数无效：${validated.error}；没有继续执行`, {
-          ...routeFacts(result), executed, stepIndex: index, transition, position: { ...current.pos },
-        });
+        if (!validated.ok) {
+          const facts = segmentFacts(current.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'invalid_step', arrived: false });
+          return fail('BAD_ARGS', `navigate_to 生成 descend_to 参数无效：${validated.error}；没有继续执行${segmentNote(facts.segment)}`, {
+            ...routeFacts(result), executed, stepIndex: index, transition, position: { ...current.pos },
+            ...facts,
+          });
+        }
         step = await runSkill(ctx, descendTo, validated.args);
       } else {
         const validated = validateSkill(moveStep, {
           xyz: [to.x, transition.to.y, to.z], facing: facingOf(from, to),
         }, ctx.adapter);
-        if (!validated.ok) return fail('BAD_ARGS', `navigate_to 生成 move_step 参数无效：${validated.error}；没有继续执行`, {
-          ...routeFacts(result), executed, stepIndex: index, transition, position: { ...current.pos },
-        });
+        if (!validated.ok) {
+          const facts = segmentFacts(current.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'invalid_step', arrived: false });
+          return fail('BAD_ARGS', `navigate_to 生成 move_step 参数无效：${validated.error}；没有继续执行${segmentNote(facts.segment)}`, {
+            ...routeFacts(result), executed, stepIndex: index, transition, position: { ...current.pos },
+            ...facts,
+          });
+        }
         step = await runSkill(ctx, moveStep, validated.args);
       }
       if (step.status !== 'succeeded') {
@@ -189,18 +252,22 @@ export const navigateTo: Skill<NavigateArgs> = {
               ...(step.data?.remediation === undefined ? {} : { remediation: step.data.remediation }),
             }
           : null;
-        return fail(step.failureCode ?? 'ERROR', `navigate_to 在第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}；没有继续执行`, {
+        const facts = segmentFacts(stopped.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'step_failed', arrived: false });
+        return fail(step.failureCode ?? 'ERROR', `navigate_to 在第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}；没有继续执行${segmentNote(facts.segment)}`, {
           ...routeFacts(result), executed,
           ...(blocker === null ? {} : { confirmedSegments: executed, blocker, lastMeasuredPosition: { ...stopped.pos } }),
           stepIndex: index, transition, remaining: result.transitions.slice(index),
           nested: { code: step.failureCode ?? 'ERROR', summary: step.summary, data: nested },
           position: { ...stopped.pos },
+          ...facts,
         });
       }
       const arrived = ctx.adapter.state();
       if (!sameCell(cell(feetCell(arrived.pos)), to) || Math.abs(arrived.pos.y - transition.to.y) > 0.01) {
-        return fail('EFFECT_NOT_CONFIRMED', `navigate_to 第 ${index + 1} 段动作报成功，但实际脚下 ${JSON.stringify(feetCell(arrived.pos))} 不是 ${JSON.stringify(to)}；没有继续执行`, {
+        const facts = segmentFacts(arrived.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'effect_not_confirmed', arrived: false });
+        return fail('EFFECT_NOT_CONFIRMED', `navigate_to 第 ${index + 1} 段动作报成功，但实际脚下 ${JSON.stringify(feetCell(arrived.pos))} 不是 ${JSON.stringify(to)}；没有继续执行${segmentNote(facts.segment)}`, {
           ...routeFacts(result), executed, stepIndex: index, transition, position: { ...arrived.pos },
+          ...facts,
         });
       }
       executed += 1;
@@ -208,19 +275,25 @@ export const navigateTo: Skill<NavigateArgs> = {
       ctx.progress(executed / Math.max(1, result.transitions.length), `navigate_to ${executed}/${result.transitions.length}`);
     }
     if (blocker !== null && blocker.index < args.maxSteps) {
-      return fail('PATH_NOT_FOUND', `navigate_to 停在 blocker 前：第 ${blocker.index + 1} 段当前证据 ${blocker.status}${blocker.reason === undefined ? '' : `（${blocker.reason}）`}；已确认 ${executed} 段，最后实测位置 ${JSON.stringify(cell(feetCell(last.pos)))}；剩余 ${result.transitions.length - executed} 段；未自动挖，清障由你显式 mine_cell 后重新观察/规划`, {
+      const facts = segmentFacts(last.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'blocker', arrived: false });
+      return fail('PATH_NOT_FOUND', `navigate_to 停在 blocker 前：第 ${blocker.index + 1} 段当前证据 ${blocker.status}${blocker.reason === undefined ? '' : `（${blocker.reason}）`}；已确认 ${executed} 段，最后实测位置 ${JSON.stringify(cell(feetCell(last.pos)))}；剩余 ${result.transitions.length - executed} 段；未自动挖，清障由你显式 mine_cell 后重新观察/规划${segmentNote(facts.segment)}`, {
         ...routeFacts(result), executed, confirmedSegments: executed,
         remaining: result.transitions.slice(executed), position: { ...last.pos },
         blocker,
+        ...facts,
       });
     }
     if (truncated) {
-      return fail('EFFECT_NOT_CONFIRMED', `navigate_to 已执行前 ${executed} 段，未到终点（maxSteps=${args.maxSteps}）；可再次调用继续`, {
+      const facts = segmentFacts(last.pos, { executed, planned: result.transitions.length, remaining: result.transitions.length - executed, invalidation: 'max_steps', arrived: false });
+      return fail('EFFECT_NOT_CONFIRMED', `navigate_to 已执行前 ${executed} 段，未到终点（maxSteps=${args.maxSteps}）；目标 (${args.to.x},${args.to.y},${args.to.z}) 不变，可再次调用继续${segmentNote(facts.segment)}`, {
         ...routeFacts(result), executed, remaining: result.transitions.slice(executed), position: { ...last.pos },
+        ...facts,
       });
     }
-    return ok(`navigate_to 到达 ${JSON.stringify(cell(feetCell(last.pos)))}（${executed} 段，${result.evidenceMode}${result.evidenceMode === 'historical' ? '，历史体素、当前可通行性未知' : ''}）`, {
+    const facts = segmentFacts(last.pos, { executed, planned: result.transitions.length, remaining: 0, invalidation: null, arrived: true });
+    return ok(`navigate_to 到达 ${JSON.stringify(cell(feetCell(last.pos)))}（${executed} 段，${result.evidenceMode}${result.evidenceMode === 'historical' ? '，历史体素、当前可通行性未知' : ''}）${segmentNote(facts.segment)}`, {
       ...routeFacts(result), executed, total: result.transitions.length, remaining: [], position: { ...last.pos },
+      ...facts,
     });
   },
 };
