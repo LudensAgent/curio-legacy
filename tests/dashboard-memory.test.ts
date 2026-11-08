@@ -33,7 +33,7 @@ test('dashboard memory keeps identical coordinates in separate dimensions and ex
     const snapshot = dashboardMemory(memory, { worldId: 'current-world', dim, pos, worldDay: 1 }, 0);
     assert.equal(snapshot.worldId, 'current-world');
     assert.equal(snapshot.dimension, dim);
-    [snapshot.landmarks, snapshot.resources, snapshot.creatures, snapshot.chests, snapshot.passages, snapshot.facilities, snapshot.hazards]
+    [snapshot.landmarks, snapshot.resources, snapshot.creatures, snapshot.chests, snapshot.facilities, snapshot.hazards]
       .forEach((records) => {
         assert.ok(records.length > 0);
         assert.ok(records.every((record) => record.worldId === 'current-world' && record.dim === dim));
@@ -45,7 +45,7 @@ test('dashboard memory keeps identical coordinates in separate dimensions and ex
     assert.deepEqual(snapshot.notes.map((note) => note.text), [`current-world:${dim}`]);
     assert.deepEqual(snapshot.goals.map((goal) => goal.goal), [`current-world:${dim}`]);
     assert.deepEqual(snapshot.dimensions, dimensions.map((name) => ({ dim: name, landmarks: 4, resources: 1,
-      creatures: 1, chests: 1, passages: 1, facilities: 2, hazards: 2 })));
+      creatures: 1, chests: 1, facilities: 2, hazards: 2 })));
   });
 });
 
@@ -92,7 +92,7 @@ test('dashboard clears spatial records when the Agent world differs from the loa
   t.after(() => memory.close());
   populate(memory, 'old-world');
   const snapshot = dashboardMemory(memory, { worldId: 'new-world', dim: 'the_nether', pos }, null);
-  [snapshot.landmarks, snapshot.resources, snapshot.creatures, snapshot.chests, snapshot.passages, snapshot.facilities,
+  [snapshot.landmarks, snapshot.resources, snapshot.creatures, snapshot.chests, snapshot.facilities,
     snapshot.hazards, snapshot.farms, snapshot.notes, snapshot.goals].forEach((records) => assert.deepEqual(records, []));
   assert.ok(snapshot.dimensions.every((summary) => Object.entries(summary).every(([key, value]) => key === 'dim' || value === 0)));
 });

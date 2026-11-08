@@ -83,25 +83,14 @@ export const OWN_BUILDING_HINT = '拆了拿料，build 回头还会报缺这一�
 /** 人造建材：只有玩家放置/合成才出现的方块（村庄房子、别人家、自己搭的非归档建筑都算）。自然石头/泥土/矿/树木不算。 */
 const MAN_MADE = /cobblestone|cobbled_deepslate|_stone_bricks|mossy_|cracked_|chiseled_|_planks|bricks|glass|_wool|terracotta|concrete|_door|_trapdoor|fence|_wall|_slab|_stairs|crafting_table|furnace|smoker|blast_furnace|chest|barrel|_bed|anvil|enchanting_table|_torch|lantern|_sign|_banner|_head|smooth_|polished_|hay_block|_carpet/;
 
-/** 这一格是不是在"自己走过/挖过的通道"里：在里面的人造建材是"自己的施工"，不当成要提醒的别人建筑。 */
-export function insidePassage(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like): boolean {
-  const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
-  for (const rec of memory.passages(state.dim)) {
-    if (rec.worldId && rec.worldId !== state.worldId) continue;
-    if (rec.path.some((q) => Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z) <= 3)) return true;
-  }
-  return false;
-}
-
-export type BlockCategory = 'own-building' | 'own-passage' | 'man-made' | 'natural';
+export type BlockCategory = 'own-building' | 'man-made' | 'natural';
 
 /**
  * 这一格属于什么（拆之前报给心智，让它在"当料拆"和"这是建筑"之间自己取舍，不替它拦）。
- * 优先级：自己的房子 > 自己的矿道/走过的路 > 人造建材 > 自然方块。
+ * 优先级：自己的房子 > 人造建材 > 自然方块。
  */
 export function classifyBlock(memory: WorldMemory, state: { worldId: string; dim: string }, pos: Vec3Like, blockName: string | null): BlockCategory {
   if (blockName && ownBuildingAt(memory, state, pos, blockName)) return 'own-building';
-  if (insidePassage(memory, state, pos)) return 'own-passage';
   if (blockName && MAN_MADE.test(blockName)) return 'man-made';
   return 'natural';
 }

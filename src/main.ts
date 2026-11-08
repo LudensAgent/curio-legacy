@@ -37,7 +37,7 @@ import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
 import { installProcessHealth, RESTART_EXIT_CODE } from './observer/process-health.ts';
 import { sandboxStats } from './codeskills/sandbox.ts';
-import { buildingArchiveFor, insidePassage, ownBuildingAt } from './skills/build.ts';
+import { buildingArchiveFor, ownBuildingAt } from './skills/build.ts';
 import { flattenProgram, MethodLibrary, simpleToMethod } from './methods/learning.ts';
 import { ResourceKnowledge } from './methods/knowledge.ts';
 import { ControlKnowledge } from './methods/controls.ts';
@@ -184,10 +184,9 @@ const vision = new Vision(adapter, config.vision, spatial);
 // injected in production until a real evidence source exists; the previous
 // config flag could only ever produce `missing_action_evidence`.
 const arbiter = new Arbiter(adapter, memory, bus, vision, spatial);
-const perception = new Perception(adapter, memory, bus, vision);
+const perception = new Perception(adapter, memory, bus, vision, spatial);
 // 区分“在自家屋里”和“在坑里”：围着自己的墙是不是自己盖的房子
 perception.ownBuilt = (pos, block) => { const st = adapter.state(); return ownBuildingAt(memory, { worldId: st.worldId, dim: st.dim }, pos, block); };
-perception.inPassage = (pos) => { const st = adapter.state(); return insidePassage(memory, { worldId: st.worldId, dim: st.dim }, pos); };
 const episodic = new EpisodicMemory(config.memory, memory, bus, () => adapter.state(), config.dataDir,
   config.memory.provider === 'hindsight' ? new HindsightBackend(config.memory) : undefined);
 episodic.start();
@@ -987,6 +986,8 @@ async function finishShutdown(code: number) {
   // pending，仍以 exit 0 报告“保存并关闭”。beginShutdown 只停新任务/取消当前任务，
   // 由 SharedSpatialSession.shutdown() 负责应用/报告 pending 并真实 close。
   attempt('arbiter.beginShutdown', () => arbiter.beginShutdown());
+  // 先把当前位移段写进共享空间记忆，再关闭空间会话。
+  attempt('perception.stop', () => perception.stop());
   let servicePromise: Promise<ShutdownResult> | null = null;
   let serviceCallError: unknown = null;
   try { servicePromise = spatial.shutdown(); } catch (error) { serviceCallError = error; }

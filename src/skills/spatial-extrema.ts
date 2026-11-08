@@ -37,8 +37,8 @@ type ExtremaBest =
 
 export const spatialExtrema: Skill<ExtremaArgs> = {
   name: 'spatial_extrema',
-  description: '只读查询共享空间记忆里挖过/走过的最深点或离给定原点最远的记录点；返回历史几何事实，不代表当前可通行。',
-  argsDoc: '{"metric":"deepest|farthest","dim"?:"维度（默认当前）","kinds"?:["dug"|"walked"|"bridge"|"built"]（默认 dug+walked）,"origin"?:{x,y,z}（farthest 用；跨维度必须显式给）,"space"?:"horizontal|euclidean"（默认 horizontal）,"includeArchived"?:false,"maxFragments"?:1-1000}；只读，不选目标、不执行。',
+  description: '只读查询共享空间记忆里记录过的最深点或离给定原点最远的记录点；返回历史几何事实，不代表当前可通行。',
+  argsDoc: '{"metric":"deepest|farthest","dim"?:"维度（默认当前）","kinds"?:["dug"|"walked"|"bridge"|"built"]（默认全部路径 kind）,"origin"?:{x,y,z}（farthest 用；跨维度必须显式给）,"space"?:"horizontal|euclidean"（默认 horizontal）,"includeArchived"?:false,"maxFragments"?:1-1000}；只读，不选目标、不执行。',
   timeoutMs: 5000,
   movement: false,
   readOnly: true,
@@ -49,7 +49,7 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
     if (a.dim !== undefined && (typeof a.dim !== 'string' || a.dim.length === 0)) return { ok: false, error: 'dim 必须是非空字符串' };
     const kinds = a.kinds;
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.length === 0 || kinds.some((kind) => !KINDS.includes(kind)))) {
-      return { ok: false, error: `kinds 必须是非空的 ${KINDS.join('|')} 数组；不写则默认 dug+walked` };
+      return { ok: false, error: `kinds 必须是非空的 ${KINDS.join('|')} 数组；不写则默认全部路径 kind` };
     }
     const parsedOrigin = a.origin === undefined ? undefined : finitePoint(a.origin);
     if (a.origin !== undefined && parsedOrigin === null) return { ok: false, error: 'origin 需要 {x,y,z} 三个有限数字' };
@@ -85,7 +85,7 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
     const space = args.space ?? 'horizontal';
     const scan = pageFragments(spatial, {
       dim,
-      kinds: args.kinds ?? ['dug', 'walked'],
+      kinds: args.kinds ?? [...KINDS],
       maxFragments: args.maxFragments ?? 1000,
       signal: ctx.signal,
       deadline: ctx.deadline,

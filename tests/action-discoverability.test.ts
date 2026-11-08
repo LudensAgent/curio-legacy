@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { advancedMovesLine, memoryMovesLine, moveDetails, moveDirectory, movesCatalog } from '../src/mind/prompt.ts';
+import { advancedMovesLine, moveDetails, moveDirectory, movesCatalog } from '../src/mind/prompt.ts';
 import { LLM_HIDDEN, SKILLS } from '../src/skills/index.ts';
 
 test('the empty moves query lists every callable action but hides body-only fillers', () => {
@@ -21,15 +21,13 @@ test('general-purpose actions stay discoverable outside the advanced line', () =
   assert.doesNotMatch(advanced, /building_archive|ranged_defend/, '通用能力不塞进阶提醒');
 });
 
-test('空间记忆查询不进静态目录，但按情境在 user 提醒里可发现', () => {
+test('空间记忆是 plan_route 的 source，不再是单独的导航技能', () => {
   const catalog = movesCatalog(28);
-  assert.doesNotMatch(catalog, /spatial_extrema|plan_memory_route/);
-  const memory = memoryMovesLine();
-  assert.match(memory, /spatial_extrema/);
-  assert.match(memory, /plan_memory_route/);
+  assert.match(catalog, /plan_route/);
+  assert.doesNotMatch(catalog, /plan_memory_route/);
   const directory = moveDirectory();
   assert.match(directory, /- spatial_extrema /);
-  assert.match(directory, /- plan_memory_route /);
+  assert.doesNotMatch(directory, /plan_memory_route/);
 });
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {

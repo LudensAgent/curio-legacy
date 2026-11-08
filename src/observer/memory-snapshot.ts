@@ -1,7 +1,6 @@
 import type { AgentState } from '../adapter/types.ts';
 import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
 import { oreKind } from '../memory/ore-spots.ts';
-import { passageFragmentation } from '../memory/passages.ts';
 import { recallText } from '../memory/recollection.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { myFacilities } from '../mind/facilities.ts';
@@ -12,13 +11,12 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
   const inDimension = (record: { worldId?: string; dim: string }) => inWorld(record) && record.dim === state.dim;
   const landmarks = memory.landmarks().filter(inWorld);
   const chests = memory.chests().filter(inWorld);
-  const passages = memory.passages().filter(inWorld);
   const hazards = memory.hazards().filter(inWorld);
   const farms = memory.farms().filter(inWorld);
   const clock = memory.chestClock(state.worldDay);
   const facilities = memory.worldId === state.worldId ? myFacilities(memory, state) : [];
   const dimensions = [...new Set(['overworld', 'the_nether', 'the_end', state.dim,
-    ...landmarks.map((l) => l.dim), ...chests.map((c) => c.dim), ...passages.map((p) => p.dim), ...hazards.map((h) => h.dim), ...farms.map((f) => f.dim)])]
+    ...landmarks.map((l) => l.dim), ...chests.map((c) => c.dim), ...hazards.map((h) => h.dim), ...farms.map((f) => f.dim)])]
     .map((dim) => {
       const places = landmarks.filter((l) => l.dim === dim);
       return {
@@ -26,7 +24,6 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
         resources: places.filter((l) => l.kind === 'resource').length,
         creatures: places.filter((l) => l.kind === 'herd').length,
         chests: chests.filter((c) => c.dim === dim).length,
-        passages: passages.filter((p) => p.dim === dim).length,
         facilities: memory.worldId === state.worldId ? myFacilities(memory, { ...state, dim }, ['chest', 'station', 'bed']).length : 0,
         hazards: hazards.filter((h) => h.dim === dim).length + places.filter((l) => l.kind === 'danger').length,
       };
@@ -40,8 +37,6 @@ export function dashboardMemory(memory: WorldMemory, state: Pick<AgentState, 'wo
       .map((l) => ({ ...l, type: l.kind === 'danger' ? `danger:${l.label}` : oreKind(l.label),
         dist: Math.round(Math.hypot(l.pos.x - state.pos.x, l.pos.y - state.pos.y, l.pos.z - state.pos.z)) }))
       .sort((a, b) => a.dist - b.dist),
-    passages: passages.filter(inDimension).sort((a, b) => b.lastUsedAt - a.lastUsedAt).slice(0, 12),
-    passageFragments: passageFragmentation(passages.filter(inDimension)),
     facilities: facilities.slice(0, 16).map((f) => ({ ...f, worldId: state.worldId, dim: state.dim })),
     chests: chests.filter(inDimension).map((c) => ({ worldId: c.worldId, dim: c.dim, ...chestLocation(c, clock), note: c.note, uses: c.uses,
       items: c.contents.items.length, text: describeChest(c, clock) })),

@@ -5,13 +5,14 @@ import { isContainerLandmark, totalStock, type StockRow } from '../memory/chest-
 import { facingOfYaw, localMap } from './local.ts';
 import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
-import type { PassageRecord, WorldMemory } from '../memory/store.ts';
+import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround, shortId } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
 import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
-import { PassageTracker, bridgeRuns, MIN_BRIDGE, passageEntranceDescent } from '../memory/passages.ts';
+import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import { TraversalRecorder } from '../spatial/traversal-recorder.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -22,6 +23,7 @@ export const DIRS: Record<string, [number, number]> = {
   S: [0, 1], SW: [-0.707, 0.707], W: [-1, 0], NW: [-0.707, -0.707],
 };
 
+const supportKey = (pos: Vec3Like) => `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
 const DANGER = new Set(['lava', 'spawner']);
 const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnace']);
 /** 功能方块地标的标签（'工作台' 或 '我的工作台'）：拆掉/消失后也要从记忆里清掉 */
@@ -187,17 +189,16 @@ export type OwnBuiltLookup = (pos: Vec3Like, block: string) => { name: string } 
 export class Perception {
   /** 判断“围着我的是不是自己盖的墙”，用来区分屋里和坑里 */
   ownBuilt?: OwnBuiltLookup;
-  /** 这一格是不是在“自己挖过/走过的通道”里（用来区分矿道和别人的人造建筑） */
-  inPassage?: (pos: Vec3Like) => boolean;
-  /** 跟着身体记自己挖过的通道（矿道、台阶井） */
-  private passages: PassageTracker;
+  /** 统一写入共享空间记忆的实测位移；没有共享会话时只感知、不记录。 */
+  private readonly traversal: TraversalRecorder | null;
+  /** 自放方块的支撑格缓存；只用于给 fragment 标 bridge 来源，不参与导航。 */
+  private placedSupports = new Set<string>();
+  private placedSupportsAt = 0;
   /** 效率账本的挖掘游标：不依赖 where，任何环境都能推进 */
   private lastDugAt = 0;
-  /** 空间记账（矿点失效、通道、放置方块移除）的挖掘游标：where 未知时先不消费，等能判断环境再补 */
+  /** 空间记账（矿点失效、放置方块移除）的挖掘游标：where 未知时先不消费，等能判断环境再补 */
   private lastSpaceDugAt = 0;
   private lastPlacedAt = 0;
-  /** 最近一次从 placed 里扫桥/路的时间：节流扫描，桥搭完几秒内被升格 */
-  private bridgeScanAt = 0;
   /** 第一次拿到某个物品时回调（heldBefore 是之前拿到过的物品） */
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
@@ -209,8 +210,8 @@ export class Perception {
   /** 地下时四个水平方向扫天光的最近方向（缓存几秒，避免每个快照都扫 32 格） */
   private surfaceDir: { key: string; at: number; dir: string | null; dist: number | null } | null = null;
 
-  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision) {
-    this.passages = new PassageTracker(memory);
+  constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision, spatial?: SharedSpatialSession) {
+    this.traversal = spatial === undefined ? null : new TraversalRecorder(spatial, Date.now, (message) => bus.publish('spatial_traversal_error', 'P2', message));
     // 做完的事有没有留住：扔掉的东西被捡回来了，身体当场就知道
     const effects = new EffectWatch(bus);
     adapter.on?.('recollected', (r: { item: string; count: number }) => effects.recollected(r.item, r.count));
@@ -296,6 +297,7 @@ export class Perception {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    this.traversal?.flush();
   }
 
   snapshot(): Percept {
@@ -532,92 +534,6 @@ export class Perception {
     }
   }
 
-  /** 自己挖的通道洞口：亲眼看那一格已变成实心（被封/塌了），或洞口虽还空着但往里一步的通道地板已被炸掉（被炸成坑），
-   *  就把这个洞口从记录里去掉；最后一个洞口也没了就整条通道作废 */
-  private forgetSealedEntrances(s: { dim: string; pos: Vec3Like }) {
-    const recs = this.memory.passages(s.dim);
-    const near = recs.flatMap((r) => r.entrances.map((e) => ({ id: r.id, e })))
-      .filter(({ e }) => Math.hypot(e.x - s.pos.x, e.y - s.pos.y, e.z - s.pos.z) <= this.vision.effectiveRange());
-    if (!near.length) return;
-    const positions = near.map(({ e }) => e);
-    const seen = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => this.vision.observeBlocks(positions.slice(i * 32, (i + 1) * 32))).flat()
-      .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
-    for (const { id, e } of near) {
-      const o = seen.get(`${e.x},${e.y},${e.z}`);
-      if (!o) continue; // 没看见（遮挡/未加载）：不猜，留着
-      const rec = this.memory.passages(s.dim).find((r) => r.id === id);
-      if (!rec) continue;
-      const open = isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column';
-      // 洞口本身没封，但被炸成坑时往里一步的通道地板会一起没了——那也不再是能进矿道的入口
-      if (open && !this.descentBlownOut(rec, e)) continue;
-      rec.entrances = rec.entrances.filter((p) => !(p.x === e.x && p.y === e.y && p.z === e.z));
-      if (rec.entrances.length) this.memory.savePassage(rec);
-      else this.memory.forgetPassage(id);
-      this.memory.markGone('矿口', s.dim, e, o.name);
-    }
-  }
-
-  /** 洞口还空着时，往里一步的通道地板是不是被炸没了：取离洞口最近、且不高于洞口的脚点（亲脚站过的地方），
-   *  看它脚下 y-1 那格现在是否也空了。脚点记录时脚下必是实心地板，现在空了就是被炸成坑；没看见地板就不猜。 */
-  private descentBlownOut(rec: Pick<PassageRecord, 'path'>, e: Vec3Like): boolean {
-    const d = passageEntranceDescent(rec, e);
-    if (!d) return false;
-    const floor = this.vision.observeBlocks([{ x: d.x, y: d.y - 1, z: d.z }])[0];
-    if (!floor) return false;
-    return isSoftBlock(floor.name) || floor.name === 'water' || floor.name === 'lava' || floor.name === 'bubble_column';
-  }
-
-  /** 节流扫一遍自己放下的方块，把连续成片的桥/路升格成可路由的「我搭的桥」记录（放进 passages，kind='bridge'）。 */
-  private maybeSyncBridges(s: { worldId: string; dim: string }) {
-    const now = Date.now();
-    if (this.bridgeScanAt !== 0 && now - this.bridgeScanAt < 2000) return;
-    this.bridgeScanAt = now;
-    const runs = bridgeRuns(this.memory.placedBlocks());
-    const bridges = this.memory.passages(s.dim).filter((r) => r.kind === 'bridge');
-    const blocksKey = (path: Vec3Like[]) => [...path].map((f) => `${f.x},${f.y - 1},${f.z}`).sort().join('|');
-    const claimed = new Set<string>();
-    for (const run of runs) {
-      const match = bridges.find((b) => !claimed.has(b.id) && b.path.some((f) => run.path.some((g) => f.x === g.x && f.y === g.y && f.z === g.z)));
-      if (match) {
-        claimed.add(match.id);
-        if (blocksKey(match.path) === blocksKey(run.path)) continue; // 桥块没变化，不重写
-        match.path = run.path;
-        match.entrances = [run.path[0], run.path[run.path.length - 1]];
-        match.deepestY = Math.min(...run.path.map((f) => f.y));
-        this.memory.savePassage(match);
-      } else {
-        this.memory.savePassage({
-          id: shortId('brg_'), worldId: s.worldId, dim: s.dim, kind: 'bridge',
-          entrances: [run.path[0], run.path[run.path.length - 1]],
-          path: run.path, deepestY: Math.min(...run.path.map((f) => f.y)),
-          dug: 0, ores: {}, createdAt: now, lastUsedAt: now, uses: 1,
-        });
-      }
-    }
-  }
-
-  /** 自己搭的桥：亲眼看桥块（path.y-1）已经没了（被拆/被炸成空），就把那块从记录里去掉，桥短到不足一条就整条作废。 */
-  private forgetBrokenBridges(s: { dim: string; pos: Vec3Like }) {
-    const bridges = this.memory.passages(s.dim).filter((r) => r.kind === 'bridge' && r.path.some((f) => dist3(f, s.pos) <= this.vision.effectiveRange()));
-    for (const rec of bridges) {
-      const blocks = rec.path.map((f) => ({ x: f.x, y: f.y - 1, z: f.z }));
-      const seen = new Map(Array.from({ length: Math.ceil(blocks.length / 32) }, (_, i) => this.vision.observeBlocks(blocks.slice(i * 32, (i + 1) * 32))).flat()
-        .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
-      const kept = rec.path.filter((f) => {
-        const o = seen.get(`${f.x},${f.y - 1},${f.z}`);
-        if (!o) return true; // 没看见：留着
-        const gone = isSoftBlock(o.name) || o.name === 'water' || o.name === 'lava' || o.name === 'bubble_column';
-        if (gone) this.memory.removePlaced({ x: f.x, y: f.y - 1, z: f.z });
-        return !gone;
-      });
-      if (kept.length === rec.path.length) continue;
-      if (kept.length < MIN_BRIDGE) { this.memory.forgetPassage(rec.id); continue; }
-      rec.path = kept;
-      rec.entrances = [kept[0], kept[kept.length - 1]];
-      this.memory.savePassage(rec);
-    }
-  }
-
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
@@ -669,8 +585,6 @@ export class Perception {
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
       }
       this.forgetVanishedOre(s);
-      this.forgetSealedEntrances(s);
-      this.forgetBrokenBridges(s);
       for (const e of v.seen) {
         if (e.kind === 'item' || e.kind === 'other') continue;
         const key = e.kind === 'player' ? 'player' : e.name;
@@ -731,7 +645,7 @@ export class Perception {
     const light = s.connected && s.alive && s.observationReady ? this.lightInfo(s) : null;
     const overhead = s.connected && s.alive && s.observationReady ? this.overheadInfo(s) : null;
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
-    const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt, inPassage: this.inPassage }) : null;
+    const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt }) : null;
     try {
       // 效率账本不依赖环境判断：寻路挖穿、辅助开挖也是真实发生的挖掘
       const effDug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
@@ -744,16 +658,27 @@ export class Perception {
         if (dug.length) this.lastSpaceDugAt = dug[dug.length - 1].ts;
         this.forgetMinedOre(s, dug);
         this.noteExposedNeighbors(s, dug);
-        const place = where.kind === 'surface' || where.kind === 'indoors' ? 'surface' : where.kind === 'underground' ? 'underground' : 'other';
-        this.passages.observe({ worldId: s.worldId, dim: s.dim, pos: s.pos, place }, dug);
         // 自己放置的方块：放→记进 LRU；挖→从 LRU 移除（保持与当前世界一致）
         const placed = this.adapter.recentPlaced?.(this.lastPlacedAt) ?? [];
         if (placed.length) {
           this.lastPlacedAt = placed[placed.length - 1].ts;
-          for (const p of placed) this.memory.putPlaced(p.pos, p.name);
+          for (const p of placed) {
+            this.memory.putPlaced(p.pos, p.name);
+            this.placedSupports.add(supportKey(p.pos));
+          }
         }
         for (const d of dug) this.memory.removePlaced(d.pos);
-        this.maybeSyncBridges(s);
+        // 共享空间记忆是唯一的历史位移记录；walked/dug/bridge 只是证据来源标签。
+        if (Date.now() - this.placedSupportsAt > 2000) {
+          this.placedSupports = new Set(this.memory.placedBlocks().map((p) => supportKey(p.pos)));
+          this.placedSupportsAt = Date.now();
+        }
+        this.traversal?.observe({
+          worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, pos: s.pos,
+          inWater: s.inWater, inLava: s.inLava, riding: !!s.riding,
+          dug,
+          onPlacedSupport: (support) => this.placedSupports.has(supportKey(support)),
+        });
       }
     } catch { /* 记不下来不影响感知 */ }
     if (light && overhead && (overhead.covered === 'canopy' || overhead.covered === 'open')) {
@@ -850,7 +775,7 @@ const MAN_MADE = /(_planks|_stairs|_slab|glass|_pane|_door|_trapdoor|_fence|_fen
  */
 export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: number; y: number; z: number }; inWater?: boolean },
   overhead: { block: string | null; up: number | null; covered: 'open' | 'canopy' | 'roof' | 'rock' },
-  opts: { ownBuilt?: OwnBuiltLookup; inPassage?: (pos: Vec3Like) => boolean } = {}): { kind: WhereKind; text: string; depth?: number; building?: string } {
+  opts: { ownBuilt?: OwnBuiltLookup } = {}): { kind: WhereKind; text: string; depth?: number; building?: string } {
   const x = Math.floor(s.pos.x), y = Math.floor(s.pos.y), z = Math.floor(s.pos.z);
   if (s.inWater) return { kind: 'water', text: '在水里' };
   const own = (pos: Vec3Like, block: string) => { try { return opts.ownBuilt?.(pos, block) ?? null; } catch { return null; } };
@@ -862,10 +787,6 @@ export function whereAmI(adapter: Pick<GameAdapter, 'blockAt'>, s: { pos: { x: n
     if (!isSoftBlock(b)) roof = { block: b, owner: own({ x, y: y + h, z }, b) };
   }
   if (overhead.covered === 'rock' && !roof?.owner) return { kind: 'underground', text: `在地下：头顶 ${overhead.up} 格是 ${overhead.block}` };
-  // 自己挖/走过的矿道里，头顶哪怕是自己铺上去的人造建材（圆石/木板），也是矿道不是房子
-  if (overhead.covered === 'roof' && (() => { try { return opts.inPassage?.({ x, y, z }) ?? false; } catch { return false; } })()) {
-    return { kind: 'underground', text: `在矿道里：头顶 ${overhead.up} 格是 ${overhead.block}` };
-  }
   // 两格外一圈：每列地表比脚下高几格（列顶被挡住就不算）
   const cols: { rise: number; block: string; owner: { name: string } | null }[] = [];
   for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
