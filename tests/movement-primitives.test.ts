@@ -401,13 +401,13 @@ test('pillar_one：垫高一级；头顶受阻时返回具体失败', async (t) 
   w.inv.set('cobblestone', 2);
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
-  const r = await pillarOne.run(ctx, {});
+  const r = await pillarOne.run(ctx, { item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(Math.floor(w.pos.y), 61);
   assert.equal(w.blockAt({ x: 0, y: 60, z: 0 }), 'cobblestone');
 
   w.blocks.push({ name: 'stone', pos: { x: 0, y: 62, z: 0 } });
-  const blocked = await pillarOne.run(ctx, {});
+  const blocked = await pillarOne.run(ctx, { item: 'any' });
   assert.equal(blocked.status, 'failed');
   assert.match(blocked.summary, /头顶|跳跃空间/);
 });
@@ -515,7 +515,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   success.yaw = Math.PI / 2; // 面朝西
   const successCtx = makeCtx(success);
   t.after(() => successCtx.memory.close());
-  const r = await pillarOne.run(successCtx, {});
+  const r = await pillarOne.run(successCtx, { item: 'any' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.facing, 'W');
   assert.equal((r.data?.local as { facing?: string } | undefined)?.facing, 'W');
@@ -526,7 +526,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   high.rise = 2;
   const highCtx = makeCtx(high);
   t.after(() => highCtx.memory.close());
-  const over = await pillarOne.run(highCtx, {});
+  const over = await pillarOne.run(highCtx, { item: 'any' });
   assert.equal(over.status, 'failed');
   assert.equal(over.failureCode, 'EFFECT_NOT_CONFIRMED');
   assert.equal(over.data?.facing, 'W');
@@ -536,7 +536,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   floating.placeSupportBlock = false;
   const floatingCtx = makeCtx(floating);
   t.after(() => floatingCtx.memory.close());
-  const air = await pillarOne.run(floatingCtx, {});
+  const air = await pillarOne.run(floatingCtx, { item: 'any' });
   assert.equal(air.status, 'failed');
   assert.equal(air.failureCode, 'EFFECT_NOT_CONFIRMED');
   assert.equal(air.data?.facing, 'W');
@@ -546,7 +546,7 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   blocked.blocks.push({ name: 'stone', pos: { x: 0, y: 62, z: 0 } });
   const blockedCtx = makeCtx(blocked);
   t.after(() => blockedCtx.memory.close());
-  const no = await pillarOne.run(blockedCtx, {});
+  const no = await pillarOne.run(blockedCtx, { item: 'any' });
   assert.equal(no.status, 'failed');
   assert.equal(no.data?.facing, 'W');
   assert.equal((no.data?.local as { facing?: string } | undefined)?.facing, 'W');

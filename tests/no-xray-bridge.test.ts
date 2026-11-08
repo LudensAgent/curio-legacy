@@ -177,7 +177,7 @@ test('step, occupied placement and climb summaries cannot identify unobserved ne
   const ctx = makeCtx(adapter, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
   for (const [skill, args] of [['move_step', { to: [1, 0, 0], facing: 'E' }], ['place_cell', { at: [1, 0, 0], facing: 'E', item: 'dirt' }],
-    ['pillar_one', {}]] as const) {
+    ['pillar_one', { item: 'any' }]] as const) {
     // Fresh bridge per skill: this test checks feedback disclosure, not the
     // intentional stance dependency between a failed move and a relative at.
     const result = await makeBridge(ctx)('act', [skill, args]);

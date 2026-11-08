@@ -229,7 +229,7 @@ test('pillar_one 确认垫高后标记原脚所在的垫脚块', async () => {
     w.removed.add('0,62,0');
     w.inv.set('cobblestone', 2);
     const ctx = { ...makeCtx(w), spatial, taskId: ACTION };
-    const r = await pillarOne.run(ctx, {});
+    const r = await pillarOne.run(ctx, { item: 'any' });
     assert.equal(r.status, 'succeeded', r.summary);
     assert.deepEqual(changedCells(spatial), ['0,60,0:m'], '垫脚块在原脚的格子；站位提升不写成 modified');
   } finally {
@@ -256,7 +256,7 @@ test('pillar_one 站高但脚下没有可站立支撑时 0 次写入', async () 
     w.removed.add('0,62,0');
     w.inv.set('cobblestone', 1);
     const ctx = { ...makeCtx(w), spatial, taskId: ACTION };
-    const r = await pillarOne.run(ctx, {});
+    const r = await pillarOne.run(ctx, { item: 'any' });
     assert.equal(r.status, 'failed');
     assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
     assert.deepEqual(changedCells(spatial), []);
