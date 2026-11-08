@@ -197,6 +197,17 @@ const semantic = new SpatialSemanticStore(spatial.session, containers, {
 });
 if (!semantic.migrationMarker()) semantic.writeMigrationMarker();
 const memory = new WorldMemory(worldMemoryPath, { semantic });
+try {
+  memory.setWorld(adapter.state().worldId);
+} catch (error) {
+  writeSync(2, JSON.stringify({
+    event: 'memory_world_mismatch',
+    memoryWorldId: memory.worldId,
+    worldId: adapter.state().worldId,
+    error: { name: error instanceof Error ? error.name : typeof error, message: error instanceof Error ? error.message : String(error) },
+  }) + '\n');
+  process.exit(1);
+}
 const vision = new Vision(adapter, config.vision, spatial);
 // Task-level journal wiring remains an explicit seam in Arbiter. It is not
 // injected in production until a real evidence source exists; the previous
