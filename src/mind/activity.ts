@@ -400,10 +400,14 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   a.failures++;
   a.consecutiveFailures++;
   const code = result.failureCode ?? 'ERROR';
-  if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${clipFeedback(result.summary, 200)}）` };
-  if (NEEDS_THOUGHT.has(code)) return { kind: 'stuck', why: clipFeedback(result.summary) };
   // 自动插步只能是已选动作契约里明确包含的执行辅助；挖、放、耗材和改目标默认交回事实。
   const data = result.data as Record<string, any> | undefined;
+  if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${clipFeedback(result.summary, 200)}）` };
+  // move_step 的“同一目标列、只错脚高”是确定性但可原地修正的 BAD_ARGS；
+  // 先留给下面的同格改写，不用 BAD_ARGS 的通用停点把可执行的修正也挡掉。
+  const sameCellMoveFix = step.skill === 'move_step' && data?.movementNotAttempted === true
+    && (data?.remediation?.at !== undefined || data?.remediation?.xyz !== undefined);
+  if (NEEDS_THOUGHT.has(code) && !sameCellMoveFix) return { kind: 'stuck', why: clipFeedback(result.summary) };
   // use_skill 等嵌套动作报出确定的图断口（connectionGap）时，
   // 原样重试不会改变通道拓扑：按数据字段判断，交回心智，不领重试额度。
   if (data?.connectionGap && typeof data.connectionGap === 'object') {
@@ -416,6 +420,43 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const nestedNavData = data?.lastNavigationFailure as { result?: { data?: Record<string, unknown> } } | undefined;
   if (data?.offRoute === true || nestedNavData?.result?.data?.offRoute === true) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary, 220)}；寻路把身体带离了记录路线（offRoute），这段位移不算进展，原样重试不会回到记录点` };
+  }
+  // move_step 的确定性高度修正：回执锁定了同一目标列，只是相对 at/绝对 xyz 的脚高写错。
+  // 直接改写这一步的同格落点再试（不换方向、不换目标列）；只修正实际脚高，不替 Agent 选新落点。
+  if (step.skill === 'move_step' && data?.movementNotAttempted === true && (data?.remediation?.at || data?.remediation?.xyz)) {
+    const args = (step.args ?? {}) as Record<string, unknown>;
+    const fix = data.remediation as { at?: unknown; xyz?: unknown };
+    const at = Array.isArray(fix.at) && fix.at.length === 3 && fix.at.every((n) => Number.isInteger(n))
+      && Math.abs(fix.at[0] as number) + Math.abs(fix.at[2] as number) === 1 && Math.abs(fix.at[1] as number) <= 1
+      ? fix.at as [number, number, number] : null;
+    const rawXyz = fix.xyz as Record<string, unknown> | undefined;
+    const xyz = rawXyz && ['x', 'y', 'z'].every((k) => typeof rawXyz[k] === 'number' && Number.isFinite(rawXyz[k]))
+      ? { x: rawXyz.x as number, y: rawXyz.y as number, z: rawXyz.z as number } : null;
+    const absolute = args.xyz !== undefined;
+    // 只接受同一目标列：相对 at 的前/右分量必须与失败步骤一致；绝对 xyz 的 x/z 格必须与回执目标一致。
+    const requested = Array.isArray(args.at) ? args.at as number[] : null;
+    const target = data.targetCell as { x: number; y: number; z: number } | undefined;
+    const sameColumn = absolute
+      ? !!xyz && (!target || (Math.floor(xyz.x) === Math.floor(target.x) && Math.floor(xyz.z) === Math.floor(target.z)))
+      : !!at && (!requested || (requested[0] === at[0] && requested[2] === at[2]));
+    const corrected = absolute
+      ? xyz && sameColumn ? { xyz, ...(typeof args.facing === 'string' ? { facing: args.facing } : {}) } : null
+      : at && sameColumn ? { at, ...(typeof args.facing === 'string' ? { facing: args.facing } : {}) } : null;
+    const attempts = a.adaptations.filter((item) => item.startsWith('step-move:')).length;
+    const changed = corrected !== null && JSON.stringify(step.args ?? {}) !== JSON.stringify(corrected);
+    if (corrected !== null && changed && attempts < 2) {
+      const mark = `step-move:${digest(JSON.stringify(step.args ?? {}))}:${digest(JSON.stringify(corrected))}`;
+      const own = ownStep(a, step);
+      if (own && !a.adaptations.includes(mark)) {
+        a.adaptations.push(mark);
+        const originalArgs = step.args;
+        own.args = corrected;
+        own.origin = 'execution_helper';
+        own.authorizedBy = { skill: step.skill, ...(own.id ? { stepId: own.id } : {}), args: originalArgs };
+        a.index = Math.max(0, a.index - 1);
+        return { kind: 'continue', adapted: `迈步目标格不变，按实际脚高把这一步改成 ${JSON.stringify(corrected)} 再试（不换方向/目标）` };
+      }
+    }
   }
   // move_step 的确定性障碍：回执给出了具体要挖的格，且这段活本身已经在挖（mine_cell/excavate_run），
   // 就按同一委托先插入这一步挖掘再重试。只处理同一目标列/头脚格，不换方向、不换材料、不扩目标。
@@ -443,7 +484,14 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     }
   }
   // 确定性预检拒绝先于任何自动照明/清障处理：暗处未知支撑、预检一步未推进，交回事实，不自动耗火把或原样重试。
-  if (step.skill === 'move_step' && data?.movementNotAttempted === true) return { kind: 'stuck', why: clipFeedback(result.summary) };
+  // >1 格落差时把已观察到的同列落点写成可复制的 descend_to 目标，但仍由 Agent 先 assess_landings 核实并选择。
+  if (step.skill === 'move_step' && data?.movementNotAttempted === true) {
+    const landing = (data.remediation?.landing ?? data.landing) as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+    const handoff = landing && ['x', 'y', 'z'].every((k) => typeof landing[k as 'x' | 'y' | 'z'] === 'number')
+      ? `；同一目标列已观察到落点 (${landing.x},${landing.y},${landing.z})：先用 assess_landings 核实当前可见性，再把 options[].target 原样交给 descend_to {"target":{"x":${landing.x},"y":${landing.y},"z":${landing.z}}}（不自动选落点）`
+      : '';
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}${handoff}` };
+  }
   if (step.skill === 'excavate_run' && data?.completedSteps === 0 && (data?.excavatedBlocks ?? 0) === 0) return { kind: 'stuck', why: clipFeedback(result.summary) };
   const stepArgs = (step.args ?? {}) as Record<string, any>;
   const facing = stepArgs.facing ?? a.facing;

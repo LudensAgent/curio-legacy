@@ -26,8 +26,8 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.entities(半径≤32) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标。when.hostile 同样匹配听见的怪——按位置/ID 行动时 when 写 seen:true，或在代码里处理 heard
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近候选干地经当前视野确认后返回 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（支撑为实心、上面两格为空气、不是水底）；历史位置或被遮挡的位置不能当作已确认落点，null 不代表四周一定没有陆地
-- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true,fall:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆；fall:true 接受移除脚下支撑后的坠落风险，三项分别显式选择，恢复不能追加原委托未授权的风险）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。同一次代码技能里，api.stepTo 或 api.act("move_step") 失败后，下一步“相对 at”的 mine_cell/place_cell/place_support 会按错误站位解析，会被直接拒绝并提示先确认实际站位；绝对 xyz 的 digAt/placeAt 仍按原目标执行。placeAt 会填空气格，也会替换可替换的植物（草/花/树苗等）和液体；目标格被不可替换的方块（含雪层、地毯、火把、半砖、门）占住时只如实报占用，不把错误材料当完成
-- api.moveTo(x,y,z) 先 plan_route 再 walk_path：精确走到已知坐标，不重新搜索、不换路、不施工；不再支持 range/sprint/avoid → {ok,error?,pos,data?}｜api.act("动作名",{参数}) 用已有动作（plan_route、walk_path、mine_cell、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
+- api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；一次只迈一格，不能跨多格；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true,fall:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆；fall:true 接受移除脚下支撑后的坠落风险，三项分别显式选择，恢复不能追加原委托未授权的风险）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。同一次代码技能里，api.stepTo 或 api.act("move_step") 失败后，下一步“相对 at”的 mine_cell/place_cell/place_support 会按错误站位解析，会被直接拒绝并提示先确认实际站位；绝对 xyz 的 digAt/placeAt 仍按原目标执行。placeAt 会填空气格，也会替换可替换的植物（草/花/树苗等）和液体；目标格被不可替换的方块（含雪层、地毯、火把、半砖、门）占住时只如实报占用，不把错误材料当完成
+- api.moveTo(x,y,z) 先 plan_route（同高步行搜索）再 walk_path：只走同高步行格，不能换层；目标脚高变化会被规划器拒绝。需要上下层时：相邻一格用 api.stepTo；更大落差先 api.act("assess_landings")，再把返回 options[].target（或 descend.target）原样交给 api.act("descend_to",{target})；更远的多段路线用 api.act("plan_route",{to,source:"spatial"}) 取现有动作 steps 后逐步执行。不要对目标邻格换几个 y 反复 moveTo。精确走到已知坐标，不重新搜索、不换路、不施工；不再支持 range/sprint/avoid → {ok,error?,pos,data?}｜api.act("动作名",{参数}) 用已有动作（plan_route、walk_path、move_step、assess_landings、descend_to、mine_cell、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
@@ -276,7 +276,9 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (o.sprint === true) throw new Error('moveTo 不再支持 sprint；需要跑用 press_keys，或让 Agent 自己选择');
         if (Array.isArray(o.avoid) && o.avoid.length) throw new Error('moveTo 不再支持 avoid；当前 plan_route 不接受非空 avoid');
         if (a[3] !== undefined && Number(a[3]) !== 0) throw new Error('moveTo 只支持精确到达，不再接受 range；需要保留距离时先 plan_route 查看落点');
-        const planned = await runSkill('plan_route', { to: p, mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
+        // moveTo 的契约是“同高步行 + 返回 routeId 给 walk_path”；memory/spatial 只返回
+        // 路点或现有动作 steps，没有 routeId，不能交给 walk_path。这里显式只走 search。
+        const planned = await runSkill('plan_route', { to: p, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
         if (!planned.ok) return { ok: false, error: planned.summary, code: planned.code, pos: ctx.adapter.state().pos };
         const routeId = (planned.data as { routeId?: unknown } | undefined)?.routeId;
         if (typeof routeId !== 'string') return { ok: false, error: 'plan_route 没有返回 routeId', pos: ctx.adapter.state().pos };

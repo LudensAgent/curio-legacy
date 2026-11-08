@@ -170,7 +170,8 @@ export const moveStep: Skill<CellArgs> = {
       // u 是目标格相对脚格的竖直偏移，不能直接按“下方第几格”硬套（半砖会让脚高与格偏移不一致）。
       const correctedU = below === null ? null : verticalStep(below.foot - baseFoot);
       const dropRemediation = correctedU === null && below !== null && below.drop > 1.01
-        ? { assess: true as const, landing: { x: target.x, y: below.foot, z: target.z }, drop: below.drop }
+        ? { assess: true as const, landing: { x: target.x, y: below.foot, z: target.z }, drop: below.drop,
+            descend: { target: { x: target.x, y: below.foot, z: target.z } } }
         : null;
       const remediation = correctedU !== null
         ? absolute
@@ -197,7 +198,8 @@ export const moveStep: Skill<CellArgs> = {
       // >1 格的落差不是 move_step 能处理的；给出“先 assess_landings 再 descend_to”的结构化交接。
       const dropBelow = correctedAt === null ? landingBelow(adapter, target) : null;
       const dropRemediation = dropBelow && dropBelow.drop > 1.01
-        ? { assess: true as const, landing: { x: target.x, y: dropBelow.foot, z: target.z }, drop: dropBelow.drop }
+        ? { assess: true as const, landing: { x: target.x, y: dropBelow.foot, z: target.z }, drop: dropBelow.drop,
+            descend: { target: { x: target.x, y: dropBelow.foot, z: target.z } } }
         : null;
       const fix = correctedAt ? { at: correctedAt } : dropRemediation;
       // 预检失败也要给出同一相邻格的准确写法；不自动重放，由心智决定是否改用这个落点。

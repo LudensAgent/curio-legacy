@@ -43,17 +43,19 @@ export const assessLandings: Skill<{ radius: number }> = {
     // 支撑顶面按当前已观察 blockstate 的碰撞形状复核，与 move_step/descend_to 共用 supportTop；
     // 拿不到状态或形状未确认时如实返回 null/unknown，不按整数脚高假定。
     const options = ctx.senses.landingOptions(args.radius).map((option) => {
-      if (option.surface === 'water') return assessLanding(option, state.hp);
-      const support = ctx.adapter.blockStateAt?.(option.support.pos);
+      const support = option.surface === 'water' ? undefined : ctx.adapter.blockStateAt?.(option.support.pos);
       // No readable state means the top surface is unavailable, not a guess from
       // the visible name with empty properties.
-      return assessLanding(
+      const assessed = assessLanding(
         option,
         state.hp,
         support === undefined || support === null ? undefined : supportTop(support.name, support.properties ?? {}),
       );
+      // 给下行动作一个可直接复制的参数；仍由 Agent 选择哪个落点，不在这里代选。
+      return { ...assessed, descend: { target: { ...option.target } } };
     });
-    return ok(options.length ? `看清 ${options.length} 处较低表面；落差、摔伤粗估与未确认项见数据，尚未移动` : '当前视野没有可确认的较低表面；可能受视角、遮挡或光照限制，不能推断四周都没有落点',
-      { source: 'current_visible_landings', hp: state.hp, options, effectEvidence: { verified: true, changed: false, reasons: ['只读可见几何与风险估算，未执行下落'] } });
+    const handoff = '要下行时从选项里选一个未被挡住的落点，把它的 target（或 descend.target）原样传给 descend_to：{"target":{"x":数值,"y":数值,"z":数值}}；descend_to 没有 mode/nearest 参数。';
+    return ok(options.length ? `看清 ${options.length} 处较低表面；落差、摔伤粗估与未确认项见数据，尚未移动；${handoff}` : `当前视野没有可确认的较低表面；可能受视角、遮挡或光照限制，不能推断四周都没有落点。${handoff}`,
+      { source: 'current_visible_landings', hp: state.hp, options, handoff, effectEvidence: { verified: true, changed: false, reasons: ['只读可见几何与风险估算，未执行下落'] } });
   },
 };

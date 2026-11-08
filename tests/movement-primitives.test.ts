@@ -177,10 +177,11 @@ test('move_step 不自动改落点：目标列下方多格才有地面时拒绝'
   assert.equal(r.status, 'failed');
   assert.equal(r.data?.movementNotAttempted, true);
   assert.match(r.summary, /descend_to|可站立面/);
-  const remediation = r.data?.remediation as { assess?: boolean; landing?: Vec3Like; drop?: number } | undefined;
+  const remediation = r.data?.remediation as { assess?: boolean; landing?: Vec3Like; drop?: number; descend?: { target?: Vec3Like } } | undefined;
   assert.equal(remediation?.assess, true);
   assert.deepEqual(remediation?.landing, { x: 1, y: 62, z: 0 });
   assert.equal(remediation?.drop, 2);
+  assert.deepEqual(remediation?.descend?.target, { x: 1, y: 62, z: 0 }, '给出可复制给 descend_to 的同一落点');
   assert.match(r.summary, /assess_landings/);
 });
 

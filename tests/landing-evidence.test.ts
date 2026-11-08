@@ -56,11 +56,13 @@ test('assess_landings reports the same slab support top as step/descend collisio
   const sharedTop = supportTop('oak_slab', { type: 'bottom' });
   assert.equal(sharedTop, 0.5);
   const aligned = await assessLandings.run(ctx, { radius: 6 });
-  const assessed = (aligned.data?.options as { supportTop: number | null; collisionSurfaceY: number | null; surfaceConsistent: boolean | null; target: { y: number }; risk: string }[])[0];
+  const assessed = (aligned.data?.options as { supportTop: number | null; collisionSurfaceY: number | null; surfaceConsistent: boolean | null; target: { x: number; y: number; z: number }; descend: { target: { x: number; y: number; z: number } }; risk: string }[])[0];
   assert.equal(assessed.supportTop, sharedTop, '与 step/descend 共用碰撞形状顶面');
   assert.equal(assessed.collisionSurfaceY, 63 + sharedTop);
   assert.equal(assessed.surfaceConsistent, true);
   assert.equal(assessed.target.y, 63.5, '只读复核，不改写所选落点');
+  assert.deepEqual(assessed.descend.target, assessed.target, '给出可直接复制给 descend_to 的落点参数');
+  assert.match(String((aligned.data as { handoff?: string }).handoff), /descend_to.*mode\/nearest/);
   assert.equal(adapter.actions.length, 0, '评估仍不移动、不挖不放');
   // 视觉落点按整数脚高硬套时，必须标出与碰撞顶面不一致，而不是接受假着陆。
   landing = option(64);

@@ -84,6 +84,8 @@ test('bucket actions inherit the owner signal and cancel an operation already wa
 
 test('fall opt-in reaches both code entry points and preserves the observed risk receipt', async (t) => {
   assert.match(API_DOC, /api\.digAt\([^\n]+fall:true/);
+  assert.match(API_DOC, /api\.moveTo[^\n]+不能换层/);
+  assert.match(API_DOC, /assess_landings[\s\S]{0,180}descend_to/);
   for (const method of ['digAt', 'act'] as const) await t.test(method, async (t) => {
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
     t.after(() => ctx.memory.close());
