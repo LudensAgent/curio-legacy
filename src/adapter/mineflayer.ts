@@ -1212,6 +1212,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     const deadline = Date.now() + opts.timeoutMs;
+    // 一格内的精确迈步不需要 pathfinder 的整段路线：后者在窄台/浮空边缘会把
+    // 本来一步能到的目标判成 No path。move_step 显式要求相邻格时直接走身体控制。
+    if (target.kind === 'xyz' && opts.adjacentStep === true && opts.maxDropDown === undefined) {
+      const at = b.entity.position;
+      const where = `(${at.x.toFixed(2)},${at.y.toFixed(2)},${at.z.toFixed(2)})`;
+      const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
+      if (outcome === 'arrived') return;
+      if (outcome === 'timeout') throw new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`);
+      throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '身体控制没有完成相邻一步'}，实际位于 ${where}`);
+    }
     const reached = await this.gotoUnstalled(goal, opts, check);
     check();
     // Pathfinder can resolve an empty noPath result without reaching its goal.
