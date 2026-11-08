@@ -191,6 +191,10 @@ export class Perception {
   ownBuilt?: OwnBuiltLookup;
   /** 统一写入共享空间记忆的实测位移；没有共享会话时只感知、不记录。 */
   private readonly traversal: TraversalRecorder | null;
+  /** 共享空间会话：用于把当前站位的脚/头/支撑作为本地重扫证据。 */
+  private readonly spatial?: SharedSpatialSession;
+  private lastStanceAt = 0;
+  private lastStanceKey = '';
   /** 自放方块的支撑格缓存；只用于给 fragment 标 bridge 来源，不参与导航。 */
   private placedSupports = new Set<string>();
   private placedSupportsAt = 0;
@@ -211,6 +215,7 @@ export class Perception {
   private surfaceDir: { key: string; at: number; dir: string | null; dist: number | null } | null = null;
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision, spatial?: SharedSpatialSession) {
+    this.spatial = spatial;
     this.traversal = spatial === undefined ? null : new TraversalRecorder(spatial, Date.now, (message) => bus.publish('spatial_traversal_error', 'P2', message));
     // 做完的事有没有留住：扔掉的东西被捡回来了，身体当场就知道
     const effects = new EffectWatch(bus);
@@ -218,6 +223,28 @@ export class Perception {
   }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
+
+  /**
+   * 身体正接触的脚/头/支撑格是实时事实：它们不依赖视锥，也不会因为 camera/遮挡
+   * 而看不见。把它们作为 local_rescan 证据刷新，避免 plan_route 因为“自己脚下”
+   * 超过新鲜度窗口而卡在 STALE。只写这三格，不挖、不选路。
+   */
+  private observeStance(s: ReturnType<GameAdapter['state']>, contact: ReturnType<typeof surroundings>) {
+    const spatial = this.spatial;
+    if (!spatial || spatial.closing || !s.onGround || !s.connected || !s.observationReady) return;
+    const now = Date.now();
+    const key = `${s.dim}|${Math.floor(s.pos.x)}|${Math.floor(s.pos.y)}|${Math.floor(s.pos.z)}`;
+    if (key === this.lastStanceKey && now - this.lastStanceAt < 5000) return;
+    // 半砖/台阶上脚格和支撑格可能是同一格；按坐标去重后再写。
+    const cells = [...new Map([contact.feet, contact.head, contact.support].flatMap((cell) => {
+      const state = this.adapter.blockStateAt?.(cell.pos);
+      return state ? [[`${cell.pos.x},${cell.pos.y},${cell.pos.z}`, { pos: cell.pos, name: state.name, properties: state.properties ?? {}, stateComplete: true }] as const] : [];
+    })).values()];
+    if (!cells.length) return;
+    this.lastStanceKey = key;
+    this.lastStanceAt = now;
+    spatial.observeLocalStance({ dim: s.dim, sessionId: s.sessionId, sequence: s.observationId, observedAt: now, cells });
+  }
 
   /** 上次亲眼看到熔炉时火亮没亮：亮→灭是一次“状态转换”，值得注意 */
   private furnaceLit = new Map<string, boolean>();
@@ -647,6 +674,9 @@ export class Perception {
     // 树冠下天光也会很弱，但人一抬头就知道是树叶，不会以为自己在地下
     const where = overhead && contact ? whereAmI(this.adapter, s, overhead, { ownBuilt: this.ownBuilt }) : null;
     try {
+      // 当前站位的脚/头/支撑是身体直接接触到的实时事实；先刷新它们，
+      // 避免空间 3D 搜索从脚下第一步就被旧证据判成 STALE。
+      if (contact) this.observeStance(s, contact);
       // 效率账本不依赖环境判断：寻路挖穿、辅助开挖也是真实发生的挖掘
       const effDug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
       if (effDug.length) this.lastDugAt = effDug[effDug.length - 1].ts;
@@ -663,11 +693,11 @@ export class Perception {
         if (placed.length) {
           this.lastPlacedAt = placed[placed.length - 1].ts;
           for (const p of placed) {
-            this.memory.putPlaced(p.pos, p.name);
+            this.memory.putPlaced(p.pos, p.name, s.dim);
             this.placedSupports.add(supportKey(p.pos));
           }
         }
-        for (const d of dug) this.memory.removePlaced(d.pos);
+        for (const d of dug) this.memory.removePlaced(d.pos, s.dim);
         // 共享空间记忆是唯一的历史位移记录；walked/dug/bridge 只是证据来源标签。
         if (Date.now() - this.placedSupportsAt > 2000) {
           this.placedSupports = new Set(this.memory.placedBlocks().map((p) => supportKey(p.pos)));

@@ -6,14 +6,16 @@
  * 暂停/关停状态和当前唯一的步行委托 report/cancel 附着。
  *
  * 证据只来自 Curio 感知产出的 typed BlockObservation[]；生命周期/作用域由
- * adapter 的真实状态单独供给，绝不从观测载荷激活。模块加载无副作用，不导入
- * 宿主配置；D2 会接入真实 Arbiter/adapter，本阶段只暴露 D2 需要的最小操作。
+ * adapter 的真实状态单独供给，绝不从观测载荷激活。模块加载只读取宿主配置里的
+ * 体素证据新鲜度上限（可被 open 选项覆盖）；D2 会接入真实 Arbiter/adapter，
+ * 本阶段只暴露 D2 需要的最小操作。
  *
  * manual 体素加载（M2a1）沿用库的 WorkingSetCoordinator，只补宿主自己的接缝：
  * resident 证据同步写入并在同一调用内派发；saved 但未驻留的证据按原始载荷有界
  * 排队、一次只跟踪一个真实 load，成功后按原观测时间/序列补写；容量/未就绪/
  * 作用域失效都留下可见结构化缺口，绝不伪造已观察空气或已保存。
  */
+import { config } from '../config.ts';
 import { openSpatialSession, PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type {
   CapacityGapKind,
@@ -41,6 +43,7 @@ import type {
   SaveResult,
   SectionKey,
   SectionResidency,
+  SpatialNode,
   SpatialQueryPort,
   SpatialQueryRequest,
   SpatialQueryResult,
@@ -115,8 +118,27 @@ export interface SharedSpatialOpenOptions {
   voxelLoading?: VoxelLoading;
   /** manual 模式的运行时驻留上限；透传库的 ResidencyLimits。 */
   residencyLimits?: ResidencyLimits;
+  /** 体素证据新鲜度上限；默认取宿主 config.spatial.voxelValidityWindowMs（5 分钟）。 */
+  voxelValidityWindowMs?: number;
   /** 可选诊断回调：容量、队列、未就绪与作用域丢弃事件。 */
   onWorkingSetDiagnostic?: (diagnostic: SharedSpatialDiagnostic) => void;
+}
+
+/** 身体直接接触到的当前站位事实；只用于本地重扫，不是远处视野。 */
+export interface LocalStanceCell {
+  pos: Vec3Like;
+  name: string;
+  properties?: Record<string, string | number | boolean>;
+  stateComplete: boolean;
+}
+
+export interface LocalStanceObservation {
+  dim: string;
+  sessionId: string;
+  /** 与感知观测共用的接收顺序；只用于库内的顺序/关联。 */
+  sequence: number;
+  observedAt: number;
+  cells: readonly LocalStanceCell[];
 }
 
 /** 当前唯一的步行委托附着：同步接收变化报告 + 可被服务取消。 */
@@ -613,15 +635,19 @@ export class SharedSpatialSession {
     this.operationTimeoutMs = operationTimeoutMs;
     this.diagnostic = diagnostic;
     this.coordinator = session.voxelLoading === 'manual' ? new WorkingSetCoordinator(session) : null;
-    // 不传 isContainer：宿主目前没有容器分类器，库会把 containerAnchors 如实报为
-    // unsupported，而不是按节点名/标签猜测。构造只持有三个内存存储的引用；
-    // 同一实例同时提供只读 query 与契约写入端口。
+    // 宿主知道哪些节点是容器锚点：只认 exact location 且 metadata.curio 明确标了
+    // container/chest/furnace 的节点。contents 仍由宿主 ledger 负责，库只回答锚点。
+    const isContainer = (node: SpatialNode) => {
+      const curio = (node.metadata as { curio?: { type?: unknown; types?: unknown } } | undefined)?.curio;
+      const types = [curio?.type, ...(Array.isArray(curio?.types) ? curio.types : [])];
+      return node.location.kind === 'exact' && types.some((type) => type === 'container' || type === 'chest' || type === 'furnace');
+    };
     const store = new SpatialMemoryStoreImpl({
       worldId,
       map: session.voxel,
       fragments: session.history,
       topology: session.topology,
-      query: { now },
+      query: { now, isContainer },
     });
     this.queryPort = store;
     this.memory = store;
@@ -694,7 +720,7 @@ export class SharedSpatialSession {
     const session = await openSpatialSession({
       worldId: options.worldId,
       databasePath: options.databasePath,
-      voxelOptions: { now },
+      voxelOptions: { now, validityWindowMs: options.voxelValidityWindowMs ?? config.spatial.voxelValidityWindowMs },
       ...(options.voxelLoading === undefined ? {} : { voxelLoading: options.voxelLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       timeoutMs,
@@ -817,6 +843,33 @@ export class SharedSpatialSession {
     );
     if (scoped.length === 0) return { sections: [] };
     const converted = scoped.map(toObservation);
+    return this.applyObservations(converted);
+  }
+
+  /**
+   * 当前站位的本地重扫：脚/头/脚下支撑是身体直接接触到的实时事实，不是远处视野。
+   * 只更新这三格的新鲜证据，不把历史格子删掉，也不改变 Agent 的目标或路线。
+   */
+  observeLocalStance(input: LocalStanceObservation): ChangeReport {
+    if (this.closingFlag) {
+      throw new PersistenceError('closed', 'shared spatial session is closed; observations are rejected');
+    }
+    const scope = this.scope;
+    if (this.pausedFlag || !this.admitted || scope === null) return { sections: [] };
+    if (input.dim !== scope.dim || input.sessionId !== scope.sessionId) return { sections: [] };
+    const observations: Observation[] = input.cells.flatMap((cell) => cell.name
+      ? [{
+          worldId: this.worldId, dim: scope.dim, sessionId: scope.sessionId,
+          pos: { ...cell.pos },
+          state: { name: cell.name, properties: Object.fromEntries(Object.entries(cell.properties ?? {}).map(([k, v]) => [k, String(v)])) },
+          stateComplete: cell.stateComplete, evidence: 'seen', source: 'local_rescan',
+          observedAt: input.observedAt, originObservationId: input.sequence, sequence: input.sequence,
+        }]
+      : []);
+    return observations.length === 0 ? { sections: [] } : this.applyObservations(observations);
+  }
+
+  private applyObservations(converted: readonly Observation[]): ChangeReport {
     if (!this.allowed('memory', 'observeBatch')) {
       // 能力 false 不调用库；拒绝留在可见缺口，不伪造空报告为“已写入”。
       this.recordGap('observe_failed', converted, 'library reports memory.observeBatch=false; the host does not call it');
@@ -824,7 +877,7 @@ export class SharedSpatialSession {
     }
     if (this.coordinator === null) {
       return this.dispatch(
-        this.session.voxel.observeBatch({ observations: converted, unobserved: [] }),
+        this.session.voxel.observeBatch({ observations: [...converted], unobserved: [] }),
         converted.length,
       );
     }

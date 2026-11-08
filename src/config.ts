@@ -72,6 +72,13 @@ if (!Number.isFinite(snapshotMaxMb) || snapshotMaxMb <= 0 || snapshotMaxMb > 409
   throw new Error(`SPATIAL_SNAPSHOT_MAX_MB 必须是 (0,4096] 内的数字，收到：${snapshotMaxMb}`);
 }
 const snapshotMaxBytes = Math.round(snapshotMaxMb * 1024 * 1024);
+// 体素证据的当前可通行新鲜度上限。库默认 60s；Agent 的一次认真思考可能就要 20–30s，
+// 60s 会在 plan_route 前把刚看过的格子标成 STALE。这里按感知节奏放宽到 5 分钟；
+// 不是记忆过期：历史格子仍保留，超过窗口只是不能冒充当前 OPEN 证据。
+const voxelValidityMs = num('SPATIAL_VOXEL_VALIDITY_MS', 300_000);
+if (!Number.isFinite(voxelValidityMs) || voxelValidityMs < 1_000 || voxelValidityMs > 86_400_000) {
+  throw new Error(`SPATIAL_VOXEL_VALIDITY_MS 必须是 [1000,86400000] 内的毫秒数，收到：${voxelValidityMs}`);
+}
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
@@ -178,6 +185,8 @@ export const config = {
     /** 单次空间快照的序列化字节上限；默认 192MiB，可用 SPATIAL_SNAPSHOT_MAX_MB 调整。 */
     snapshotMaxMb,
     snapshotMaxBytes,
+    /** 体素证据作为“当前可通行”证据的新鲜度上限；默认 5 分钟，可用 SPATIAL_VOXEL_VALIDITY_MS 调整。 */
+    voxelValidityWindowMs: voxelValidityMs,
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {

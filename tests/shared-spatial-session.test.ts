@@ -95,6 +95,33 @@ function cleanup(dir: string, result: ShutdownResult | null): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
+test('observeLocalStance 把当前站位写成新鲜的本地重扫证据', async () => {
+  const { svc, dir } = await openShared();
+  let result: ShutdownResult | null = null;
+  try {
+    svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
+    const observedAt = Date.now();
+    svc.observeLocalStance({
+      dim: 'overworld', sessionId: 's1', sequence: 1, observedAt,
+      cells: [
+        { pos: { x: 0, y: -1, z: 0 }, name: 'minecraft:stone', properties: {}, stateComplete: true },
+        { pos: { x: 0, y: 0, z: 0 }, name: 'minecraft:air', properties: {}, stateComplete: true },
+        { pos: { x: 0, y: 1, z: 0 }, name: 'minecraft:air', properties: {}, stateComplete: true },
+      ],
+    });
+    const support = svc.session.voxel.cellAt('overworld', 0, -1, 0);
+    assert.equal(support.observed, true);
+    assert.equal(support.evidence.freshness, 'FRESH');
+    assert.equal(support.evidence.observation.source, 'local_rescan');
+    assert.equal(support.evidence.observation.evidence, 'seen');
+    assert.equal(support.evidence.observation.observedAt, observedAt);
+    assert.equal(support.evidence.validUntil - observedAt, 300_000, '宿主默认 5 分钟，而不是库默认 60 秒');
+  } finally {
+    try { result = await svc.shutdown(); } catch { /* 保留 fixture 供检查 */ }
+    cleanup(dir, result);
+  }
+});
+
 /** 真实 close 的正向断言：completed/error/unconfirmedRequest 都来自实际返回值。 */
 function assertCleanClose(result: ShutdownResult): void {
   if (result.close === null) assert.fail('shutdown did not return a close result');
