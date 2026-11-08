@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Vec3Like } from '../src/adapter/types.ts';
-import { footSurfaceY, supportTop } from '../src/perception/geometry.ts';
+import { footSurfaceY, supportCellsUnderBody, supportSurfaces, supportTop } from '../src/perception/geometry.ts';
 import { facingOfYaw, feetCell, toWorld } from '../src/perception/local.ts';
 import { toRel } from '../src/skills/movement/coordinates.ts';
 import { moveStep, mineCell, placeCell, placeSupport, pillarOne } from '../src/skills/movement/index.ts';
@@ -237,6 +237,24 @@ test('脚高按碰撞顶面解析：半砖/雪层/楼梯/灵魂沙/箱子，不�
     [key({ ...cell, y: cell.y - 1 }), { name: 'stone', properties: {} }],
   ]);
   assert.equal(footSurfaceY(cell, (p) => layered.get(key(p)) ?? null), cell.y + 0.875);
+});
+
+test('支撑面带水平范围：偏心身体不把方块另一侧的高顶面当支撑', () => {
+  const cell = { x: 0, y: 63, z: 0 };
+  const properties = { facing: 'north', half: 'bottom', shape: 'outer_left', waterlogged: false };
+  const at = (p: Vec3Like) => (p.x === 0 && p.y === 63 && p.z === 0
+    ? { name: 'stone_stairs', properties }
+    : null);
+  assert.deepEqual(supportSurfaces('stone_stairs', properties), [
+    { top: 0.5, minX: 0, maxX: 1, minZ: 0, maxZ: 1 },
+    { top: 1, minX: 0, maxX: 0.5, minZ: 0, maxZ: 0.5 },
+  ]);
+  // 身体占 x/z 0.6..1.2：与高顶面（0..0.5）不相交，只能落到低面 0.5。
+  assert.equal(footSurfaceY(cell, at, { minX: 0.6, maxX: 1.2, minZ: 0.6, maxZ: 1.2 }), 63.5);
+  // 站在格心时脚底范围压到高顶面。
+  assert.equal(footSurfaceY(cell, at), 64);
+  assert.deepEqual(supportCellsUnderBody({ x: 0.9, y: 64, z: 0.9 }, at), [], '高顶面不在脚下时不算托住');
+  assert.deepEqual(supportCellsUnderBody({ x: 0.5, y: 64, z: 0.5 }, at).map((s) => s.top), [64]);
 });
 
 test('move_step 同层：站到相邻格，按实际脚高验收', async (t) => {
