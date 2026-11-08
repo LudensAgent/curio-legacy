@@ -12,7 +12,7 @@ import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type V
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
-import { TraversalRecorder } from '../spatial/traversal-recorder.ts';
+import { TraversalRecorder, type TraversalWriteReceipt } from '../spatial/traversal-recorder.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -325,6 +325,14 @@ export class Perception {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.traversal?.flush();
+  }
+
+  /**
+   * 最近有界空间记忆写入回执（旧→新）。只用于证据链观察/报告
+   * `recordWalkCorridor` 的真实结局，不重试、不回滚身体结果、不写计划点。
+   */
+  traversalReceipts(limit?: number): readonly TraversalWriteReceipt[] {
+    return this.traversal?.receipts(limit) ?? [];
   }
 
   snapshot(): Percept {

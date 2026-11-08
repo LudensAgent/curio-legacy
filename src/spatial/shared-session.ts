@@ -236,7 +236,19 @@ export interface WalkCorridorEvidence {
   segments: readonly WalkCorridorSegment[];
 }
 
-/** walk_path 记忆写入结局；失败阶段保留已写入的 traversal 前缀，不冒充已保存。 */
+/** 一次确认走廊写入的拓扑结果；计数来自本次实测段派生的节点/边，不是计划点。 */
+export interface WalkMemoryTopology {
+  nodes: number;
+  edges: number;
+  /** true 仅表示这些节点/边随本次走廊原子写入提交；跳过拓扑时恒为 false。 */
+  written: boolean;
+}
+
+/**
+ * walk_path 记忆写入结局；失败阶段保留已写入的 traversal 前缀，不冒充已保存。
+ * `stage` 只来自库/共享会话实际返回的结构化拒绝；调用方 sink 抛出不是本类型，
+ * 由 recorder 侧另行如实表达（不得把异常改写成这里的阶段）。
+ */
 export type WalkMemoryOutcome =
   | {
       status: 'written';
@@ -244,6 +256,7 @@ export type WalkMemoryOutcome =
       traversalIds: string[];
       stancesMarked: number;
       deliveryError: { committed: true; error: unknown } | null;
+      topology: WalkMemoryTopology;
     }
   | {
       status: 'failed';
@@ -251,6 +264,7 @@ export type WalkMemoryOutcome =
       message: string;
       fragmentId: string;
       traversalIds: string[];
+      topology: WalkMemoryTopology;
     };
 
 /** 结构化缺口类别；只描述宿主实际拒绝/未完成的事实。 */
@@ -1000,6 +1014,7 @@ export class SharedSpatialSession {
 
   private recordCorridor(input: WalkCorridorEvidence, opts: CorridorWriteOptions): WalkMemoryOutcome {
     const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
+    const emptyTopology: WalkMemoryTopology = { nodes: 0, edges: 0, written: false };
     // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
     // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
     const rejected =
@@ -1008,21 +1023,26 @@ export class SharedSpatialSession {
       ?? this.writeRejection(input.fragment.dim, 'markTraversed')
       ?? this.writeRejection(input.fragment.dim, 'recordNode')
       ?? this.writeRejection(input.fragment.dim, 'upsertEdge');
-    if (rejected !== null) return { status: 'failed', stage: rejected.kind, message: rejected.detail, ...base };
+    if (rejected !== null) return { status: 'failed', stage: rejected.kind, message: rejected.detail, ...base, topology: emptyTopology };
     const oldSession = input.segments.find((segment) => this.sessionMismatch(segment.sessionId) !== null);
     if (oldSession !== undefined) {
       const mismatch = this.sessionMismatch(oldSession.sessionId)!;
-      return { status: 'failed', stage: 'session_mismatch', message: mismatch, ...base };
+      return { status: 'failed', stage: 'session_mismatch', message: mismatch, ...base, topology: emptyTopology };
     }
     const sessionId = this.scope?.sessionId;
     if (sessionId === undefined) {
-      return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base };
+      return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base, topology: emptyTopology };
     }
 
     const traversals = input.segments.map((segment) => ({ ...segment, fragmentId: segment.fragmentId }));
     const topology = input.segments.length === 0
       ? null
       : planWalkTopology(input.fragment.dim, input.segments, opts.topologyNamespace);
+    const topologyCounts: WalkMemoryTopology = {
+      nodes: topology?.nodes.length ?? 0,
+      edges: topology?.edges.length ?? 0,
+      written: false,
+    };
 
     // Host-level route-size cap: keep the old "history written, topology skipped"
     // outcome, but write the history prefix atomically instead of leaving a
@@ -1042,6 +1062,7 @@ export class SharedSpatialSession {
           stage: historyOnly.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
           message: corridorProblemMessage(historyOnly),
           ...base,
+          topology: topologyCounts,
         };
       }
       base.traversalIds.push(...historyOnly.traversals.inserted, ...historyOnly.traversals.unchanged);
@@ -1052,6 +1073,7 @@ export class SharedSpatialSession {
           + `confirmed corridor needs ${topology.nodes.length} node(s)/${topology.edges.length} edge(s), `
           + `host cap ${opts.maxTopologyNodes}/${opts.maxTopologyEdges}`,
         ...base,
+        topology: topologyCounts,
       };
     }
 
@@ -1090,12 +1112,16 @@ export class SharedSpatialSession {
         stage: receipt.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
         message: corridorProblemMessage(receipt),
         ...base,
+        topology: topologyCounts,
       };
     }
 
     base.traversalIds.push(...receipt.traversals.inserted, ...receipt.traversals.unchanged);
     const deliveryError = this.markCorridorStances(input.segments);
-    return { status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError };
+    return {
+      status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError,
+      topology: { ...topologyCounts, written: topology !== null },
+    };
   }
 
   /**
