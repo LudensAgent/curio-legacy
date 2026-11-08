@@ -42,8 +42,24 @@ test('passageRouteInspection：allowed 过滤在搜索时生效，并报告 disa
   const blocked = passageRouteInspection([drop], at(0, 59, 0), at(0, 57, 0), { near: 0.5, allowed: ['walk', 'step'] });
   assert.equal(blocked.status, 'gap');
   assert.equal(blocked.reason, 'disallowed_transition');
+  assert.deepEqual(blocked.rejectedLeg?.transitions, ['drop'], '被拒的 leg 事实要带回');
+  assert.equal(blocked.rejectedLeg?.reversible, false);
   const allowed = passageRouteInspection([drop], at(0, 59, 0), at(0, 57, 0), { near: 0.5, allowed: ['walk', 'step', 'drop'] });
   assert.equal(allowed.status, 'route');
+});
+
+test('passageRouteInspection：多步 link 标 mixed；上爬只标 climb + mechanism unknown', () => {
+  const mixed = rec('mixed', [at(0, 64, 0), at(1, 63, 0), at(1, 62, 0)], [{ a: at(0, 64, 0), b: at(1, 62, 0) }]);
+  const multi = passageRouteInspection([mixed], at(0, 64, 0), at(1, 62, 0), { near: 0.5, allowed: ['walk', 'step', 'drop'] });
+  assert.equal(multi.status, 'route');
+  assert.deepEqual(multi.legs[0]?.transitions, ['step', 'drop']);
+  assert.equal(multi.legs[0]?.mixed, true);
+
+  const climb = rec('climb', [at(0, 62, 0), at(0, 64, 0)], [{ a: at(0, 62, 0), b: at(0, 64, 0) }]);
+  const up = passageRouteInspection([climb], at(0, 62, 0), at(0, 64, 0), { near: 0.5, allowed: ['climb'] });
+  assert.equal(up.status, 'route');
+  assert.deepEqual(up.legs[0]?.transitions, ['climb']);
+  assert.equal(up.legs[0]?.mechanism, 'unknown');
 });
 
 test('passageRouteInspection：heal 默认关闭不跨记录；显式开启才连并标 healed', () => {

@@ -71,6 +71,7 @@ test('plan_memory_route：allowed 默认不含 drop；显式允许后才走纯�
   const blocked = await planMemoryRoute.run(ctx, { to: at(0, 62, 0), from: at(0, 64, 0) });
   assert.equal(blocked.data?.status, 'gap');
   assert.equal(blocked.data?.reason, 'disallowed_transition');
+  assert.deepEqual((blocked.data?.rejectedLeg as { transitions: string[] }).transitions, ['drop']);
 
   const { spatial: allowedSpatial } = fakeSpatial([[fragment('drop', [at(0, 64, 0), at(0, 62, 0)], {
     links: [{ a: at(0, 64, 0), b: at(0, 62, 0) }],
@@ -100,6 +101,49 @@ test('plan_memory_route：heal 默认 false 不跨记录，显式 true 才连接
   const healed = await planMemoryRoute.run(healedCtx, { to: at(3, 64, 0), from: at(0, 64, 0), heal: true });
   assert.equal(healed.data?.status, 'route');
   assert.ok((healed.data?.legs as { evidence: string }[]).some((leg) => leg.evidence === 'healed'));
+});
+
+test('plan_memory_route：legacy 稀疏路径/多步 mixed 可走，并标 evidence', async () => {
+  const { spatial } = fakeSpatial([[fragment('sparse', [at(0, 60, 0), at(0, 54, 0)])]]);
+  const { ctx } = ctxOf(spatial);
+  const sparse = await planMemoryRoute.run(ctx, { to: at(0, 54, 0), from: at(0, 60, 0), allowed: ['walk', 'step', 'drop'] });
+  assert.equal(sparse.data?.status, 'route');
+  const sparseLeg = (sparse.data?.legs as { transitions: string[]; evidence: string }[])[0];
+  assert.deepEqual(sparseLeg?.transitions, ['drop']);
+  assert.equal(sparseLeg?.evidence, 'legacy');
+
+  const { spatial: mixedSpatial } = fakeSpatial([[fragment('mixed', [at(0, 64, 0), at(1, 63, 0), at(1, 62, 0)], {
+    links: [{ a: at(0, 64, 0), b: at(1, 62, 0) }],
+  })]]);
+  const { ctx: mixedCtx } = ctxOf(mixedSpatial);
+  const mixed = await planMemoryRoute.run(mixedCtx, { to: at(1, 62, 0), from: at(0, 64, 0), allowed: ['walk', 'step', 'drop'] });
+  assert.equal(mixed.data?.status, 'route');
+  const mixedLeg = (mixed.data?.legs as { transitions: string[]; mixed?: boolean }[])[0];
+  assert.deepEqual(mixedLeg?.transitions, ['step', 'drop']);
+  assert.equal(mixedLeg?.mixed, true);
+});
+
+test('plan_memory_route：maxWaypoints 截断、snapRadius 命不中、目标/起点太远', async () => {
+  const { spatial } = fakeSpatial([[fragment('stair', [at(0, 64, 0), at(1, 63, 0), at(2, 62, 0)])]]);
+  const { ctx } = ctxOf(spatial);
+  const capped = await planMemoryRoute.run(ctx, { to: at(2, 62, 0), from: at(0, 64, 0), maxWaypoints: 2 });
+  assert.equal(capped.data?.status, 'gap');
+  assert.equal(capped.data?.reason, 'truncated');
+  assert.equal(capped.data?.truncated, true);
+
+  const { spatial: farFromSpatial } = fakeSpatial([[fragment('near', [at(0, 64, 0), at(1, 64, 0)])]]);
+  const { ctx: farFromCtx } = ctxOf(farFromSpatial);
+  const farFrom = await planMemoryRoute.run(farFromCtx, { to: at(1, 64, 0), from: at(10, 64, 0), snapRadius: 1 });
+  assert.equal(farFrom.data?.status, 'gap');
+  assert.equal(farFrom.data?.reason, 'from_far_from_records');
+  assert.deepEqual(farFrom.data?.nearest, at(1, 64, 0));
+
+  const { spatial: farToSpatial } = fakeSpatial([[fragment('near', [at(0, 64, 0), at(1, 64, 0)])]]);
+  const { ctx: farToCtx } = ctxOf(farToSpatial);
+  const farTo = await planMemoryRoute.run(farToCtx, { to: at(10, 64, 0), from: at(0, 64, 0), snapRadius: 1 });
+  assert.equal(farTo.data?.status, 'gap');
+  assert.equal(farTo.data?.reason, 'to_far_from_records');
+  assert.deepEqual(farTo.data?.nearest, at(1, 64, 0));
 });
 
 test('plan_memory_route：maxPoints 截断如实报告；参数边界与只读', async () => {

@@ -310,6 +310,7 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  *  显式 link 是纯垂直下坠（同 x/z，a 高、b 低、差 ≥2）时，只证明 a→b，反向 climb 不可走；
  *  带水平位移的 dy≤-2 可能是跨了两级台阶，保持双向。 */
 export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number; heal?: boolean } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> } {
+  // 旧调用（含 passageRoute）默认开启跨记录近距自愈；新查询显式传 heal:false，避免把几何推断当证据。
   const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK, heal = opts.heal ?? true;
   let points = 0, linkCount = 0, cuts = 0, reverses = 0;
   for (const r of recs) {
@@ -498,6 +499,10 @@ export interface PassageRouteLeg {
   deepestY?: number;
   reversible: boolean;
   evidence: PassageLegEvidence;
+  /** 垂直上爬只说明几何，不知道实际是梯子还是跳跃。 */
+  mechanism?: 'unknown';
+  /** 这一 leg 的记录切片里出现了不止一种 transition。 */
+  mixed?: boolean;
 }
 
 export interface PassageRouteInspection {
@@ -510,6 +515,8 @@ export interface PassageRouteInspection {
   heal: boolean;
   nearest?: Vec3Like;
   reason?: 'empty' | 'from_far_from_records' | 'to_far_from_records' | 'disconnected' | 'disallowed_transition';
+  /** disallowed_transition 时，被 allowed 排除的第一段事实。 */
+  rejectedLeg?: PassageRouteLeg;
 }
 
 type RouteRecord = Pick<PassageRecord, 'path' | 'links'> & Partial<Pick<PassageRecord, 'id' | 'kind' | 'deepestY'>>;
@@ -557,12 +564,15 @@ export function passageRouteInspection(
     fromDistance: fromHit?.distance ?? null,
     toDistance: toHit?.distance ?? null,
   };
-  const gap = (reason: PassageRouteInspection['reason'], nearest?: Vec3Like): PassageRouteInspection => ({
-    status: 'gap', waypoints: [], legs: [], snapped, near, hop, heal, ...(nearest === undefined ? {} : { nearest }), ...(reason === undefined ? {} : { reason }),
+  const nearestNode = (p: Vec3Like) => nodes.reduce((winner, node) => d3(node, p) < d3(winner, p) ? node : winner, nodes[0]!);
+  const gap = (reason: PassageRouteInspection['reason'], nearest?: Vec3Like, rejectedLeg?: PassageRouteLeg): PassageRouteInspection => ({
+    status: 'gap', waypoints: [], legs: [], snapped, near, hop, heal,
+    ...(nearest === undefined ? {} : { nearest }), ...(reason === undefined ? {} : { reason }),
+    ...(rejectedLeg === undefined ? {} : { rejectedLeg }),
   });
   if (nodes.length === 0) return gap('empty');
-  if (fromHit === null) return gap('from_far_from_records');
-  if (toHit === null) return gap('to_far_from_records');
+  if (fromHit === null) return gap('from_far_from_records', nearestNode(from));
+  if (toHit === null) return gap('to_far_from_records', nearestNode(to));
   const a = fromHit.index, b = toHit.index;
   if (a === b) return { status: 'route', waypoints: [{ ...nodes[a]! }], legs: [], snapped, near, hop, heal };
 
@@ -605,6 +615,8 @@ export function passageRouteInspection(
       ...(sameRecord && typeof rec?.deepestY === 'number' ? { deepestY: rec.deepestY } : {}),
       reversible: !blocked.get(v)?.has(u),
       evidence,
+      ...(transitions.includes('climb') ? { mechanism: 'unknown' as const } : {}),
+      ...(transitions.length > 1 ? { mixed: true } : {}),
     } satisfies PassageRouteLeg;
     legCache.set(cacheKey, leg);
     return leg;
@@ -629,7 +641,7 @@ export function passageRouteInspection(
     if (raw.dist[b] !== Infinity) {
       const rawRoute = reconstruct(raw.prev, b);
       const offending = rawRoute.slice(1).map((v, i) => legInfo(rawRoute[i]!, v)).find((leg) => leg.transitions.some((transition) => !allowed.has(transition)));
-      return gap('disallowed_transition', offending?.from ?? nodes[a]);
+      return gap('disallowed_transition', offending?.from ?? nodes[a], offending);
     }
     const all = graphShortest(nodes, filtered, a, -1, blocked);
     // 旧 passageRoute：目标附近换一个真正可达的节点（兼容行为，只在显式开启时用）。

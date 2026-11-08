@@ -119,6 +119,9 @@ export const COMMON_MOVES = ['move_step', 'mine_cell', 'place_cell', 'place_supp
  */
 const ADVANCED = /portal|end_|dragon|stronghold|search_structure/;
 
+/** 空间记忆查询/回程规划：不进静态 system 目录（预算不够且不是每念都用），按情境作为 user 提醒出现。 */
+const MEMORY_MOVES = new Set(['spatial_extrema', 'plan_memory_route']);
+
 /** 描述取第一句话，太长就在逗号处截断（不截在半个词上） */
 function briefOf(d: string, n: number): string {
   const first = d.replace(/\s+/g, ' ').split(/[。；;：:]/)[0];
@@ -140,9 +143,9 @@ function descOf(s: { name: string; description: string }, chars: number): string
  * 当前活动用到的动作单独作为 user 提醒，这样 system 前缀保持字节稳定，最大程度命中服务端前缀缓存。
  */
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
-  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name) && !MEMORY_MOVES.has(s.name));
   const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
-  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 12)}）`);
+  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数；不写 names 列出全部动作，含进阶动作）：${onDemand.join('、')}` : '';
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
 }
@@ -150,7 +153,13 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 /** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
 export function advancedMovesLine(): string {
   const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
-  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 12)}）`).join('、')}` : '';
+  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
+}
+
+/** 空间记忆查询：按情境补在 user 消息末尾，不占静态 system 目录。 */
+export function memoryMovesLine(): string {
+  const names = Object.values(SKILLS).filter((s) => MEMORY_MOVES.has(s.name) && !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name));
+  return names.length ? `空间记忆查询/回程规划可用（参数用 moves 查）：${names.map((s) => `${s.name}（${briefOf(s.description, 14)}）`).join('、')}` : '';
 }
 
 /**
@@ -957,7 +966,13 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   if (!glance && advanced) {
     const line = advancedMovesLine();
     if (line) reminders.push(line);
-  } else if (glance) {
+  }
+  // 空间记忆查询/回程规划：探索、采集、脱困或非主世界时补一句，不占静态 system 目录。
+  if (!glance && (advanced || ['explore', 'gather', 'survive'].includes(ctx.activity?.kind ?? ''))) {
+    const memory = memoryMovesLine();
+    if (memory) reminders.push(memory);
+  }
+  if (glance) {
     const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
     if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
   }

@@ -243,6 +243,15 @@ export function obj(raw: unknown): Record<string, any> {
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, any>) : {};
 }
 
+/** 解析 {x,y,z} 为有限点；非对象、缺坐标或非有限数返回 null。 */
+export function finitePoint(value: unknown): Vec3Like | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const p = value as Record<string, unknown>;
+  return [p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n))
+    ? { x: p.x as number, y: p.y as number, z: p.z as number }
+    : null;
+}
+
 export function clampInt(v: unknown, min: number, max: number, def: number) {
   const n = Math.round(Number(v));
   if (!Number.isFinite(n)) return def;

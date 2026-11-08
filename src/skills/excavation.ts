@@ -400,6 +400,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       observedAt: segment.observedAt,
       source: 'confirmed_excavate_run',
       executionId: ctx.taskId,
+      actionId: ctx.taskId,
       ...(args.mode === 'tunnel' ? { mode: 'walk' as const } : {}),
     }));
     const outcome = ctx.spatial.recordRouteCorridor({ fragment, segments });
