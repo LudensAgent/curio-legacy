@@ -235,19 +235,26 @@ test('transparent diggable blocks in the work face (wall_torch) are cleared, not
   assert.ok(world.digs.some((pos) => pos.x === 1 && pos.y === 63), 'the torch cell is dug instead of aborting excavation');
 });
 
-test('excavation checks actual registry harvest tools, hardness, falling roofs and protected blocks', async () => {
-  for (const mode of ['tool', 'bedrock', 'roof', 'frame']) {
+test('excavation rejects unbreakable, falling-roof and protected work faces before digging', async () => {
+  for (const mode of ['bedrock', 'roof', 'frame']) {
     const world = new ExcavationWorld();
-    if (mode === 'tool') { world.inv.clear(); world.setBlock({ x: 1, y: 63, z: 0 }, 'stone'); }
     if (mode === 'bedrock') world.setBlock({ x: 1, y: 63, z: 0 }, 'bedrock');
     if (mode === 'roof') world.setBlock({ x: 1, y: 66, z: 0 }, 'gravel');
     if (mode === 'frame') world.setBlock({ x: 1, y: 63, z: 0 }, 'end_portal_frame');
     const result = await excavationSkill.run(context(world), args({ steps: 1 }));
     assert.equal(result.status, 'failed', mode);
-    if (mode === 'tool') assert.equal(result.failureCode, 'TOOL_MISSING');
     assert.equal(world.digs.length, 0, mode);
     assert.equal(world.moves.length, 0, mode);
   }
+});
+
+test('清路不要求采到掉落：没有采掘工具也能挖开普通方块', async () => {
+  const world = new ExcavationWorld();
+  world.inv.clear();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'stone');
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(world.digs.length > 0, '没有镐仍可挖开清路');
 });
 
 test('a newly exposed liquid boundary stops movement and never creates a fictitious landing checkpoint', async () => {
@@ -375,14 +382,12 @@ test('a non-load-bearing next landing reports its own reason, not the liquid hin
   assert.equal(world.moves.length, 0);
 });
 
-test('ascending excavation rejects an unbreakable or falling jump ceiling and an inadequate real obsidian tool before mutation', async () => {
-  for (const mode of ['bedrock', 'gravel', 'tool']) {
+test('ascending excavation rejects an unbreakable or falling jump ceiling before mutation', async () => {
+  for (const mode of ['bedrock', 'gravel']) {
     const world = new ExcavationWorld(); tower(world);
-    if (mode === 'tool') { world.inv.clear(); world.inv.set('iron_pickaxe', 1); }
-    else world.setBlock({ x: 0, y: 66, z: 0 }, mode);
+    world.setBlock({ x: 0, y: 66, z: 0 }, mode);
     const result = await excavationSkill.run(context(world), args({ mode: 'stairs_up', steps: 1 }));
     assert.equal(result.status, 'failed', mode);
-    if (mode === 'tool') assert.equal(result.failureCode, 'TOOL_MISSING');
     assert.equal(world.digs.length, 0, mode);
     assert.equal(world.moves.length, 0, mode);
   }

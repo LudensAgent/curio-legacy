@@ -1777,7 +1777,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (forced) {
       const it = b.inventory.items().find((i: any) => i.name === forced);
       if (!it) return { ok: false, reason: `TOOL_MISSING: 背包里没有 ${forced}，无法挖 ${block.name}` };
-      if (block.harvestTools && !block.harvestTools[it.type]) return { ok: false, reason: `TOOL_MISSING: ${forced} 挖不动 ${block.name}` };
+      // 不因 harvestTools 拒绝：指定工具挖不出掉落时仍能挖开这一格（清路/脱困），
+      // 掉落事实由 dig 在装备后按实际手持回报 noDrop；是否换工具由 Agent 决定。
       const pick = this.bestInvItem(forced) ?? it;
       if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
       // 指定工具必须真的在主手才开挖；装备没落到主手就不能拿原主手继续挖
@@ -1841,11 +1842,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 没有对应工具时只是不掉东西，照样能挖掉（原版：空手挖石头约 7.5 秒、深板岩约 15 秒，什么都不掉）：
     // 清路、脱困只要把这一格挖开，用不着镐；要拿到圆石、矿石才得用镐（gather 自己会先检查）。
     // 以前这里一律拒绝（TOOL_MISSING），它就学成了“没镐石头动不了”，镐快断时宁可困在洞里也不敢挖
-    // handOnly 的掉落事实按实际手持算：背包里虽有镐，空手挖石头仍是什么都不掉。
-    const heldHarvests = !block.harvestTools || (!!b.heldItem && !!block.harvestTools[b.heldItem.type]);
-    const harvest = opts.handOnly === true ? heldHarvests : this.canHarvest(pos);
     const tool = await this.afterAction(() => this.equipBestTool(block, signal, opts.tool, opts.handOnly === true), check);
     if (!tool.ok) return tool;
+    // 掉落事实按装备后的实际手持算：背包里虽有镐，空手或指定斧头挖石头仍是什么都不掉。
+    const harvest = !block.harvestTools || (!!b.heldItem && !!block.harvestTools[b.heldItem.type]);
     throwIfAborted(signal);
     if (!b.canDigBlock(block)) return { ok: false, reason: 'OUT_OF_REACH' };
     const e = b.entity;

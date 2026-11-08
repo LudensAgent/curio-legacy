@@ -228,8 +228,8 @@ export const moveStep: Skill<CellArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 export const mineCell: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野时先转头看向它，仍看不见则返回未知，不挖其他位置。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换成更合适的、也不自动造工具。指定的 tool 不在背包或挖不动返回 TOOL_MISSING；没指定时挖不动/不掉落按适配器真实规则返回 noDrop、超时等事实，要换工具先 hold_item。液体邻格默认不挖；wet/lava 分别显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
   validate(raw, adapter) {

@@ -32,6 +32,8 @@ class ToolWorld extends FakeAdapter {
   heldTool: string | null = null;
   digOpts: { tool?: string | null; handOnly?: boolean }[] = [];
   equipAttempts: string[] = [];
+  /** 这些工具能挖开但采不到掉落（例如石斧挖下界岩） */
+  breakOnly = new Set<string>();
   override state() { return { ...super.state(), held: this.heldTool }; }
   override async equipItem(name: string, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal) {
     this.equipAttempts.push(name);
@@ -47,6 +49,7 @@ class ToolWorld extends FakeAdapter {
     const tool = opts?.tool;
     if (tool && (this.inv.get(tool) ?? 0) <= 0) return { ok: false, reason: `TOOL_MISSING: 背包里没有 ${tool}` };
     const r = await super.dig(pos, signal);
+    if (r.ok && tool && this.breakOnly.has(tool)) return { ...r, noDrop: true, digMs: 456 };
     // 模拟空手挖石头的真实结果：能挖开，但什么都不掉。
     return opts?.handOnly && !this.heldTool ? { ...r, noDrop: true, digMs: 123 } : r;
   }
@@ -368,6 +371,24 @@ test('mine_cell：相对和绝对 xyz 同样校验 tool，只用指定或当前�
   assert.deepEqual(missingWorld.digOpts, [{ tool: 'iron_pickaxe' }]);
   assert.equal(missingWorld.actions.some((a) => a.startsWith('craft:')), false, '缺工具不能自动造');
   assert.equal(missingWorld.blockAt({ x: 1, y: 64, z: 0 }), 'stone');
+});
+
+test('mine_cell：指定工具采不到掉落时照样挖开并回报 noDrop，不自动换工具', async (t) => {
+  const w = new ToolWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'netherrack', pos: { x: 1, y: 64, z: 0 } });
+  w.inv.set('stone_axe', 1);
+  w.inv.set('iron_pickaxe', 1);
+  w.breakOnly.add('stone_axe');
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E', tool: 'stone_axe' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.noDrop, true, '采不到掉落是事实，不是拒绝挖开的理由');
+  assert.equal(r.data?.digMs, 456);
+  assert.deepEqual(w.digOpts, [{ tool: 'stone_axe' }], '只用调用者指定的工具');
+  assert.deepEqual(w.equipAttempts, [], '背包里有镐也不能自动换用');
+  assert.equal(w.actions.some((a) => a.startsWith('craft:')), false, '缺工具不能自动造');
 });
 
 test('mine_cell [0,-1,0] 挖脚部支撑格：下半砖/床/雪层/整块', async (t) => {

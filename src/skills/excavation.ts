@@ -253,7 +253,7 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like, ledger: RiskLedger, opts: P
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
  * These reads never discover structures or choose an underground direction. */
-function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool: string | undefined, ledger: RiskLedger, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}) {
+function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: RiskLedger, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}) {
   const { adapter } = ctx;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
   for (const pos of cells) {
@@ -273,14 +273,8 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, tool: st
       // 工作面只要求「可挖、非保护、非危险」：火把/梯子/告示牌这类透明方块不是完整立方，却一样能瞬挖通过，
       // 不能再拿整块判定（完整立方）去卡它，否则 agent 自己插的火把会反过来堵死开挖通道
       if (PROTECTED.has(name) || name.endsWith('_bed') || !block?.diggable || !Number.isFinite(block.hardness) || block.hardness! < 0) throw new ExcavationStop('ERROR', `工作面 ${name} 不能作为普通安全通道挖除`, false, 'impossible');
-      // 指定了工具：每一格都必须能用这件工具挖；哪一格挖不了就报哪一格，不自动改用别的工具
-      if (tool) {
-        if (adapter.digTimeEstimate(name, tool) === null) throw new ExcavationStop('TOOL_MISSING', `指定的 ${tool} 挖不了工作格 (${pos.x},${pos.y},${pos.z}) 的 ${name}`, false, 'impossible');
-      } else {
-        const tools = Object.keys(block.harvestTools ?? {});
-        const held = adapter.state().inventory.some((item) => item.count > 0 && tools.includes(String(registry.itemsByName[item.name]?.id)));
-        if (!adapter.canHarvest(pos) || tools.length && !held) throw new ExcavationStop('TOOL_MISSING', `缺少实际可采掘 ${name} 的工具`, false, 'impossible');
-      }
+      // 清路只看能不能挖开，不要求能采到掉落：指定工具在背包与否由开挖前的检查负责，
+      // 逐格能否挖开交给 dig 的真实结果（会如实回报 noDrop / HAND_DIG_TIMEOUT）。
     }
     for (const offset of [{ x: 1, y: 0, z: 0 }, { x: -1, y: 0, z: 0 }, { x: 0, y: 0, z: 1 }, { x: 0, y: 0, z: -1 }, { x: 0, y: 1, z: 0 }]) {
       const at = { x: pos.x + offset.x, y: pos.y + offset.y, z: pos.z + offset.z };
@@ -335,7 +329,7 @@ function pruneExcavationWaypoints(ctx: SkillCtx) {
 export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnObservation?: () => boolean) {
   const { adapter, senses, signal } = ctx;
   const origin = adapter.state();
-  let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, filled = 0, fillTried = false;
+  let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, noDropBlocks = 0, filled = 0, fillTried = false;
   /** 风险与邻格未知作为数据返回，成功/失败都带；不让它们只活在错误文本里。 */
   const ledger: RiskLedger = { risks: [], unknownAdjacent: [], riskKeys: new Set(), unknownKeys: new Set() };
   const path: { pos: Vec3Like; observationId: number }[] = [];
@@ -349,10 +343,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const fillNote = () => filled
     ? `（按 fill 补了 ${filled} 处支撑：${fillFacts.map((f) => `${f.item} 在 (${f.at.x},${f.at.y},${f.at.z})`).join('、')}）`
     : '';
+  const noDropNote = () => noDropBlocks ? `（其中 ${noDropBlocks} 格没有掉落）` : '';
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
-      excavatedBlocks: excavated, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
+      excavatedBlocks: excavated, noDropBlocks, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       risks: ledger.risks.map((risk) => ({ ...risk, at: { ...risk.at } })), riskCells: ledger.risks.map((risk) => ({ ...risk.at })), unknownAdjacent: ledger.unknownAdjacent.map((at) => ({ ...at })),
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
@@ -484,10 +479,10 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       }
       if (supportProblemNow) throw supportProblemNow;
       const height = args.mode === 'stairs' ? 3 : 2;
-      const cells = preflightColumn(ctx, next, height, args.tool, ledger, args).reverse();
+      const cells = preflightColumn(ctx, next, height, ledger, args).reverse();
       // A one-block jump needs extra clearance above the current head before
       // moving. Its floor and the next step block are never dug out.
-      const workCheck = () => { preflightColumn(ctx, next, height, args.tool, ledger, args); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, args.tool, ledger, args); };
+      const workCheck = () => { preflightColumn(ctx, next, height, ledger, args); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, ledger, args); };
       workCheck();
       if (args.mode === 'stairs_up') cells.unshift({ ...here, y: here.y + 2 });
       for (const pos of cells) {
@@ -495,7 +490,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         workCheck();
         const before = adapter.blockAt(pos) ?? '';
         if (AIR.has(before)) continue;
-        // 指定了工具就交给适配器：只装备这一把、挖不动就返回 TOOL_MISSING，不自动换别的工具
+        // 指定了工具就交给适配器：只装备这一把，不自动换别的工具；不掉落也照挖，真实失败原因原样报出
         const result = await adapter.dig(pos, signal, args.tool ? { tool: args.tool } : undefined);
         // 先确认这一格是否真的挖空，再检查会话/期限：已经发生的挖掘要计进部分效果，
         // 取消/超时不能把它报成“没挖过”。
@@ -504,6 +499,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           // 适配器返回的 TOOL_MISSING（可能带前缀说明）原样报出，不吞成笼统的 ERROR
           throw new ExcavationStop(result.reason?.startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : 'ERROR', `安全通道开挖失败：${result.reason}`);
         }
+        // 挖开与采集分开：清路成功但这一格没有掉落时，把事实计进回执，不因此判失败。
+        if (result.noDrop) noDropBlocks++;
         // 工作面自身的下落方块默认可挖，但挖后要复核目标格：沙/沙砾可能从上方落回填。
         if (falling(before)) await sleep(50, signal);
         const cleared = adapter.blockAt(pos);
@@ -534,7 +531,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
         await sleep(50, signal);
       }
-      preflightColumn(ctx, next, height, args.tool, ledger, args);
+      preflightColumn(ctx, next, height, ledger, args);
       standingCell(ctx, next, ledger, args);
       completed++;
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
@@ -548,9 +545,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return checkpointId; // 存不下恢复点就保留上一入口，不影响继续挖
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
-      if (await observe()) return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}`, { ...details(), stoppedByObservation: true });
+      if (await observe()) return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
     }
-    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}${noDropNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
@@ -598,11 +595,12 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认工具、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就在挖前停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包或挖不了某一格时返回 TOOL_MISSING。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
-  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就在挖前停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe（不掉落也会挖开并回报 noDrop）","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;
-    if (typeof value.entry !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.entry) || !['stairs', 'stairs_up', 'tunnel'].includes(mode) || typeof value.direction !== 'string' || !Object.hasOwn(DIRECTIONS, value.direction) || !Number.isInteger(steps) || steps < 1 || steps > 8) return { ok: false, error: 'entry 为 current 或可信入口ID；mode=stairs|stairs_up|tunnel；direction=north|east|south|west；steps 为1-8整数' };
+    if (typeof value.entry !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(value.entry)) return { ok: false, error: 'entry 为 current 或可信入口ID' };
+    if (!['stairs', 'stairs_up', 'tunnel'].includes(mode) || typeof value.direction !== 'string' || !Object.hasOwn(DIRECTIONS, value.direction) || !Number.isInteger(steps) || steps < 1 || steps > 8) return { ok: false, error: 'mode=stairs|stairs_up|tunnel；direction=north|east|south|west；steps 为1-8整数' };
     if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线，如 iron_pickaxe）；不写则沿用身体自己的换工具规则' };
     const fill = value.fill;
     if (fill !== undefined && (typeof fill !== 'string' || !/^[a-z0-9_]{1,80}$/.test(fill) || (fill !== 'any' && !adapter.isKnownItem(fill)))) {

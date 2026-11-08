@@ -53,8 +53,10 @@ class ToolWorld extends FakeAdapter {
     this.digs.push({ ...pos });
     this.digOpts.push(opts);
     if (this.digFailure) return { ok: false, reason: this.digFailure };
+    const block = this.blockAt(pos) ?? '';
     this.setBlock(pos, 'air');
-    return { ok: true };
+    // 采不到掉落也能挖开：掉落事实按实际使用的工具回报。
+    return this.digTimeEstimate(block, opts?.tool ?? null) === null ? { ok: true, noDrop: true } : { ok: true };
   }
   override async moveTo(target: MoveTarget, options: MoveOpts) {
     throwIfAborted(options.signal);
@@ -120,15 +122,15 @@ test('excavate_run.tool：适配器挖不动时原样报出 TOOL_MISSING 事实�
   assert.equal(world.moves.length, 0);
 });
 
-test('excavate_run.tool：指定工具挖不了某一格 → TOOL_MISSING 并说明哪一格，不挖', async () => {
+test('excavate_run.tool：指定工具采不到掉落仍会开挖，并只用这一把、不自动换', async () => {
   const world = new ToolWorld();
   world.setBlock({ x: 1, y: 63, z: 0 }, 'stone');
   const result = await excavationSkill.run(context(world), args({ steps: 1, tool: 'stone_shovel' }));
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'TOOL_MISSING');
-  assert.match(result.summary, /stone_shovel 挖不了工作格 \(1,63,0\) 的 stone/);
-  assert.equal(world.digs.length, 0, '预检失败前不挖，也不自动改用别的工具');
-  assert.equal(world.moves.length, 0);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(world.digs.length > 0, '清路不要求能采到掉落');
+  assert.ok(world.digOpts.length > 0 && world.digOpts.every((opts) => opts?.tool === 'stone_shovel'), '只用指定工具');
+  assert.equal(result.data?.noDropBlocks, 1, '掉落事实要计进回执');
+  assert.equal(world.moves.length, 1);
 });
 
 test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文里也能进入 user 消息', () => {

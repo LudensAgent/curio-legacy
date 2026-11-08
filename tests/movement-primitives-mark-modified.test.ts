@@ -278,7 +278,7 @@ test('excavate_run 每个复核为空气的格都标记', async () => {
     Object.assign(w, { pos: { x: 0.5, y: 64, z: 0.5 }, worldId: WORLD, sessionId: SESSION, dim: DIM });
     w.inv.set('iron_pickaxe', 1);
     const ctx = { ...makeCtx(w, { deadlineMs: 30000 }), spatial, taskId: ACTION };
-    const result = await excavateRun.run(ctx, { entry: 'current', mode: 'stairs', direction: 'east', steps: 1 });
+    const result = await excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 1 });
     assert.equal(result.status, 'succeeded', result.summary);
     assert.ok(w.digs.length > 0, 'stairs 应至少挖空一格');
     // 标记集合必须正好是每次 dig 后复核为空气的格，不含站位或相邻格。
@@ -310,7 +310,7 @@ test('excavate_run 挖后复核不是空气（被回填）时 0 次写入', asyn
     Object.assign(w, { pos: { x: 0.5, y: 64, z: 0.5 }, worldId: WORLD, sessionId: SESSION, dim: DIM });
     w.inv.set('iron_pickaxe', 1);
     const ctx = { ...makeCtx(w, { deadlineMs: 30000 }), spatial, taskId: ACTION };
-    const result = await excavateRun.run(ctx, { entry: 'current', mode: 'stairs', direction: 'east', steps: 1 });
+    const result = await excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 1 });
     assert.equal(result.status, 'failed', result.summary);
     assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
     assert.deepEqual(changedCells(spatial), [], '未确认的挖掘不得写入 markModified');
