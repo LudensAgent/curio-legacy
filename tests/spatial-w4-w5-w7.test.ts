@@ -70,12 +70,12 @@ test('W5 遮挡外变化不写入事实，合法观测后才更新，旧证据�
   assert.equal(facts.freshnessBeforeObservation, 'FRESH');
   assert.equal(facts.reportBeforeObservation, 0, 'no observation means no ChangeReport');
   assert.equal(facts.ageBeforeMs, 5_000, 'old evidence age must be preserved');
-  assert.equal(facts.validUntilBefore, 60_000, 'old evidence validity ceiling must not move');
+  assert.equal(facts.validUntilBefore, 300_000, '宿主默认 5 分钟；旧证据的有效期上限不能因为遮挡外变化而移动');
   assert.equal(facts.oldObservedAtPreserved, 0);
   assert.equal(facts.updatedObservedAt, 6_000);
   assert.equal(facts.updatedState, 'minecraft:air');
   assert.equal(facts.unrelatedObservedAt, 0, 'neighbour evidence must not be refreshed by the new observation');
-  assert.equal(facts.unrelatedValidUntil, 60_000);
+  assert.equal(facts.unrelatedValidUntil, 300_000);
   assert.equal(facts.verdictAfterLegalObservation, 'BLOCKED');
 });
 
