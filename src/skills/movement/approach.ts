@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
-import { searchLandRoute, type LandSearchResult } from '../../spatial/land-search.ts';
+import { searchLandRouteAsync, type LandSearchResult } from '../../spatial/land-search.ts';
 import { navigateTo } from './navigate.ts';
 import { fail, obj, ok, runSkill, validateSkill, type Skill, type SkillResult } from '../types.ts';
 
@@ -101,20 +101,24 @@ export const goNear: Skill<ApproachArgs> = {
     }));
     // 先只跑严格证据；严格全失败才用历史证据回退。原实现边搜严格边搜历史，
     // 即使后面的候选有严格路线，也会为前面每个失败候选白跑一遍历史搜索。
-    const strictResults = candidates.map((to) => ({
-      to, result: searchLandRoute(spatial.session.voxel, { ...request, to }),
-    }));
+    // 分片搜索：所有候选共用同一个截止时间；搜索期间让出事件循环，取消不必等整轮跑完。
+    const strictResults: { to: Vec3Like; result: LandSearchResult }[] = [];
+    for (const to of candidates) {
+      if (ctx.signal.aborted) break;
+      strictResults.push({ to, result: await searchLandRouteAsync(spatial.session.voxel, { ...request, to }) });
+    }
     const usable: { to: Vec3Like; result: LandSearchResult }[] = strictResults.flatMap(({ to, result }) =>
       result.status === 'FOUND' && !result.transitions.some((transition) => !args.allowed.includes(transition.kind))
         ? [{ to, result }] : []);
     if (!usable.length && args.historical) {
-      usable.push(...strictResults.flatMap(({ to, result }) => {
-        if (result.status === 'FOUND') return [];
-        const historical = searchLandRoute(spatial.session.voxel, { ...request, to, allowStale: true });
-        return historical.status === 'FOUND'
-          && !historical.transitions.some((transition) => !args.allowed.includes(transition.kind))
-          ? [{ to, result: historical }] : [];
-      }));
+      for (const { to, result } of strictResults) {
+        if (result.status === 'FOUND' || ctx.signal.aborted) continue;
+        const historical = await searchLandRouteAsync(spatial.session.voxel, { ...request, to, allowStale: true });
+        if (historical.status === 'FOUND'
+          && !historical.transitions.some((transition) => !args.allowed.includes(transition.kind))) {
+          usable.push({ to, result: historical });
+        }
+      }
     }
     usable.sort((a, b) => (a.result.evidenceMode === b.result.evidenceMode ? 0 : a.result.evidenceMode === 'current' ? -1 : 1)
       || a.result.cost - b.result.cost);
@@ -122,11 +126,22 @@ export const goNear: Skill<ApproachArgs> = {
     if (!chosen) {
       const attempts = strictResults.map(({ to, result }) => ({
         to, status: result.status, cancelReason: result.stats.cancelReason,
-        searchMs: result.stats.durationMs, boundaries: result.boundaries.length,
+        searchMs: result.stats.durationMs, yieldCount: result.stats.yieldCount,
+        maxSyncSliceMs: result.stats.maxSyncSliceMs, boundaries: result.boundaries.length,
       }));
+      // 预算耗尽和证据不足都不是“已确认没有路”：不能一律报 PATH_NOT_FOUND。
+      const budgetHit = strictResults.some(({ result }) => result.status === 'BUDGET_EXHAUSTED');
       const timeBudgetHit = strictResults.some(({ result }) => result.stats.cancelReason === 'time');
-      return fail('PATH_NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格${timeBudgetHit ? `（搜索时间预算 ${GO_NEAR_SEARCH_MS}ms 已耗尽，先缩小范围或走近再试）` : ''}；不会把目标方块本身当站立格`, {
-        target, targetName, candidates: attempts, budgetMs: GO_NEAR_SEARCH_MS, timeBudgetHit, position: { ...state.pos },
+      const noPath = strictResults.some(({ result }) => result.status === 'NO_PATH');
+      const insufficientEvidence = !budgetHit && !noPath;
+      const reason = budgetHit
+        ? `搜索预算已耗尽（${timeBudgetHit ? `时间 ${GO_NEAR_SEARCH_MS}ms` : '节点/边上限'}；${strictResults.length} 个候选），不代表没有路；先缩小范围或走近再试`
+        : insufficientEvidence
+          ? `所有 ${strictResults.length} 个候选都缺证据（UNKNOWN/STALE），不能当成已确认无路；先 look_around/走近刷新证据`
+          : '所有候选都返回 NO_PATH';
+      return fail(budgetHit ? 'TIMEOUT' : noPath ? 'PATH_NOT_FOUND' : 'NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格：${reason}；不会把目标方块本身当站立格`, {
+        target, targetName, candidates: attempts, candidateCount: strictResults.length,
+        budgetMs: GO_NEAR_SEARCH_MS, budgetHit, timeBudgetHit, insufficientEvidence, position: { ...state.pos },
       });
     }
     const nested = validateSkill(navigateTo, {
@@ -148,6 +163,8 @@ export const goNear: Skill<ApproachArgs> = {
     const targetArg = JSON.stringify({ x: target.x, y: target.y, z: target.z });
     return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${chosen.to.x},${chosen.to.y},${chosen.to.z})；后续动作的 target 写 ${targetArg}（容器用 take_items/store_items，床用 sleep，门/工作站用 interact_block/use_gui，传送门用 observe_portal/travel_portal）`, {
       target, targetName, chosen: chosen.to, evidenceMode: chosen.result.evidenceMode,
+      candidateCount: strictResults.length, budgetMs: GO_NEAR_SEARCH_MS,
+      maxSyncSliceMs: Math.max(...strictResults.map(({ result }) => result.stats.maxSyncSliceMs)),
       navigation: moved.data, position: { ...ctx.adapter.state().pos },
     });
   },
