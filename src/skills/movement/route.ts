@@ -325,12 +325,25 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
   const stepDetail = Object.entries(stepCounts).map(([skill, count]) => `${skill}×${count}`).join('、');
   // 只给数量时模型无法执行这些步骤；把前几步参数放进摘要，明确“先执行它们，再重新规划”。
   const stepPreview = steps.slice(0, 3).map((step) => `${step.skill} ${JSON.stringify(step.args)}`).join('；');
+  const boundaryCounts = result.boundaries.reduce<Record<string, number>>((all, boundary) => {
+    const key = `${boundary.status}/${boundary.kind}`;
+    all[key] = (all[key] ?? 0) + 1;
+    return all;
+  }, {});
+  const boundaryDetail = Object.entries(boundaryCounts).map(([key, count]) => `${key}×${count}`).join('、');
+  const boundaryGuidance = result.status === 'UNKNOWN'
+    ? '还有未观察/不完整的边界，先靠近或看清再试'
+    : result.status === 'NO_PATH'
+      ? '已观察地形里没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
+      : result.status === 'BUDGET_EXHAUSTED'
+        ? '搜索预算耗尽，先规划更近的一段'
+        : '先规划更近的一段，或走近/看清后再试';
   return {
     result,
     steps,
     summary: result.status === 'FOUND'
       ? `空间 3D 路线 ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。先执行：${stepPreview}${steps.length > 3 ? '；…' : ''}；只读规划，不是执行授权，执行后按当前证据重新规划；drop>1 的 descend_to 仍要求当前可见落点`
-      : `空间 3D 搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实）；先规划更近的一段，或走近/看清后再试`,
+      : `空间 3D 搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实${boundaryDetail ? `：${boundaryDetail}` : ''}）；${boundaryGuidance}`,
     facts: {
       source: 'spatial', backend: 'spatial_voxel_search',
       assurance: result.assurance, executable: false,
@@ -348,8 +361,8 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回路点/过渡，spatial 返回现有动作 steps（move_step/descend_to），search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。auto 依次 memory→spatial→search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；spatial 返回 points/transitions 和现有动作 steps；memory/spatial 都不是 routeId，也不直接授权执行。',
+  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回路点/过渡，spatial 返回现有动作 steps（move_step/descend_to），search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。auto 先 memory→spatial；只有目标脚高与当前一致时才回退 search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 只走当前脚高的同高格点，目标 y 不同时不会回退到 search；spatial 返回 points/transitions 和现有动作 steps；search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；memory/spatial 都不是 routeId，也不直接授权执行。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -431,6 +444,19 @@ export const planRoute: Skill<PlanArgs> = {
         }
         spatialGap = { summary: candidate.summary, facts };
       }
+    }
+
+    // 同高 search 的库只接受与当前脚高完全一致的精确目标；目标 y 变化时它必然
+    // 返回 unsupported_target，再回退只会把真正有用的 3D 边界事实淹没。auto 到这里
+    // 说明 memory/spatial 都没有给出可执行路线，直接把换层事实和边界交回。
+    const heightChange = Math.abs(stance.y - from.y) > 0.01;
+    if (args.source === 'auto' && heightChange) {
+      const gap = spatialGap ? `；空间 3D：${spatialGap.summary}` : '';
+      return fail('BAD_ARGS', `目标脚高 ${stance.y} 与当前 ${from.y} 不同（${(stance.y - from.y).toFixed(2)} 格），同高 search 只支持固定脚高 ${from.y}，不能表示换层${gap}；换层由你用相邻一格 move_step，或更大落差先 assess_landings 再 descend_to 显式处理（不自动改目标）${cellNote}`, {
+        ...(spatialGap?.facts ?? {}),
+        targetFoot: stance.y, currentFoot: from.y, heightChange: stance.y - from.y,
+        ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }),
+      });
     }
 
     const search = new WalkRouteSearch(spatial.session.voxel, {
