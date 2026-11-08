@@ -333,3 +333,59 @@ test('真实适配器 dig 默认行为不变：没传 handOnly 时仍自动装�
   assert.deepEqual(f.equipCalls, ['iron_pickaxe']);
   assert.equal(f.bot.heldItem?.name, 'iron_pickaxe');
 });
+
+/** 放置已经发生，但适配器仍返回失败（超时/回执丢失）：世界状态才是效果证据。 */
+class PlacedThenFailWorld extends FakeAdapter {
+  override async placeBlockAt(pos: Vec3Like, items: string[], signal: AbortSignal): Promise<ActionResult> {
+    const placed = await super.placeBlockAt(pos, items, signal);
+    return placed.ok ? { ok: false, reason: 'TIMEOUT: 回执丢失' } : placed;
+  }
+}
+
+test('place_cell：适配器回执失败但世界已放置时，以权威方块状态结算成功', async (t) => {
+  const w = new PlacedThenFailWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('stone', 2);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'stone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'stone');
+  assert.match(String(r.data?.adapterReason ?? ''), /TIMEOUT/);
+});
+
+test('place_support：适配器回执失败但目标格已形成支撑时，不再换站位重复放置', async (t) => {
+  const w = new PlacedThenFailWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0');
+  w.inv.set('stone', 2);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'stone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 1, y: 63, z: 0 }), 'stone');
+  assert.equal(w.inv.get('stone'), 1, '只消耗一块，不因回执失败重复放置');
+});
+
+/** 换站位移动已经产生部分位移后抛错：旧起点生成的候选站位不再成立。 */
+class PartialStanceWorld extends FakeAdapter {
+  override async placeBlockAt(): Promise<ActionResult> {
+    return { ok: false, reason: 'NO_REFERENCE' };
+  }
+  override async moveTo(): Promise<void> {
+    this.pos = { x: this.pos.x + 0.25, y: this.pos.y, z: this.pos.z };
+    throw new Error('MOVE_INTERRUPTED');
+  }
+}
+
+test('place_support：换站位移动部分发生后不按旧起点继续', async (t) => {
+  const w = new PartialStanceWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('stone', 2);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'stone' });
+  assert.equal(r.status, 'failed');
+  assert.equal((r.data?.problem as { kind?: string } | undefined)?.kind, 'STANCE_MOVE_PARTIAL');
+  assert.equal(w.inv.get('stone'), 2, '没有发生放置消耗');
+});
