@@ -5,6 +5,7 @@ import { feetCell } from '../../perception/local.ts';
 import { fail, obj, ok, runSkill, validateSkill, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 import { moveStep } from './primitives.ts';
 import { descendTo } from './descend.ts';
+import { executionWindow } from './route.ts';
 
 type Kind = 'walk' | 'step' | 'drop';
 type NavigateArgs = {
@@ -52,7 +53,7 @@ function routeFacts(result: LandSearchResult) {
  */
 export const navigateTo: Skill<NavigateArgs> = {
   name: 'navigate_to',
-  description: '按你指定的目的地和允许的 walk/step/drop 执行 3D 路线。宿主用已记录体素规划（当前证据优先，可用历史体素），并逐步用 move_step/descend_to 核实；不挖、不放、不搭、不换目标，遇 2 格以上高差、阻挡、落点不可见或历史路线失效就停下报事实。',
+  description: '按你指定的目的地和允许的 walk/step/drop 执行 3D 路线。宿主用已记录体素规划（当前证据优先，可用历史体素），并逐步用 move_step/descend_to 核实；不挖、不放、不搭、不换目标，遇 2 格以上高差、阻挡、落点不可见或历史路线失效就停下报事实。历史候选被当前证据判定 BLOCKED 时只执行 blocker 前的前缀，返回最后实测位置、已确认段、剩余段与 blocker；不自动挖，清障由你显式 mine_cell 后再观察/规划。',
   argsDoc: '{"to":{"x":整数,"y":脚高,"z":整数},"allowed"?":["walk","step","drop"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false}；to 是站立脚位/方块格，不是箱子/门方块本身；historical 默认 true（当前证据没路时用历史体素，结果标 historical/UNKNOWN）；不自动施工。',
   timeoutMs: 30000,
   movement: true,
@@ -136,7 +137,11 @@ export const navigateTo: Skill<NavigateArgs> = {
         ...routeFacts(result), position: { ...state.pos }, disallowed: disallowed,
       });
     }
-    const transitions = result.transitions.slice(0, args.maxSteps);
+    // 历史候选的逐段复验已在搜索层按当前证据完成：BLOCKED 段之前的前缀才交给身体，
+    // 该段本身不启动。STALE/UNKNOWN 不等于已观测阻挡，仍由 move_step/descend_to
+    // 在执行前用现场证据确认。
+    const { blocker, limit } = executionWindow(result.verification, args.maxSteps, result.transitions.length);
+    const transitions = result.transitions.slice(0, limit);
     const truncated = transitions.length < result.transitions.length;
     let executed = 0;
     let last: AgentState = state;
@@ -175,10 +180,21 @@ export const navigateTo: Skill<NavigateArgs> = {
       }
       if (step.status !== 'succeeded') {
         const { local: _local, around: _around, ...nested } = (step.data ?? {}) as Record<string, unknown>;
+        const stopped = ctx.adapter.state();
+        const problemKind = (step.data?.problem as { kind?: string } | undefined)?.kind;
+        const blocker = problemKind === 'TARGET_BLOCKED' || problemKind === 'HEAD_BLOCKED'
+          ? {
+              index, transition, status: 'BLOCKED', problem: problemKind,
+              ...(step.data?.targetCell === undefined ? {} : { cell: step.data.targetCell }),
+              ...(step.data?.remediation === undefined ? {} : { remediation: step.data.remediation }),
+            }
+          : null;
         return fail(step.failureCode ?? 'ERROR', `navigate_to 在第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}；没有继续执行`, {
-          ...routeFacts(result), executed, stepIndex: index, transition,
+          ...routeFacts(result), executed,
+          ...(blocker === null ? {} : { confirmedSegments: executed, blocker, lastMeasuredPosition: { ...stopped.pos } }),
+          stepIndex: index, transition, remaining: result.transitions.slice(index),
           nested: { code: step.failureCode ?? 'ERROR', summary: step.summary, data: nested },
-          position: { ...ctx.adapter.state().pos },
+          position: { ...stopped.pos },
         });
       }
       const arrived = ctx.adapter.state();
@@ -190,6 +206,13 @@ export const navigateTo: Skill<NavigateArgs> = {
       executed += 1;
       last = arrived;
       ctx.progress(executed / Math.max(1, result.transitions.length), `navigate_to ${executed}/${result.transitions.length}`);
+    }
+    if (blocker !== null && blocker.index < args.maxSteps) {
+      return fail('PATH_NOT_FOUND', `navigate_to 停在 blocker 前：第 ${blocker.index + 1} 段当前证据 ${blocker.status}${blocker.reason === undefined ? '' : `（${blocker.reason}）`}；已确认 ${executed} 段，最后实测位置 ${JSON.stringify(cell(feetCell(last.pos)))}；剩余 ${result.transitions.length - executed} 段；未自动挖，清障由你显式 mine_cell 后重新观察/规划`, {
+        ...routeFacts(result), executed, confirmedSegments: executed,
+        remaining: result.transitions.slice(executed), position: { ...last.pos },
+        blocker,
+      });
     }
     if (truncated) {
       return fail('EFFECT_NOT_CONFIRMED', `navigate_to 已执行前 ${executed} 段，未到终点（maxSteps=${args.maxSteps}）；可再次调用继续`, {

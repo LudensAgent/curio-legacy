@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { clearRouteRecords, planRoute } from '../src/skills/movement/index.ts';
+import { executionWindow } from '../src/skills/movement/route.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -65,6 +66,85 @@ function flatWorld() {
   return map;
 }
 
+function memorySpatial(map: VoxelMap, inspection: Record<string, unknown>) {
+  return {
+    ...fakeSpatial(map),
+    query: () => ({ status: 'ok', data: { kind: 'historyRoute', inspection } }),
+  } as unknown as SharedSpatialSession;
+}
+
+test('历史候选 verification 中段 BLOCKED：执行窗口只含 blocker 前的前缀', () => {
+  const hop = (x: number) => ({
+    transition: { kind: 'walk' as const, from: at(x, 0, 0), to: at(x + 1, 0, 0), drop: 0 },
+    status: 'OPEN', hazards: [],
+  });
+  const blocked = { ...hop(2), status: 'BLOCKED', reason: 'target blocked by current evidence' };
+  const verification = { verdict: 'BLOCKED', openPrefix: 2, transitions: [hop(0), hop(1), blocked, hop(3)] };
+  const { blocker, limit } = executionWindow(verification, 8, 4);
+  assert.equal(limit, 2, '只把 blocker 前的前缀交给身体');
+  assert.equal(blocker?.index, 2);
+  assert.equal(blocker?.status, 'BLOCKED');
+  assert.equal(blocker?.reason, 'target blocked by current evidence');
+  assert.equal(blocker?.transition, blocked.transition, 'blocker 直接复用复验条目自带的 transition');
+  assert.deepEqual(blocker?.hazards, []);
+
+  const noBlocker = executionWindow({ verdict: 'STALE', openPrefix: 0, transitions: [hop(0), hop(1)] }, 8, 2);
+  assert.equal(noBlocker.blocker, null, 'STALE/UNKNOWN 不是已观测阻挡');
+  assert.equal(noBlocker.limit, 2, '没有 BLOCKED 时不截断，交给逐步执行复核');
+
+  const capped = executionWindow(verification, 1, 4);
+  assert.equal(capped.limit, 1, 'maxSteps 比 blocker 更早时按预算截断');
+});
+
+test('plan_route source:"memory" 多格历史 leg 保持历史几何，不当作一步 move_step', async (t) => {
+  const map = flatWorld();
+  const { w, ctx: base } = ctxAt(map, at(0.5, 0, 0.5));
+  const points = [at(0.5, 0, 0.5), at(5.5, 0, 0.5), at(6.5, 0, 0.5)];
+  const evidence = (id: string, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }) => ({
+    id, fragmentId: 'f-dug', from, to, worldId: WORLD, dim: DIM, sessionId: SESSION,
+    observedAt: 1, source: 'confirmed_walk', mode: 'walk',
+  });
+  const ctx = {
+    ...base,
+    spatial: memorySpatial(map, {
+      worldId: WORLD, dim: DIM, from: points[0], to: points[2], near: 5, status: 'FOUND',
+      fromNodeId: 'n0', toNodeId: 'n2', points, nodeIds: ['n0', 'n1', 'n2'], edgeIds: ['e0', 'e1'],
+      segments: [
+        { edgeId: 'e0', from: 'n0', to: 'n1', type: 'CAVE_PASSAGE', direction: 'forward', evidenceId: 't0', evidence: evidence('t0', points[0]!, points[1]!) },
+        { edgeId: 'e1', from: 'n1', to: 'n2', type: 'HORIZONTAL', direction: 'forward', evidenceId: 't1', evidence: evidence('t1', points[1]!, points[2]!) },
+      ],
+      gaps: [], message: 'found',
+      historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN',
+    }),
+  };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(6, 0, 0), mode: 'walk', source: 'memory', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.executable, false);
+  assert.equal(r.data?.currentPassability, 'UNKNOWN');
+  assert.equal(r.data?.historicalGeometry, true);
+  const legs = r.data?.legs as {
+    transition: string; maxSpan: number; oneCellHop: boolean;
+    executable: boolean; currentPassability: string; historicalGeometry: boolean;
+  }[];
+  assert.deepEqual(legs.map((leg) => leg.transition), ['walk', 'walk']);
+  assert.equal(legs[0]!.maxSpan, 5);
+  assert.equal(legs[0]!.oneCellHop, false, '多格 leg 不能被当成一步');
+  assert.equal(legs[0]!.executable, false);
+  assert.equal(legs[0]!.currentPassability, 'UNKNOWN');
+  assert.equal(legs[0]!.historicalGeometry, true);
+  assert.equal(legs[1]!.maxSpan, 1);
+  assert.equal(legs[1]!.oneCellHop, true);
+  assert.deepEqual(r.data?.selectedEndpoint, points[2]);
+  assert.match(r.summary, /跨多格/);
+  assert.match(r.summary, /不是一步 move_step/);
+  assert.match(r.summary, /plan_route source:"search"/);
+  assert.match(r.summary, /只到你选定的端点/);
+  assert.match(r.summary, /第1段 walk/);
+  assert.deepEqual(w.actions, [], '记忆规划不移动');
+});
+
 test('plan_route source:"spatial" 返回现有 move_step 步骤，不新增动作、不发 routeId', async (t) => {
   const map = flatWorld();
   const { w, ctx } = ctxAt(map, at(0.5, 0, 0.5));
@@ -78,12 +158,13 @@ test('plan_route source:"spatial" 返回现有 move_step 步骤，不新增动�
   assert.ok(Array.isArray(steps) && steps.length > 0);
   assert.ok(steps.every((step) => step.skill === 'move_step' || step.skill === 'descend_to'));
   assert.ok(steps.every((step) => !!SKILLS[step.skill]), '步骤只能使用现有动作');
-  const transitions = r.data?.transitions as { from: { x: number; y: number; z: number } }[];
+  const transitions = r.data?.transitions as { from: { x: number; y: number; z: number }; to: { x: number; y: number; z: number } }[];
   steps.forEach((step, index) => {
     w.pos = { ...transitions[index]!.from };
     const validated = SKILLS[step.skill]!.validate(step.args, w);
     assert.equal(validated.ok, true, `${step.skill} 参数应通过现有动作校验：${JSON.stringify(step.args)} ${JSON.stringify(validated)}`);
   });
+  assert.equal(Math.floor(transitions.at(-1)!.to.x), 3, '路线只到选定的目标格，不越过');
   assert.deepEqual(w.actions, [], 'plan_route 只读，不移动');
 });
 
@@ -164,8 +245,11 @@ test('plan_route source:"spatial" 严格无路时用历史体素给出带 UNKNOW
   assert.equal(r.data?.currentPassability, 'UNKNOWN');
   assert.match(r.summary, /历史体素路线/);
   assert.match(r.summary, /当前可通行性未知/);
-  const verification = r.data?.verification as { verdict?: string; openPrefix?: number } | undefined;
+  const verification = r.data?.verification as { verdict?: string; openPrefix?: number; transitions: { status: string }[] } | undefined;
   assert.notEqual(verification?.verdict, 'OPEN', '历史路线必须暴露它不是当前已验证的 OPEN 路线');
+  assert.equal(r.data?.verifiedOpenSegments, verification?.openPrefix, '逐段复验前缀原样暴露');
+  assert.ok('blocker' in (r.data ?? {}), '历史候选暴露 blocker 槽位');
+  assert.equal(verification?.transitions.length, (r.data?.transitions as unknown[]).length, '每段都有当前证据复验结论');
   const steps = r.data?.steps as { skill: string; args: Record<string, unknown> }[] | undefined;
   assert.ok(steps?.length, '历史路线仍应给出可逐步执行的现有动作');
   assert.ok(steps.every((step) => !!SKILLS[step.skill]));
