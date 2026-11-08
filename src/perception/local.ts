@@ -1,7 +1,7 @@
 import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { isSoftBlock, LIQUID_BLOCKS } from './surroundings.ts';
-import { bodyProbe, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, placementReference, RELATIVE_FOOT_TOLERANCE, supportTop, type ObservedState } from './geometry.ts';
+import { bodyProbe, footSurfaceY, hasAnyCollision, isPassableDoor, isReplaceable, MIN_STEP_DELTA, placementReference, PLAYER_STEP_HEIGHT, RELATIVE_FOOT_TOLERANCE, supportTop, verticalStepKind, type ObservedState } from './geometry.ts';
 
 /**
  * 以身体为原点的局部坐标：[前, 上, 右]，前 = 指定的朝向（N/E/S/W）。
@@ -101,33 +101,40 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
   };
   const word = (f: number, u: number, r: number) => `${f > 0 ? '前' : f < 0 ? '后' : ''}${r < 0 ? '左' : r > 0 ? '右' : ''}${u > 0 ? `上${u}` : u < 0 ? `下${-u}` : ''}` || '原地';
   const stand: string[] = [], place: string[] = [];
-  // 与 move_step 单步预检同一组判据：曼哈顿 1；同层脚高一致，上一级/下一级 0.5–1 格。
+  // 与 move_step 单步预检同一组判据：曼哈顿 1；同层脚高一致，上一级/下一级 0.01–1 格。
   // stand 是候选（含对角和分数脚高），不保证一步到达；executable 才是可直接交给 move_step 的落点。
   const executable: { at: [number, number, number]; xyz: [number, number, number]; foot: number; facing: Facing; primitive: 'move_step' }[] = [];
+  /** 每个正交相邻列只保留离当前脚高最近的那一步；u 是扫描层，不是 move_step 的竖直偏移。 */
+  const bestStep = new Map<string, { f: number; r: number; cell: Vec3Like; foot: number; vertical: -1 | 0 | 1 }>();
   for (const u of [0, -1, 1]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
     if (f === 0 && r === 0) continue;
-    if (u === 1 && !isOpen(at(0, 2, 0))) continue; // 往上迈要先跳，头顶得空
     const cell = toWorld(feet, facing, [f, u, r]);
     const state = stateAtWorld(cell);
     if (!state || blocksEntry(state)) continue;
     const foot = footSurfaceY(cell, stateAtWorld);
     if (foot === null) continue;
     // 和 step 的相对目标一致：列一步内所有非整块顶面（床/灵魂沙/土径等），整格落差仍按 ±1 层列出。
+    // 扫描窗口以整数脚格为锚；实测脚高只用于判断真实台阶高度。
     if (Math.abs(foot - (feet.y + u)) > RELATIVE_FOOT_TOLERANCE) continue;
     const probe = bodyProbe(foot, cell.x, cell.z, stateAtWorld);
     if (probe.unknown.length || probe.blockers.length) continue;
-    const offset = Math.abs(foot - (feet.y + u)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : '';
+    // 超过原版自动迈步高度才需要起跳；这时当前列的头顶必须空。
+    if (foot - pos.y > PLAYER_STEP_HEIGHT && !isOpen(at(0, 2, 0))) continue;
+    const offset = Math.abs(foot - (feet.y + u)) > MIN_STEP_DELTA ? `（脚高 ${foot.toFixed(2)}）` : '';
     const diagonal = f !== 0 && r !== 0;
     stand.push(`[${f},${u},${r}] ${word(f, u, r)}${offset}${diagonal ? '（对角，需多步）' : ''}`);
     const horizontal = Math.abs(f) + Math.abs(r);
-    const dv = foot - feet.y;
-    // 规范化的竖直写法：同层 0，向上 1，向下 -1；只有与枚举层一致时才列为可执行单步，
-    // 避免把半砖/雪层的分数脚高伪装成同层（或同一列在不同 u 层重复列出）。
-    const vertical = Math.abs(dv) <= 0.01 ? 0 : dv > 0 ? 1 : -1;
-    const stepable = vertical === 0 || (dv >= 0.49 && dv <= 1.01) || (dv >= -1.01 && dv <= -0.49);
-    if (horizontal === 1 && stepable && u === vertical) {
-      executable.push({ at: [f, vertical, r], xyz: [cell.x, foot, cell.z], foot, facing, primitive: 'move_step' });
+    // 用实测连续脚高，而不是整数脚格：站在雪层/半砖上时，0.01–1 格的台阶同样可走。
+    const vertical = verticalStepKind(foot - pos.y);
+    if (horizontal !== 1 || vertical === null) continue;
+    const columnKey = `${f},${r}`;
+    const previous = bestStep.get(columnKey);
+    if (previous === undefined || Math.abs(foot - pos.y) < Math.abs(previous.foot - pos.y)) {
+      bestStep.set(columnKey, { f, r, cell, foot, vertical });
     }
+  }
+  for (const step of bestStep.values()) {
+    executable.push({ at: [step.f, step.vertical, step.r], xyz: [step.cell.x, step.foot, step.cell.z], foot: step.foot, facing, primitive: 'move_step' });
   }
   for (const u of [0, -1, 1, 2]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
     if (f === 0 && r === 0 && (u === 0 || u === 1)) continue;
@@ -140,7 +147,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
   return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers, body: bodyCells,
     spots: {
       stand: stand.slice(0, 8), executable: executable.slice(0, 8), place: place.slice(0, 8),
-      note: 'stand 是候选脚部目标格：括号里的脚高按实际碰撞顶面（半砖/雪层等可为分数），对角项需要多步，不能直接当 move_step 的一步；executable 是按 move_step 单步规则（曼哈顿 1、同层脚高一致、上下级 0.5–1 格、身体净空）预检过的落点，xyz 是世界脚位，执行前仍会按最新位置重新预检。place 是已看清的空位且旁边有已观察的可贴面方块。地图来自本次视觉，body 的脚/头所在格来自触觉事实；两者证据范围不同，未知格不计入。实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格',
+      note: 'stand 是候选脚部目标格：括号里的脚高按实际碰撞顶面（半砖/雪层等可为分数），对角项需要多步，不能直接当 move_step 的一步；executable 是按 move_step 单步规则（曼哈顿 1、同层脚高一致、上下级 0.01–1 格、身体净空；超过 0.6 格要起跳）预检过的落点，xyz 是世界脚位，执行前仍会按最新位置重新预检。place 是已看清的空位且旁边有已观察的可贴面方块。地图来自本次视觉，body 的脚/头所在格来自触觉事实；两者证据范围不同，未知格不计入。实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格',
     } };
 }
 

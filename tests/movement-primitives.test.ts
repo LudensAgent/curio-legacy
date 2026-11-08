@@ -530,11 +530,11 @@ test('move_step 预检给出同一相邻格的准确修正，不自动改目标'
 });
 
 test('move_step 文档与实际半格/落差规则一致', async (t) => {
-  // 文档必须写清实际接受的规则：上一级 0.5–1 格（半砖提示 [1,1,0]），下一级支撑顶面低 0.5–1 格。
-  assert.match(moveStep.description, /0\.5[–-]1/);
+  // 文档必须写清实际接受的规则：上一级 0.01–1 格（半砖/雪层都用 [1,1,0]），下一级支撑顶面低 0.01–1 格。
+  assert.match(moveStep.description, /0\.01[–-]1/);
   assert.match(moveStep.description, /\[1,1,0\]/);
   assert.match(moveStep.argsDoc, /\[1,1,0\]/);
-  assert.match(moveStep.argsDoc, /0\.5[–-]1/);
+  assert.match(moveStep.argsDoc, /0\.01[–-]1/);
 
   const up = flat();
   up.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 64, z: 0 } });
@@ -567,16 +567,71 @@ test('move_step 文档与实际半格/落差规则一致', async (t) => {
   low.blockProperties.set('1,64,0', { layers: 2 });
   const lowCtx = makeCtx(low);
   t.after(() => lowCtx.memory.close());
-  const notEnough = await moveStep.run(lowCtx, { at: [1, 1, 0], facing: 'E' });
-  assert.equal(notEnough.status, 'failed', '上一级不足 0.5 格不算迈上台阶');
+  const partialUp = await moveStep.run(lowCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(partialUp.status, 'succeeded', '上一级 0.125 格是真实可走的台阶');
+  assert.equal(low.pos.y, 64.125);
 
   const high = flat();
   high.blocks.push({ name: 'snow', pos: { x: 1, y: 63, z: 0 } });
   high.blockProperties.set('1,63,0', { layers: 6 });
   const highCtx = makeCtx(high);
   t.after(() => highCtx.memory.close());
-  const tooHigh = await moveStep.run(highCtx, { at: [1, -1, 0], facing: 'E' });
-  assert.equal(tooHigh.status, 'failed', '下一级落差不足 0.5 格不算下一级');
+  const partialDown = await moveStep.run(highCtx, { at: [1, -1, 0], facing: 'E' });
+  assert.equal(partialDown.status, 'succeeded', '下一级 0.375 格是真实可走的落差');
+  assert.equal(high.pos.y, 63.625);
+});
+
+test('move_step 能从雪层跨上高一整块（0.125 格），预检修正可执行', async (t) => {
+  const w = new FlooringWorld();
+  w.groundY = -100;
+  w.pos = { x: 0.5, y: 63.875, z: 0.5 };
+  w.blocks.push({ name: 'snow', pos: { x: 0, y: 63, z: 0 } });
+  w.blockProperties.set('0,63,0', { layers: 8 });
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 63, z: 0 } }); // 顶面 64：高 0.125 格
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+
+  // 同层请求如实拒绝，但给出的 [1,1,0] 必须真的能执行。
+  const sameLevel = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(sameLevel.status, 'failed');
+  assert.deepEqual((sameLevel.data as { remediation?: { at?: [number, number, number] } } | undefined)?.remediation?.at, [1, 1, 0]);
+
+  const rise = await moveStep.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(rise.status, 'succeeded', rise.summary);
+  assert.equal(w.pos.y, 64, '实际脚高为整块顶面');
+});
+
+test('move_step 只对超过 0.6 格的上升做跳跃净空检查', async (t) => {
+  // 0.5 格由原版自动迈步完成，头顶再高一格有方块也不影响。
+  const stepUp = flat();
+  stepUp.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 64, z: 0 } });
+  stepUp.blockProperties.set('1,64,0', { type: 'bottom' });
+  stepUp.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } });
+  const stepCtx = makeCtx(stepUp);
+  t.after(() => stepCtx.memory.close());
+  const stepped = await moveStep.run(stepCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(stepped.status, 'succeeded', stepped.summary);
+
+  // 1 格上升需要起跳；当前列头顶一格被占时如实拒绝。
+  const jump = flat();
+  jump.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  jump.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } });
+  const jumpCtx = makeCtx(jump);
+  t.after(() => jumpCtx.memory.close());
+  const blocked = await moveStep.run(jumpCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(blocked.status, 'failed');
+  assert.equal((blocked.data?.problem as { kind?: string } | undefined)?.kind, 'HEAD_BLOCKED');
+
+  // 0.5625 格（床顶）仍不超过 stepHeight 0.6：不需要起跳，也不做当前列跳跃净空检查。
+  const bedStep = flat();
+  bedStep.blocks.push({ name: 'red_bed', pos: { x: 1, y: 64, z: 0 } });
+  bedStep.blockProperties.set('1,64,0', { part: 'foot', facing: 'north', occupied: false });
+  bedStep.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } });
+  const bedCtx = makeCtx(bedStep);
+  t.after(() => bedCtx.memory.close());
+  const autoStep = await moveStep.run(bedCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(autoStep.status, 'succeeded', autoStep.summary);
+  assert.equal(bedStep.pos.y, 64.5625);
 });
 
 test('move_step 同列向上只能沿梯子', () => {

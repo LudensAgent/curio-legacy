@@ -44,6 +44,30 @@ test('半砖的分数脚高只作为上一级可执行落点，不伪装成同�
   assert.ok(!map.spots.executable.some((item) => item.at[1] === 0 && item.at[0] === 1 && item.at[2] === 0), '不能同时列成同层');
 });
 
+test('站在雪层上跨上高一整块（0.125 格）也列为可执行单步', () => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 63.875, z: 0.5 };
+  w.blocks.push({ name: 'snow', pos: { x: 0, y: 63, z: 0 } });
+  w.blockProperties.set('0,63,0', { layers: 8 });
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 63, z: -1 } });
+  const map = localMap(w, w.pos, 'N', observeAllBlocks(w));
+  const up = map.spots.executable.find((item) => item.at[0] === 1 && item.at[2] === 0);
+  assert.deepEqual(up?.at, [1, 1, 0], `0.125 格台阶应列为 [1,1,0]：${JSON.stringify(map.spots.executable)}`);
+  assert.equal(up?.foot, 64);
+});
+
+test('从半砖脚高下到相邻整块顶面（0.5 格）也列为可执行单步', () => {
+  const w = new FakeAdapter();
+  w.pos = { x: 0.5, y: 64.5, z: 0.5 };
+  w.blocks.push({ name: 'stone_slab', pos: { x: 0, y: 64, z: 0 } });
+  w.blockProperties.set('0,64,0', { type: 'bottom' });
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 63, z: -1 } }); // 顶面 64：低 0.5 格
+  const map = localMap(w, w.pos, 'N', observeAllBlocks(w));
+  const down = map.spots.executable.find((item) => item.at[0] === 1 && item.at[2] === 0);
+  assert.deepEqual(down?.at, [1, -1, 0], `半砖到整块顶面应列为 [1,-1,0]：${JSON.stringify(map.spots.executable)}`);
+  assert.equal(down?.foot, 64);
+});
+
 test('after 把身体压着的门格作为触觉事实传入局部图', () => {
   const w = flat();
   w.blocks.push({ name: 'nether_portal', pos: { x: 0, y: 64, z: 0 } }, { name: 'nether_portal', pos: { x: 0, y: 65, z: 0 } });
