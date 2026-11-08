@@ -8,7 +8,7 @@ import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
-import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep } from './types.ts';
+import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, NavigationProgress } from './types.ts';
 
 /**
  * 截断长反馈时同时保留头尾：开头交代是哪一步/什么失败，结尾常带可执行事实
@@ -205,8 +205,256 @@ function digest(text: string): string {
   return (h >>> 0).toString(36);
 }
 
-export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory' | 'pos'>): Activity {
+/** 会把身体带向一个目的地的动作；只有它们参与导航目标。相对 move_step 不在此列。 */
+const NAVIGATION_SKILLS = new Set(['plan_route', 'walk_path', 'navigate_to']);
+
+type NavPoint = { x: number; y: number; z: number };
+
+const navPoint = (value: unknown): NavPoint | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const p = value as Record<string, unknown>;
+  return ['x', 'y', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))
+    ? { x: p.x as number, y: p.y as number, z: p.z as number } : null;
+};
+
+const sameNavPoint = (a: NavPoint, b: NavPoint) =>
+  Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.z - b.z) < 0.01;
+
+/** 只接受 Agent 明确给出的绝对目的地；相对 at 不在移动后重新解析。 */
+function addressedTarget(step: Step): NavPoint | null {
+  const args = (step.args ?? {}) as Record<string, unknown>;
+  const to = navPoint(args.to);
+  if (to) return to;
+  const target = navPoint(args.target);
+  if (target) return target;
+  const xyz = args.xyz;
+  return Array.isArray(xyz) && xyz.length === 3
+    && xyz.every((n) => typeof n === 'number' && Number.isFinite(n))
+    ? { x: xyz[0] as number, y: xyz[1] as number, z: xyz[2] as number } : null;
+}
+
+const navPoints = (value: unknown): NavPoint[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((item) => {
+    const point = navPoint(item) ?? navPoint((item as { to?: unknown } | null)?.to);
+    return point ? [point] : [];
+  });
+};
+
+/** 回执里已确认的段数：walk_path 报 confirmedSegments，navigate_to 报 executed。 */
+function confirmedSegmentsOf(data: Record<string, unknown>): number {
+  if (typeof data.confirmedSegments === 'number' && Number.isFinite(data.confirmedSegments)) return data.confirmedSegments;
+  return typeof data.executed === 'number' && Number.isFinite(data.executed) ? data.executed : 0;
+}
+
+function adoptDestination(nav: NavigationProgress, target: NavPoint) {
+  nav.destination = { ...target };
+  nav.remaining = [{ ...target }];
+}
+
+/** 路线 handle 已经不能复用的报告（注册表问题或库的失效原因）。 */
+const ROUTE_HANDLE_PROBLEMS = new Set([
+  'route_not_found', 'route_consumed', 'route_expired', 'scope_mismatch', 'route_not_executable',
+  'invalid_request', 'route_invalidated', 'route_start_changed', 'scope_changed',
+]);
+
+function invalidationReasonOf(data: Record<string, unknown>): string | undefined {
+  const invalidation = data.invalidation as { reason?: unknown } | undefined;
+  if (typeof invalidation?.reason === 'string' && invalidation.reason) return invalidation.reason;
+  const problem = data.problem as { kind?: unknown } | undefined;
+  if (typeof problem?.kind === 'string' && ROUTE_HANDLE_PROBLEMS.has(problem.kind)) return problem.kind;
+  const unsupported = data.unsupported as { reason?: unknown } | undefined;
+  if (typeof unsupported?.reason === 'string' && ROUTE_HANDLE_PROBLEMS.has(unsupported.reason)) return unsupported.reason;
+  return undefined;
+}
+
+function newNavigation(a: Activity, state: Pick<AgentState, 'pos' | 'worldId' | 'dim'>): NavigationProgress {
+  const destination = a.steps
+    .filter((step) => NAVIGATION_SKILLS.has(step.skill))
+    .map(addressedTarget)
+    .find((point): point is NavPoint => point !== null);
+  const now = Date.now();
+  const nav: NavigationProgress = {
+    delegationId: a.id,
+    ...(a.doneWhen ? { arrivalCondition: a.doneWhen } : {}),
+    worldId: state.worldId, dim: state.dim,
+    measured: { pos: { ...state.pos }, at: now },
+    completedSegments: 0,
+    remaining: [],
+    phase: 'planning', updatedAt: now,
+  };
+  if (destination) adoptDestination(nav, destination);
+  return nav;
+}
+
+/**
+ * 派发下一段前复核实测位置，并保留父委托的期限快照。
+ * 期限来自现有 beginStep/stepExpiry 账本；这里不新建预算，也不延长它。
+ */
+export function noteNavigationDispatch(
+  a: Activity, step: Step,
+  state: Pick<AgentState, 'pos' | 'worldId' | 'dim'>,
+  opts: { deadlineMs?: number } = {},
+) {
+  const nav = a.navigation;
+  if (!NAVIGATION_SKILLS.has(step.skill) || !nav) return undefined;
+  const now = Date.now();
+  const destination = addressedTarget(step);
+  if (!nav.destination && destination) adoptDestination(nav, destination);
+  nav.worldId = state.worldId;
+  nav.dim = state.dim;
+  nav.measured = { pos: { ...state.pos }, at: now };
+  nav.segmentStart = { ...state.pos };
+  if (opts.deadlineMs !== undefined) nav.parentDeadlineMs = opts.deadlineMs;
+  const routeId = (step.args as { routeId?: unknown } | undefined)?.routeId;
+  if (typeof routeId === 'string' && routeId && nav.lastRoute?.id !== routeId) {
+    nav.lastRoute = { id: routeId, source: 'pending', valid: true, confirmed: 0 };
+  }
+  nav.phase = step.skill === 'plan_route' ? 'planning' : 'executing';
+  nav.updatedAt = now;
+  return nav;
+}
+
+/**
+ * 把一步的实测回执并入当前导航目标：更新实测位置、已完成段、剩余目标、routeId/来源和失效/失败。
+ * 只保留当前委托的一份状态；route 几何、traversal 和体素仍留在共享空间库。
+ */
+function noteNavigationResult(
+  a: Activity, step: Step,
+  result: Pick<SkillResult, 'status' | 'failureCode' | 'summary' | 'data'>,
+  state: AgentState,
+) {
+  const nav = a.navigation;
+  if (!nav) return undefined;
+  const now = Date.now();
+  nav.measured = { pos: { ...state.pos }, at: now };
+  nav.updatedAt = now;
+  if (!NAVIGATION_SKILLS.has(step.skill)) return nav;
+  const data = (result.data ?? {}) as Record<string, unknown>;
+  const segment = data.segment && typeof data.segment === 'object' ? data.segment as Record<string, unknown> : undefined;
+  const requested = navPoint(data.requestedTarget) ?? navPoint(data.to) ?? addressedTarget(step);
+  if (!nav.destination && requested) adoptDestination(nav, requested);
+  const confirmed = confirmedSegmentsOf(data);
+  const routeId = typeof data.routeId === 'string' && data.routeId ? data.routeId : undefined;
+  const source = [data.source, data.routeKind, data.backend].find((value): value is string => typeof value === 'string' && !!value);
+  const priorRoute = routeId && nav.lastRoute?.id === routeId ? nav.lastRoute : undefined;
+  if (confirmed > (priorRoute?.confirmed ?? 0)) nav.completedSegments += confirmed - (priorRoute?.confirmed ?? 0);
+  const invalidation = invalidationReasonOf(data);
+  if (routeId) nav.lastRoute = {
+    id: routeId,
+    source: source ?? priorRoute?.source ?? 'route',
+    valid: !invalidation,
+    confirmed: Math.max(priorRoute?.confirmed ?? 0, confirmed),
+  };
+  const remaining = navPoints(data.remainingPoints) ?? navPoints(data.remaining);
+  const position = navPoint(data.position) ?? navPoint(data.lastPosition);
+  const outcome = typeof data.outcome === 'string' ? data.outcome : typeof data.navOutcome === 'string' ? data.navOutcome : undefined;
+  const arrived = outcome === 'ARRIVED' || data.arrived === true || segment?.arrivedAtTarget === true;
+  const failure = result.status === 'failed'
+    ? { at: now, ...(result.failureCode ? { code: String(result.failureCode) } : {}), summary: clipFeedback(result.summary, 220) }
+    : undefined;
+  if (invalidation) {
+    nav.phase = 'replanning';
+    nav.lastInvalidation = { at: now, reason: clipFeedback(invalidation, 200) };
+    if (routeId && nav.lastRoute) nav.lastRoute.valid = false;
+  } else if (result.status === 'cancelled') {
+    nav.phase = 'cancelled';
+  } else if (arrived) {
+    // 段终点等于原目的地才算到达；中间 waypoint 只是完成了一段。
+    const final = !nav.destination || !requested || sameNavPoint(nav.destination, requested);
+    if (final) {
+      nav.phase = 'arrived';
+      nav.remaining = [];
+    } else {
+      nav.phase = 'segment_completed';
+      nav.remaining = remaining?.length ? remaining : [{ ...nav.destination! }];
+    }
+    nav.lastConfirmed = { pos: { ...(position ?? state.pos) }, at: now };
+  } else if (confirmed > 0) {
+    // 有实测确认的段就是进展；保留剩余目标，不把这一段当整趟失败。
+    nav.phase = 'segment_completed';
+    if (remaining) nav.remaining = remaining;
+    nav.lastConfirmed = { pos: { ...(position ?? state.pos) }, at: now };
+    if (failure) nav.lastFailure = failure;
+  } else if (result.status === 'failed') {
+    nav.phase = 'failed';
+    if (failure) nav.lastFailure = failure;
+  } else if (remaining) {
+    nav.remaining = remaining;
+  } else if (step.skill === 'plan_route') {
+    nav.phase = 'planning';
+  }
+  const strategy = `${step.skill}${source ? `/${source}` : ''}`;
+  nav.strategy = strategy.slice(0, 120);
+  nav.updatedAt = now;
+  return nav;
+}
+
+/**
+ * Agent 明确改写同一段委托的步骤（mind 的 adjust 分支）时，只有新步骤声明了新的绝对目的地
+ * 才替换原目的地/到达条件；路线回执里的近处 waypoint、剩余段不调用这里。
+ */
+export function retargetNavigation(a: Activity, steps: ActivityStep[]) {
+  const nav = a.navigation;
+  if (!nav) return undefined;
+  const destination = steps
+    .filter((step) => NAVIGATION_SKILLS.has(step.skill))
+    .map(addressedTarget)
+    .find((point): point is NavPoint => point !== null);
+  const now = Date.now();
+  if (destination && (!nav.destination || !sameNavPoint(nav.destination, destination))) {
+    adoptDestination(nav, destination);
+    nav.phase = 'planning';
+  }
+  if (a.doneWhen) nav.arrivalCondition = a.doneWhen; else delete nav.arrivalCondition;
+  nav.updatedAt = now;
+  return nav;
+}
+
+/** 换维/死亡/断线/会话失效：保留原目的地与已完成进度，作废旧 route handle，下一段从实测位置重规划。 */
+export function invalidateNavigation(
+  a: Activity, reason: string,
+  state?: Pick<AgentState, 'pos' | 'worldId' | 'dim'>,
+) {
+  const nav = a.navigation;
+  if (!nav) return undefined;
+  const now = Date.now();
+  if (state) {
+    nav.worldId = state.worldId;
+    nav.dim = state.dim;
+    nav.measured = { pos: { ...state.pos }, at: now };
+  }
+  nav.lastInvalidation = { at: now, reason: clipFeedback(reason, 200) };
+  if (nav.lastRoute) nav.lastRoute = { ...nav.lastRoute, valid: false };
+  nav.phase = 'replanning';
+  nav.updatedAt = now;
+  return nav;
+}
+
+function describeNavigation(nav: NavigationProgress) {
   return {
+    delegation_id: nav.delegationId,
+    state: nav.phase,
+    ...(nav.destination ? { original_destination: nav.destination } : {}),
+    ...(nav.arrivalCondition ? { arrival_condition: nav.arrivalCondition } : {}),
+    scope: `${nav.worldId}/${nav.dim}`,
+    measured_position: nav.measured.pos,
+    ...(nav.segmentStart ? { segment_start: nav.segmentStart } : {}),
+    completed_segments: nav.completedSegments,
+    remaining_count: nav.remaining.length,
+    // 只给当前计划的剩余点（上限 8），不把历史路点塞进提示词。
+    remaining_targets: nav.remaining.slice(0, 8),
+    ...(nav.parentDeadlineMs !== undefined ? { parent_deadline_ms: nav.parentDeadlineMs } : {}),
+    ...(nav.lastRoute ? { last_route: { id: nav.lastRoute.id, source: nav.lastRoute.source, valid: nav.lastRoute.valid } } : {}),
+    ...(nav.lastConfirmed ? { last_confirmed_position: nav.lastConfirmed.pos } : {}),
+    ...(nav.lastInvalidation ? { last_invalidation: nav.lastInvalidation.reason } : {}),
+    ...(nav.lastFailure ? { last_failure: nav.lastFailure.summary } : {}),
+    ...(nav.strategy ? { strategy: nav.strategy } : {}),
+  };
+}
+
+export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory' | 'pos' | 'worldId' | 'dim'>): Activity {
+  const a: Activity = {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
@@ -216,6 +464,8 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
   };
+  if (a.steps.some((step) => NAVIGATION_SKILLS.has(step.skill))) a.navigation = newNavigation(a, state);
+  return a;
 }
 
 export function doneWhenMet(a: Activity, state: AgentState, percept?: Percept): boolean {
@@ -348,6 +598,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (navStage) recorded.stage = navStage;
   a.results.push(recorded);
   if (a.results.length > 16) a.results = a.results.slice(-16);
+  // 导航目标只并入当前委托的实测进度/来源/失效；几何与 traversal 不复制到这里。
+  noteNavigationResult(a, step, result, state);
   // 放置/补支撑也会为了让出参照面而轻推身体。0.25 格就足以跨过格边界，让后续相对坐标换到另一列；
   // 只要脚格变了，就记下站位缺口，下一步若是相对动作先交回心智，不按旧站位继续。
   if ((step.skill === 'place_cell' || step.skill === 'place_support') && a.stepStart?.pos
@@ -418,6 +670,19 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue' };
   }
   if (result.status === 'cancelled') return { kind: 'continue' };
+  // 已确认的导航段是进展，不是这段活的失败：walk_path 的 routeId 单次消费，原样重放只会
+  // 得到 route_consumed；navigate_to 的同类重复调用也不构成新的实测依据。索引照常前进，
+  // 由后续步骤/新一轮路线从实测位置继续，Activity 不按 failed 收尾。
+  if (result.status === 'failed' && NAVIGATION_SKILLS.has(step.skill)) {
+    const confirmed = confirmedSegmentsOf((result.data ?? {}) as Record<string, unknown>);
+    if (confirmed > 0) {
+      a.consecutiveFailures = 0;
+      const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；已消费的路线不再原样重放，保留这段实测进展，下一段从实测位置重新规划`;
+      const reached = conditionReached();
+      if (reached) return reached;
+      return remainingSteps(a) === 0 ? { kind: 'done', met: false, why } : { kind: 'continue' };
+    }
+  }
   if (softMiss(a, step, result)) {
     a.consecutiveFailures = 0;
     const own = ownStep(a, step);
@@ -767,6 +1032,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),
     ...(a.attemptOnly ? { attempt_only: a.attemptOnly.reason, original_done_when: a.attemptOnly.originalDoneWhen } : {}),
     ...(a.planCoverageGap ? { plan_coverage_gap: a.planCoverageGap } : {}),
+    ...(a.navigation ? { navigation: describeNavigation(a.navigation) } : {}),
     ...(explore.searchIntent ? { exploration: {
       start: explore.start, end: explore.end, max_horizontal: explore.maxHorizontal,
       visited_cells: explore.visitedCells, local_only_so_far: explore.localOnly,

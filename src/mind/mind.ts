@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -414,6 +414,10 @@ export class Mind {
       this.requestThink(was ? `换了个地方（穿门前本来在做「${was}」），重新看看周围接着办` : '换了个地方，重新看看周围', 'deliberate');
     }
     if (this.lastDim !== state.dim) {
+      // 维度变化：当前导航仍是旧维度的目标与 route handle，先作废 handle 并按实测位置重规划。
+      if (this.activity?.navigation && this.activity.navigation.dim !== state.dim) {
+        invalidateNavigation(this.activity, `换了维度（${this.activity.navigation.dim} → ${state.dim}）`, state);
+      }
       // 带证据放行的换维真正发生后，补上实际目标维度与当前会话；仍只记来源/目标，不复制空间历史。
       if (this.lastSourceSwitch && this.lastSourceSwitch.from === this.lastDim
         && Date.now() - this.lastSourceSwitch.at < Mind.SEARCH_STATE_TTL_MS) {
@@ -768,6 +772,8 @@ export class Mind {
       this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
       return;
     }
+    // 下一段开始前复核实测位置；父期限只做快照展示，实际门禁仍是 beginStep/stepExpiry 账本。
+    noteNavigationDispatch(this.activity, template, state, budget ? { deadlineMs: budget.deadlineMs } : {});
     // 自动续跑的绝对期限只走调度预算 meta.deadlineMs，不改写技能参数：
     // 参数注入会被 use_skill 等严格校验器当成未知字段拒绝，也不该混进动作记录。
     const dispatch = step;
@@ -930,6 +936,9 @@ export class Mind {
       } else delete this.order.activityId;
     }
     const state = this.d.adapter.state();
+    // 换维/死亡/断线/会话中断结束这段活时，保留原目的地与已完成段，只作废旧 route handle；
+    // 下一段必须按实测位置重新规划，不静默复用。
+    if (a.navigation && outcome === 'interrupted') invalidateNavigation(a, summary, state);
     if (a.dropped?.length) summary = `${summary}；计划里这些步骤未通过校验，没有执行：${a.dropped.join('、')}`;
     const newChunks = typeof a.startChunks === 'number' ? this.d.memory.visitedChunkCount - a.startChunks : null;
     const record = recordOf(a, outcome, summary, state, { newChunks });
@@ -1898,6 +1907,8 @@ export class Mind {
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
+      // 显式的 adjust 才能改写导航目的地；路线回执里的 waypoint 永远不替换原目的地。
+      retargetNavigation(a, a.steps);
       if (draft.expect) a.expect = draft.expect;
       if (draft.ifStuck) a.ifStuck = draft.ifStuck;
       this.activityThoughtAt = Date.now();
