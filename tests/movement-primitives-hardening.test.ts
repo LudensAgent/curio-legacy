@@ -74,7 +74,7 @@ test('mine_cell 适配器抛错但目标格已空：按已确认效果结算并�
   assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air');
 });
 
-test('mine_cell 报告未观察的邻格，不把未知当成安全', async (t) => {
+test('mine_cell 未观察的邻格默认阻止挖掘，显式授权后才挖', async (t) => {
   const w = flat();
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
   const targetOnly = (positions: Vec3Like[]) => positions
@@ -85,10 +85,17 @@ test('mine_cell 报告未观察的邻格，不把未知当成安全', async (t) 
     }));
   const ctx = makeCtx(w, { senses: { observeBlocks: targetOnly } });
   t.after(() => ctx.memory.close());
-  const r = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(r.status, 'succeeded', r.summary);
-  const unknown = r.data?.unknownAdjacent as [number, number, number][];
+  const denied = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(denied.status, 'failed');
+  assert.equal(problemKind(denied), 'UNKNOWN_ADJACENT_UNAUTHORIZED');
+  const unknown = denied.data?.unknownAdjacent as [number, number, number][];
   assert.ok(Array.isArray(unknown) && unknown.length > 0, '未观察的邻格要单独列出');
+  assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'stone', '未授权时不能挖');
+
+  const allowed = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E', allowUnknownAdjacent: true });
+  assert.equal(allowed.status, 'succeeded', allowed.summary);
+  assert.deepEqual(allowed.data?.unknownAdjacent, unknown);
+  assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air');
 });
 
 test('mine_cell 绝对坐标文档也列出 tool', () => {
@@ -166,7 +173,7 @@ test('place_cell 返回净消耗与库存核对字段', async (t) => {
   const r = await placeCell.run(ctx, { at: [1, 0, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.consumed, 1);
-  assert.deepEqual(r.data?.inventory, { item: 'cobblestone', before: 2, after: 1, consumed: 1, verified: true });
+  assert.deepEqual(r.data?.inventory, { item: 'cobblestone', before: 2, after: 1, consumed: 1, inventoryDelta: 1, inventorySync: 'confirmed', verified: true });
   assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'block_placed' });
 });
 
@@ -260,6 +267,56 @@ test('place_support 换站位成功后把身体移动作为一等结果返回', 
   assert.notDeepEqual(movement.start, movement.end);
 });
 
+test('place_support 模糊失败后等待同步，再按实际支撑结算', async (t) => {
+  class LatePlace extends FakeAdapter {
+    places = 0;
+    override async placeBlockAt(pos: Vec3Like, names: string[], signal: AbortSignal) {
+      this.places += 1;
+      // 回执先失败，世界状态稍后才出现放置结果：不能立即判死并去换站位。
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await super.placeBlockAt(pos, names, signal);
+      return { ok: false, reason: 'TIMEOUT' };
+    }
+  }
+  const w = new LatePlace();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0');
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.places, 1, '世界已形成支撑后不得继续换站位');
+  assert.equal(w.actions.some((a) => a.startsWith('moveTo:')), false);
+});
+
+test('place_support 换站位移动异常且身体已移动：停止，不按旧起点继续', async (t) => {
+  class PartialMove extends FakeAdapter {
+    moves = 0;
+    override async placeBlockAt(_pos: Vec3Like, _names: string[], _signal: AbortSignal) {
+      return { ok: false, reason: 'NO_REFERENCE' };
+    }
+    override async moveTo(_target: MoveTarget, _opts: MoveOpts) {
+      this.moves += 1;
+      this.pos = { ...this.pos, x: this.pos.x + 0.4 };
+      throw new Error('TIMEOUT: 换站位超时');
+    }
+  }
+  const w = new PartialMove();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0');
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal(problemKind(r), 'STANCE_MOVE_PARTIAL');
+  assert.equal(w.moves, 1, '身体已偏离旧起点后不得继续尝试候选站位');
+  assert.equal((r.data?.movement as { changed?: boolean } | undefined)?.changed, true);
+  assert.deepEqual(r.data?.stanceMove, { from: { x: 0.5, y: 64, z: 0.5 }, to: { x: 0.9, y: 64, z: 0.5 } });
+});
+
 test('move_step validate 后起点变化：run 拒绝旧计划', async (t) => {
   const w = flat();
   const validated = moveStep.validate({ to: [1, 0, 0], facing: 'E' }, w);
@@ -272,6 +329,45 @@ test('move_step validate 后起点变化：run 拒绝旧计划', async (t) => {
   assert.equal(problemKind(r), 'START_CHANGED');
   assert.equal(r.data?.movementNotAttempted, true);
   assert.deepEqual(w.pos, { x: 1.5, y: 64, z: 0.5 }, '不执行旧计划');
+});
+
+test('move_step 起点在同一脚格内连续漂移也拒绝旧计划', async (t) => {
+  const w = flat();
+  const validated = moveStep.validate({ to: [1, 0, 0], facing: 'E' }, w);
+  assert.ok(validated.ok, !validated.ok ? validated.error : '');
+  w.pos = { x: 0.85, y: 64, z: 0.5 }; // 脚格仍是 (0,64,0)
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, validated.args);
+  assert.equal(r.status, 'failed');
+  assert.equal(problemKind(r), 'START_CHANGED');
+  const drift = r.data?.positionDrift as number;
+  assert.ok(drift > 0.3, `漂移应被算出：${drift}`);
+  assert.deepEqual(w.pos, { x: 0.85, y: 64, z: 0.5 }, '不执行旧计划');
+  assert.equal(w.actions.some((a) => a.startsWith('moveTo:')), false);
+});
+
+test('move_step 等待落地超时后拒绝执行，不把超时当稳定', async (t) => {
+  const w = flat();
+  w.onGround = false;
+  const ctx = makeCtx(w, { deadlineMs: 100 });
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(problemKind(r), 'BODY_NOT_STABLE');
+  assert.equal(r.data?.movementNotAttempted, true);
+  assert.equal(w.actions.some((a) => a.startsWith('moveTo:')), false);
+});
+
+test('方块元语的 xyz 必须是整数格坐标', () => {
+  const w = flat();
+  assert.equal(mineCell.validate({ xyz: { x: 1.5, y: 64, z: 0 } }, w).ok, false);
+  assert.equal(mineCell.validate({ xyz: { x: 1, y: 64.5, z: 0 } }, w).ok, false);
+  assert.equal(placeCell.validate({ xyz: { x: 1.5, y: 64, z: 0 }, item: 'cobblestone' }, w).ok, false);
+  assert.equal(placeSupport.validate({ xyz: { x: 1, y: 63.5, z: 0 }, item: 'cobblestone' }, w).ok, false);
+  assert.ok(mineCell.validate({ xyz: { x: 1, y: 64, z: 0 } }, w).ok);
+  assert.ok(placeCell.validate({ xyz: { x: 1, y: 64, z: 0 }, item: 'cobblestone' }, w).ok);
+  assert.ok(placeSupport.validate({ xyz: { x: 1, y: 63, z: 0 }, item: 'cobblestone' }, w).ok);
 });
 
 test('move_step 绝对 xyz 的 y 是脚高：回执目标格是脚所在方块格', async (t) => {

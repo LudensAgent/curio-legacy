@@ -31,7 +31,7 @@ test('拆了床：mine_cell 只报已挖掉、掉落物未进背包；记忆里�
   ctx.memory.addLandmark('discovery', '我的床', 'overworld', bed, 2);
   w.setBlock({ x: 7, y: 63, z: 3 }, 'water');
   w.entities = [{ id: 9, name: 'item:white_bed', kind: 'item', pos: { x: 7.4, y: 63.2, z: 3.6 }, dist: 7, count: 1 } as any];
-  const r = await mineCell.run(ctx, { at: [1, 0, -2], facing: 'E', xyz: { x: 2, y: 64, z: 0 }, own: true } as any);
+  const r = await mineCell.run(ctx, { at: [1, 0, -2], facing: 'E', xyz: { x: 2, y: 64, z: 0 }, own: true, allowUnknownAdjacent: true } as any);
   assert.equal(r.status, 'succeeded', r.summary);
   assert.match(r.summary, /挖掉了 \[1,0,-2\] 的 white_bed/);
   assert.equal(r.data?.inBag, false, '掉落物没进背包时如实说没拿到');
@@ -95,12 +95,12 @@ test('缺料时不拆自家房子当原料：dig_at / dig 拒绝并说清楚为�
   assert.ok(ownBuildingAt(ctx.memory, s, pos, wall.name));
   assert.equal(ownBuildingAt(ctx.memory, s, pos, 'sand'), null, '换成了别的方块就不算');
   w.pos = { x: pos.x + 0.5, y: pos.y - 1, z: pos.z + 1.5 }; // 站在墙南边一格，面朝北
-  const v = mineCell.validate({ at: [1, 1, 0], facing: 'N' }, w) as any;
+  const v = mineCell.validate({ at: [1, 1, 0], facing: 'N', allowUnknownAdjacent: true }, w) as any;
   const r = await mineCell.run(ctx, v.args);
   assert.equal(r.status, 'failed');
   assert.match(r.summary, /自己盖的.*拆东墙补西墙/);
   assert.equal(w.blockAt(pos), wall.name, '没拆');
-  const forced = await mineCell.run(ctx, (mineCell.validate({ at: [1, 1, 0], facing: 'N', own: true }, w) as any).args);
+  const forced = await mineCell.run(ctx, (mineCell.validate({ at: [1, 1, 0], facing: 'N', own: true, allowUnknownAdjacent: true }, w) as any).args);
   assert.equal(forced.status, 'succeeded', forced.summary);
 });
 
@@ -143,12 +143,12 @@ test('自己站的格子里有火把：mine_cell [0,0,0] 照样拿掉（不再�
   t.after(() => ctx.memory.close());
   w.setBlock({ x: 0, y: 63, z: 0 }, 'stone');
   w.setBlock({ x: 0, y: 64, z: 0 }, 'torch');
-  const r = await mineCell.run(ctx, (mineCell.validate({ at: [0, 0, 0], facing: 'N' }, w) as any).args);
+  const r = await mineCell.run(ctx, (mineCell.validate({ at: [0, 0, 0], facing: 'N', allowUnknownAdjacent: true }, w) as any).args);
   assert.equal(r.status, 'succeeded', r.summary);
   assert.match(r.summary, /挖掉了 \[0,0,0\] 的 torch/);
   assert.equal(w.blockAt({ x: 0, y: 64, z: 0 }), 'air');
   w.setBlock({ x: 0, y: 64, z: 0 }, 'air');
-  const empty = await mineCell.run(ctx, (mineCell.validate({ at: [0, 0, 0], facing: 'N' }, w) as any).args);
+  const empty = await mineCell.run(ctx, (mineCell.validate({ at: [0, 0, 0], facing: 'N', allowUnknownAdjacent: true }, w) as any).args);
   assert.match(empty.summary, /本来就空着/);
   // 原地垫高的提示
   w.inv.set('dirt', 4);

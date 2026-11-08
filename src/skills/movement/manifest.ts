@@ -24,10 +24,10 @@ const DECLARED: Record<string, Declared> = {
       relative: { front: 1, up: [-1, 1], right: 1 },
       absolute: 'xyz x/z 是整数方块列；y 是精确脚高，可为分数',
     },
-    preconditions: ['目标格与当前脚格水平相邻或同列梯子', '目标脚面在当前脚高 ±1 内', '身体与起跳空间无阻挡/未知', '不在水/岩浆/乘骑状态', '起点脚格、维度和会话未变化'],
+    preconditions: ['目标格与当前脚格水平相邻或同列梯子', '目标脚面在当前脚高 ±1 内', '身体与起跳空间无阻挡/未知', '不在水/岩浆/乘骑状态', '身体已经稳定触地', '起点连续位置、脚格、维度和会话未变化'],
     effects: ['movement'],
     problems: [
-      'START_CHANGED', 'NOT_ADJACENT', 'UNSUPPORTED_ENVIRONMENT',
+      'START_CHANGED', 'NOT_ADJACENT', 'UNSUPPORTED_ENVIRONMENT', 'BODY_NOT_STABLE',
       'NO_SUPPORT', 'FOOT_HEIGHT_MISMATCH', 'UNSUPPORTED_STEP_HEIGHT',
       'HEAD_BLOCKED', 'TARGET_BLOCKED', 'UNKNOWN_GEOMETRY',
       'MOVE_REJECTED', 'MOVE_TIMEOUT', 'POSITION_NOT_CONFIRMED',
@@ -35,11 +35,11 @@ const DECLARED: Record<string, Declared> = {
   },
   mine_cell: {
     geometry: { relative: { front: 2, up: [-1, 3], right: 2 } },
-    preconditions: ['目标格已加载且本次可见', '目标不是液体', '液体邻格已授权', '挖脚下支撑的落差/液体风险已授权', '目标不是自建结构或受保护箱子', '指定工具可用'],
+    preconditions: ['目标格已加载且本次可见', '目标不是液体', '液体邻格已授权', '未知邻格已显式授权', '挖脚下支撑的落差/液体风险已授权', '目标不是自建结构或受保护箱子', '指定工具可用'],
     effects: ['block_removed'],
     problems: [
       'TARGET_STATE_UNKNOWN', 'TARGET_NOT_OBSERVED', 'TARGET_LIQUID',
-      'LIQUID_RISK_UNAUTHORIZED', 'FALL_RISK_UNAUTHORIZED',
+      'LIQUID_RISK_UNAUTHORIZED', 'FALL_RISK_UNAUTHORIZED', 'UNKNOWN_ADJACENT_UNAUTHORIZED',
       'OWN_BUILDING', 'STORED_CHEST',
       'EFFECT_UNKNOWN', 'EFFECT_NOT_CONFIRMED',
     ],
@@ -61,7 +61,7 @@ const DECLARED: Record<string, Declared> = {
     problems: [
       'TARGET_STATE_UNKNOWN', 'TARGET_OCCUPIED', 'MISSING_MATERIAL',
       'NO_REFERENCE', 'REFERENCE_UNREACHABLE', 'EDGE_NO_REFERENCE', 'EDGE_NOT_REACHED', 'EDGE_HEIGHT', 'EDGE_ERROR',
-      'PLACEMENT_FAILED', 'EFFECT_UNKNOWN', 'EFFECT_NOT_CONFIRMED', 'EFFECT_MISMATCH',
+      'PLACEMENT_FAILED', 'STANCE_MOVE_PARTIAL', 'EFFECT_UNKNOWN', 'EFFECT_NOT_CONFIRMED', 'EFFECT_MISMATCH',
     ],
   },
   pillar_one: {
