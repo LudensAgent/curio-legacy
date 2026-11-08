@@ -37,8 +37,9 @@ if (!database || !worldId) {
   process.exit(1);
 }
 const containerPath = resolve(args.get('container-ledger') ?? join(dirname(dirname(resolve(database))), 'containers.json'));
-const travelPath = args.get('travel-memory') ?? null;
 const worldMemoryPath = resolve(args.get('world-memory') ?? join(dirname(dirname(resolve(database))), 'world-memory.json'));
+const travelPath = args.get('travel-memory')
+  ?? (existsSync(join(dirname(worldMemoryPath), 'travel-memory.json')) ? join(dirname(worldMemoryPath), 'travel-memory.json') : null);
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const workingDatabase = execute ? resolve(database) : `${resolve(database)}.normalize-dry-${stamp}.sqlite`;
 const workingContainerPath = execute ? containerPath : `${containerPath}.normalize-dry-${stamp}.json`;
