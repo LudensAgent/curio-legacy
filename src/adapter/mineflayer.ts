@@ -3290,7 +3290,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 退出门过程中已经换维度时，旧坐标的 approach 已经没有意义，跳过接近段直接等待落地。
       if (this.currentDimension() === from.dim) {
         if (approach) {
-          await this.moveTo({ kind: 'near', pos: approach.cell, range: 0.5 }, { signal, timeoutMs: 20000 });
+          // The approach cell can be a one-block step the pathfinder refuses even
+          // though the portal is within a couple of blocks. Do not abort the
+          // portal action on a path failure: fall through to the short direct
+          // drive toward the portal opening, which is what a player does.
+          try {
+            await this.moveTo({ kind: 'near', pos: approach.cell, range: 0.5 }, { signal, timeoutMs: 20000 });
+          } catch (error) {
+            if (signal.aborted || error instanceof AbortedError) throw error;
+          }
           const stepDeadline = Date.now() + 12000;
           while (Date.now() < stepDeadline) {
             throwIfAborted(signal);
