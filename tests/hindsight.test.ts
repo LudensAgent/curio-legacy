@@ -108,6 +108,24 @@ test('Hindsight recall uses all_strict scope, rejects leaked results and bounds 
   }
 });
 
+test('Hindsight recall opts into trace and reports only a bounded request id from it', async t => {
+  let trace: Record<string, unknown> | undefined = { request_id: 'req-abc-123', detail: 'server body must not leak' };
+  const backend = await fixture(t, async (request, response) => {
+    const query = await body(request);
+    assert.equal(query.trace, true);
+    json(response, { results: [{ id: 'm-1', text: 'village', tags: scope }], ...(trace ? { trace } : {}) });
+  });
+  const reported: (string | undefined)[] = [];
+  const recall = () => backend.recall({ worldId: episode.worldId, dimension: episode.dimension, query: 'village',
+    onRequestId: (id) => reported.push(id) }, activeSignal());
+  await recall();
+  trace = { request_id: 'x'.repeat(200), requestId: 'bad value with spaces', trace_id: 42 };
+  await recall();
+  trace = undefined;
+  await recall();
+  assert.deepEqual(reported, ['req-abc-123', undefined, undefined]);
+});
+
 test('Hindsight recall preserves inference provenance and document source', async t => {
   const backend = await fixture(t, (_request, response) => json(response, { results: [
     { id: 'guess', text: 'Maybe there is a cave', tags: scope, type: 'world', document_id: 'episode-guess', occurred_start: '2026-10-23T00:00:00Z', metadata: { kind: 'inference' } },

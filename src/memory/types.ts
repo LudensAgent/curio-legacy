@@ -24,6 +24,33 @@ export interface RecallRequest {
   query: string;
   worldId: string;
   dimension: string;
+  /** Optional sink for a bounded server-side request id when the backend response exposes one. */
+  onRequestId?: (id: string | undefined) => void;
+}
+
+/** Body-free memory service failure: the error type and HTTP status are enough to diagnose, the body is never kept. */
+export interface RecallFailure {
+  type: string;
+  status?: number;
+}
+
+/** Additive, body-free recall observability. Kept out of `MemoryContext` so the context byte budget is unchanged. */
+export interface RecallDiagnostics {
+  backend: 'local' | 'hindsight' | 'unavailable';
+  /** Bounded server-supplied id from the opt-in recall trace; omitted when the response has none. */
+  requestId?: string;
+  elapsedMs: number;
+  /** True only when a remote attempt failed and local recall answered instead. */
+  degraded: boolean;
+  /** Memories returned by the retrieval that produced this context, before the JSON byte budget. */
+  hits: number;
+  /** IDs selected into `MemoryContext.memories` (what a consumer may inject; not proof it reached the prompt). */
+  memoryIds: string[];
+  /** Bounded reason slugs for trimmed/dropped memories (budget, dedup, scope, ...), never memory text. */
+  dropped: string[];
+  error?: RecallFailure;
+  /** Why the remote backend was not used even though it was enabled. */
+  fallback?: 'empty' | 'cooldown' | 'in_flight';
 }
 
 export interface MemoryContext {
