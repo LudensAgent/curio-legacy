@@ -122,6 +122,7 @@ for (const order of ['inventory-first', 'block-first'] as const) {
     assert.equal(f.uses(), 1);
     assert.deepEqual(result.placed, { x: 2, y: 64, z: 0 });
     assert.equal(f.adapter.recentPlaced(0).at(-1)?.name, 'water');
+    assert.equal(f.adapter.recentPlaced(0).at(-1)?.status, 'confirmed', '只有同时确认方块与背包证据才记 confirmed');
   });
 }
 

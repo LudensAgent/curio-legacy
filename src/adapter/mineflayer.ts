@@ -2000,7 +2000,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 脚下一格点脚下支撑块的侧面；脚下两格点支撑块下方那一格的侧面（这要求那一格是实心参照方块）。
    * 只处理水平相邻的支撑位；目标格必须为空。几何不允许时如实返回原因，不瞬移、不伪造成功。
    */
-  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
+  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placedName?: string | null; verified?: boolean; placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2015,7 +2015,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (drop !== 1 && drop !== 2) return { ok: false, reason: 'EDGE_HEIGHT:只能补脚下一格或两格的支撑，其他高度需要另找站位' };
     const tgt = this.vec(target);
     const cur = b.blockAt(tgt);
-    if (cur && cur.boundingBox === 'block') return { ok: true, placed: { ...target } };
+    if (cur && cur.boundingBox === 'block') {
+      return { ok: true, placed: { ...target }, placedName: String(cur.name), verified: itemNames.includes(String(cur.name)) };
+    }
     const under = b.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
     if (!under || under.boundingBox !== 'block') return { ok: false, reason: 'EDGE_NO_SUPPORT:脚下不是实心方块' };
     // 参照方块必须与目标格同层：drop 1 是脚下支撑块，drop 2 是再下面一格。
@@ -2065,16 +2067,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(dx, 0, dz)), signal, 5000, () => {}), check);
       const now = b.blockAt(tgt);
       if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的', stance, attemptedFaces: tried };
-      this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
+      // 目标格出现了碰撞方块不等于请求材料已放下；核对实际方块名再给 confirmed。
+      const evidence = this.placementEvidence(target, itemNames, item.name);
+      this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
       placedOk = true;
-      return { ok: true, placed: { ...target }, stance, attemptedFaces: tried };
+      return { ok: true, placed: { ...target }, stance, attemptedFaces: tried, ...evidence };
     } catch (e) {
       if ((e as Error)?.name === 'AbortedError') throw e;
       const q = b.entity.position;
       return { ok: false, reason: `EDGE_PLACE_FAILED:${String((e as Error)?.message ?? e).slice(0, 100)}`, stance: { x: q.x, y: q.y, z: q.z }, attemptedFaces: tried };
     } finally {
       // 放置失败时人还在方块边缘外面：先潜行退回格心再松 sneak，避免一松就不受支撑。
-      if (ownsControls() && !placedOk) {
+      // 已取消/被换主时绝不再主动移动身体，交给新的动作所有者接管。
+      if (ownsControls() && !signal.aborted && !placedOk) {
         try {
           if (typeof b.look === 'function') await b.look(Math.atan2(dx, dz), -0.35, true);
           b.setControlState('forward', true);
@@ -2088,7 +2093,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
   }
 
-  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
+  async placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placedName?: string | null; verified?: boolean; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2099,7 +2104,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     const target = this.vec(pos);
     const cur = b.blockAt(target);
-    if (cur && cur.boundingBox === 'block') return { ok: true }; // 已经有方块了
+    // 已经有方块了：这不是本次放置，只如实返回目标格当前的方块名。
+    if (cur && cur.boundingBox === 'block') return { ok: true, ...this.placementEvidence(pos, itemNames, item.name) };
     // 树苗只能种在草地/泥土类方块上：先查目标格下方，种不了就报清楚（别让服务器拒绝后只回一句 still air）
     if (isTreeSaplingItem(item.name)) {
       const below = b.blockAt(target.offset(0, -1, 0));
@@ -2138,8 +2144,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         try {
           await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
         } finally { if (sneak) b.setControlState('sneak', false); }
-        this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
-        return { ok: true };
+        // 动作回执成功不等于请求材料已经放下：读一次目标格再标 attempted/confirmed。
+        const evidence = this.placementEvidence(pos, itemNames, item.name);
+        this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
+        return { ok: true, ...evidence };
       } catch (e: any) {
         if (e?.name === 'AbortedError') throw e;
         attempt.reason = `PLACE_FAILED:${String(e?.message ?? e).slice(0, 80)}`;
@@ -2155,8 +2163,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           try {
             await this.afterAction(() => b.equip(item, 'hand'), check);
             await this.afterAction(() => raceAbort(b.placeBlock(floor, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
-            this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name);
-            return { ok: true };
+            const evidence = this.placementEvidence(pos, itemNames, item.name);
+            this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
+            return { ok: true, ...evidence };
           } catch (e: any) {
             if (e?.name === 'AbortedError') throw e;
           }
@@ -2273,7 +2282,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     ];
     const effectEvidence = { verified: true, changed: reasons.length > 0, reasons: reasons.length ? reasons : ['没有确认桶转换或目标源格变化'] };
     if (placed && consumed > 0 && emptyAdded > 0) {
-      this.notePlaced({ x: target.x, y: target.y, z: target.z }, fluidName);
+      this.notePlaced({ x: target.x, y: target.y, z: target.z }, fluidName, 'confirmed');
       return { ok: true, placed: { x: target.x, y: target.y, z: target.z }, effectEvidence };
     }
     if (reasons.length) return { ok: false, reason: `PLACEMENT_NOT_CONFIRMED:没有同时确认 ${item}→bucket 和目标格出现 ${fluidName} 源`, effectEvidence };
@@ -5075,10 +5084,29 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private dugLog: { pos: Vec3Like; name: string; ts: number; tool: string | null; ms: number }[] = [];
   recentDug(since: number) { return this.dugLog.filter((d) => d.ts > since); }
 
-  private placedLog: { pos: Vec3Like; name: string; ts: number }[] = [];
+  private placedLog: { pos: Vec3Like; name: string; ts: number; status: 'attempted' | 'confirmed' }[] = [];
   recentPlaced(since: number) { return this.placedLog.filter((d) => d.ts > since); }
-  private notePlaced(pos: Vec3Like, name: string) {
-    this.placedLog.push({ pos: { x: pos.x, y: pos.y, z: pos.z }, name, ts: Date.now() });
+
+  /**
+   * 读一次目标格，返回实际方块名和是否属于请求材料（含墙上变体）。
+   * 这只是一次本地方块读取；上层 primitive 仍以它自己的世界核对为准，两层证据不合并。
+   */
+  private placementEvidence(target: Vec3Like, itemNames: string[], requested: string) {
+    const now = this.bot?.blockAt?.(this.vec(target));
+    const placedName = now?.name ? String(now.name) : null;
+    const aliases = [
+      requested,
+      requested.replace(/torch$/, 'wall_torch'),
+      requested.replace(/_sign$/, '_wall_sign'),
+      requested.replace(/_hanging_sign$/, '_wall_hanging_sign'),
+    ];
+    const verified = placedName !== null && (itemNames.includes(placedName) || aliases.includes(placedName));
+    return { placedName, verified };
+  }
+
+  /** status 区分「动作发出」和「已确认目标格出现请求材料」，不能把两者都记成已放置。 */
+  private notePlaced(pos: Vec3Like, name: string, status: 'attempted' | 'confirmed') {
+    this.placedLog.push({ pos: { x: pos.x, y: pos.y, z: pos.z }, name, ts: Date.now(), status });
     if (this.placedLog.length > 512) this.placedLog.splice(0, this.placedLog.length - 512);
   }
 

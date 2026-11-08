@@ -213,6 +213,15 @@ export interface ActionResult {
   effectEvidence?: EffectEvidence;
 }
 
+/**
+ * 放置动作的附加事实：目标格实际出现的方块名，以及是否确认它是请求材料。
+ * verified=false 只表示「有碰撞方块/未确认材料」，不能当成请求方块已放下。
+ */
+export interface PlacementEvidence {
+  placedName?: string | null;
+  verified?: boolean;
+}
+
 /** 放置失败时实际尝试过的参照方块与点击面；face 是从参照方块指向目标格的单位向量。 */
 export interface PlacementFaceAttempt {
   ref: Vec3Like;
@@ -417,14 +426,14 @@ export interface GameAdapter {
   /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
-  placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: PlacementFaceAttempt[] }>;
+  placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & PlacementEvidence & { attemptedFaces?: PlacementFaceAttempt[] }>;
   /**
    * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格或两格的空目标格放一块方块。
    * 脚下两格需要在支撑块下方有实心参照方块；没有时如实返回 EDGE_NO_REFERENCE，不伪造成功。
    * 只用于 place_support 的支撑位；会移动身体到边缘，放完保持站稳。
    * `stance` 是实际尝试放置时的身体位置（潜行到边缘后）；失败前没挪动就不返回。
    */
-  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: PlacementFaceAttempt[] }>;
+  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & PlacementEvidence & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: PlacementFaceAttempt[] }>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
   useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<GuiResult>;
@@ -477,8 +486,11 @@ export interface GameAdapter {
   forgetDiscarded?(item: string): void;
   /** 自己挖掉的方块（动作、代码技能、寻路挖穿的都算），since 之后的；用来记自己挖过的通道和挖掘耗时 */
   recentDug?(since: number): { pos: Vec3Like; name: string; ts: number; tool?: string | null; ms?: number }[];
-  /** 自己放置的方块（placeBlockAt 成功才算），since 之后的；用来记自己放过哪些格 */
-  recentPlaced?(since: number): { pos: Vec3Like; name: string; ts: number }[];
+  /**
+   * 放置动作记录，since 之后的。status=confirmed 才确认目标格出现了请求材料；
+   * attempted 只是动作回执成功，不能当成已验证的世界修改。
+   */
+  recentPlaced?(since: number): { pos: Vec3Like; name: string; ts: number; status: 'attempted' | 'confirmed' }[];
   collectNearbyDrops(signal: AbortSignal, radius: number, timeoutMs: number): Promise<number>;
   /** 只合成指定目标；prepare:true 才补做两层前置材料并制造/放置工作台。tablePos = 已知工作台位置；batchSize = 每批最多执行配方的次数（1–64），不是产物个数 */
   /** detail：失败时具体缺什么；tablePos：这次用到的工作台位置（便于记住、下次复用） */
