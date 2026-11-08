@@ -1,9 +1,9 @@
 import type { PathFragment } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../adapter/types.ts';
 import { fragmentRecord } from '../memory/spatial-backend.ts';
-import { passageRouteInspection, type PassageTransition } from '../memory/passages.ts';
+import { passageRouteInspection, type PassageRouteInspection, type PassageTransition } from '../memory/passages.ts';
 import { fragmentArchivedAt, pageFragments } from '../spatial/fragments.ts';
-import { fail, obj, ok, type Skill } from './types.ts';
+import { fail, finitePoint, obj, ok, type Skill } from './types.ts';
 
 const TRANSITIONS: readonly PassageTransition[] = ['walk', 'step', 'drop', 'climb'];
 
@@ -17,14 +17,6 @@ interface MemoryRouteArgs {
   maxPoints?: number;
 }
 
-const finitePoint = (value: unknown): Vec3Like | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const p = value as Record<string, unknown>;
-  return [p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n))
-    ? { x: p.x as number, y: p.y as number, z: p.z as number }
-    : null;
-};
-
 /** 实测脚点没有 links 时，用连续点补真实相邻边；不跨越 1.5 格以上的缺口。 */
 const synthesizedLinks = (polyline: readonly Vec3Like[]) => polyline.slice(1).flatMap((point, index) => {
   const a = polyline[index]!;
@@ -33,7 +25,9 @@ const synthesizedLinks = (polyline: readonly Vec3Like[]) => polyline.slice(1).fl
     : [];
 });
 
-const reasonText = (reason: string | undefined) => {
+type MemoryRouteGapReason = NonNullable<PassageRouteInspection['reason']> | 'truncated';
+
+const reasonText = (reason: MemoryRouteGapReason | undefined) => {
   switch (reason) {
     case 'from_far_from_records': return '起点离记录通道太远';
     case 'to_far_from_records': return '目标离记录通道太远';
@@ -99,7 +93,11 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
       if (points + fragment.polyline.length > maxPoints) { truncated = true; break; }
       points += fragment.polyline.length;
       const record = fragmentRecord(fragment);
-      const links = record.links?.length ? record.links : fragment.geometrySource === 'traversal' ? synthesizedLinks(fragment.polyline) : undefined;
+      const links = record.links?.length
+        ? record.links
+        : fragment.geometrySource === 'traversal' || fragment.kind === 'dug'
+          ? synthesizedLinks(fragment.polyline)
+          : undefined;
       records.push({ ...record, ...(links && links.length ? { links } : {}) });
     }
 
@@ -111,8 +109,9 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     });
     const maxWaypoints = args.maxWaypoints ?? 1024;
     const overLimit = inspection.status === 'route' && inspection.waypoints.length > maxWaypoints;
+    if (overLimit) truncated = true;
     const status = overLimit ? 'gap' : inspection.status;
-    const reason = overLimit ? 'truncated' : inspection.reason;
+    const reason: MemoryRouteGapReason | undefined = overLimit ? 'truncated' : inspection.reason;
     const waypoints = overLimit ? [] : inspection.waypoints;
     const legs = overLimit ? [] : inspection.legs;
     const data = {
@@ -122,6 +121,7 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
       allowed,
       waypoints, legs,
       ...(inspection.nearest === undefined ? {} : { nearest: inspection.nearest }),
+      ...(inspection.rejectedLeg === undefined ? {} : { rejectedLeg: inspection.rejectedLeg }),
       snapRadius: inspection.near,
       snapped: inspection.snapped,
       heal: inspection.heal,
@@ -137,7 +137,7 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     const end = waypoints.at(-1);
     const truncatedNote = truncated ? '；本次扫描/图规模已截断，结果可能不完整' : '';
     const summary = status === 'route'
-      ? `历史路线 ${legs.length} 段、${waypoints.length} 个路点${end === undefined ? '' : `，终点 (${Math.floor(end.x)},${end.y},${Math.floor(end.z)})`}${truncatedNote}。这是历史几何，未验证当前可通行；执行时可用的现成原语：同高段 plan_route/walk_path，垂直段 move_step/descend_to/excavate_run/pillar_one；缺口和施工由你决定。`
+      ? `历史路线 ${legs.length} 段、${waypoints.length} 个路点${end === undefined ? '' : `，终点 (${Math.floor(end.x)},${end.y},${Math.floor(end.z)})`}${truncatedNote}。这是历史几何，未验证当前可通行；执行和复核由你决定。`
       : `没有可用的历史路线：${reasonText(reason)}${inspection.nearest === undefined ? '' : `；最近可达 (${Math.floor(inspection.nearest.x)},${inspection.nearest.y},${Math.floor(inspection.nearest.z)})`}${truncatedNote}。这是历史几何事实，未验证当前可通行；是否绕路/挖/垫由你决定。`;
     return ok(summary, data);
   },

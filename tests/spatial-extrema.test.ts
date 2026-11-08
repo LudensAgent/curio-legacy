@@ -59,8 +59,12 @@ test('spatial_extrema：deepest 取全局最低点，并区分 deepestY 与 poly
   assert.equal(best.fragment.id, 'a');
   assert.equal(best.pointY, 40);
   assert.equal(best.deepestY, 38);
-  assert.match(r.summary, /最深记录点/);
+  assert.match(r.summary, /最深记录脚点/);
+  assert.match(r.summary, /更低观测 y=38/);
   assert.match(r.summary, /历史记录/);
+  assert.equal(r.data?.origin, null);
+  assert.equal(r.data?.space, 'horizontal');
+  assert.deepEqual(Object.keys(spatial).sort(), ['closing', 'query', 'session'], '只读：没有写入入口');
 });
 
 test('spatial_extrema：farthest 按 origin/space 计算，默认原点为当前脚位', async () => {

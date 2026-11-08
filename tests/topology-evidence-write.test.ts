@@ -582,3 +582,55 @@ test('spatial_query 宿主能力上报与真实接线一致：recordNode/upsertE
   assert.equal(envelope.data.capabilities.memory.recordNode, true, '库实际能力也是 true');
   assert.equal(envelope.data.capabilities.memory.upsertEdge, true);
 });
+
+test('dug 路线：fragment/traversal/拓扑使用 dug 命名空间与 excavate 来源', async (t) => {
+  const { svc, dir } = await openEvidenceSession();
+  t.after(async () => { await closeEvidenceSession(svc, dir); });
+  const points = [{ x: 0, y: 64, z: 0 }, { x: 1, y: 63, z: 0 }, { x: 2, y: 62, z: 0 }];
+  const fragment: PathFragment = {
+    ...corridorFragment('dug:test', points),
+    kind: 'dug',
+    metadata: { curio: { v: 1, type: 'route', source: 'excavate_run' } },
+  };
+  const segments = corridorSegments(points, fragment.id).map(({ mode: _mode, ...segment }) => ({
+    ...segment, source: 'confirmed_excavate_run', actionId: 'action-1',
+  }));
+  const outcome = svc.recordRouteCorridor({ fragment, segments });
+  assert.equal(outcome.status, 'written');
+  const stored = svc.session.history.fragments({ dim: DIM, limit: 10 }).items;
+  assert.equal(stored[0]?.kind, 'dug');
+  const edges = edgesOf(svc).items;
+  assert.equal(edges.length, 2);
+  assert.ok(edges.every((edge) => edge.id.startsWith('dug:')));
+  assert.ok(edges.every((edge) => edge.source === 'confirmed_excavate_run'));
+  assert.ok(edges.every((edge) => edge.type === 'STAIRCASE'));
+  const traversals = svc.session.history.traversals({ fragmentId: fragment.id, limit: 10 }).items;
+  assert.ok(traversals.every((traversal) => traversal.actionId === 'action-1'));
+});
+
+test('dug 路线能力 false：recordRouteCorridor 失败关闭，不写历史', async (t) => {
+  const { svc, dir } = await openEvidenceSession();
+  t.after(async () => { await closeEvidenceSession(svc, dir); });
+  const recorded = svc.capabilities();
+  (svc as unknown as { capabilityReport: HostCapabilityReport }).capabilityReport = forcedReport(recorded.library, { recordNode: false });
+  const points = [{ x: 0, y: 64, z: 0 }, { x: 1, y: 63, z: 0 }];
+  const fragment: PathFragment = { ...corridorFragment('dug:caps', points), kind: 'dug' };
+  const outcome = svc.recordRouteCorridor({ fragment, segments: corridorSegments(points, fragment.id) });
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.stage, 'capability_unavailable');
+  assert.equal(svc.query({ kind: 'fragments' }).total, 0);
+});
+
+test('dug 路线重复 id 不同内容：失败关闭，保留原 fragment', async (t) => {
+  const { svc, dir } = await openEvidenceSession();
+  t.after(async () => { await closeEvidenceSession(svc, dir); });
+  const original = [{ x: 0, y: 64, z: 0 }, { x: 1, y: 63, z: 0 }];
+  const first: PathFragment = { ...corridorFragment('dug:dup', original), kind: 'dug' };
+  assert.equal(svc.recordRouteCorridor({ fragment: first, segments: corridorSegments(original, first.id) }).status, 'written');
+  const changed = [{ x: 0, y: 64, z: 0 }, { x: 0, y: 62, z: 0 }];
+  const second: PathFragment = { ...first, polyline: changed, deepestY: 62 };
+  const outcome = svc.recordRouteCorridor({ fragment: second, segments: corridorSegments(changed, second.id) });
+  assert.equal(outcome.status, 'failed');
+  assert.equal(outcome.stage, 'save_fragment');
+  assert.deepEqual(svc.session.history.fragments({ dim: DIM, limit: 10 }).items[0]?.polyline, original);
+});

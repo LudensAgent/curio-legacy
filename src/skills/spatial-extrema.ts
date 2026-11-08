@@ -1,7 +1,7 @@
 import type { PathFragment } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../adapter/types.ts';
 import { fragmentArchivedAt, pageFragments } from '../spatial/fragments.ts';
-import { fail, obj, ok, type Skill } from './types.ts';
+import { fail, finitePoint, obj, ok, type Skill } from './types.ts';
 
 const KINDS = ['dug', 'walked', 'bridge', 'built'] as const;
 
@@ -14,14 +14,6 @@ interface ExtremaArgs {
   includeArchived?: boolean;
   maxFragments?: number;
 }
-
-const finitePoint = (value: unknown): Vec3Like | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const p = value as Record<string, unknown>;
-  return [p.x, p.y, p.z].every((n) => typeof n === 'number' && Number.isFinite(n))
-    ? { x: p.x as number, y: p.y as number, z: p.z as number }
-    : null;
-};
 
 const distance = (a: Vec3Like, b: Vec3Like, space: 'horizontal' | 'euclidean') =>
   space === 'horizontal' ? Math.hypot(a.x - b.x, a.z - b.z) : Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -132,7 +124,8 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       status: 'ok',
       metric: args.metric,
       dim,
-      ...(origin === null ? {} : { origin: { ...origin }, space }),
+      origin: origin === null ? null : { ...origin },
+      space,
       best,
       scanned: { fragments: scan.items.length, pages: scan.pages, withoutPolyline, archivedSkipped },
       truncated: scan.truncated || scan.partial,
@@ -142,9 +135,12 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       evidence: 'historical',
       currentPassability: 'UNKNOWN',
     };
+    const point = best === null ? null : best.point as Vec3Like;
+    const deepestY = args.metric === 'deepest' && best !== null ? (best as { deepestY: number }).deepestY : null;
+    const depthNote = point !== null && deepestY !== null && deepestY < point.y ? `；记录里还有更低观测 y=${deepestY}（未保留为脚点）` : '';
     const label = args.metric === 'deepest'
-      ? (best === null ? '没有找到符合条件的最深记录点' : `最深记录点 (${Math.floor((best.point as Vec3Like).x)},${(best.point as Vec3Like).y},${Math.floor((best.point as Vec3Like).z)})，fragment ${(best.fragment as { id: string }).id}`)
-      : (best === null ? '没有找到符合条件的最远记录点' : `最远记录点 (${Math.floor((best.point as Vec3Like).x)},${(best.point as Vec3Like).y},${Math.floor((best.point as Vec3Like).z)})，距原点 ${(best.distance as number).toFixed(1)} 格，fragment ${(best.fragment as { id: string }).id}`);
+      ? (best === null || point === null ? '没有找到符合条件的最深记录点' : `最深记录脚点 (${Math.floor(point.x)},${point.y},${Math.floor(point.z)})${depthNote}，fragment ${(best.fragment as { id: string }).id}`)
+      : (best === null || point === null ? '没有找到符合条件的最远记录点' : `最远记录点 (${Math.floor(point.x)},${point.y},${Math.floor(point.z)})，距原点 ${(best.distance as number).toFixed(1)} 格，fragment ${(best.fragment as { id: string }).id}`);
     return ok(`${label}；历史记录，不代表当前可通行；是否前往由你决定`, data);
   },
 };
