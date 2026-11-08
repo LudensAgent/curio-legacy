@@ -63,6 +63,11 @@ test('assess_landings reports the same slab support top as step/descend collisio
   assert.equal(assessed.target.y, 63.5, '只读复核，不改写所选落点');
   assert.deepEqual(assessed.descend.target, assessed.target, '给出可直接复制给 descend_to 的落点参数');
   assert.match(String((aligned.data as { handoff?: string }).handoff), /descend_to.*mode\/nearest/);
+  assert.match(aligned.summary, /相邻 1 处/);
+  const landings = aligned.data?.landings as { id: string; target: { x: number; y: number; z: number }; approach: string }[] | undefined;
+  assert.equal(landings?.[0]?.id, 'L1');
+  assert.equal(landings?.[0]?.approach, 'adjacent');
+  assert.deepEqual(landings?.[0]?.target, assessed.target, '摘要/数据里的 id 指向可复制的精确落点');
   assert.equal(adapter.actions.length, 0, '评估仍不移动、不挖不放');
   // 视觉落点按整数脚高硬套时，必须标出与碰撞顶面不一致，而不是接受假着陆。
   landing = option(64);

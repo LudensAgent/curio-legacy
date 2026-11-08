@@ -33,6 +33,12 @@ test('descend requires fresh local geometry, sufficient health or observed water
 
   const stale = fixture(); stale.option.receipt.at -= 2000;
   assert.equal((await descend.run(stale.ctx, { target: stale.option.target })).status, 'failed'); assert.equal(stale.calls.length, 0);
+  const wrong = fixture();
+  const missing = await descend.run(wrong.ctx, { target: { x: 9, y: 60, z: 9 } });
+  assert.equal(missing.status, 'failed');
+  assert.match(missing.summary, /2 格内可见落点|选择的落点当前不可见/);
+  assert.ok(Array.isArray(missing.data?.available) && (missing.data.available as unknown[]).length > 0, '失败时列出当前可复制的落点');
+  assert.equal(wrong.calls.length, 0);
   const unsafe = fixture(); unsafe.state.hp = 8;
   assert.equal((await descend.run(unsafe.ctx, { target: unsafe.option.target })).failureCode, 'LOW_HP'); assert.equal(unsafe.calls.length, 0);
   const occluded = fixture(); occluded.option.corridor = 'unknown';

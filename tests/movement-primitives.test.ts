@@ -182,7 +182,24 @@ test('move_step 不自动改落点：目标列下方多格才有地面时拒绝'
   assert.deepEqual(remediation?.landing, { x: 1, y: 62, z: 0 });
   assert.equal(remediation?.drop, 2);
   assert.deepEqual(remediation?.descend?.target, { x: 1, y: 62, z: 0 }, '给出可复制给 descend_to 的同一落点');
+  assert.deepEqual((remediation as { stairs?: { mode?: string } } | undefined)?.stairs?.mode, 'stairs');
   assert.match(r.summary, /assess_landings/);
+  assert.match(r.summary, /excavate_run/);
+});
+
+test('move_step 遇到 2 格以上高差时给出 excavate_run 阶梯交接', async (t) => {
+  const w = flat();
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 65, z: 0 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /excavate_run/);
+  assert.match(r.summary, /stairs_up/);
+  const stairs = (r.data?.remediation as { stairs?: { mode?: string; direction?: string; steps?: number } } | undefined)?.stairs;
+  assert.equal(stairs?.mode, 'stairs_up');
+  assert.equal(stairs?.direction, 'east');
+  assert.ok((stairs?.steps ?? 0) >= 1);
 });
 
 test('move_step 绝对脚高与真实支撑不符时拒绝，不悄悄改落点', async (t) => {

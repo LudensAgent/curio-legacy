@@ -255,7 +255,7 @@ const PRINCIPLES = `【原则】
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
-const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。place_cell 指方块占据格，place_support 补脚部目标下面一格。
+const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试 move_step；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。place_cell 指方块占据格，place_support 补脚部目标下面一格。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。pillar_one 原地垫高（需头顶上方两格全空，两格高的隧道改用 mine_cell+move_step 阶梯）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 move_step。
 - place_support [1,-1,0] 会在 [1,0,0] 脚部目标格正下方补支撑；上下范围 -2..3，可以补下一级 [1,-1,0] 的支撑格 [1,-2,0]。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
