@@ -210,11 +210,17 @@ export class Mind {
   private noProgressRuns: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[] = [];
   /** 最近一次局部动作/落点失败：它只否定这一步，不能单独证明整个来源或维度没有资源。 */
   private lastLocalFailure: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null = null;
+  /** 最近一次被证据放行的换维：只记来源/目标/理由；目标未知时等实际换维后再补上。 */
+  private lastSourceSwitch: { at: number; from: string; to: string | null; reason: string; worldId: string; sessionId: string } | null = null;
+  /** 最近一次实测新区块进展：只记区域标识与新区块数，不复制格点/几何。 */
+  private lastRegionExpansion: { at: number; region: string; chunks: number; dim: string; worldId: string; sessionId: string } | null = null;
   private sourceSwitchRejects = 0;
   static readonly PROGRESS_GATE_ACTIVITIES = 8;
   static readonly PROGRESS_GATE_COOLDOWN_MS = 10 * 60_000;
   static readonly PROGRESS_GATE_REJECT_LIMIT = 2;
   static readonly LOCAL_FAILURE_TTL_MS = 10 * 60_000;
+  /** 搜索状态（无进展、局部失败、换维/换区证据）跨轮次保留的上限；过期恢复不再冒充当前状态。 */
+  static readonly SEARCH_STATE_TTL_MS = 30 * 60_000;
   /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
   static REVIEW_GAP_MIN: [number, number] = [45, 90];
   private reviewGapMs = 45 * 60_000;
@@ -269,21 +275,28 @@ export class Mind {
 
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
-    d.memory.setWorld(d.adapter.state().worldId);
+    const state = d.adapter.state();
+    d.memory.setWorld(state.worldId);
     d.thinker.skillStats = (name) => d.behaviors?.statsOf(name);
     d.thinker.successfulEmergencyVersions = (name) => d.behaviors?.successfulEmergencyVersions(name) ?? [];
     // 任务事实跨重连保留，但过期的、别世界/会话的不能直接拿来判当前做法。
     const facts = d.self.taskFacts();
     const now = Date.now();
+    const recent = <T extends { at: number; worldId: string; sessionId: string }>(fact: T | null | undefined) =>
+      fact && now - fact.at < Mind.SEARCH_STATE_TTL_MS && fact.worldId === state.worldId && fact.sessionId === state.sessionId ? fact : null;
     this.noProgressRuns = (facts.noProgressRuns ?? []).filter((run) => now - run.at < 30 * 60_000).slice(-16);
     const failure = facts.lastLocalFailure;
     this.lastLocalFailure = failure && now - failure.at < Mind.LOCAL_FAILURE_TTL_MS ? failure : null;
+    this.lastSourceSwitch = recent(facts.lastSourceSwitch);
+    this.lastRegionExpansion = recent(facts.lastRegionExpansion);
   }
 
   private persistTaskFacts() {
     this.d.self.setTaskFacts({
       noProgressRuns: this.noProgressRuns.slice(-16),
       lastLocalFailure: this.lastLocalFailure,
+      lastSourceSwitch: this.lastSourceSwitch,
+      lastRegionExpansion: this.lastRegionExpansion,
     });
   }
 
@@ -397,6 +410,12 @@ export class Mind {
       this.requestThink(was ? `换了个地方（穿门前本来在做「${was}」），重新看看周围接着办` : '换了个地方，重新看看周围', 'deliberate');
     }
     if (this.lastDim !== state.dim) {
+      // 带证据放行的换维真正发生后，补上实际目标维度与当前会话；仍只记来源/目标，不复制空间历史。
+      if (this.lastSourceSwitch && this.lastSourceSwitch.from === this.lastDim
+        && Date.now() - this.lastSourceSwitch.at < Mind.SEARCH_STATE_TTL_MS) {
+        this.lastSourceSwitch = { ...this.lastSourceSwitch, to: state.dim, sessionId: state.sessionId };
+        this.persistTaskFacts();
+      }
       this.lastDim = state.dim;
       if (this.d.self.firstVisit(state.dim)) this.arriveSomewhereNew(state.dim);
     }
@@ -1017,6 +1036,13 @@ export class Mind {
   private noteProgressOutcome(a: Activity, record: ActivityRecord, progressed: boolean) {
     const plan = this.d.self.plan();
     const now = Date.now();
+    const state = this.safe(() => this.d.adapter.state(), null);
+    // 实测新区块是区域覆盖扩大的唯一依据；Curio 只记区域标识与数量，格点仍由共享空间库承担。
+    const newChunks = typeof a.startChunks === 'number' ? this.d.memory.visitedChunkCount - a.startChunks : 0;
+    if (newChunks > 0 && state) {
+      this.lastRegionExpansion = { at: now, region: `${Math.floor(state.pos.x / 16)},${Math.floor(state.pos.z / 16)}`,
+        chunks: this.d.memory.visitedChunkCount, dim: state.dim, worldId: state.worldId, sessionId: state.sessionId };
+    }
     if (!plan || a.agendaId !== plan.agendaId || progressed) {
       this.noProgressRuns = [];
       this.progressGate = null;
@@ -1025,11 +1051,10 @@ export class Mind {
       this.persistTaskFacts();
       return;
     }
-    if (record.outcome === 'interrupted') return;
+    if (record.outcome === 'interrupted') { this.persistTaskFacts(); return; }
     // 同一做法 + 同一区域 + 同一证据版本才算“重复同一路线”；换了区域或有了新区块/物品，版本会不同。
     const start = a.startPos ?? { x: 0, y: 0, z: 0 };
     const area = `${Math.floor(start.x / 16)},${Math.floor(start.z / 16)}`;
-    const state = this.safe(() => this.d.adapter.state(), null);
     const scope = state ? `${state.worldId}|${state.sessionId}|${state.dim}` : '';
     const evidence = `${scope}|${this.d.memory.visitedChunkCount}|${plan.progressAt ?? 0}|${a.agendaId ?? ''}`;
     const sourceKey = `${gateSignatureOf(a.steps)}|${area}|${evidence}`;
@@ -1069,6 +1094,13 @@ export class Mind {
     };
   }
 
+  /** 记下这次换维的依据；目的地未知时留 null，等 tick 观察到实际维度再补上。 */
+  private noteSourceSwitch(activity: { steps: { skill: string }[] }, failure: { dim: string; worldId: string; sessionId: string }, reason: string) {
+    const to = activity.steps.some((step) => step.skill === 'recall_portal') ? 'overworld'
+      : activity.steps.some((step) => step.skill === 'use_end_gateway') ? 'the_end' : null;
+    this.lastSourceSwitch = { at: Date.now(), from: failure.dim, to, reason, worldId: failure.worldId, sessionId: failure.sessionId };
+  }
+
   /**
    * 局部失败不能直接升级成“这个维度/来源没有资源”。换维度或换来源时，
    * 要求活动里带新的具体证据（开箱/远征搜索/采集）或 plan.switch_reason；
@@ -1095,12 +1127,14 @@ export class Mind {
     const newChunks = !!state && state.worldId === failure.worldId && this.d.memory.visitedChunkCount > (failure.chunks ?? this.d.memory.visitedChunkCount);
     const newPlan = !!(decision.plan as { switchReason?: string } | undefined)?.switchReason;
     if (newEvidenceStep || newChunks || newPlan) {
+      this.noteSourceSwitch(activity, failure, newEvidenceStep ? 'activity-evidence' : newChunks ? 'new-chunks' : 'plan-reason');
       this.lastLocalFailure = null;
       this.sourceSwitchRejects = 0;
       this.persistTaskFacts();
       return true;
     }
     if (this.sourceSwitchRejects >= 1) {
+      this.noteSourceSwitch(activity, failure, 'unverified-second-attempt');
       this.d.bus.publish('source_switch_unverified', 'P2', '再次在没有新证据时换维度/来源；放行，但这次失败不能当作来源耗尽的证据', { failure });
       this.lastLocalFailure = null;
       this.sourceSwitchRejects = 0;
