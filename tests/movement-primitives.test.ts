@@ -165,7 +165,41 @@ test('move_step 绝对脚高与真实支撑不符时拒绝，不悄悄改落点'
   assert.equal(r.status, 'failed');
   assert.equal(r.data?.movementNotAttempted, true);
   assert.equal(r.data?.actualSupport, 63.5);
+  assert.match(r.summary, /63\.50/);
+  assert.deepEqual((r.data as any)?.remediation?.xyz, { x: 1, y: 63.5, z: 0 });
   assert.deepEqual(w.pos, before);
+});
+
+test('move_step 预检给出同一相邻格的准确修正，不自动改目标', async (t) => {
+  // 同层请求，但目标实际高一格：返回 [1,1,0]，而不是笼统的“下落用 [1,-1,0]”。
+  const up = flat();
+  up.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  const upCtx = makeCtx(up);
+  t.after(() => upCtx.memory.close());
+  const rise = await moveStep.run(upCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(rise.status, 'failed');
+  assert.equal(rise.failureCode, 'BAD_ARGS');
+  assert.equal(rise.data?.movementNotAttempted, true);
+  assert.match(rise.summary, /\[1,1,0\]/);
+  assert.deepEqual((rise.data as any)?.remediation?.at, [1, 1, 0]);
+  assert.deepEqual(up.pos, { x: 0.5, y: 64, z: 0.5 }, '未执行迈步');
+
+  // 同层请求，但目标实际低一格：返回 [1,-1,0]。
+  const down = flat();
+  down.removed.add('1,63,0');
+  const downCtx = makeCtx(down);
+  t.after(() => downCtx.memory.close());
+  const drop = await moveStep.run(downCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.match(drop.summary, /\[1,-1,0\]/);
+  assert.deepEqual((drop.data as any)?.remediation?.at, [1, -1, 0]);
+
+  // 上一级请求，但目标其实是同层：返回 [1,0,0]。
+  const level = flat();
+  const levelCtx = makeCtx(level);
+  t.after(() => levelCtx.memory.close());
+  const flatStep = await moveStep.run(levelCtx, { at: [1, 1, 0], facing: 'E' });
+  assert.match(flatStep.summary, /\[1,0,0\]/);
+  assert.deepEqual((flatStep.data as any)?.remediation?.at, [1, 0, 0]);
 });
 
 test('move_step 文档与实际半格/落差规则一致', async (t) => {

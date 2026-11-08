@@ -47,6 +47,20 @@ function minFootInTarget(world: ReturnType<typeof stepWorld>, startFootY: number
   return minY;
 }
 
+/** 目标列低一格：原点列 y=63 实心（脚高 64），目标列 y=63 空气、y=62 实心（落点脚高 63）。 */
+function dropWorld() {
+  return {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const solid = (p.x === 0 && p.z === 0 && p.y === 63) || (p.x === 0 && p.z === -1 && p.y === 62);
+      const stateId = solid ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+}
+
 /** 带真实物理的 bot：setControlState 驱动控制，50ms 一 tick 推物理。 */
 function physicsBot(world: ReturnType<typeof stepWorld>, startFootY: number) {
   const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
@@ -115,6 +129,33 @@ test('moveTo 在寻路按节点提前结算后，闭环前推真正落到目标�
   assert.equal(Math.floor(bot.entity.position.z), -1);
   assert.ok(bot.entity.position.z > -1, `越过目标格 z=${bot.entity.position.z}`);
   assert.equal(bot.control.forward, false, '到达后应已松开前进键');
+});
+
+test('寻路在目标格内按脚格提前结算、身体仍悬空时，先等落地再验收', async (t) => {
+  const world = dropWorld();
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  bot.pathfinder.goto = async () => {
+    // GoalBlock 已按 floor(脚格) 判到：水平进了目标列，脚还在落点上方 0.92。
+    bot.entity.position = new Vec3(0.5, 63.92, -0.8);
+    bot.entity.velocity = new Vec3(0, -0.1, 0);
+    bot.entity.onGround = false;
+  };
+  const a = adapter(bot);
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63, z: -1 }, { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false });
+  assert.ok(Math.abs(bot.entity.position.y - 63) <= 0.01, `脚高 ${bot.entity.position.y}`);
+  assert.equal(Math.floor(bot.entity.position.z), -1);
+});
+
+test('目标格内悬空但始终不落地时报告 TIMEOUT，而不是无路径', async () => {
+  const { bot, forwardSets } = noPhysicsBot();
+  bot.pathfinder.goto = async () => {
+    bot.entity.position = new Vec3(0.5, 63.92, -0.5);
+    bot.entity.onGround = false;
+  };
+  const a = adapter(bot);
+  await assert.rejects(a.moveTo({ kind: 'xyz', x: 0, y: 63, z: -1 }, { signal: new AbortController().signal, timeoutMs: 250 }), /TIMEOUT/);
+  assert.equal(forwardSets.length, 0, '未触地时不该发前进键');
 });
 
 test('moveTo 从底半砖上一步到整块（脚高 64）也能闭环完成', async (t) => {

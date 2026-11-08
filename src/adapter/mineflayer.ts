@@ -1229,16 +1229,45 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const cell = p.floored();
         return cell.x === Math.floor(target.x) && cell.z === Math.floor(target.z) && Math.abs(p.y - target.y) <= 0.01;
       };
+      const inTargetCell = () => {
+        const p = b.entity.position;
+        return Math.floor(p.x) === Math.floor(target.x) && Math.floor(p.z) === Math.floor(target.z);
+      };
       const here = () => `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
-      // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；越段/超时分别报告，不统一说成无路径。
+      // Pathfinder 的 GoalBlock 按“脚格”判到：一格上/下台阶可能在身体仍悬空时结算。
+      // 已在目标柱、脚高于落点且未触地时，先在期限内等落地；最终仍用精确脚高验收，不放宽容差。
+      const settling = () => !b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava
+        && b.entity.position.y > target.y + 0.01;
+      if (!atTarget() && inTargetCell() && settling()) {
+        const settleBy = Math.min(deadline, Date.now() + 2000);
+        while (Date.now() < settleBy && !atTarget()) {
+          check();
+          if (!inTargetCell() || !settling()) break;
+          await this.afterAction(() => sleep(50, opts.signal), check);
+        }
+        // 期限用完仍悬空：finishAdjacentStep 在未触地时也无法前推，直接如实报告超时。
+        if (!atTarget() && inTargetCell() && settling()) {
+          throw new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`);
+        }
+      }
+      // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；有路径但停在相邻格不是“无路”。
+      // 身体虽已在目标列、但仍由原支撑托住（如站在整块边缘去踩半砖）时，也交给它继续前推。
       if (!atTarget() && reached && !opts.allowSwimming) {
         const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
         // helper 的 arrived 已经过连续稳定验收，直接采纳，不再用较宽的瞬时坐标检查覆盖它。
         if (outcome === 'arrived') return;
         if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
-        throw new Error(`No path: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
+        throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
       }
-      if (!atTarget()) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
+      if (!atTarget()) {
+        if (inTargetCell()) {
+          throw new Error(`NOT_CONFIRMED: 已到目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}（实际脚高 ${b.entity.position.y.toFixed(2)}），实际位于 ${here()}`);
+        }
+        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有空 noPath 才报 PATH_NOT_FOUND。
+        throw new Error(reached
+          ? `NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`
+          : `No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
+      }
     } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
   }
 
