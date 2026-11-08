@@ -266,3 +266,36 @@ test('walk_path 在起点漂移超过容差时拒绝执行，要求重新规划'
   assert.equal((result.data?.unsupported as { reason?: string } | undefined)?.reason, 'route_start_changed');
   assert.notEqual(w.control.forward, true, '拒绝执行时不能按前进键');
 });
+
+test('plan_route 把整数方块目标归一化到当前脚位格点，不再因 .3/.7 偏移拒绝', async (t) => {
+  const w = flatAdapter();
+  w.pos = { x: 0.3, y: 64, z: 0.7 };
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const spatial = fakeSpatial(map);
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.targetCell, { x: 2, y: 64, z: 0 });
+  assert.deepEqual(r.data?.requestedTarget, { x: 2, y: 64, z: 0 });
+  assert.deepEqual(r.data?.targetStance, { x: 2.3, y: 64, z: 0.7 });
+  assert.ok((r.data?.points as unknown[]).length >= 2);
+  assert.match(r.summary, /目标格 \(2,64,0\)/);
+  assert.deepEqual(w.actions, [], '规划阶段不移动');
+});
+
+test('plan_route 目标与当前同格时按零段路线成功，而不是把 .7 当成非整数偏移', async (t) => {
+  const w = flatAdapter();
+  w.pos = { x: -0.3, y: 64, z: 0.7 };
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const spatial = fakeSpatial(map);
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: { x: -1, y: 64, z: 0 }, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.targetCell, { x: -1, y: 64, z: 0 });
+  assert.equal((r.data?.points as unknown[]).length, 1);
+  assert.match(r.summary, /0 段/);
+});
