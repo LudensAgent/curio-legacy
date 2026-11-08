@@ -8,6 +8,12 @@
  *
  * 查询只读：不观察、不移动、不加载 Section、不刷新证据时间、不写库。历史几何与
  * 观测证据都不代表当前可通行性；容器内容永远不进入空间库。
+ *
+ * Frontier（D-V4-026）：库 0.10.1-workflow.8 的 validator 已接受 additive `frontiers`，
+ * 但宿主没有 `frontierSource` 注入点，也没有 `WalkSearchSnapshot` 生产者
+ * （`plan_route` 的 `WalkRouteSearch` 是调用内局部变量）。因此宿主能力位固定 false，
+ * `{kind:"frontiers"}` 得到库的结构化 unsupported（精确缺失能力），而不是候选或空列表；
+ * 宿主不建影子地图/索引，也不在查询内启动搜索。真实接线见 DECISIONS。
  */
 import type { SpatialQueryResult, SpatialQueryStatus } from 'curio-minecraft-3d-memory';
 import { fail, ok, type Skill } from './types.ts';
@@ -55,6 +61,9 @@ const HOST_COMPOSED_CAPABILITIES = {
     resourceAnchors: true,
     containerAnchors: true,
     containerContents: false,
+    // D-V4-026：库 .8 接受该 kind，但宿主未注入 `frontierSource`（SharedSpatialSession
+    // 构造 SpatialMemoryStoreImpl 时没有该参数），也没有快照生产者；查询返回库的
+    // 结构化 unsupported，能力位如实为 false，不建第二张地图/索引或查询内搜索。
     frontiers: false,
   },
   plan: {
