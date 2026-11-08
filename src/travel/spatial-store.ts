@@ -1,7 +1,7 @@
 import type { JsonValue } from 'curio-minecraft-3d-memory';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { shortId } from '../util.ts';
-import type { SpatialSessionLike } from '../memory/spatial-backend.ts';
+import type { SpatialLibraryStores } from '../spatial/semantic-store.ts';
 import type { PortalEndpoint, PortalTraversal } from './store.ts';
 
 type EndpointKind = PortalEndpoint['kind'];
@@ -11,7 +11,7 @@ interface EndpointRecord extends PortalEndpoint {}
 const clone = <T>(value: T): T => structuredClone(value);
 const jsonRecord = (value: unknown) => JSON.parse(JSON.stringify(value)) as JsonValue;
 
-function endpoints(session: SpatialSessionLike, worldId: string): EndpointRecord[] {
+function endpoints(session: SpatialLibraryStores, worldId: string): EndpointRecord[] {
   const out: EndpointRecord[] = [];
   let after: string | undefined;
   for (let guard = 0; guard < 10_000; guard++) {
@@ -34,7 +34,7 @@ function endpoints(session: SpatialSessionLike, worldId: string): EndpointRecord
  * Endpoints stay as `endpoint` nodes; crossings stay raw in `portal_traversals`.
  */
 export class SpatialTravelStore {
-  constructor(private readonly session: SpatialSessionLike, private readonly worldId: string) {}
+  constructor(private readonly session: SpatialLibraryStores, private readonly worldId: string) {}
 
   get world(): string { return this.worldId; }
 
@@ -73,11 +73,11 @@ export class SpatialTravelStore {
 
   observe(state: AgentState, pos: Vec3Like, kind: EndpointKind, portalObserved = true): PortalEndpoint {
     if (!state.observationReady || !state.connected || !state.alive || ![pos.x, pos.y, pos.z].every(Number.isFinite)) throw new Error('A portal requires a live observation');
-    const all = endpoints(this.session, this.worldId);
+    const all = endpoints(this.session, state.worldId);
     const near = all.find((e) => e.worldId === state.worldId && e.dim === state.dim && e.kind === kind && Math.hypot(e.pos.x - pos.x, e.pos.y - pos.y, e.pos.z - pos.z) <= 4);
     const endpoint: EndpointRecord = near ?? {
       id: shortId('portal_'), worldId: state.worldId, dim: state.dim, pos: { ...pos }, kind,
-      portalObserved: false, observedAt: 0,
+      portalObserved, observedAt: 0,
     };
     if (near) {
       if (portalObserved) { near.pos = { ...pos }; near.portalObserved = true; }
@@ -90,7 +90,7 @@ export class SpatialTravelStore {
 
   record(fromId: string, toId: string, from: AgentState, to: AgentState) {
     if (!from.observationReady || !to.observationReady || !to.connected || !to.alive || from.worldId !== to.worldId || from.dim === to.dim || from.sessionId === to.sessionId) throw new Error('Unverified dimension transition');
-    const all = endpoints(this.session, this.worldId);
+    const all = endpoints(this.session, from.worldId);
     const source = all.find((e) => e.id === fromId && e.worldId === from.worldId);
     const destination = all.find((e) => e.id === toId && e.worldId === to.worldId);
     if (!source || !destination || source.dim !== from.dim || destination.dim !== to.dim) throw new Error('Portal scope does not match transition');
@@ -109,7 +109,7 @@ export class SpatialTravelStore {
 
   recordGateway(fromId: string, toId: string, from: AgentState, to: AgentState) {
     if (!from.observationReady || !to.observationReady || !to.connected || !to.alive || from.worldId !== to.worldId || from.dim !== 'the_end' || to.dim !== 'the_end' || from.sessionId !== to.sessionId || Math.hypot(from.pos.x - to.pos.x, from.pos.y - to.pos.y, from.pos.z - to.pos.z) < 48) throw new Error('Unverified End gateway teleport');
-    const all = endpoints(this.session, this.worldId);
+    const all = endpoints(this.session, from.worldId);
     const source = all.find((e) => e.id === fromId && e.worldId === from.worldId);
     const destination = all.find((e) => e.id === toId && e.worldId === to.worldId);
     if (source?.kind !== 'end_gateway' || destination?.kind !== 'end_gateway' || source.dim !== from.dim || destination.dim !== to.dim) throw new Error('Gateway scope does not match teleport');

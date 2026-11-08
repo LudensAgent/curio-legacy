@@ -14,6 +14,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 function fixture(duration = 2500) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), signal = new AbortController().signal;
   adapter.dim = 'the_end'; adapter.speed = 100000; adapter.inv.set('ender_pearl', 4);
+  memory.setWorld(adapter.state().worldId);
   const pos = { x: 3, y: 64, z: 0 };
   adapter.blocks.push({ name: 'end_gateway', pos });
   const endpoint = travelStore(memory).observe(adapter.state(), pos, 'end_gateway');

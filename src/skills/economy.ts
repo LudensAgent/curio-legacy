@@ -333,9 +333,9 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
   async run(ctx, args) {
     const state = ctx.adapter.state();
     if (args.target === undefined) {
-      const hints = ctx.memory.recallChests(args.item, { dim: state.dim, from: state.pos }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall, recall.dist) }));
+      const hints = ctx.memory.recallChests(args.item, { from: state.pos }).slice(0, 8).map((recall) => ({ dimension: recall.chest.dim, text: describeRecall(recall, recall.dist) }));
       const hintText = hints.length ? `；${hints.map((h) => h.text).join('；')}` : '；不记得哪个箱子里有它';
-      return fail('BAD_ARGS', `尚未指定翻哪只容器${hintText}；选定并重新看见后，用 target 指定这一只查看或取物`, { candidates: containerCandidates(ctx), hints });
+      return fail('BAD_ARGS', `尚未指定翻哪只容器（未自动搜索）${hintText}；选定并重新看见后，用 target 指定这一只查看或取物`, { candidates: containerCandidates(ctx), hints });
     }
     const selected = await selectedContainer(ctx, args.target);
     if (!selected.ok) return selected.result;

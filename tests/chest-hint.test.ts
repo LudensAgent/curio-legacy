@@ -69,14 +69,3 @@ test('起过名的箱子按名字说', () => {
   m.noteChestUse('overworld', hutPos, { put: [{ name: 'raw_iron', count: 9 }], seen: [{ name: 'raw_iron', count: 9 }], note: '放矿的', day: 1 });
   assert.match(chestHint(m, here, [{ item: 'raw_iron', count: 2 }]), /放矿的的?箱子 \(293,68,-369\)/);
 });
-
-test('旧版模糊印象加载后直接丢弃，内容等重新打开', () => {
-  const m = new WorldMemory(null) as any;
-  m.data.chests['default:overworld:1,2,3'] = { dim: 'overworld', pos: { x: 1, y: 2, z: 3 }, ts: Date.now(), items: [{ name: 'cobblestone', count: 344 }, { name: 'iron_ingot', count: 1 }] };
-  m.migrate();
-  const rec = m.chests()[0];
-  assert.equal(rec.items, undefined);
-  assert.equal(rec.traces, undefined);
-  assert.deepEqual(rec.contents.items, []);
-  assert.equal(rec.contents.possiblyStale, true);
-});

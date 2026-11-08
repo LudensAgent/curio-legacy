@@ -1,8 +1,5 @@
 import { storeItems } from '../src/skills/economy.ts';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { test } from 'node:test';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { habitName, learnCandidates, signatureOf } from '../src/brain/habits.ts';
@@ -33,27 +30,6 @@ const P = (over: Partial<Percept> = {}): Percept => ({
   ...over,
 });
 
-test('记忆迁移：旧版本穿墙得来的矿物地标被清掉，自己的家/箱子/路标保留', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mem-'));
-  const file = path.join(dir, 'world-memory.json');
-  fs.writeFileSync(file, JSON.stringify({
-    version: 1,
-    seen: { blocks: { iron_ore: 1 }, entities: {}, biomes: {} },
-    landmarks: [
-      { id: 'base', kind: 'base', label: '基地', dim: 'overworld', pos: { x: 0, y: 64, z: 0 }, ts: 1 },
-      { id: 'res_1', kind: 'resource', label: 'iron_ore', dim: 'overworld', pos: { x: -7, y: 44, z: 87 }, ts: 1 },
-      { id: 'dis_1', kind: 'discovery', label: 'spawner', dim: 'overworld', pos: { x: 5, y: 20, z: 5 }, ts: 1 },
-      { id: 'dis_2', kind: 'discovery', label: '我的箱子', dim: 'overworld', pos: { x: 2, y: 64, z: 0 }, ts: 1 },
-      { id: 'way_1', kind: 'waypoint', label: '路标 E-1', dim: 'overworld', pos: { x: 64, y: 70, z: 0 }, ts: 1 },
-    ],
-  }));
-  const m = new WorldMemory(file);
-  assert.equal(m.migrated, 2);
-  assert.deepEqual(m.landmarks().map((l) => l.id), ['base', 'dis_2', 'way_1']);
-  assert.equal(m.seenCount().blocks, 0);
-  m.flush();
-  assert.equal(new WorldMemory(file).migrated, 0, '迁移只做一次');
-});
 
 test('近处矿点看不到不等于消失：gather 失败，保留尚未重新确认的历史线索', async (t) => {
   const a = new FakeAdapter();

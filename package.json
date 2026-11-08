@@ -40,6 +40,8 @@
     "check:memory:local": "node --env-file=.env.local --import tsx scripts/check-memory.ts",
     "check:memory:live": "node --env-file=.env.live --import tsx scripts/check-memory.ts",
     "fixtures:spatial-pre-real": "tsx scripts/spatial-pre-real-fixtures.ts",
+    "spatial:normalize": "tsx scripts/spatial-normalize.ts",
+    "spatial:verify": "tsx scripts/verify-spatial-cutover.ts",
     "test": "tsx --test tests/*.test.ts",
     "world:seed": "tsx scripts/world-seed.ts",
     "agents:list": "tsx scripts/agents.ts list",

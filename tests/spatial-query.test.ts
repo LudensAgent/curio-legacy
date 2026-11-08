@@ -487,7 +487,7 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
   let shutdown: ShutdownResult | null = null;
   try {
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    svc.session.topology.saveNode({ id: 'n-chest', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(3, 64) } });
+    svc.session.topology.saveNode({ id: 'n-chest', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(3, 64) }, metadata: { curio: { v: 2, type: 'container' } } });
 
     const contents = await spatialQuery.run(ctxFor(svc), { kind: 'containerContents', dim: DIM });
     assert.equal(contents.status, 'succeeded');
@@ -501,10 +501,10 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     const anchors = await spatialQuery.run(ctxFor(svc), { kind: 'containerAnchors', dim: DIM });
     assert.equal(anchors.status, 'succeeded');
     const anchorsEnvelope = envelopeOf(anchors);
-    assert.equal(anchorsEnvelope.status, 'unsupported');
-    assert.equal(rec(anchorsEnvelope.problem).kind, 'unsupported');
-    assert.equal(rec(anchorsEnvelope.problem).query, 'containerAnchors');
-    assert.equal(anchorsEnvelope.data, undefined, '没有分类器时不按节点名猜测容器');
+    assert.equal(anchorsEnvelope.status, 'ok');
+    const anchorPage = rec(anchorsEnvelope.data) as { total: number; items: Record<string, unknown>[] };
+    assert.equal(anchorPage.total, 1);
+    assert.equal(rec(anchorPage.items[0]).id, 'n-chest');
 
     const capabilities = await spatialQuery.run(ctxFor(svc), { kind: 'capabilities' });
     assert.equal(capabilities.status, 'succeeded');
@@ -516,7 +516,7 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     const queryCaps = rec(report.query);
     assert.equal(queryCaps.cells, true);
     assert.equal(queryCaps.components, true);
-    assert.equal(queryCaps.containerAnchors, false);
+    assert.equal(queryCaps.containerAnchors, true);
     assert.equal(queryCaps.containerContents, false);
 
     // 双报告：库信封与 capabilities 形状原样；宿主组合能力单独标注 owner。

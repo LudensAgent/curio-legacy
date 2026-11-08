@@ -282,14 +282,22 @@ if (evidenceFile) process.on('exit', () => fs.writeFileSync(evidenceFile, JSON.s
   const probeScript = path.join(dir, 'memory-hook-probe.mts');
   const probeEvidence = path.join(dir, 'memory-hook-probe.json');
   const eventsUrl = pathToFileURL(path.join(PROJECT, 'src', 'events.ts')).href;
+  const inMemoryUrl = pathToFileURL(path.join(PROJECT, 'src', 'spatial', 'in-memory.ts')).href;
+  const containersUrl = pathToFileURL(path.join(PROJECT, 'src', 'memory', 'container-ledger.ts')).href;
+  const semanticUrl = pathToFileURL(path.join(PROJECT, 'src', 'spatial', 'semantic-store.ts')).href;
   fs.writeFileSync(probeScript, `
 import path from 'node:path';
 import { WorldMemory } from ${JSON.stringify(storeUrl)};
 import { EpisodicMemory } from ${JSON.stringify(episodicUrl)};
 import { EventBus } from ${JSON.stringify(eventsUrl)};
+import { createInMemoryLibraryStores } from ${JSON.stringify(inMemoryUrl)};
+import { ContainerLedger } from ${JSON.stringify(containersUrl)};
+import { SpatialSemanticStore } from ${JSON.stringify(semanticUrl)};
 
 const dir = process.env.CHILD_PROBE_DIR;
-const memory = new WorldMemory(path.join(dir, 'world-memory.json'));
+const worldId = 'probe';
+const semantic = new SpatialSemanticStore(createInMemoryLibraryStores(worldId), new ContainerLedger(null, worldId), { worldId });
+const memory = new WorldMemory(path.join(dir, 'world-memory.json'), { semantic });
 const episodic = new EpisodicMemory(
   { provider: 'local', worldId: 'probe', agentId: 'probe', baseUrl: '', apiKey: '', bankId: '', timeoutMs: 1000, maxContextBytes: 1024 },
   memory,
