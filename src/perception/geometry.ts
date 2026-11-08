@@ -134,6 +134,9 @@ export function estimatedFallDamage(drop: number): number {
 /**
  * 站在这列时的实际脚高（世界 Y）：优先取脚格里薄层（半砖/雪/地毯/床）的顶面，
  * 否则取脚下一格的支撑顶面。没有已观察的承重面返回 null。
+ *
+ * cell 必须是方块格坐标（y 为整数格号），不是连续脚高；调用方要先用 feetCell()
+ * 把实测脚位或目标脚高换算成脚所在格，否则分数 y 会被当成格坐标再算一次顶面。
  */
 export function footSurfaceY(cell: Vec3Like, at: StateAt): number | null {
   const inCell = supportSurfaceTop(cell, at(cell));
