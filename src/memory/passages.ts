@@ -514,6 +514,8 @@ export interface PassageRouteInspection {
   hop: number;
   heal: boolean;
   nearest?: Vec3Like;
+  /** nearest 是否由 Dijkstra 证明从起点可达；from/to 离记录太远时为 false（只是最近记录点）。 */
+  nearestReachable?: boolean;
   reason?: 'empty' | 'from_far_from_records' | 'to_far_from_records' | 'disconnected' | 'disallowed_transition';
   /** disallowed_transition 时，被 allowed 排除的第一段事实。 */
   rejectedLeg?: PassageRouteLeg;
@@ -555,24 +557,26 @@ export function passageRouteInspection(
   const closest = (p: Vec3Like) => {
     let best = -1, bd = Infinity;
     nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });
-    return bd <= near ? { index: best, distance: bd } : null;
+    return { index: best, distance: bd };
   };
-  const fromHit = closest(from), toHit = closest(to);
+  const fromNear = closest(from), toNear = closest(to);
+  const fromHit = fromNear.distance <= near ? fromNear : null;
+  const toHit = toNear.distance <= near ? toNear : null;
   const snapped = {
     from: fromHit === null ? { ...from } : { ...nodes[fromHit.index]! },
     to: toHit === null ? { ...to } : { ...nodes[toHit.index]! },
     fromDistance: fromHit?.distance ?? null,
     toDistance: toHit?.distance ?? null,
   };
-  const nearestNode = (p: Vec3Like) => nodes.reduce((winner, node) => d3(node, p) < d3(winner, p) ? node : winner, nodes[0]!);
-  const gap = (reason: PassageRouteInspection['reason'], nearest?: Vec3Like, rejectedLeg?: PassageRouteLeg): PassageRouteInspection => ({
+  const gap = (reason: PassageRouteInspection['reason'], nearest?: Vec3Like, rejectedLeg?: PassageRouteLeg, nearestReachable?: boolean): PassageRouteInspection => ({
     status: 'gap', waypoints: [], legs: [], snapped, near, hop, heal,
     ...(nearest === undefined ? {} : { nearest }), ...(reason === undefined ? {} : { reason }),
     ...(rejectedLeg === undefined ? {} : { rejectedLeg }),
+    ...(nearestReachable === undefined ? {} : { nearestReachable }),
   });
   if (nodes.length === 0) return gap('empty');
-  if (fromHit === null) return gap('from_far_from_records', nearestNode(from));
-  if (toHit === null) return gap('to_far_from_records', nearestNode(to));
+  if (fromHit === null) return gap('from_far_from_records', nodes[fromNear.index], undefined, false);
+  if (toHit === null) return gap('to_far_from_records', nodes[toNear.index], undefined, false);
   const a = fromHit.index, b = toHit.index;
   if (a === b) return { status: 'route', waypoints: [{ ...nodes[a]! }], legs: [], snapped, near, hop, heal };
 
@@ -641,7 +645,7 @@ export function passageRouteInspection(
     if (raw.dist[b] !== Infinity) {
       const rawRoute = reconstruct(raw.prev, b);
       const offending = rawRoute.slice(1).map((v, i) => legInfo(rawRoute[i]!, v)).find((leg) => leg.transitions.some((transition) => !allowed.has(transition)));
-      return gap('disallowed_transition', offending?.from ?? nodes[a], offending);
+      return gap('disallowed_transition', offending?.from ?? nodes[a], offending, true);
     }
     const all = graphShortest(nodes, filtered, a, -1, blocked);
     // 旧 passageRoute：目标附近换一个真正可达的节点（兼容行为，只在显式开启时用）。
@@ -656,7 +660,7 @@ export function passageRouteInspection(
         nodes.forEach((q, i) => {
           if (all.dist[i] !== Infinity) { const d = d3(q, to); if (d < nd) { nd = d; nearest = i; } }
         });
-        return gap('disconnected', nearest < 0 ? undefined : nodes[nearest]);
+        return gap('disconnected', nearest < 0 ? undefined : nodes[nearest], undefined, true);
       }
     } else {
       // 新查询：目标分量不连通就如实报缺口，不悄悄改到附近另一个点。
@@ -664,7 +668,7 @@ export function passageRouteInspection(
       nodes.forEach((q, i) => {
         if (all.dist[i] !== Infinity) { const d = d3(q, to); if (d < nd) { nd = d; nearest = i; } }
       });
-      return gap('disconnected', nearest < 0 ? undefined : nodes[nearest]);
+      return gap('disconnected', nearest < 0 ? undefined : nodes[nearest], undefined, true);
     }
   }
   const route = reconstruct(prev, target);

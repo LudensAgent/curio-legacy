@@ -150,16 +150,21 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
 }
 
+/** 一组动作的 user 提醒行：名字 + 一句用途，完整参数用 moves 查。 */
+function purposeLine(label: string, names: string[]): string {
+  return names.length ? `${label}：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
+}
+
 /** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
 export function advancedMovesLine(): string {
-  const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
-  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
+  return purposeLine('进阶动作可用（参数用 moves 查）', Object.values(SKILLS)
+    .filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name));
 }
 
 /** 空间记忆查询：按情境补在 user 消息末尾，不占静态 system 目录。 */
 export function memoryMovesLine(): string {
-  const names = Object.values(SKILLS).filter((s) => MEMORY_MOVES.has(s.name) && !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name));
-  return names.length ? `空间记忆查询/回程规划可用（参数用 moves 查）：${names.map((s) => `${s.name}（${briefOf(s.description, 14)}）`).join('、')}` : '';
+  return purposeLine('空间记忆查询/回程规划可用（参数用 moves 查）', Object.values(SKILLS)
+    .filter((s) => MEMORY_MOVES.has(s.name) && !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name)).map((s) => s.name));
 }
 
 /**

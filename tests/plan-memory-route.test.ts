@@ -137,6 +137,7 @@ test('plan_memory_route：maxWaypoints 截断、snapRadius 命不中、目标/�
   assert.equal(farFrom.data?.status, 'gap');
   assert.equal(farFrom.data?.reason, 'from_far_from_records');
   assert.deepEqual(farFrom.data?.nearest, at(1, 64, 0));
+  assert.equal(farFrom.data?.nearestReachable, false);
 
   const { spatial: farToSpatial } = fakeSpatial([[fragment('near', [at(0, 64, 0), at(1, 64, 0)])]]);
   const { ctx: farToCtx } = ctxOf(farToSpatial);
@@ -144,6 +145,7 @@ test('plan_memory_route：maxWaypoints 截断、snapRadius 命不中、目标/�
   assert.equal(farTo.data?.status, 'gap');
   assert.equal(farTo.data?.reason, 'to_far_from_records');
   assert.deepEqual(farTo.data?.nearest, at(1, 64, 0));
+  assert.equal(farTo.data?.nearestReachable, false);
 });
 
 test('plan_memory_route：maxPoints 截断如实报告；参数边界与只读', async () => {
@@ -151,6 +153,7 @@ test('plan_memory_route：maxPoints 截断如实报告；参数边界与只读',
   const { ctx, w } = ctxOf(spatial);
   const truncated = await planMemoryRoute.run(ctx, { to: at(2, 64, 0), from: at(0, 64, 0), maxPoints: 1 });
   assert.equal(truncated.data?.status, 'gap');
+  assert.equal(truncated.data?.reason, 'truncated');
   assert.equal(truncated.data?.truncated, true);
   assert.deepEqual(w.actions, []);
   const adapter = new FakeAdapter();

@@ -608,6 +608,20 @@ test('dug 路线：fragment/traversal/拓扑使用 dug 命名空间与 excavate 
   assert.ok(traversals.every((traversal) => traversal.actionId === 'action-1'));
 });
 
+test('dug 路线：垂直下坠/上爬写 DROP/CLIMB 与对应 modes', async (t) => {
+  const { svc, dir } = await openEvidenceSession();
+  t.after(async () => { await closeEvidenceSession(svc, dir); });
+  const points = [{ x: 0, y: 64, z: 0 }, { x: 0, y: 62, z: 0 }, { x: 0, y: 64, z: 0 }];
+  const fragment: PathFragment = { ...corridorFragment('dug:vertical', points), kind: 'dug' };
+  const segments = corridorSegments(points, fragment.id).map(({ mode: _mode, ...segment }) => ({ ...segment, source: 'confirmed_excavate_run' }));
+  assert.equal(svc.recordRouteCorridor({ fragment, segments }).status, 'written');
+  const edges = edgesOf(svc).items;
+  assert.deepEqual(
+    edges.map((edge) => [edge.type, edge.modes]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    [['CLIMB', ['climb']], ['DROP', ['drop']]],
+  );
+});
+
 test('dug 路线能力 false：recordRouteCorridor 失败关闭，不写历史', async (t) => {
   const { svc, dir } = await openEvidenceSession();
   t.after(async () => { await closeEvidenceSession(svc, dir); });
