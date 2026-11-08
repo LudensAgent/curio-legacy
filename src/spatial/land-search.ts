@@ -44,6 +44,12 @@ export interface LandSearchRequest {
   maxNodes?: number;
   /** 默认 8192。 */
   maxEdges?: number;
+  /** Absolute epoch-ms deadline shared across passes. Overrides maxSearchMs. */
+  deadlineMs?: number;
+  /** Wall-clock budget when no absolute deadline; default 1500 ms. */
+  maxSearchMs?: number;
+  /** Clock used only for the time budget/duration; defaults to Date.now. */
+  clock?: () => number;
   rules: LandRules;
   /** true 时用历史体素（含过期证据）做几何推导；输出必须标记为历史路线。 */
   allowStale?: boolean;
@@ -72,6 +78,18 @@ export interface LandSearchResult {
     unsupportedEdges: number;
     maxNodes: number;
     maxEdges: number;
+    maxSearchMs: number;
+    durationMs: number;
+    /** Why the search stopped at a bound; null when it finished on its own. */
+    cancelReason: 'signal' | 'time' | 'nodes' | 'edges' | null;
+    /** Distinct Sections read during this pass. */
+    visitedSections: number;
+    /** Calls that returned a Section view (live or snapshot). */
+    sectionReads: number;
+    /** `sectionAt` deep-copy calls; expected 0 after the SectionRef fix. */
+    snapshotCount: number;
+    /** `cellAt` evidence clones (one per cell read). */
+    cloneCount: number;
   };
 }
 
@@ -89,6 +107,8 @@ export interface LandRouteVerification {
 }
 
 const EPS = 1e-9;
+/** Default wall-clock cap for one search pass; callers may share a shorter deadline. */
+export const DEFAULT_LAND_SEARCH_MS = 1500;
 const DANGER = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'cobweb', 'pointed_dripstone']);
 const cell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
 const pointEqual = (a: Vec3Like, b: Vec3Like) => Math.abs(a.x - b.x) <= EPS && Math.abs(a.y - b.y) <= EPS && Math.abs(a.z - b.z) <= EPS;
@@ -262,6 +282,40 @@ function historicalMapView(map: VoxelMap, sessionId: string, now: number): Voxel
 }
 
 /**
+ * Read-only wrapper that counts Section views and per-cell evidence clones. It
+ * delegates to the live map and never writes; evaluators only need these six
+ * entry points. Counters make the deep-copy regression observable.
+ */
+function trackLandReads(
+  map: VoxelMap,
+  visited: Set<string>,
+  stats: { sectionReads: number; snapshotCount: number; cloneCount: number },
+): VoxelMap {
+  const keyOfSection = (dim: string, x: number, y: number, z: number): string =>
+    `${dim}|${x >> 4},${y >> 4},${z >> 4}`;
+  return {
+    worldId: map.worldId,
+    sectionRef: (dim: string, x: number, y: number, z: number) => {
+      stats.sectionReads += 1;
+      visited.add(keyOfSection(dim, x, y, z));
+      return map.sectionRef(dim, x, y, z);
+    },
+    sectionAt: (dim: string, x: number, y: number, z: number) => {
+      stats.sectionReads += 1;
+      stats.snapshotCount += 1;
+      visited.add(keyOfSection(dim, x, y, z));
+      return map.sectionAt(dim, x, y, z);
+    },
+    cellAt: (dim: string, x: number, y: number, z: number) => {
+      stats.cloneCount += 1;
+      return map.cellAt(dim, x, y, z);
+    },
+    sectionResidency: (key) => map.sectionResidency(key),
+    residencyGeneration: (dim, cx, cz, sy) => map.residencyGeneration(dim, cx, cz, sy),
+  } as unknown as VoxelMap;
+}
+
+/**
  * 在已观测 VoxelMap 上做有界 3D A*：节点是脚格，边是 walk（同高 ±1 X/Z）、
  * step（上一级 ±1 X/Z）、drop（下一格到 maxDrop 格、±1 X/Z）。
  * 默认只走当前证据 OPEN 的边；allowStale 时允许用历史体素推导候选路线，
@@ -270,9 +324,18 @@ function historicalMapView(map: VoxelMap, sessionId: string, now: number): Voxel
 export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now = Date.now()): LandSearchResult {
   const evidenceMode = request.allowStale === true ? 'historical' as const : 'current' as const;
   const assurance = evidenceMode === 'historical' ? 'historical_geometry' as const : 'geometry_only' as const;
-  const traversability = evidenceMode === 'historical' ? historicalMapView(map, request.sessionId, now) : map;
   const maxNodes = request.maxNodes ?? 2048;
   const maxEdges = request.maxEdges ?? 8192;
+  const maxSearchMs = request.maxSearchMs ?? DEFAULT_LAND_SEARCH_MS;
+  if (!Number.isFinite(maxSearchMs) || maxSearchMs <= 0) {
+    throw new Error(`maxSearchMs must be a positive finite number: ${String(maxSearchMs)}`);
+  }
+  if (request.deadlineMs !== undefined && !Number.isFinite(request.deadlineMs)) {
+    throw new Error(`deadlineMs must be a finite epoch time: ${String(request.deadlineMs)}`);
+  }
+  const clock = request.clock ?? Date.now;
+  const startedAt = clock();
+  const deadlineMs = request.deadlineMs ?? startedAt + maxSearchMs;
   const maxDrop = request.maxDrop ?? 4;
   const limits = resolveLandLimits();
   const start = request.body.feet;
@@ -285,18 +348,33 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   const targetCell = { x: Math.floor(request.to.x), z: Math.floor(request.to.z) };
   // 站立格目标的 y 可能写的是方块 y 或略偏；吸附到该列真实可站立顶面
   // （半砖/雪层/台阶/箱子顶），不按整数层硬套。容器/门/床仍应由 go_near 处理。
-  const targetSurfaces = standableSurfaces(map, request.dim, targetCell.x, targetCell.z, request.to.y, 2, 2);
+  const visitedSections = new Set<string>();
+  const stats = {
+    nodesExpanded: 0, edgesEvaluated: 0, openEdges: 0, blockedEdges: 0, unknownEdges: 0,
+    staleEdges: 0, unsupportedEdges: 0, maxNodes, maxEdges, maxSearchMs, durationMs: 0,
+    cancelReason: null as 'signal' | 'time' | 'nodes' | 'edges' | null,
+    visitedSections: 0, sectionReads: 0, snapshotCount: 0, cloneCount: 0,
+  };
+  const baseMap = trackLandReads(map, visitedSections, stats);
+  const traversability = evidenceMode === 'historical' ? historicalMapView(baseMap, request.sessionId, now) : baseMap;
+  const finishStats = (): void => {
+    stats.durationMs = Math.max(0, clock() - startedAt);
+    stats.visitedSections = visitedSections.size;
+  };
+  const stopReason = (): 'signal' | 'time' | null =>
+    request.signal?.aborted === true ? 'signal' : clock() >= deadlineMs ? 'time' : null;
+  const targetSurfaces = standableSurfaces(baseMap, request.dim, targetCell.x, targetCell.z, request.to.y, 2, 2);
   const targetY = targetSurfaces.length === 0 ? request.to.y
     : targetSurfaces.reduce((best, surface) => Math.abs(surface.y - request.to.y) < Math.abs(best - request.to.y) ? surface.y : best, targetSurfaces[0]!.y);
   const resolvedTarget: Vec3Like = { x: targetCell.x + 0.5, y: targetY, z: targetCell.z + 0.5 };
   const stanceFor = (x: number, y: number, z: number): Vec3Like => ({ x: x + 0.5, y, z: z + 0.5 });
   const heuristic = (x: number, y: number, z: number) =>
     Math.abs(x - targetCell.x) + Math.abs(z - targetCell.z) + Math.abs(y - targetY) * 2;
-  const stats = { nodesExpanded: 0, edgesEvaluated: 0, openEdges: 0, blockedEdges: 0, unknownEdges: 0, staleEdges: 0, unsupportedEdges: 0, maxNodes, maxEdges };
   const boundaries: LandSearchBoundary[] = [];
 
   const startKey = keyOf(startCell.x, start.y, startCell.z);
   if (startCell.x === targetCell.x && startCell.z === targetCell.z && Math.abs(start.y - targetY) <= EPS) {
+    finishStats();
     return { status: 'FOUND', assurance, evidenceMode, executable: false, points: [{ ...startStance }], transitions: [], boundaries, cost: 0, resolvedTarget: { ...startStance }, stats };
   }
 
@@ -310,19 +388,32 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   let budget = false;
 
   while (open.size > 0) {
-    if (request.signal?.aborted) return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+    const stopped = stopReason();
+    if (stopped !== null) {
+      if (stopped === 'signal') {
+        stats.cancelReason = 'signal';
+      } else {
+        budget = true;
+        stats.cancelReason = 'time';
+      }
+      if (stopped === 'signal') {
+        finishStats();
+        return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+      }
+      break;
+    }
     const head = open.pop()!;
     const node = nodes.get(head.key);
     if (node === undefined) continue;
     if ((best.get(head.key) ?? Infinity) < node.g) continue;
     if (node.cx === targetCell.x && node.cz === targetCell.z && Math.abs(node.cy - targetY) <= EPS) { found = head.key; break; }
     stats.nodesExpanded += 1;
-    if (stats.nodesExpanded >= maxNodes) { budget = true; break; }
+    if (stats.nodesExpanded >= maxNodes) { budget = true; stats.cancelReason = 'nodes'; break; }
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const nx = node.cx + dx, nz = node.cz + dz;
       // 候选高度来自这一列真实可站立面，而不是 node.cy ± 整数：
       // 这样半砖 0.5、雪层 0.875、台阶/箱子顶、0<drop<1 都能成为边。
-      const surfaces = standableSurfaces(map, request.dim, nx, nz, node.cy, maxDrop, 1.01);
+      const surfaces = standableSurfaces(baseMap, request.dim, nx, nz, node.cy, maxDrop, 1.01);
       const candidates: { kind: LandSearchKind; ny: number; drop: number; cost: number }[] = [];
       for (const surface of surfaces) {
         const dy = surface.y - node.cy;
@@ -340,7 +431,16 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
         });
       }
       for (const candidate of candidates) {
-        if (stats.edgesEvaluated >= maxEdges) { budget = true; break; }
+        if (stats.edgesEvaluated >= maxEdges) { budget = true; stats.cancelReason = 'edges'; break; }
+        const edgeStop = stopReason();
+        if (edgeStop !== null) {
+          if (edgeStop === 'signal') {
+            stats.cancelReason = 'signal';
+            finishStats();
+            return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+          }
+          budget = true; stats.cancelReason = 'time'; break;
+        }
         const to = nx === targetCell.x && nz === targetCell.z && Math.abs(candidate.ny - targetY) <= EPS
           ? { ...resolvedTarget }
           : stanceFor(nx, candidate.ny, nz);
@@ -351,7 +451,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
         else if (check.status === 'UNKNOWN' || check.status === 'INCOMPLETE') stats.unknownEdges += 1;
         else if (check.status === 'STALE') stats.staleEdges += 1;
         else stats.unsupportedEdges += 1;
-        if (!safe(check, map, request.dim, to)) {
+        if (!safe(check, baseMap, request.dim, to)) {
           if (boundaries.length < 64) boundaries.push({ from: { ...node.stance }, to, kind: candidate.kind, status: check.status, ...(check.reason === undefined ? {} : { reason: check.reason }) });
           continue;
         }
@@ -372,6 +472,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     // STALE 和 UNKNOWN 都是“证据不足”，不是“已观测地形断连”。把 stale 当成
     // NO_PATH 会让上层误报“没有路”，其实只需要重新观察刷新证据。
     const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : (stats.unknownEdges > 0 || stats.staleEdges > 0) ? 'UNKNOWN' : 'NO_PATH';
+    finishStats();
     return { status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
   }
 
@@ -385,6 +486,7 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     if (node.via !== null) transitions.unshift(node.via);
     cursor = node.parent;
   }
+  finishStats();
   return {
     status: 'FOUND', assurance, evidenceMode, executable: false, points, transitions, boundaries,
     cost: nodes.get(found)!.g, resolvedTarget, stats,

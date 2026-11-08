@@ -20,6 +20,8 @@ import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillR
 
 type Scope = { worldId: string; dim: string; sessionId: string };
 type RouteSource = 'auto' | 'search' | 'memory' | 'spatial';
+/** Shared wall-clock budget for the strict + historical 3D A* passes. */
+const SPATIAL_SEARCH_MS = 2500;
 type PlanArgs = {
   to: Vec3Like;
   mode: 'walk';
@@ -309,7 +311,7 @@ export function landSearchSteps(result: LandSearchResult) {
   });
 }
 
-function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal) {
+function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal, deadlineMs: number) {
   const request = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: BODY.width, height: BODY.height, pose: BODY.pose },
@@ -317,6 +319,7 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
     maxDrop: 4,
     rules: walkLandRules,
     signal,
+    deadlineMs,
   };
   // 先用当前证据；找不到时再用历史体素试一次。历史路线只作为候选，
   // 逐段用真实当前证据复验，执行时仍由 move_step/descend_to 核实。
@@ -347,7 +350,9 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
         ? '历史体素里也没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
         : '已观察地形里没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
       : result.status === 'BUDGET_EXHAUSTED'
-        ? '搜索预算耗尽，先规划更近的一段'
+        ? result.stats.cancelReason === 'time'
+          ? `搜索时间预算耗尽（${result.stats.durationMs}ms / ${SPATIAL_SEARCH_MS}ms），先规划更近的一段或走近再试`
+          : `搜索节点/边预算耗尽（${result.stats.durationMs}ms），先规划更近的一段`
         : '先规划更近的一段，或走近/看清后再试';
   const routeLabel = result.evidenceMode === 'historical' ? '历史体素路线（含过期证据，当前可通行性未知）' : '空间 3D 路线';
   const verification = result.verification;
@@ -362,7 +367,9 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
       source: 'spatial', backend: 'spatial_voxel_search',
       assurance: result.assurance, evidenceMode: result.evidenceMode, currentPassability: 'UNKNOWN', executable: false,
       points: result.points, transitions: result.transitions, steps: result.status === 'FOUND' ? steps : [],
-      boundaries: result.boundaries, cost: result.cost, resolvedTarget: result.resolvedTarget, stats: result.stats,
+      boundaries: result.boundaries, cost: result.cost, resolvedTarget: result.resolvedTarget,
+      stats: result.stats, budgetMs: SPATIAL_SEARCH_MS, searchMs: result.stats.durationMs,
+      cancelReason: result.stats.cancelReason,
       ...(verification === undefined ? {} : { verification }),
     },
   };
@@ -451,7 +458,7 @@ export const planRoute: Skill<PlanArgs> = {
       if (!spatial.session?.voxel) {
         if (args.source === 'spatial') return fail('NOT_CONNECTED', 'plan_route source:"spatial" 需要共享空间 VoxelMap');
       } else {
-        const candidate = spatialRoute(spatial, state, stance, ctx.signal);
+        const candidate = spatialRoute(spatial, state, stance, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
         const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
         if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
         if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };

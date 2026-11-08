@@ -1,0 +1,27 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.10.1-workflow.6"
+  },
+  "sourceHEAD": "6ddfd55367cdba53af604e4062f7c6b0feae7445",
+  "artifactSHA256": "52919b2c99fe66fc901907056474e424311fe51ba2a94120891a0b8d3e3f22b2",
+  "npmIntegrity": "sha512-ZOGgIlrC2eTqBOQ2hOI8Jj0no6dGHe5VrQbykeL5q10AcRYW8QcF6xq3TU6ez1YNCSPYBdWtDKhJcmEps+yKUg==",
+  "artifact": "curio-minecraft-3d-memory-0.10.1-workflow.6.tgz",
+  "artifactSize": 673045,
+  "sourceBinding": {
+    "clean": true,
+    "head": "6ddfd55367cdba53af604e4062f7c6b0feae7445",
+    "note": "Built from a clean detached worktree at sourceHEAD. package.json version was temporarily set to 0.10.1-workflow.6 for packing and restored; package-lock.json was restored too."
+  },
+  "verification": {
+    "build": { "status": "PASS", "command": "npm run build" },
+    "typecheck": { "status": "PASS", "command": "npx tsc --noEmit" },
+    "focusedTests": {
+      "status": "PASS",
+      "command": "npx vitest run tests/land-transition.test.ts tests/land-route.test.ts --reporter=dot",
+      "knownNoise": "The repository vitest invocation also collects copies under .claude/worktrees; all passed."
+    }
+  },
+  "contract": "memory-host-contract/1 (unchanged)",
+  "notes": "Land transition reads live SectionRefs and copies only escaping evidence; replaces the host postinstall patch for this path. Real Minecraft integration (H-01) was not run."
+}
