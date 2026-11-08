@@ -4,6 +4,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity, nextStep } from '../src/mind/activity.ts';
 import { parseDecision, validateDraft } from '../src/mind/thinker.ts';
 import { SKILLS } from '../src/skills/index.ts';
+import { validateSkill } from '../src/skills/types.ts';
 import { makeCtx, observeAllBlocks, TestWorld } from './survival-helpers.ts';
 
 test('the recorded north narrative with explicit south steps is rejected until the activity declares its frame', (t) => {
@@ -86,6 +87,25 @@ test('changing the frame, backward steps, world coordinates, and vertical work r
   const invalid = validateDraft({ what: '错误坐标方向', facing: 'NE', steps: [{ skill: 'look_around' }] }, adapter, memory, []);
   assert.ok('error' in invalid);
   assert.match(invalid.error, /facing 必须是 N\/E\/S\/W/);
+});
+
+test('excavate_run 规范化后不再携带内部 entry，派发时的第二次校验仍能通过', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  const draft = validateDraft({ what: '朝东开上行阶梯', steps: [
+    { skill: 'excavate_run', args: { mode: 'stairs_up', direction: 'east', steps: 2 } },
+  ] }, adapter, memory, []);
+  assert.ok(!('error' in draft), JSON.stringify(draft));
+  const step = draft.steps[0];
+  assert.equal('entry' in (step.args as Record<string, unknown>), false, 'activity 不能保存内部注入的 entry');
+  const dispatch = validateSkill(SKILLS.excavate_run, step.args, adapter);
+  assert.ok(dispatch.ok, !dispatch.ok ? dispatch.error : '');
+  // 参数写错时只报 mode/direction/steps，不再用 entry 误导模型。
+  const bad = validateDraft({ what: '方向写错', steps: [
+    { skill: 'excavate_run', args: { direction: 'down' } },
+  ] }, adapter, memory, []);
+  assert.ok('error' in bad);
+  assert.doesNotMatch(bad.error, /entry/);
 });
 
 test('a queued next activity keeps its own declared frame and cannot borrow the current one', (t) => {

@@ -17,7 +17,8 @@ function botWith(name: string, ms: number, items: { name: string; type: number }
     entity: { position: new Vec3(0, 64, 0), onGround: true, isInWater: false, effects: {} },
     heldItem: null, inventory: { items: () => items }, game: { dimension: 'overworld' },
     blockAt: () => block, canDigBlock: () => true,
-    equip: async () => {}, unequip: async () => {},
+    // 真实 equip 会把物品放到主手；掉落判定要按装备后的实际手持算。
+    equip: async (it: any) => { bot.heldItem = it; }, unequip: async () => { bot.heldItem = null; },
     dig: async () => { dug.push(name); }, stopDigging() {},
   };
   return { bot, dug };

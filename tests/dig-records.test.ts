@@ -154,12 +154,32 @@ test('dig(opts.tool)：背包没有指定工具 → TOOL_MISSING，不换别的�
   assert.deepEqual(used, []);
 });
 
-test('dig(opts.tool)：指定工具挖不动该方块 → TOOL_MISSING', async () => {
+test('dig(opts.tool)：指定工具采不到掉落仍会挖开，并如实回报 noDrop', async () => {
   const { bot, used } = digBot(stone(), [{ name: 'iron_axe', type: 258, count: 1 }]);
   const r = await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal, { tool: 'iron_axe' });
+  assert.equal(r.ok, true);
+  assert.equal(r.noDrop, true);
+  assert.deepEqual(used, ['iron_axe']);
+});
+
+test('dig(opts.tool)：noDrop 按实际手持算，不因背包里有镐而误报有掉落', async () => {
+  const { bot, used } = digBot(stone(), [{ name: 'iron_axe', type: 258, count: 1 }, { name: 'iron_pickaxe', type: 257, count: 1 }]);
+  const r = await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal, { tool: 'iron_axe' });
+  assert.equal(r.ok, true);
+  assert.equal(r.noDrop, true);
+  assert.deepEqual(used, ['iron_axe'], '只用手持的斧头，不用背包里能采集的镐');
+});
+
+test('dig(opts.tool)：预计耗时超出动作预算 → HAND_DIG_TIMEOUT，不实际挖', async () => {
+  const slow = (): FakeBlock => ({
+    name: 'obsidian', position: { x: 1, y: 64, z: 0 }, diggable: true,
+    harvestTools: { 871: true }, digTime: () => 60000,
+  });
+  const { bot, used } = digBot(slow(), [{ name: 'iron_axe', type: 258, count: 1 }]);
+  const r = await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal, { tool: 'iron_axe' });
   assert.equal(r.ok, false);
-  assert.match(r.reason ?? '', /TOOL_MISSING.*iron_axe/);
-  assert.deepEqual(used, []);
+  assert.match(r.reason ?? '', /HAND_DIG_TIMEOUT/);
+  assert.deepEqual(used, [], '预算不够时不发起挖掘');
 });
 
 test('dig(opts.tool)：软方块（泥土）照指定用铁镐，不被换成更快的铁锹；不传时保持自动挑最快', async () => {

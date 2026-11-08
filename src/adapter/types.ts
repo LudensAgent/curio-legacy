@@ -463,8 +463,9 @@ export interface GameAdapter {
   portalStance?(pos: Vec3Like): Vec3Like | null;
   bossStatus?(): { dragonDeath: BossDeathObservation | null };
   /**
-   * 挖一格。opts.tool 给具体物品名时只准用这一把：背包没有或它挖不动这块 → TOOL_MISSING，
-   * 不换别的工具、不退回空手；opts.handOnly 为 true 时只用当前手持（空手就空手挖），不从背包换工具；
+   * 挖一格。opts.tool 给具体物品名时只准用这一把：背包没有 → TOOL_MISSING，不换别的工具、不退回空手；
+   * 它采不到这块的掉落但仍能挖开时，照常挖开并返回 noDrop（清路不需要掉落）；预计耗时超过动作预算才 HAND_DIG_TIMEOUT。
+   * opts.handOnly 为 true 时只用当前手持（空手就空手挖），不从背包换工具；
    * 两者都不传沿用自动换手：手上能挖就用，不能才按上次亲手选的同种工具→最快工具。
    */
   dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null; handOnly?: boolean }): Promise<ActionResult>;
