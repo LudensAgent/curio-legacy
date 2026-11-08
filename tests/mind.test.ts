@@ -1222,7 +1222,8 @@ test('再次决策时提供附近实际失败动作的参数、结果、位置�
   let current = JSON.parse(w.pending.at(-1)!.messages[1].content.split('\n').find((line) => line.startsWith('【此刻】'))!.slice('【此刻】'.length));
   assert.equal(current.recent_action_failures.note, '动作结束时的实际反馈，位置和环境可能随后改变');
   assert.deepEqual(current.recent_action_failures.entries[0], { skill: 'mind_step', args: { n: 3 }, failure_code: 'BAD_ARGS',
-    summary: '目标脚下是 air', position, observed_at: current.recent_action_failures.entries[0].observed_at });
+    summary: '目标脚下是 air', position, observed_at: current.recent_action_failures.entries[0].observed_at,
+    scope: 'step', implication: '这次失败只否定这个动作/落点，不否定其他方向、其他来源或整个维度' });
   assert.ok(Number.isFinite(Date.parse(current.recent_action_failures.entries[0].observed_at)));
   await w.reply(w.pending.length - 1, { decision: 'new', activity: { what: '再次尝试', steps: [step(4)] } });
   await w.tick();

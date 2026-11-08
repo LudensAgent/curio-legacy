@@ -2,7 +2,7 @@ import type { AgentState } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
 import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
-import { evaluateCondition } from '../projects/conditions.ts';
+import { evaluateCondition, type ConditionPerception } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
@@ -219,7 +219,7 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
 }
 
 export function doneWhenMet(a: Activity, state: AgentState, percept?: Percept): boolean {
-  return !!a.doneWhen && evaluateCondition(a.doneWhen, state, state.worldId, [], percept).status === 'satisfied';
+  return !!a.doneWhen && evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept)).status === 'satisfied';
 }
 
 /** 刚刚结束的那一步在 routine 里的原样（带 optional 标记） */
@@ -317,14 +317,14 @@ export type StepVerdict =
 export function afterStep(a: Activity, step: Step, result: SkillResult, durationMs: number, state: AgentState, percept?: Percept): StepVerdict {
   const conditionReached = (): StepVerdict | null => {
     if (!a.doneWhen) return null;
-    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], percept);
+    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept));
     if (evidence.status !== 'satisfied') return null;
     a.conditionTriggered = true;
     return { kind: 'done', met: true, why: `收工条件满足：${JSON.stringify(a.doneWhen)}；位置 (${state.pos.x.toFixed(1)},${state.pos.y.toFixed(1)},${state.pos.z.toFixed(1)})；实际 ${JSON.stringify(evidence.actual)}；只确认该条件，其他目标未由此验证` };
   };
   const conditionUnmet = () => {
     if (!a.doneWhen) return '';
-    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], percept);
+    const evidence = evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept));
     return `；收工条件未满足或无法确认：${JSON.stringify(a.doneWhen)}；状态 ${evidence.status}，实际 ${JSON.stringify(evidence.actual)}${evidence.reason ? `；原因：${evidence.reason}` : ''}；位置 (${state.pos.x.toFixed(1)},${state.pos.y.toFixed(1)},${state.pos.z.toFixed(1)})`;
   };
   const previous = [...a.results].reverse().find((r) => r.status === 'failed' && targetKeyOf(r) === targetKeyOf(step));
@@ -671,11 +671,45 @@ function explorationOf(a: Activity, end: { x: number; y: number; z: number }, ne
   const start = a.startPos ?? end;
   const maxHorizontal = Math.max(0, ...positions.map((pos) => Math.hypot(pos.x - start.x, pos.z - start.z)));
   const searchIntent = searchIntentOf(a);
+  const found = a.results.flatMap((result) => {
+    const value = result.data?.found;
+    if (typeof value === 'string') return [value.replace(/^minecraft:/, '')];
+    if (value && typeof value === 'object' && typeof (value as { name?: unknown }).name === 'string') {
+      return [String((value as { name: string }).name).replace(/^minecraft:/, '')];
+    }
+    return [];
+  });
+  const blocked = a.results.some((result) => ['PATH_NOT_FOUND', 'NO_SUPPORT', 'UNSUPPORTED_STEP_HEIGHT', 'HEAD_BLOCKED', 'TARGET_BLOCKED', 'MOVE_TIMEOUT']
+    .includes(String(result.failureCode ?? '')));
   return {
     start: { ...start }, end: { ...end },
     maxHorizontal: Math.round(maxHorizontal * 100) / 100,
     visitedCells: new Set(positions.map((pos) => `${Math.floor(pos.x)},${Math.floor(pos.z)}`)).size,
-    newChunks, searchIntent, localOnly: searchIntent && maxHorizontal < 8 && (newChunks ?? 0) <= 0,
+    newChunks, searchIntent, found, blocked,
+    localOnly: searchIntent && maxHorizontal < 8 && (newChunks ?? 0) <= 0,
+  };
+}
+
+/** 活动内评估 done_when 时附带实测探索证据；没有它时 exploration 条件只能返回 unknown。 */
+function activityPerception(a: Activity, state: AgentState, percept?: Percept): ConditionPerception {
+  return { ...(percept as unknown as ConditionPerception), activityExploration: explorationOf(a, state.pos, null) };
+}
+
+const LOCAL_FAILURE_SKILLS = new Set(['move_step', 'navigate_to', 'walk_path', 'go_near', 'descend_to', 'excavate_run', 'pillar_one', 'place_support', 'place_cell', 'swim_path', 'boat_path']);
+const LOCAL_FAILURE_KINDS = new Set(['FOOT_HEIGHT_MISMATCH', 'UNSUPPORTED_STEP_HEIGHT', 'NO_SUPPORT', 'HEAD_BLOCKED', 'TARGET_BLOCKED', 'POSITION_NOT_CONFIRMED', 'MOVE_REJECTED', 'MOVE_TIMEOUT', 'UNKNOWN_GEOMETRY', 'PATH_NOT_FOUND']);
+
+/** 把一个步骤失败归到“局部动作/落点”层；只有这类失败会阻止无证据换来源。 */
+export function localStepFailure(
+  step: Pick<Step, 'skill'>,
+  result: { failureCode?: string | null; summary: string; data?: Record<string, unknown> },
+  state: Pick<AgentState, 'worldId' | 'sessionId' | 'dim' | 'pos'>,
+  chunks: number,
+) {
+  const kind = (result.data?.problem as { kind?: string } | undefined)?.kind ?? String(result.failureCode ?? '');
+  if (!LOCAL_FAILURE_SKILLS.has(step.skill) || !LOCAL_FAILURE_KINDS.has(kind)) return null;
+  return {
+    at: Date.now(), skill: step.skill, code: result.failureCode ?? null, summary: clipFeedback(result.summary, 220),
+    worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, pos: { ...state.pos }, chunks,
   };
 }
 
@@ -720,7 +754,7 @@ export function argsLabel(step: Step): string {
 
 /** 把一段活压成一行给模型看 */
 export function describeActivity(a: Activity, state: AgentState, percept?: Percept) {
-  const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], percept) : null;
+  const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept)) : null;
   const stageOf = (r: Activity['results'][number]) => (r as { stage?: unknown }).stage;
   const lastStage = [...a.results].reverse().find((r) => typeof stageOf(r) === 'string');
   const explore = explorationOf(a, state.pos, null);

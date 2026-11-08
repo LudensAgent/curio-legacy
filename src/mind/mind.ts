@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -153,7 +153,7 @@ export class Mind {
   private recentEnds: ActivityEnd[] = [];
   private failuresByTarget = new Map<string, { n: number; last: number; at: number[] }>();
   /** 近期动作失败的实际反馈，只在同一会话、附近再次决策时提供。 */
-  private recentActionFailures: { step: Step; code: string | null; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
+  private recentActionFailures: { step: Step; code: string | null; summary: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number; scope?: 'step'; implication?: string }[] = [];
   /** 近期动作成功但附带、要心智掂量的事实（如挖到人造建材），同样只在同一会话、附近决策时提供。 */
   private recentActionCaveats: { step: Step; caveat: string; pos: AgentState['pos']; worldId: string; sessionId: string; dim: string; at: number }[] = [];
   /** 同一个动作、同样的参数、同样的失败：记录次数，供心智参考。 */
@@ -207,10 +207,14 @@ export class Mind {
   private progressGate: { at: number; agendaId: string | null; signatures: string[]; activities: { what: string; outcome: string; summary: string }[] } | null = null;
   private progressGateRejects = 0;
   private lastProgressGateAt = 0;
-  private noProgressRuns: { at: number; signature: string; what: string; outcome: string; summary: string }[] = [];
+  private noProgressRuns: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[] = [];
+  /** 最近一次局部动作/落点失败：它只否定这一步，不能单独证明整个来源或维度没有资源。 */
+  private lastLocalFailure: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null = null;
+  private sourceSwitchRejects = 0;
   static readonly PROGRESS_GATE_ACTIVITIES = 8;
   static readonly PROGRESS_GATE_COOLDOWN_MS = 10 * 60_000;
   static readonly PROGRESS_GATE_REJECT_LIMIT = 2;
+  static readonly LOCAL_FAILURE_TTL_MS = 10 * 60_000;
   /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
   static REVIEW_GAP_MIN: [number, number] = [45, 90];
   private reviewGapMs = 45 * 60_000;
@@ -268,6 +272,19 @@ export class Mind {
     d.memory.setWorld(d.adapter.state().worldId);
     d.thinker.skillStats = (name) => d.behaviors?.statsOf(name);
     d.thinker.successfulEmergencyVersions = (name) => d.behaviors?.successfulEmergencyVersions(name) ?? [];
+    // 任务事实跨重连保留，但过期的、别世界/会话的不能直接拿来判当前做法。
+    const facts = d.self.taskFacts();
+    const now = Date.now();
+    this.noProgressRuns = (facts.noProgressRuns ?? []).filter((run) => now - run.at < 30 * 60_000).slice(-16);
+    const failure = facts.lastLocalFailure;
+    this.lastLocalFailure = failure && now - failure.at < Mind.LOCAL_FAILURE_TTL_MS ? failure : null;
+  }
+
+  private persistTaskFacts() {
+    this.d.self.setTaskFacts({
+      noProgressRuns: this.noProgressRuns.slice(-16),
+      lastLocalFailure: this.lastLocalFailure,
+    });
   }
 
   get inFlight() { return !!this.thinking; }
@@ -1004,11 +1021,19 @@ export class Mind {
       this.noProgressRuns = [];
       this.progressGate = null;
       this.progressGateRejects = 0;
+      if (progressed) { this.lastLocalFailure = null; this.sourceSwitchRejects = 0; }
+      this.persistTaskFacts();
       return;
     }
     if (record.outcome === 'interrupted') return;
+    // 同一做法 + 同一区域 + 同一证据版本才算“重复同一路线”；换了区域或有了新区块/物品，版本会不同。
+    const start = a.startPos ?? { x: 0, y: 0, z: 0 };
+    const area = `${Math.floor(start.x / 16)},${Math.floor(start.z / 16)}`;
+    const evidence = `${this.d.memory.visitedChunkCount}|${plan.progressAt ?? 0}|${a.agendaId ?? ''}`;
+    const sourceKey = `${gateSignatureOf(a.steps)}|${area}|${evidence}`;
     this.noProgressRuns = [...this.noProgressRuns.filter((run) => now - run.at < 30 * 60_000),
-      { at: now, signature: gateSignatureOf(a.steps), what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
+      { at: now, signature: gateSignatureOf(a.steps), sourceKey, what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
+    this.persistTaskFacts();
     if (this.noProgressRuns.length < Mind.PROGRESS_GATE_ACTIVITIES) return;
     if (this.progressGate || this.review || now < this.dangerUntil || this.order || this.userSuggestion) return;
     if (now - this.lastProgressGateAt < Mind.PROGRESS_GATE_COOLDOWN_MS) return;
@@ -1016,7 +1041,8 @@ export class Mind {
       .map(({ what, outcome, summary }) => ({ what, outcome, summary: summary.slice(0, 120) }));
     this.progressGate = {
       at: now, agendaId: plan.agendaId,
-      signatures: [...new Set(this.noProgressRuns.map((run) => run.signature))],
+      // 有 sourceKey 的按“做法+区域+证据版本”判重；旧记录才退回裸签名。
+      signatures: [...new Set(this.noProgressRuns.flatMap((run) => run.sourceKey ? [run.sourceKey] : [run.signature]))],
       activities,
     };
     this.lastProgressGateAt = now;
@@ -1042,6 +1068,55 @@ export class Mind {
   }
 
   /**
+   * 局部失败不能直接升级成“这个维度/来源没有资源”。换维度或换来源时，
+   * 要求活动里带新的具体证据（开箱/远征搜索/采集）或 plan.switch_reason；
+   * 拒绝一次，第二次放行并标为未验证，避免把紧急返程困死。
+   */
+  private enforceSourceSwitchEvidence(decision: MindDecision, info: { urgent?: boolean }): boolean {
+    const failure = this.lastLocalFailure;
+    if (!failure || info.urgent || this.order || this.userSuggestion) return true;
+    const now = Date.now();
+    if (now - failure.at > Mind.LOCAL_FAILURE_TTL_MS) {
+      this.lastLocalFailure = null;
+      this.persistTaskFacts();
+      return true;
+    }
+    const activity = decision.activity ?? decision.next;
+    if (!activity) return true;
+    const switchesDimension = activity.steps.some((step) => ['travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill));
+    if (!switchesDimension) { this.sourceSwitchRejects = 0; return true; }
+    const newEvidenceStep = activity.steps.some((step) => {
+      if (['take_items', 'store_items', 'use_gui', 'gather', 'forage', 'hunt', 'fish'].includes(step.skill)) return true;
+      return step.skill === 'expedition' && !!(step.args as Record<string, unknown> | undefined)?.find;
+    });
+    const state = this.safe(() => this.d.adapter.state(), null);
+    const newChunks = !!state && state.worldId === failure.worldId && this.d.memory.visitedChunkCount > (failure.chunks ?? this.d.memory.visitedChunkCount);
+    const newPlan = !!(decision.plan as { switchReason?: string } | undefined)?.switchReason;
+    if (newEvidenceStep || newChunks || newPlan) {
+      this.lastLocalFailure = null;
+      this.sourceSwitchRejects = 0;
+      this.persistTaskFacts();
+      return true;
+    }
+    if (this.sourceSwitchRejects >= 1) {
+      this.d.bus.publish('source_switch_unverified', 'P2', '再次在没有新证据时换维度/来源；放行，但这次失败不能当作来源耗尽的证据', { failure });
+      this.lastLocalFailure = null;
+      this.sourceSwitchRejects = 0;
+      this.persistTaskFacts();
+      return true;
+    }
+    this.sourceSwitchRejects += 1;
+    const note = `最近一次失败（${failure.skill} ${failure.code ?? ''}：${failure.summary}）只说明那一步/那个落点不成立，不能推出这个维度或来源没有资源。要换维度/来源，先在 activity 里加入新的具体证据动作（打开指定容器 take_items/store_items、expedition {find} 沿路搜索、采集/打猎等），或在 plan 里写 switch_reason 说明新证据；这次换来源被拒绝一次`;
+    decision.notes.push(note);
+    this.d.bus.publish('source_switch_rejected', 'P2', note, { failure });
+    this.requestThink(note, 'deliberate');
+    decision.activity = undefined;
+    decision.next = undefined;
+    decision.kind = 'continue';
+    return false;
+  }
+
+  /**
    * 闸门真正加在动作入口：无进展列表里已经出现过的动作签名，拒绝一次并要求重想。
    * 连续两次仍选同一条路时解除闸门，避免把模型困死；选择不同地点/方法则放行并清除。
    */
@@ -1051,7 +1126,14 @@ export class Mind {
     if (Date.now() - gate.at > 15 * 60_000) { this.progressGate = null; this.progressGateRejects = 0; return true; }
     const signature = decision.activity ? gateSignatureOf(decision.activity.steps)
       : decision.next ? gateSignatureOf(decision.next.steps) : null;
-    const repeats = !!signature && gate.signatures.includes(signature);
+    // 决策时的区域/证据版本：同一做法换了区域或有了新区块/物品，就不再算同一路线。
+    const state = this.safe(() => this.d.adapter.state(), null);
+    const fullKey = signature && state
+      ? `${signature}|${Math.floor(state.pos.x / 16)},${Math.floor(state.pos.z / 16)}|${this.d.memory.visitedChunkCount}|${this.d.self.plan()?.progressAt ?? 0}|${this.d.self.plan()?.agendaId ?? ''}`
+      : null;
+    const repeats = !!signature && (fullKey
+      ? gate.signatures.includes(fullKey)
+      : gate.signatures.some((key) => key === signature || key.startsWith(`${signature}|`)));
     const idleContinue = decision.kind === 'continue' && !signature && !this.activity;
     if (!repeats && !idleContinue) {
       this.progressGate = null;
@@ -1135,8 +1217,16 @@ export class Mind {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
       const failedState = this.d.adapter.state();
       this.recentActionFailures.push({ step: structuredClone(step), code: result.failureCode ?? null, summary: clipFeedback(result.summary),
-        pos: { ...failedState.pos }, worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim, at: Date.now() });
+        pos: { ...failedState.pos }, worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim, at: Date.now(),
+        scope: 'step', implication: '这次失败只否定这个动作/落点，不否定其他方向、其他来源或整个维度' });
       this.recentActionFailures = this.recentActionFailures.filter((f) => Date.now() - f.at < Mind.SAME_FAIL_MS).slice(-30);
+      // 局部移动/放置失败只记作“这一步不成立”；之后要换维度/来源时，必须带新的具体证据。
+      // move_step/place 等元语的 failureCode 常是 BAD_ARGS，具体是哪类局部失败在 data.problem.kind。
+      const localFailure = localStepFailure(step, result, failedState, this.d.memory.visitedChunkCount);
+      if (localFailure) {
+        this.lastLocalFailure = localFailure;
+        this.persistTaskFacts();
+      }
       this.pruneFailures();
       const key = targetKeyOf(step);
       const entry = this.failuresByTarget.get(key) ?? { n: 0, last: 0, at: [] };
@@ -1475,7 +1565,8 @@ export class Mind {
       recentActionFailures: nearbyFailures.map((f) => {
         const repeats = this.failuresByTarget.get(targetKeyOf(f.step))?.n ?? 0;
         return { skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
-          position: f.pos, observed_at: new Date(f.at).toISOString(), ...(repeats >= 2 ? { repeats } : {}) };
+          position: f.pos, observed_at: new Date(f.at).toISOString(), ...(repeats >= 2 ? { repeats } : {}),
+          ...(f.scope ? { scope: f.scope } : {}), ...(f.implication ? { implication: f.implication } : {}) };
       }),
       recentActionCaveats: nearbyCaveats.map((c) => ({ skill: c.step.skill, args: c.step.args ?? {}, caveat: c.caveat, position: c.pos, observed_at: new Date(c.at).toISOString() })),
     };
@@ -1708,6 +1799,8 @@ export class Mind {
         else this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
       }
     }
+    // 先看“局部失败 → 换维度/来源”是否有新证据，再看无进展闸门。
+    if (!this.enforceSourceSwitchEvidence(decision, info)) return;
     // 无进展闸门在动作入口生效：签名和最近无进展的做法相同就拒绝一次，要求换地点/方法或改计划。
     if (!this.enforceProgressGate(decision, info)) return;
     if (decision.next) {
