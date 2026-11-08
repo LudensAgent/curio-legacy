@@ -370,6 +370,20 @@ test('place_support：已有可站立顶面不消耗材料；空支撑格才放'
   assert.equal(w.inv.get('cobblestone'), 1);
 });
 
+test('place_support 能从 1×1 平台侧面补出下一级支撑', async (t) => {
+  const w = new FakeAdapter();
+  w.groundY = -100;
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 63, z: 0 } });
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 1, y: 63, z: 0 }), 'cobblestone');
+  assert.equal(w.inv.get('cobblestone'), 0);
+});
+
 test('place_support 支持脚下方两格', async (t) => {
   const w = flat();
   w.removed.add('1,62,0');

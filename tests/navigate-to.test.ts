@@ -110,6 +110,34 @@ test('navigate_to 从 1×1 平台用显式 2 格下落到真实站立面', async
   assert.deepEqual(transitions?.map((transition) => [transition.kind, transition.drop]), [['drop', 2]]);
 });
 
+test('navigate_to 从 1×1 平台用 4 格下落也能执行', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: { x: number; y: number; z: number }[] = [];
+  for (let x = -1; x <= 2; x++) for (let y = 58; y <= 65; y++) for (let z = -1; z <= 1; z++) air.push({ x, y, z });
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', [{ x: 0, y: 63, z: 0 }, { x: 1, y: 59, z: 0 }]);
+  const adapter = new DropWorld();
+  adapter.groundY = -100;
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 63, z: 0 } }, { name: 'stone', pos: { x: 1, y: 59, z: 0 } });
+  const option: LandingOption = {
+    target: { x: 1.5, y: 60, z: 0.5 }, support: { pos: { x: 1, y: 59, z: 0 }, name: 'stone' },
+    surface: 'ground', surfaceY: 60, drop: 4, horizontalDistance: 1, clearance: 'clear', corridor: 'clear',
+    approach: 'adjacent', waterDepth: 'unknown', unknowns: [],
+    receipt: { worldId: WORLD, sessionId: SESSION, dimension: DIM, observationId: 0, at: Date.now(), from: { ...adapter.pos }, onGround: true },
+  };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  const fresh = () => ({ ...option, receipt: { ...option.receipt, at: Date.now(), from: { ...adapter.pos }, observationId: adapter.state().observationId } });
+  ctx.senses.landingOptions = () => [fresh()];
+  t.after(() => ctx.memory.close());
+  const r = await navigateTo.run(ctx, {
+    to: { x: 1, y: 60, z: 0 }, allowed: ['walk', 'step', 'drop'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+  });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(Math.floor(adapter.pos.y), 60);
+  assert.equal((r.data?.transitions as { drop?: number }[] | undefined)?.[0]?.drop, 4);
+});
+
 test('navigate_to 没有 walk/step/drop 路线时停下报边界，不移动', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fill(map, 'minecraft:air', [{ x: 0, y: 64, z: 0 }, { x: 0, y: 65, z: 0 }]);
