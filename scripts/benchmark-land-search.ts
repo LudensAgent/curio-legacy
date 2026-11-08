@@ -12,7 +12,7 @@
 import { performance } from 'node:perf_hooks';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { walkLandRules } from '../src/adapter/land-rules.ts';
-import { searchLandRoute } from '../src/spatial/land-search.ts';
+import { searchLandRoute, searchLandRouteAsync } from '../src/spatial/land-search.ts';
 
 const WORLD = 'bench-world', DIM = 'overworld', SESSION = 'bench-session';
 const REPEATS = Number(process.env.REPEATS ?? 5);
@@ -49,6 +49,10 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     nodes: number; edges: number; visitedSections: number; sectionReads: number;
     snapshotCount: number; cloneCount: number; status: string; cancelReason: string | null;
   }[] = [];
+  const asyncSamples: {
+    totalMs: number; timerDelayMs: number; yields: number; maxSyncSliceMs: number;
+    status: string; cancelReason: string | null; historical: string | null;
+  }[] = [];
   for (let i = 0; i < REPEATS; i++) {
     const deadlineMs = Date.now() + BUDGET_MS;
     const request = { worldId: WORLD, dim: DIM, sessionId: SESSION, body, to, rules: walkLandRules, maxNodes: 2048, maxEdges: 8192, deadlineMs };
@@ -68,6 +72,29 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
       visitedSections: strict.stats.visitedSections, sectionReads: strict.stats.sectionReads,
       snapshotCount: strict.stats.snapshotCount, cloneCount: strict.stats.cloneCount,
       status: strict.status, cancelReason: strict.stats.cancelReason,
+    });
+
+    // The async entry yields about every 8ms of compute. Measure the longest
+    // interval between 1ms timer ticks during the sli
+    let asyncTimerDelay = 0;
+    let asyncLastTick = performance.now();
+    const timer = setInterval(() => {
+      const at = performance.now();
+      asyncTimerDelay = Math.max(asyncTimerDelay, at - asyncLastTick);
+      asyncLastTick = at;
+    }, 1);
+    const asyncDeadline = Date.now() + BUDGET_MS;
+    const a0 = performance.now();
+    const asyncStrict = await searchLandRouteAsync(map, { ...request, deadlineMs: asyncDeadline });
+    const asyncHistorical = asyncStrict.status === 'FOUND'
+      ? null : await searchLandRouteAsync(map, { ...request, allowStale: true, deadlineMs: asyncDeadline });
+    const a1 = performance.now();
+    clearInterval(timer);
+    asyncSamples.push({
+      totalMs: a1 - a0, timerDelayMs: asyncTimerDelay,
+      yields: asyncStrict.stats.yieldCount, maxSyncSliceMs: asyncStrict.stats.maxSyncSliceMs,
+      status: asyncStrict.status, cancelReason: asyncStrict.stats.cancelReason,
+      historical: asyncHistorical?.status ?? null,
     });
   }
   const pct = (values: number[], p: number) => {
@@ -92,6 +119,15 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     strictMs: { p50: round(pct(samples.map((s) => s.strictMs), 0.5)), p95: round(pct(samples.map((s) => s.strictMs), 0.95)) },
     historicalMs: { p50: round(pct(samples.map((s) => s.historicalMs), 0.5)), p95: round(pct(samples.map((s) => s.historicalMs), 0.95)) },
     timerDelayMs: { p50: round(pct(samples.map((s) => s.timerDelayMs), 0.5)), p95: round(pct(samples.map((s) => s.timerDelayMs), 0.95)) },
+    async: {
+      status: asyncSamples[0]!.status,
+      cancelReason: asyncSamples[0]!.cancelReason,
+      historical: asyncSamples[0]!.historical,
+      yields: asyncSamples[0]!.yields,
+      maxSyncSliceMs: asyncSamples[0]!.maxSyncSliceMs,
+      totalMs: { p50: round(pct(asyncSamples.map((s) => s.totalMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.totalMs), 0.95)) },
+      timerDelayMs: { p50: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.95)) },
+    },
   };
 }
 
