@@ -7,9 +7,11 @@
  * 规范化后的 xyz 是否真存在。
  */
 
-/** 会改变身体站位的移动步骤；失败后身体可能已有部分位移，不再位于原起点。 */
+/** 会改变身体站位的步骤；失败后身体可能已有部分位移，不再位于原起点。
+ *  放置/补支撑也可能为了让出参照面而轻推身体（哪怕不足 0.5 格），同样要计入。 */
 export const STANCE_MOVES = new Set([
   'move_step', 'walk_path', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'pillar_one',
+  'place_cell', 'place_support',
 ]);
 
 /**
@@ -19,11 +21,11 @@ export const STANCE_MOVES = new Set([
 export const NAVIGATION_ACTIONS = new Set(['walk_path']);
 
 /**
- * 规范化参数下，该动作是否为依赖站位的相对挖掘/放置。
- * 只有 mine_cell/place_cell/place_support 且没有合法 xyz 绝对目标时才是相对。
+ * 规范化参数下，该动作是否为依赖当前站位的相对动作（挖掘/放置/迈步）。
+ * 只有 move_step/mine_cell/place_cell/place_support 且没有合法 xyz 绝对目标时才是相对。
  */
 export function relativeCellAction(skill: string, validatedArgs: unknown): boolean {
-  if (skill !== 'mine_cell' && skill !== 'place_cell' && skill !== 'place_support') return false;
+  if (skill !== 'move_step' && skill !== 'mine_cell' && skill !== 'place_cell' && skill !== 'place_support') return false;
   if (validatedArgs === null || typeof validatedArgs !== 'object' || Array.isArray(validatedArgs)) return false;
   return (validatedArgs as Record<string, unknown>).xyz === undefined;
 }

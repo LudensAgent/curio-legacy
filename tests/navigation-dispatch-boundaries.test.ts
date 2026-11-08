@@ -99,9 +99,9 @@ test('代码技能中失败的 stepTo/move_step 后，相对 at 的挖掘/放置
   await assert.rejects(bridge('act', ['mine_cell', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
   await assert.rejects(bridge('act', ['place_cell', { at: [1, -1, 0], item: 'dirt', facing: 'N' }]), /没到新站位/);
 
-  // 通过 api.act 调用相对/绝对 step 同样记录未到达缺口。
-  const viaAct = await bridge('act', ['move_step', { at: [1, 0, 0], facing: 'N' }]) as { ok: boolean };
-  assert.equal(viaAct.ok, false);
+  // 通过 api.act 调用的相对 move_step 同样依赖当前站位：缺口未确认前必须一起拦下，
+  // 不能先按错误站位迈一步再让后面的挖掘/放置失败。
+  await assert.rejects(bridge('act', ['move_step', { at: [1, 0, 0], facing: 'N' }]), /没到新站位/);
   await assert.rejects(bridge('act', ['mine_cell', { at: [1, -1, 0], facing: 'N' }]), /没到新站位/);
   assert.equal(adapter.actions.length, 0, '被拒绝的相对动作不能在身体上执行');
 });

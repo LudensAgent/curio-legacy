@@ -68,6 +68,31 @@ class BackfillWorld extends FakeAdapter {
   }
 }
 
+/** 挖掉中心支撑，但身体 AABB 还压在相邻方块边缘上：脚高不变。 */
+class EdgeSupportWorld extends FakeAdapter {
+  override async dig(pos: Vec3Like, _signal: AbortSignal) {
+    const name = this.nameAt(pos.x, pos.y, pos.z);
+    if (name === 'air') return { ok: false, reason: 'NO_BLOCK' };
+    this.blocks = this.blocks.filter((b) => !(b.pos.x === pos.x && b.pos.y === pos.y && b.pos.z === pos.z));
+    this.removed.add(`${pos.x},${pos.y},${pos.z}`);
+    return { ok: true };
+  }
+}
+
+/** 挖掉支撑后模拟身体的真实结果：落到某处，或仍悬在空中。 */
+class DigFallWorld extends FakeAdapter {
+  afterDig: { pos: Vec3Like; onGround: boolean } | null = null;
+  override async dig(pos: Vec3Like, signal: AbortSignal) {
+    const r = await super.dig(pos, signal);
+    if (r.ok && this.afterDig) {
+      this.pos = { ...this.afterDig.pos };
+      this.onGround = this.afterDig.onGround;
+      this.afterDig = null;
+    }
+    return r;
+  }
+}
+
 /** 可配置的垫高：rise>1 模拟多升了一格；placeSupportBlock=false 模拟只报成功但没留下支撑。 */
 class PillarWorld extends FakeAdapter {
   rise = 1;
@@ -488,6 +513,51 @@ test('pillar_one 用实际 yaw 报朝向；成功要求精确 +1 和实测支撑
   assert.equal(no.status, 'failed');
   assert.equal(no.data?.facing, 'W');
   assert.equal((no.data?.local as { facing?: string } | undefined)?.facing, 'W');
+});
+
+test('mine_cell 挖脚下支撑：身体跨格被相邻块托住时如实返回剩余支撑', async (t) => {
+  const w = new EdgeSupportWorld();
+  w.pos = { x: 0.816, y: 64, z: 0.5 }; // 中心在 0 列，AABB 有 0.116 压进相邻的 1 列
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'E', fall: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.onGround, true);
+  const supports = r.data?.supports as { pos: Vec3Like; name: string }[];
+  assert.ok(supports.some((s) => s.pos.x === 1 && s.pos.y === 63 && s.pos.z === 0 && s.name === 'grass_block'), JSON.stringify(supports));
+  assert.match(r.summary, /托着|支撑/);
+
+  // 目标已空也不再说一句“本来就是空的”就走：重复挖同一格时继续报告身体支撑事实。
+  const again = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'E', fall: true });
+  assert.equal(again.status, 'succeeded');
+  assert.equal(again.data?.noop, true);
+  const againSupports = again.data?.supports as { pos: Vec3Like; name: string }[];
+  assert.ok(againSupports.some((s) => s.pos.x === 1 && s.pos.y === 63 && s.pos.z === 0), JSON.stringify(againSupports));
+  assert.match(again.summary, /托着|已触地/);
+});
+
+test('mine_cell 挖脚下支撑：身体还在空中时明确报告未确认落地', async (t) => {
+  const w = new DigFallWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.afterDig = { pos: { x: 0.5, y: 63.08, z: 0.5 }, onGround: false };
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) }, deadlineMs: 300 });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'E', fall: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.pendingFall, true);
+  assert.match(r.summary, /仍在空中|尚未确认落地/);
+});
+
+test('mine_cell 挖脚下支撑：落地后回报实际落点与落差', async (t) => {
+  const w = new DigFallWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.afterDig = { pos: { x: 0.5, y: 63, z: 0.5 }, onGround: true };
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'E', fall: true });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.onGround, true);
+  assert.match(r.summary, /落到 y=63\.00/);
 });
 
 test('mine_cell 目标被下落方块回填时返回 EFFECT_NOT_CONFIRMED 和事实', async (t) => {

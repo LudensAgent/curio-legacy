@@ -138,9 +138,11 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         const r = await adapter.useBucketAt(pos, args.item, signal);
         if (!r.ok) {
           const code = r.reason?.startsWith('NO_ITEM') ? 'MISSING_MATERIALS'
-            : r.reason?.startsWith('NO_REFERENCE') || r.reason?.startsWith('NO_PLACEMENT_FACE') ? 'PATH_NOT_FOUND'
+            : r.reason?.startsWith('NO_REFERENCE') || r.reason?.startsWith('NO_PLACEMENT_FACE') ? 'BAD_ARGS'
             : r.reason?.startsWith('NO_EFFECT') || r.reason?.startsWith('PLACEMENT_NOT_CONFIRMED') ? 'EFFECT_NOT_CONFIRMED' : 'ERROR';
-          return fail(code, `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}`, { pos, reason: r.reason, effectEvidence: r.effectEvidence });
+          // 目标格六邻/参照面的实际事实要进摘要；只给 NO_REFERENCE 会让模型继续猜格子。
+          const extra = [r.detail, ...(r.effectEvidence?.reasons ?? [])].filter(Boolean).join('；');
+          return fail(code, `往 (${pos.x},${pos.y},${pos.z}) 倒 ${args.item} 没成：${r.reason}${extra ? `；${extra}` : ''}`, { pos, reason: r.reason, detail: r.detail, effectEvidence: r.effectEvidence });
         }
         return ok(`往 (${pos.x},${pos.y},${pos.z}) 倒了 ${args.item}${r.placed ? `，确认这格变成了 ${adapter.blockAt(pos)}` : ''}${r.effectEvidence?.reasons?.length ? `；${r.effectEvidence.reasons.join('；')}` : ''}`, { pos, placed: r.placed, effectEvidence: r.effectEvidence });
       } catch (e) {

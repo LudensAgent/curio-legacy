@@ -1,6 +1,6 @@
 import type { PlacementFaceAttempt, Vec3Like } from '../../adapter/types.ts';
 import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
-import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, isReplaceable, supportTop } from '../../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, footSurfaceY, isReplaceable, supportCellsUnderBody, supportTop } from '../../perception/geometry.ts';
 import { dropBelow, isSoftBlock, LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
@@ -258,7 +258,7 @@ export const moveStep: Skill<CellArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 export const mineCell: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。只挖不走，不挖基岩。',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。挖脚下支撑块若下方有落差/液体会拦住，fall:true 才接受风险。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true} 或 {"xyz":[x,y,z]}（前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
@@ -313,7 +313,20 @@ export const mineCell: Skill<MineArgs> = {
       return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘：目标格 (${pos.x},${pos.y},${pos.z}) 状态未确认（视野外/被遮挡/未加载），不把未看见当作空气；换个站位或先挖掉挡着的那一格`, { ...after(ctx, args.facing, pos), targetCell: { ...pos }, target: { ...pos }, noop: true, obscured: true, unknown: true });
     }
     const before = seenBefore;
-    if (AIR.has(before)) return ok(`[${args.at}] 本来就是空的，不用挖`, { cell: [...args.at], was: 'air', ...after(ctx, args.facing, pos), noop: true });
+    if (AIR.has(before)) {
+      // 目标已空时也要说清身体有没有掉：只回“本来就是空的”会让 Agent 反复挖同一格找原因。
+      const state = adapter.state();
+      const supports = digsSupport ? supportCellsUnderBody(state.pos, (p) => stateAt(adapter, p)) : [];
+      const supportText = supports.slice(0, 3).map((s) => `${s.name}(${s.pos.x},${s.pos.y},${s.pos.z})`).join('、');
+      const bodyText = digsSupport
+        ? `；身体在 y=${state.pos.y.toFixed(2)}，${state.onGround ? '已触地' : '未触地'}${supports.length ? `，脚下还有 ${supportText} 托着` : ''}`
+        : '';
+      return ok(`[${args.at}] 本来就是空的，不用挖${bodyText}`, {
+        cell: [...args.at], was: 'air',
+        ...(digsSupport ? { onGround: state.onGround, supports } : {}),
+        ...after(ctx, args.facing, pos), noop: true,
+      });
+    }
     if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, after(ctx, args.facing, pos));
     const neighborPositions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
       .map(([dx, dy, dz]) => ({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }));
@@ -372,6 +385,39 @@ export const mineCell: Skill<MineArgs> = {
     // 挖后复核已确认目标格是空气：这时才把这一格记成自身动作修改，失败/未确认不写。
     markSelfModified(ctx.spatial, dim, pos, ctx.taskId);
     noteEdit(ctx.taskId, 'dig', pos);
+    // 挖掉脚下支撑后身体可能仍在落，或被相邻方块边缘托住：等落地/读实际支撑，再回执。
+    // 只对“挖的是脚下支撑格”补这段事实；挖别的格子不替 Agent 推断身体会不会掉。
+    const fall = digsSupport ? await (async () => {
+      const settleBy = Math.min(ctx.deadline, Date.now() + 2000);
+      const terminal = () => {
+        const s = adapter.state();
+        return s.onGround || s.inWater || s.inLava;
+      };
+      while (!terminal() && Date.now() < settleBy) {
+        throwIfAborted(ctx.signal);
+        await sleep(50, ctx.signal);
+      }
+      const state = adapter.state();
+      return {
+        onGround: state.onGround, inWater: state.inWater, inLava: state.inLava,
+        pendingFall: !state.onGround && !state.inWater && !state.inLava,
+        fromY: origin.pos.y, toY: state.pos.y, drop: origin.pos.y - state.pos.y,
+        supports: supportCellsUnderBody(state.pos, (p) => stateAt(adapter, p)),
+      };
+    })() : undefined;
+    const supportText = fall && fall.supports.length
+      ? fall.supports.slice(0, 3).map((s) => `${s.name}(${s.pos.x},${s.pos.y},${s.pos.z})`).join('、')
+      : '';
+    const fallText = !fall ? ''
+      : fall.pendingFall
+        ? `；目标格已空，但身体仍在空中（y=${fall.toY.toFixed(2)}，未触地），尚未确认落地`
+        : fall.inWater || fall.inLava
+          ? `；身体在${fall.inWater ? '水' : '岩浆'}中（y=${fall.toY.toFixed(2)}），尚未确认落脚`
+          : fall.drop > 0.01
+            ? `；身体落到 y=${fall.toY.toFixed(2)}（落差 ${fall.drop.toFixed(2)} 格）`
+            : fall.supports.length
+              ? `；身体仍在 y=${fall.toY.toFixed(2)}，脚下还有 ${supportText} 托着，没有掉落`
+              : `；目标格已空，身体仍在 y=${fall.toY.toFixed(2)}`;
     let got = '';
     let inBag: boolean | undefined;
     if (keepsake) {
@@ -379,11 +425,13 @@ export const mineCell: Skill<MineArgs> = {
       inBag = countOf(keepsake) > had;
       got = inBag ? `；${keepsake} 已经进了背包` : `；${keepsake} 掉在地上，还没进背包——要拿回来写 pickup_items`;
     }
-    return ok(`挖掉了 [${args.at}] 的 ${before}${got}`, {
+    return ok(`挖掉了 [${args.at}] 的 ${before}${got}${fallText}`, {
       cell: [...args.at], was: before,
       ...(digInfo.noDrop !== undefined ? { noDrop: digInfo.noDrop } : {}),
       ...(digInfo.ms !== undefined ? { digMs: digInfo.ms } : {}),
-      ...(inBag !== undefined ? { inBag } : {}), ...after(ctx, args.facing, pos), ...fallFacts,
+      ...(inBag !== undefined ? { inBag } : {}),
+      ...(fall ? { onGround: fall.onGround, pendingFall: fall.pendingFall, supports: fall.supports, fall } : {}),
+      ...after(ctx, args.facing, pos), ...fallFacts,
     }, structure === 'man-made' ? MAN_MADE_NOTE : undefined);
   },
 };
@@ -436,7 +484,18 @@ export const placeCell: Skill<PlaceArgs> = {
     if (!adapter.state().inventory.some((i) => i.name === args.item && i.count > 0)) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`, after(ctx, args.facing, pos));
     try {
       const r = await adapter.placeBlockAt(pos, [args.item], ctx.signal);
-      if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'PATH_NOT_FOUND', `放不到 [${args.at}]：${r.reason ?? r.detail ?? '放置失败'}`, { attemptedFaces: r.attemptedFaces ?? [], ...after(ctx, args.facing, pos) });
+      if (!r.ok) {
+        const reason = r.reason ?? '放置失败';
+        const code = r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS'
+          : /^NO_REFERENCE|^NO_PLACEMENT_FACE/.test(reason) ? 'BAD_ARGS'
+            : 'PATH_NOT_FOUND';
+        // 参照面事实必须进摘要：只放 data 时心智看到的只有 NO_REFERENCE，会继续猜同一格。
+        const faces = (r.attemptedFaces ?? []).slice(0, 2)
+          .map((f) => `参照 (${f.ref.x},${f.ref.y},${f.ref.z}) 的 [${f.face.join(',')}] 面${f.reason ? `：${f.reason}` : ''}`)
+          .join('；');
+        const detail = [r.detail, faces].filter(Boolean).join('；');
+        return fail(code, `放不到 [${args.at}]：${reason}${detail ? `；${detail}` : ''}`, { attemptedFaces: r.attemptedFaces ?? [], ...after(ctx, args.facing, pos) });
+      }
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `放 [${args.at}] 没成：${(e as Error).message}`, after(ctx, args.facing, pos));
@@ -618,11 +677,18 @@ export const placeSupport: Skill<SupportArgs> = {
     }
     const consumed = beforeCount - countOf();
     if (!formed) {
-      return fail('PATH_NOT_FOUND', `[${args.at}] 没能形成可站立支撑：${attempts.map((a) => `${a.stance}:${a.reason ?? '未放置'}`).join('；')}`, {
+      // 摘要里带上适配器已经给出的参照面/站位细节；只放进 data 时心智看不到，会反复猜同一格。
+      const brief = (s: string) => s.length <= 120 ? s : `${s.slice(0, 119)}…`;
+      const attemptText = attempts
+        .map((a) => brief(`${a.stance}:${a.reason ?? '未放置'}${a.detail ? `（${a.detail}）` : ''}`))
+        .join('；');
+      const firstDetail = attempts.find((a) => a.detail)?.detail;
+      return fail('BAD_ARGS', `[${args.at}] 没能形成可站立支撑：${attemptText}`, {
         attempts, materials: [...names], consumed, targetCell: { ...pos },
         remediation: {
           stance: '换到能看见目标格相邻实心面的站位再 place_support（例如目标格另一侧）',
           alternatives: ['descend_to 降到下一级后从下方补支撑', 'place_cell 在已有参照面的相邻格放置'],
+          ...(firstDetail ? { reference: firstDetail } : {}),
         },
         ...after(ctx, args.facing, pos),
       });
