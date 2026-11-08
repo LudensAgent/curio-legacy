@@ -12,6 +12,65 @@ class FeedbackWorld extends TestWorld {
   }
 }
 
+/** 模拟坐标点火走的 useBlockAt；只测 use_item 的契约与反馈，不跑真实交互 */
+class IgniteWorld extends TestWorld {
+  useBlockAtCalls = 0;
+  useBlockAtResult: ActionResult = { ok: true, effectEvidence: { verified: true, changed: true, reasons: ['方块变了：(0,64,2) air→nether_portal'] } };
+  override async useBlockAt(): Promise<ActionResult> {
+    this.useBlockAtCalls++;
+    return this.useBlockAtResult;
+  }
+}
+
+test('坐标点火对着空气格：BAD_ARGS，不执行右键，并把六邻事实说清楚', async () => {
+  const w = new IgniteWorld();
+  w.inv.set('flint_and_steel', 1);
+  w.setBlock({ x: 0, y: 63, z: 2 }, 'obsidian');
+  w.setBlock({ x: 0, y: 65, z: 2 }, 'netherrack');
+  const r = await useItem.run(makeCtx(w), { item: 'flint_and_steel', on: { x: 0, y: 64, z: 2 } });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.equal(w.useBlockAtCalls, 0);
+  assert.match(r.summary, /现在是 air/);
+  assert.match(r.summary, /\(0,65,2\)=netherrack/);
+});
+
+test('坐标点火 fire_charge 同样拒绝空气格', async () => {
+  const w = new IgniteWorld();
+  w.inv.set('fire_charge', 1);
+  const r = await useItem.run(makeCtx(w), { item: 'fire_charge', on: { x: 0, y: 64, z: 2 } });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.equal(w.useBlockAtCalls, 0);
+});
+
+test('门框内腔被占：NO_EFFECT 映射为 EFFECT_NOT_CONFIRMED，回执带点击格与六邻', async () => {
+  const w = new IgniteWorld();
+  w.inv.set('flint_and_steel', 1);
+  w.setBlock({ x: 0, y: 63, z: 2 }, 'obsidian');
+  w.useBlockAtResult = {
+    ok: false,
+    reason: 'NO_EFFECT:目标方块、邻格和背包均未变化',
+    effectEvidence: { verified: true, changed: false, reasons: ['点击格与六邻：(0,63,2)=obsidian、(0,64,2)=air、(0,65,2)=netherrack', '目标、邻格和背包均未变化'] },
+  };
+  const r = await useItem.run(makeCtx(w), { item: 'flint_and_steel', on: { x: 0, y: 63, z: 2 } });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.match(r.summary, /点击格与六邻/);
+  assert.match(r.summary, /netherrack/);
+  assert.equal(w.useBlockAtCalls, 1);
+});
+
+test('点火成功后回执报告实际方块变化，而不只是点击格', async () => {
+  const w = new IgniteWorld();
+  w.inv.set('flint_and_steel', 1);
+  w.setBlock({ x: 0, y: 63, z: 2 }, 'obsidian');
+  const r = await useItem.run(makeCtx(w), { item: 'flint_and_steel', on: { x: 0, y: 63, z: 2 } });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /air→nether_portal/);
+  assert.equal(w.useBlockAtCalls, 1);
+});
+
 test('装水成功时把实际变化（water_bucket +1）写进反馈，而不是只说 bucket 少了', async () => {
   const w = new FeedbackWorld();
   w.inv.set('bucket', 4);

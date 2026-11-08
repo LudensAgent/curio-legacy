@@ -11,7 +11,7 @@ import { isSkillDisabled } from '../skills/disabled.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
-import { travelStore } from '../travel/store.ts';
+import { portalAgeText, travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
@@ -722,12 +722,15 @@ function worldKnowledge(ctx: MindContext) {
     const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
       .map((r) => [`${r.toId}:${r.returnVerified}`, { to: r.toId, return_verified: r.returnVerified }])).values()];
     const nowBlock = ctx.blockAt?.(e.pos) ?? null;
-    const now = nowBlock === e.kind ? '亮着'
+    const now = nowBlock === e.kind ? `仍是 ${e.kind}`
       : nowBlock === null ? '未加载(未知)'
-      : e.kind === 'nether_portal' && (nowBlock === 'air' || nowBlock === 'cave_air' || nowBlock === 'void_air') ? '门未点亮（黑曜石框多半还在）'
-      : e.kind === 'nether_portal' && (nowBlock === 'torch' || nowBlock === 'wall_torch') ? '门未点亮（框里插了火把）'
-      : `已变(现为 ${nowBlock})`;
-    return { id: e.id, dim: e.dim, kind: e.kind, pos: e.pos, ...(leadsTo.length ? { leads_to: leadsTo } : {}), now };
+      : `现为 ${nowBlock}`;
+    return {
+      id: e.id, dim: e.dim, kind: e.kind, pos: e.pos,
+      portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
+      recorded_ago: portalAgeText(e.observedAt),
+      ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
+    };
   });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });

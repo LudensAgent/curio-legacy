@@ -17,7 +17,7 @@ import { planWaterRoute } from './water-route.ts';
 const AIRISH = new Set(['air', 'cave_air', 'void_air']);
 /** 能往空气格里倒的桶：on 写坐标时用 */
 const FLUID_BUCKETS = new Set(['water_bucket', 'lava_bucket']);
-/** 能对指定坐标右键点火（点下界门框内/生火）的物品 */
+/** 能对指定坐标右键点火的物品；火落在被点击面的相邻格，不是 on 这一格 */
 const IGNITE_ITEMS = new Set(['flint_and_steel', 'fire_charge']);
 /** "x,y,z" / [x,y,z] / {x,y,z} → 整数坐标；不是坐标返回 null */
 const coordValue = (v: unknown): Vec3Like | null => {
@@ -37,8 +37,8 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
 // ------------------------------------------------------------------ use_item
 export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string }> = {
   name: 'use_item',
-  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹对这格右键点火（点下界门框内空气用它）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体）；船/筏是实体不是方块，interact_block 只对可见方块右键并拒绝船/筏，on 写坐标当前也不支持船/筏；放船后用 interact {"entity":"boat"} 坐上去、boat_path 划走；对生物用东西（喂、剪、挤奶）是 interact',
-  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹对这格点火；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell；船/筏写 water，坐标形式不支持船/筏）", "dir"?: "N|NE|E|SE|S|SW|W|NW"}',
+  description: '手持物品右键：对着最近的看得见的某种方块、水面或岩浆（on 写方块名），或沿当前准星使用（on:"self"，不自动低头/选点，只朝正看着的方向用）；手持树苗（*_sapling，含红树苗 mangrove_propagule）对 on:"grass_block"/"dirt"/"mud" 等土壤方块右键可种下（种在命中面的相邻空格，具体哪格由站位/视线决定；要指定格子用 place_cell）；on 写坐标（"x,y,z" 或 {"x","y","z"}）时：满水桶/岩浆桶往那格空气倒流体，空桶（bucket）从那一格流体源装水/岩浆，打火石/火焰弹右键 on 指定的方块（火落在被点击面的相邻格，当前固定点顶面 +Y；不能写内腔空气格）；树苗不能对坐标右键；手持船/筏（*_boat/*_raft）对 on:"water" 是放船（生成实体）；船/筏是实体不是方块，interact_block 只对可见方块右键并拒绝船/筏，on 写坐标当前也不支持船/筏；放船后用 interact {"entity":"boat"} 坐上去、boat_path 划走；对生物用东西（喂、剪、挤奶）是 interact',
+  argsDoc: '{"item": "<物品名>", "on"?: "self | water | lava | <方块名> | {x,y,z}坐标（满桶倒进这格空气 / 空桶从这格流体源装 / 打火石·火焰弹写被右键的方块坐标，火落在点击面相邻格，当前固定点顶面 +Y，不能写内腔空气格；树苗/红树苗写土壤名如 grass_block，坐标用 place_cell；船/筏写 water，坐标形式不支持船/筏）", "dir"?: "N|NE|E|SE|S|SW|W|NW（仅 on 写方块名时筛选候选；坐标模式不改变点击面）"}',
   timeoutMs: 30000,
   movement: true,
   validate(raw, adapter) {
@@ -55,9 +55,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
     if (FLUID_BUCKETS.has(item) && (on === 'water' || on === 'lava')) {
       return { ok: false, error: `满的 ${item} 不能对着 ${on} 本体右键（会 NO_EFFECT，倒不进流体源格）；把 on 写成那格空气的坐标 {"x","y","z"}（浇岩浆做黑曜石写岩浆旁那格空气，水会流过去），或 on:"self" 沿当前准星使用` };
     }
-    // 打火石/火焰弹点下界门：要点门框内侧那格空气（on 写坐标），对着 obsidian 等方块本体右键会 NO_EFFECT 点不着。
+    // 打火石/火焰弹要指定被右键的那一格方块；方块名会按名字自动挑最近一处，不能指定观察到的格/面。
     if (IGNITE_ITEMS.has(item) && typeof on === 'string' && on !== 'self') {
-      return { ok: false, error: `${item} 点下界门要点门框内侧那格空气：on 写内腔空气的坐标 {"x","y","z"}，不能写方块名（对着 obsidian 等方块本体右键点不着门，会 NO_EFFECT）` };
+      return { ok: false, error: `${item} 的 on 写坐标：坐标是被右键的方块（火落在被点击面的相邻格，当前固定点顶面 +Y），不是要点燃的内腔空气；写方块名会按名字自动挑最近一处，不能指定你观察到的某一格/某一面` };
     }
     return { ok: true, args: { item, on, ...(dir ? { dir } : {}) } };
   },
@@ -78,10 +78,22 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       }
       if (IGNITE_ITEMS.has(args.item)) {
         if (!adapter.useBlockAt) return fail('ERROR', '当前适配器不支持对坐标使用物品');
+        // 右键必须有方块面；空气格不是可点击对象。给出点击格六邻事实，让 agent 自己判断要点哪格。
+        const target = adapter.blockAt(pos);
+        if (target !== null && AIRISH.has(target)) {
+          const around = [[0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]]
+            .map(([dx, dy, dz]) => {
+              const at = { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz };
+              return `(${at.x},${at.y},${at.z})=${adapter.blockAt(at) ?? '未知'}`;
+            }).join('、');
+          return fail('BAD_ARGS', `(${pos.x},${pos.y},${pos.z}) 现在是 ${target}，没有可右键的方块面：${args.item} 的坐标 on 指被右键的方块（火落在被点击面的相邻格，当前固定点顶面 +Y），不是内腔空气；点击格六邻：${around}；未执行右键`, { pos, actual: target });
+        }
         const r = await adapter.useBlockAt(pos, args.item, signal);
-        if (!r.ok) return fail('ERROR', `对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item} 点火失败：${r.reason}`, { pos, reason: r.reason });
-        const now = adapter.blockAt(pos);
-        return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}（现在这格是 ${now ?? '未知'}）`, { pos, changed: now });
+        const evidence = r.effectEvidence?.reasons?.length ? `；观察：${r.effectEvidence.reasons.join('；')}` : '';
+        const after = adapter.blockAt(pos);
+        const data = { pos, actual: after, reason: r.reason, effectEvidence: r.effectEvidence };
+        if (!r.ok) return fail(codeFromError({ message: r.reason }), `对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item} 失败：${r.reason}${evidence}`, data);
+        return ok(`对 (${pos.x},${pos.y},${pos.z}) 使用 ${args.item}；点击格现在是 ${after ?? '未知'}${evidence}`, { ...data, changed: after });
       }
       if (args.item === 'bucket') {
         // 坐标不是观察证据；动作前后都只报告当前会话中仍可见的目标状态。

@@ -52,7 +52,7 @@ test('use_item 满桶倒进没有实心面可贴的空气格：NO_REFERENCE 不�
   // (0,66,2)：正下方 (0,65,2) 是空气，四周都是空气，没有可贴面
   const r = await useItem.run(ctx, { item: 'water_bucket', on: { x: 0, y: 66, z: 2 } });
   assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'PATH_NOT_FOUND');
+  assert.equal(r.failureCode, 'BAD_ARGS', 'NO_REFERENCE 表示这格没有可贴面，属于参数/目标问题');
   assert.equal(w.inv.get('water_bucket'), 1, '没贴面不该扣水桶');
 });
 

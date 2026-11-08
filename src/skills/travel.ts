@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { travelStore, type PortalEndpoint } from '../travel/store.ts';
+import { portalAgeText, travelStore, type PortalEndpoint } from '../travel/store.ts';
 import { dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
@@ -18,7 +18,9 @@ function visiblePortal(ctx: SkillCtx, positions: Vec3Like[], kinds: string[]) {
 
 /** 把当前世界已记录的门列成一行，供 agent 自己挑（不替它改选目标） */
 function knownPortals(store: ReturnType<typeof travelStore>, worldId: string) {
-  return store.snapshot(worldId).endpoints.map((e) => `${e.id}（${e.dim} ${e.pos.x},${e.pos.y},${e.pos.z}）`).join('；') || '（还没有记录任何门）';
+  return store.snapshot(worldId).endpoints.map((e) =>
+    `${e.id}（${e.dim} ${e.pos.x},${e.pos.y},${e.pos.z}，${e.portalObserved ? '门方块曾实际观察到' : '仅到达位置'}，记录于 ${portalAgeText(e.observedAt)}）`
+  ).join('；') || '（还没有记录任何门）';
 }
 
 export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
@@ -171,8 +173,10 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   try {
     const nowBlock = adapter.blockAt(endpoint.pos);
     if (nowBlock !== endpoint.kind) {
-      const unlit = endpoint.kind === 'nether_portal' && (AIR.has(nowBlock ?? '') || nowBlock === 'torch' || nowBlock === 'wall_torch');
-      return fail('NOT_FOUND', unlit ? `门方块现在是 ${nowBlock}，多半只是被熄灭，黑曜石框还在` : '记忆中的传送门已改变或尚未加载');
+      return fail('NOT_FOUND', `门方块现在的实际方块是 ${nowBlock ?? '未加载'}，不是记录时的 ${endpoint.kind}（记录于 ${portalAgeText(endpoint.observedAt)}）`, {
+        portalId: endpoint.id, pos: endpoint.pos, expected: endpoint.kind, actual: nowBlock,
+        portalObserved: endpoint.portalObserved, observedAt: endpoint.observedAt,
+      });
     }
     ctx.setStationaryWait?.(true);
     const result = await adapter.enterPortalAt(endpoint.pos, signal);
