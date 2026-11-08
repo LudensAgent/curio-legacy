@@ -12,6 +12,15 @@ export interface PortalEndpoint {
   observedAt: number;
 }
 
+/** observedAt 是端点记录/核对的时刻；portalObserved=false 时它只是到达位置。 */
+export function portalAgeText(observedAt: number, now = Date.now()) {
+  const minutes = Math.floor((now - observedAt) / 60_000);
+  return minutes < 1 ? '不到 1 分钟前'
+    : minutes < 90 ? `${minutes} 分钟前`
+    : minutes < 48 * 60 ? `${Math.round(minutes / 60)} 小时前`
+    : `${Math.round(minutes / 1440)} 天前`;
+}
+
 export interface PortalTraversal {
   fromId: string;
   toId: string;

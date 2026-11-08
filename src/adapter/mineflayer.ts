@@ -3032,7 +3032,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         ...(b.currentWindow && b.currentWindow !== window ? ['服务器打开了交互窗口'] : []),
       ];
     };
-    return Object.assign(() => reasons().length > 0, { reasons });
+    // 失败时也要说清点的是哪一格、周围现在是什么；这不是推断，是观察。
+    const names = () => cells.map((pos) => {
+      const at = b.blockAt(pos);
+      return `(${pos.x},${pos.y},${pos.z})=${at?.name ?? '未知'}`;
+    });
+    return Object.assign(() => reasons().length > 0, { reasons, names });
   }
 
   async useItem(item: string, signal: AbortSignal, opts: UseItemOptions = {}): Promise<ActionResult> {
@@ -4967,7 +4972,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (fluid) await this.afterAction(() => this.lookSynced(), check);
       if (fluid) await this.afterAction(async () => { b.activateItem(); await sleep(250, signal); b.deactivateItem(); }, check);
       else await this.afterAction(() => b.activateBlock(block), check);
-      return await this.waitForInteraction(changed, check) ? { ok: true, effectEvidence: { verified: true, changed: true, reasons: changed.reasons() } } : { ok: false, reason: 'NO_EFFECT:目标方块、邻格和背包均未变化', effectEvidence: { verified: true, changed: false, reasons: ['目标、邻格和背包均未变化'] } };
+      return await this.waitForInteraction(changed, check)
+        ? { ok: true, effectEvidence: { verified: true, changed: true, reasons: changed.reasons() } }
+        : { ok: false, reason: 'NO_EFFECT:目标方块、邻格和背包均未变化', effectEvidence: { verified: true, changed: false, reasons: [`点击格与六邻：${changed.names().join('、')}`, '目标、邻格和背包均未变化'] } };
     } catch (e: any) {
       if (e instanceof AbortedError) throw e;
       return { ok: false, reason: String(e?.message ?? e), effectEvidence: { verified: false, changed: false, reasons: ['交互异常，未能确认效果'] } };

@@ -193,3 +193,27 @@ test('tree sapling use_item confirms placement on valid soil and rejects non-soi
   assert.deepEqual(mangroveResult.placed, { x: 2, y: 64, z: 0 });
   assert.equal(mangrove.count(), 3);
 });
+
+test('useItemOn 无效果时报告点击格与六邻的实际方块', async (t) => {
+  const advance = clock(t);
+  const w = fixture('flint_and_steel');
+  const pending = w.adapter.useItemOn('flint_and_steel', { kind: 'block', pos: w.ground }, new AbortController().signal);
+  await advance();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  const reasons = result.effectEvidence?.reasons?.join('；') ?? '';
+  assert.match(reasons, /点击格与六邻/);
+  assert.match(reasons, /\(2,63,0\)=grass_block/);
+  assert.match(reasons, /\(2,64,0\)=air/);
+});
+
+test('useItemOn 成功时报告 air→nether_portal 的实际变化', async (t) => {
+  const advance = clock(t);
+  const w = fixture('flint_and_steel');
+  w.bot.activateBlock = async () => { w.put('nether_portal', w.dest); };
+  const pending = w.adapter.useItemOn('flint_and_steel', { kind: 'block', pos: w.ground }, new AbortController().signal);
+  await advance();
+  const result = await pending;
+  assert.equal(result.ok, true, result.reason);
+  assert.match(result.effectEvidence?.reasons?.join('；') ?? '', /\(2,64,0\) air→nether_portal/);
+});

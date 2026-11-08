@@ -344,3 +344,19 @@ test('travel_portal timeout while confirmed inside names cooldown/latency instea
   assert.match(r.summary, /传送冷却|服务器延迟|对端未就绪/);
   assert.match(r.summary, /不要连续重进/);
 });
+
+test('stale portal endpoint reports the actual block and record age, not a frame guess', async () => {
+  const { adapter, memory, run } = setup();
+  const endpoint = travelStore(memory).observe(adapter.state(), { x: 3, y: 64, z: 0 }, 'nether_portal');
+  const outcome = await run('travel_portal', { portalId: endpoint.id });
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(outcome.result.failureCode, 'NOT_FOUND');
+  assert.match(outcome.result.summary, /门方块现在的实际方块是 air/);
+  assert.match(outcome.result.summary, /记录于/);
+  assert.doesNotMatch(outcome.result.summary, /黑曜石框/);
+  assert.equal(outcome.result.data?.actual, 'air');
+
+  const missing = await run('travel_portal', { portalId: 'portal_missing' });
+  assert.match(missing.result.summary, /门方块曾实际观察到/);
+  assert.match(missing.result.summary, /记录于/);
+});
