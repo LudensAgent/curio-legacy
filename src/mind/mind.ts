@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -689,6 +689,15 @@ export class Mind {
         // 放置的站位副作用改变了相对坐标原点。若相对目标按“上一动作开始前的锚点”解释，
         // 正好落在本次确认的支撑脚位上，就显式重绑定到该绝对落点；否则交回需要重绑定的缺口。
         const rebound = step.skill === 'move_step' ? this.rebindStanceStep(step, v.args, gap) : null;
+        if (rebound?.kind === 'reached') {
+          // 边缘放置已经把身体带到本次支撑的脚位：这一步相对移动的世界目标已经达成，不再移动。
+          delete this.activity.stanceGap;
+          const body = this.d.adapter.state();
+          this.d.bus.publish('body_adapt', 'P2', `「${gap.skill}」的站位副作用已经把身体带到本次支撑的脚位 (${rebound.target.x},${rebound.target.y},${rebound.target.z})；接着的相对移动目标已达成，不再移动`, { planId: this.activity.id, skill: step.skill, target: rebound.target });
+          this.activity.results.push({ skill: step.skill, args: step.args, status: 'succeeded', summary: '站位副作用已达成该相对移动的目标，不再移动', at: Date.now(), durationMs: 0, pos: { ...body.pos } });
+          this.activity.consecutiveFailures = 0;
+          return;
+        }
         if (rebound) {
           delete this.activity.stanceGap;
           this.d.bus.publish('body_adapt', 'P2', `「${gap.skill}」改变了站位；下一步仍按原锚点去本次支撑的脚位 (${rebound.target.x},${rebound.target.y},${rebound.target.z})`, { planId: this.activity.id, skill: step.skill, from: rebound.from, target: rebound.target });
@@ -745,6 +754,9 @@ export class Mind {
     if (!a) return null;
     const rebound = rebindStanceTarget(args, gap);
     if (!rebound) return null;
+    const target = { x: rebound.xyz[0], y: rebound.xyz[1], z: rebound.xyz[2] };
+    // 放置的副作用可能已经把身体带到目标脚位；这时这一步已经没有要走的距离。
+    if (stanceReached(this.d.adapter.state().pos, target)) return { kind: 'reached' as const, target };
     const reboundArgs = { xyz: rebound.xyz, facing: rebound.facing };
     if (!this.d.arbiter.validate({ skill: step.skill, args: reboundArgs }).ok) return null;
     const own = a.steps[Math.max(0, a.index - 1)];
@@ -755,7 +767,7 @@ export class Mind {
       own.origin = 'execution_helper';
       own.authorizedBy = { skill: step.skill, ...(own.id ? { stepId: own.id } : {}), args: originalArgs };
     }
-    return { from: rebound.from, target: { x: rebound.xyz[0], y: rebound.xyz[1], z: rebound.xyz[2] } };
+    return { kind: 'rebound' as const, from: rebound.from, target };
   }
 
   /** 自动续跑到原动作期限就取消本次执行；不延长，也不让新 taskId 重新计时。 */
