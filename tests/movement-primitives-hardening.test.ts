@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ActionResult, MoveOpts, MoveTarget, PlacementFaceAttempt, Vec3Like } from '../src/adapter/types.ts';
-import { mineCell, moveStep, pillarOne, placeCell, placeSupport } from '../src/skills/movement/index.ts';
+import { l1Primitives, L1_MANIFEST, mineCell, moveStep, pillarOne, placeCell, placeSupport, PRIMITIVE_PROBLEM_KINDS } from '../src/skills/movement/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
 
@@ -341,6 +341,23 @@ test('move_step 把相邻一步的扫掠/跳跃/落地交给适配器 adjacentSt
   assert.equal(w.opts[0]?.maxDropDown, undefined);
 });
 
+test('move_step 身体空间有未加载格时不当作空旷', async (t) => {
+  class UnloadedHead extends FakeAdapter {
+    // FakeAdapter 的测试世界总是返回方块名；这里显式模拟区块未加载（GameAdapter 允许 null）。
+    override blockAt(pos: Vec3Like): string {
+      return (pos.x === 1 && pos.y === 65 && pos.z === 0 ? null : super.blockAt(pos)) as unknown as string;
+    }
+  }
+  const w = new UnloadedHead();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(problemKind(r), 'UNKNOWN_GEOMETRY');
+  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: 0.5 });
+});
+
 test('move_step 在岩浆中明确拒绝，不进入普通步行等待', async (t) => {
   const w = flat();
   w.inLava = true;
@@ -434,6 +451,29 @@ test('place_support 每次尝试都带结构化 problem.kind', async (t) => {
   const attempts = r.data?.attempts as { problem?: { kind?: string } }[];
   assert.ok(attempts.length > 0);
   assert.ok(attempts.every((a) => a.problem?.kind === 'NO_REFERENCE'), JSON.stringify(attempts));
+});
+
+test('回执带执行关联字段，便于把观测与动作对上号', async (t) => {
+  const w = flat();
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.actionId, 'move_step');
+  assert.match(String(r.data?.executionId), /[:]move_step:\d+$/);
+  assert.equal(typeof r.data?.sequence, 'number');
+});
+
+test('L1 manifest 覆盖每个基础动作，且效果/失败码都有声明', () => {
+  assert.equal(L1_MANIFEST.length, l1Primitives.length);
+  const problems = new Set<string>(PRIMITIVE_PROBLEM_KINDS);
+  for (const contract of L1_MANIFEST) {
+    assert.ok(contract.args.length > 0, `${contract.name} 缺少 args`);
+    assert.ok(contract.effects.length > 0, `${contract.name} 缺少 effects`);
+    assert.ok(contract.problems.length > 0, `${contract.name} 缺少 problems`);
+    for (const kind of contract.problems) assert.ok(problems.has(kind), `${contract.name} 声明了未知 problem ${kind}`);
+  }
+  assert.deepEqual(L1_MANIFEST.map((c) => c.name).sort(), ['mine_cell', 'move_step', 'pillar_one', 'place_cell', 'place_support']);
 });
 
 test('place_cell 占用分类使用 TARGET_OCCUPIED，而不是 PATH_NOT_FOUND 语义', async (t) => {
