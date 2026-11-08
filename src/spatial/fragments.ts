@@ -19,7 +19,9 @@ export function pageFragments(
   },
 ): { items: PathFragment[]; pages: number; truncated: boolean; partial: boolean } {
   const items: PathFragment[] = [];
-  const kinds: (PathFragment['kind'] | undefined)[] = opts.kinds?.length ? opts.kinds : [undefined];
+  // 显式空数组表示“不匹配任何 kind”，不能悄悄退化成扫全部。
+  if (opts.kinds !== undefined && opts.kinds.length === 0) return { items: [], pages: 0, truncated: false, partial: false };
+  const kinds: (PathFragment['kind'] | undefined)[] = opts.kinds ?? [undefined];
   let pages = 0;
   let truncated = false;
   let partial = false;

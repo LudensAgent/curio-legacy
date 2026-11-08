@@ -93,6 +93,7 @@ test('plan_memory_route：heal 默认 false 不跨记录，显式 true 才连接
   const closed = await planMemoryRoute.run(ctx, { to: at(3, 64, 0), from: at(0, 64, 0), heal: false });
   assert.equal(closed.data?.status, 'gap');
   assert.equal(closed.data?.reason, 'disconnected');
+  assert.match(closed.summary, /heal:true/);
   const { spatial: healedSpatial } = fakeSpatial([[
     fragment('a', [at(0, 64, 0), at(1, 64, 0)]),
     fragment('b', [at(1.5, 64, 0), at(3, 64, 0)]),

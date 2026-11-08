@@ -42,7 +42,7 @@ const reasonText = (reason: MemoryRouteGapReason | undefined) => {
 export const planMemoryRoute: Skill<MemoryRouteArgs> = {
   name: 'plan_memory_route',
   description: '只读历史路线规划：在共享空间记忆的挖/走/桥通道图上找 from→to 的稀疏路点，返回每段 transition/可逆性/证据或结构化缺口；不执行、不挖、不放、不搭柱。',
-  argsDoc: '{"to":{x,y,z},"from"?:{x,y,z}（默认当前脚位）,"allowed"?：["walk"|"step"|"drop"|"climb"]（默认 walk+step，drop/climb 需显式允许）,"snapRadius"?:0-16（默认5）,"maxWaypoints"?:1-1024,"heal"?:false（显式允许跨记录近距自愈）,"maxPoints"?:1-500000}；历史几何，未验证当前可通行；不执行。',
+  argsDoc: '{"to":{x,y,z},"from"?:{x,y,z}（默认当前脚位）,"allowed"?:["walk"|"step"|"drop"|"climb"]（默认 walk+step，drop/climb 需显式允许）,"snapRadius"?:0-16（默认5）,"maxWaypoints"?:1-1024,"heal"?:true|false（默认 false，显式允许跨记录近距自愈）,"maxPoints"?:1-500000}；历史几何，未验证当前可通行；不执行。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -140,9 +140,10 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     const truncatedNote = truncated ? '；本次扫描/图规模已截断，结果可能不完整' : '';
     const nearestLabel = inspection.nearestReachable === false ? '最近记录点（不保证从起点可达）' : '最近可达';
     const primitives = '执行/复核可用的现成动作：plan_route/walk_path（同高步行）、move_step（相邻一格）、descend_to（落差）、excavate_run（开挖）、pillar_one（垫高）；如何组合由你决定';
+    const healHint = inspection.heal ? '' : '；如果是跨记录断点，可用 heal:true 显式允许近距自愈（结果会标 evidence:"healed"）';
     const summary = status === 'route'
       ? `历史路线 ${legs.length} 段、${waypoints.length} 个路点${end === undefined ? '' : `，终点 (${Math.floor(end.x)},${end.y},${Math.floor(end.z)})`}${truncatedNote}。这是历史几何，未验证当前可通行；${primitives}。`
-      : `没有可用的历史路线：${reasonText(reason)}${inspection.nearest === undefined ? '' : `；${nearestLabel} (${Math.floor(inspection.nearest.x)},${inspection.nearest.y},${Math.floor(inspection.nearest.z)})`}${truncatedNote}。这是历史几何事实，未验证当前可通行；是否绕路/挖/垫由你决定。`;
+      : `没有可用的历史路线：${reasonText(reason)}${inspection.nearest === undefined ? '' : `；${nearestLabel} (${Math.floor(inspection.nearest.x)},${inspection.nearest.y},${Math.floor(inspection.nearest.z)})`}${truncatedNote}${healHint}。这是历史几何事实，未验证当前可通行；是否绕路/挖/垫由你决定。`;
     return ok(summary, data);
   },
 };

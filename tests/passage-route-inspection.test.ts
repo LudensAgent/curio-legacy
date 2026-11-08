@@ -67,6 +67,14 @@ test('passageRouteInspection：多步 link 标 mixed；上爬只标 climb + mech
   assert.equal(up.legs[0]?.mechanism, 'unknown');
 });
 
+test('passageRouteInspection：共享坐标的两条 record 按各自 path 标 adjacent，不误标 healed', () => {
+  const a = rec('shared-a', [at(0, 64, 0), at(1, 64, 0)]);
+  const b = rec('shared-b', [at(1, 64, 0), at(2, 64, 0)]);
+  const route = passageRouteInspection([a, b], at(0, 64, 0), at(2, 64, 0), { near: 0.5, heal: false });
+  assert.equal(route.status, 'route');
+  assert.deepEqual(route.legs.map((leg) => leg.evidence), ['adjacent', 'adjacent']);
+});
+
 test('passageRouteInspection：heal 默认关闭不跨记录；显式开启才连并标 healed', () => {
   const a = rec('a', [at(0, 64, 0), at(1, 64, 0)]);
   const b = rec('b', [at(1.5, 64, 0), at(3, 64, 0)]);

@@ -547,9 +547,24 @@ export function passageRouteInspection(
   opts: { near?: number; hop?: number; link?: number; heal?: boolean; allowed?: readonly PassageTransition[]; fallbackNear?: boolean } = {},
 ): PassageRouteInspection {
   const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK, heal = opts.heal ?? false;
-  const { nodes, owner, edges, blocked } = passageGraph(recs, { hop, link, heal });
+  const { nodes, edges, blocked } = passageGraph(recs, { hop, link, heal });
   const allowed = new Set<PassageTransition>(opts.allowed ?? ['walk', 'step', 'drop', 'climb']);
   const links = new Set<string>();
+  // 每个节点只记第一个索引它的 record；共享坐标会让 owner 指向旧 record。
+  // 边的归属改看“哪条 record 的 path/link 真的产生了这对端点”，避免把同 record 的边误标成 healed。
+  const pairOwner = new Map<string, number>();
+  recs.forEach((rec, index) => {
+    for (const l of rec.links ?? []) {
+      pairOwner.set(pointPairKey(l.a, l.b), index);
+      pairOwner.set(pointPairKey(l.b, l.a), index);
+    }
+    for (let i = 0; i + 1 < rec.path.length; i++) {
+      const a = rec.path[i]!, b = rec.path[i + 1]!;
+      const forward = pointPairKey(a, b), reverse = pointPairKey(b, a);
+      if (!pairOwner.has(forward)) pairOwner.set(forward, index);
+      if (!pairOwner.has(reverse)) pairOwner.set(reverse, index);
+    }
+  });
   for (const rec of recs) for (const l of rec.links ?? []) {
     links.add(pointPairKey(l.a, l.b));
     links.add(pointPairKey(l.b, l.a));
@@ -595,18 +610,20 @@ export function passageRouteInspection(
     const cacheKey = `${u},${v}`;
     const cached = legCache.get(cacheKey);
     if (cached !== undefined) return cached;
-    const sameRecord = owner[u] !== undefined && owner[u] === owner[v];
-    const rec = sameRecord ? recs[owner[u]!] : undefined;
+    const pairKey = pointPairKey(nodes[u]!, nodes[v]!);
+    const pairIndex = pairOwner.get(pairKey);
+    const sameRecord = pairIndex !== undefined;
+    const rec = sameRecord ? recs[pairIndex] : undefined;
     const points: Vec3Like[] = (() => {
-      if (rec === undefined) return [{ ...nodes[u]! }, { ...nodes[v]! }];
-      const i = indexOfPoint(owner[u]!, nodes[u]!);
-      const j = indexOfPoint(owner[u]!, nodes[v]!);
+      if (rec === undefined || pairIndex === undefined) return [{ ...nodes[u]! }, { ...nodes[v]! }];
+      const i = indexOfPoint(pairIndex, nodes[u]!);
+      const j = indexOfPoint(pairIndex, nodes[v]!);
       if (i < 0 || j < 0) return [{ ...nodes[u]! }, { ...nodes[v]! }];
       const slice = i <= j ? rec.path.slice(i, j + 1) : rec.path.slice(j, i + 1).reverse();
       return slice.length >= 2 ? slice.map((p) => ({ ...p })) : [{ ...nodes[u]! }, { ...nodes[v]! }];
     })();
     const transitions = [...new Set(points.slice(1).map((p, i) => routeTransition(points[i]!, p)))];
-    const linked = links.has(pointPairKey(nodes[u]!, nodes[v]!));
+    const linked = links.has(pairKey);
     const evidence: PassageLegEvidence = linked
       ? 'linked'
       : !sameRecord
