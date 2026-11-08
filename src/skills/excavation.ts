@@ -368,8 +368,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   };
   /** 只把已确认落地写成 dug fragment/traversal/拓扑；记忆失败不改身体结果。 */
   const recordRoute = () => {
-    if (routeMemory !== undefined || confirmedSegments.length === 0) return;
-    if (!ctx.spatial) { routeMemory = { status: 'skipped' }; return; }
+    if (routeMemory !== undefined) return;
+    if (confirmedSegments.length === 0 || !ctx.spatial) { routeMemory = { status: 'skipped' }; return; }
     const first = confirmedSegments[0]!;
     const last = confirmedSegments.at(-1)!;
     const polyline = [{ ...first.from }, ...confirmedSegments.map((segment) => ({ ...segment.to }))];
@@ -463,7 +463,10 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       senses.markSweep();
       return false;
     };
-    if (await observe()) return ok('在当前实际入口观察到目标，未继续开挖', { ...details(), stoppedByObservation: true });
+    if (await observe()) {
+      recordRoute();
+      return ok('在当前实际入口观察到目标，未继续开挖', { ...details(), stoppedByObservation: true });
+    }
     const direction = DIRECTIONS[args.direction];
     for (let step = 0; step < args.steps; step++) {
       const current = assertSession(ctx, origin), here = voxel(current.pos);

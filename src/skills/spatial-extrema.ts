@@ -48,8 +48,8 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
     if (metric !== 'deepest' && metric !== 'farthest') return { ok: false, error: 'metric 必须是 deepest 或 farthest' };
     if (a.dim !== undefined && (typeof a.dim !== 'string' || a.dim.length === 0)) return { ok: false, error: 'dim 必须是非空字符串' };
     const kinds = a.kinds;
-    if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some((kind) => !KINDS.includes(kind)))) {
-      return { ok: false, error: `kinds 必须是 ${KINDS.join('|')} 的数组` };
+    if (kinds !== undefined && (!Array.isArray(kinds) || kinds.length === 0 || kinds.some((kind) => !KINDS.includes(kind)))) {
+      return { ok: false, error: `kinds 必须是非空的 ${KINDS.join('|')} 数组；不写则默认 dug+walked` };
     }
     const parsedOrigin = a.origin === undefined ? undefined : finitePoint(a.origin);
     if (a.origin !== undefined && parsedOrigin === null) return { ok: false, error: 'origin 需要 {x,y,z} 三个有限数字' };
