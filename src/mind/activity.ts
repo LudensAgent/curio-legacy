@@ -4,6 +4,7 @@ import type { Percept } from '../perception/perception.ts';
 import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { evaluateCondition, type ConditionPerception } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
+import { ROUTE_REGISTRY_PROBLEM_KINDS } from '../skills/movement/route.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
@@ -252,10 +253,13 @@ function adoptDestination(nav: NavigationProgress, target: NavPoint) {
   nav.remaining = [{ ...target }];
 }
 
-/** 路线 handle 已经不能复用的报告（注册表问题或库的失效原因）。 */
-const ROUTE_HANDLE_PROBLEMS = new Set([
-  'route_not_found', 'route_consumed', 'route_expired', 'scope_mismatch', 'route_not_executable',
-  'invalid_request', 'route_invalidated', 'route_start_changed', 'scope_changed',
+/**
+ * 路线 handle 已经不能复用的报告：注册表拒绝的六种原因（与 walk.ts 共用 route.ts 的集合）
+ * 加上库在执行期报告的三种失效原因。后者不属于注册表问题，放在这里只为统一“旧 handle 不可复用”的判定。
+ */
+const ROUTE_HANDLE_PROBLEMS = new Set<string>([
+  ...ROUTE_REGISTRY_PROBLEM_KINDS,
+  'route_invalidated', 'route_start_changed', 'scope_changed',
 ]);
 
 function invalidationReasonOf(data: Record<string, unknown>): string | undefined {
@@ -353,32 +357,42 @@ function noteNavigationResult(
   const failure = result.status === 'failed'
     ? { at: now, ...(result.failureCode ? { code: String(result.failureCode) } : {}), summary: clipFeedback(result.summary, 220) }
     : undefined;
+  // 保留当前计划的剩余目标与最后实测落点；同一语义在多条终态分支复用。
+  const keepProgress = (nextRemaining: NavPoint[] | undefined) => {
+    if (nextRemaining) nav.remaining = nextRemaining;
+    nav.lastConfirmed = { pos: { ...(position ?? state.pos) }, at: now };
+  };
   if (invalidation) {
     nav.phase = 'replanning';
     nav.lastInvalidation = { at: now, reason: clipFeedback(invalidation, 200) };
     if (routeId && nav.lastRoute) nav.lastRoute.valid = false;
+    // 失效前已确认的段仍是实测进展：保留最后落点与当前计划的剩余目标，别因 handle 失效丢掉。
+    if (confirmed > 0) keepProgress(remaining);
   } else if (result.status === 'cancelled') {
     nav.phase = 'cancelled';
+    // 取消只终止本段：已确认的段、剩余目标和最后实测落点照实保留。
+    if (confirmed > 0) keepProgress(remaining);
+    else if (remaining) nav.remaining = remaining;
   } else if (arrived) {
     // 段终点等于原目的地才算到达；中间 waypoint 只是完成了一段。
     const final = !nav.destination || !requested || sameNavPoint(nav.destination, requested);
     if (final) {
       nav.phase = 'arrived';
-      nav.remaining = [];
+      keepProgress([]);
     } else {
       nav.phase = 'segment_completed';
-      nav.remaining = remaining?.length ? remaining : [{ ...nav.destination! }];
+      keepProgress(remaining?.length ? remaining : [{ ...nav.destination! }]);
     }
-    nav.lastConfirmed = { pos: { ...(position ?? state.pos) }, at: now };
   } else if (confirmed > 0) {
     // 有实测确认的段就是进展；保留剩余目标，不把这一段当整趟失败。
     nav.phase = 'segment_completed';
-    if (remaining) nav.remaining = remaining;
-    nav.lastConfirmed = { pos: { ...(position ?? state.pos) }, at: now };
+    keepProgress(remaining);
     if (failure) nav.lastFailure = failure;
   } else if (result.status === 'failed') {
     nav.phase = 'failed';
     if (failure) nav.lastFailure = failure;
+    // 段失败（无可确认段）也要保留当前计划的剩余目标；空数组照实写空，不用旧计划冒充。
+    if (remaining) nav.remaining = remaining;
   } else if (remaining) {
     nav.remaining = remaining;
   } else if (step.skill === 'plan_route') {
@@ -405,6 +419,8 @@ export function retargetNavigation(a: Activity, steps: ActivityStep[]) {
   if (destination && (!nav.destination || !sameNavPoint(nav.destination, destination))) {
     adoptDestination(nav, destination);
     nav.phase = 'planning';
+    // 目标已变：旧目标的 route handle 指向旧终点，不能再被后续 walk_path 复用。
+    if (nav.lastRoute) nav.lastRoute = { ...nav.lastRoute, valid: false };
   }
   if (a.doneWhen) nav.arrivalCondition = a.doneWhen; else delete nav.arrivalCondition;
   nav.updatedAt = now;
@@ -444,7 +460,9 @@ function describeNavigation(nav: NavigationProgress) {
     remaining_count: nav.remaining.length,
     // 只给当前计划的剩余点（上限 8），不把历史路点塞进提示词。
     remaining_targets: nav.remaining.slice(0, 8),
-    ...(nav.parentDeadlineMs !== undefined ? { parent_deadline_ms: nav.parentDeadlineMs } : {}),
+    ...(nav.parentDeadlineMs !== undefined
+      ? { parent_deadline_ms: nav.parentDeadlineMs, parent_budget_remaining_ms: Math.max(0, nav.parentDeadlineMs - Date.now()) }
+      : {}),
     ...(nav.lastRoute ? { last_route: { id: nav.lastRoute.id, source: nav.lastRoute.source, valid: nav.lastRoute.valid } } : {}),
     ...(nav.lastConfirmed ? { last_confirmed_position: nav.lastConfirmed.pos } : {}),
     ...(nav.lastInvalidation ? { last_invalidation: nav.lastInvalidation.reason } : {}),
@@ -674,13 +692,24 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 得到 route_consumed；navigate_to 的同类重复调用也不构成新的实测依据。索引照常前进，
   // 由后续步骤/新一轮路线从实测位置继续，Activity 不按 failed 收尾。
   if (result.status === 'failed' && NAVIGATION_SKILLS.has(step.skill)) {
-    const confirmed = confirmedSegmentsOf((result.data ?? {}) as Record<string, unknown>);
+    const data = (result.data ?? {}) as Record<string, unknown>;
+    const confirmed = confirmedSegmentsOf(data);
     if (confirmed > 0) {
       a.consecutiveFailures = 0;
       const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；已消费的路线不再原样重放，保留这段实测进展，下一段从实测位置重新规划`;
       const reached = conditionReached();
       if (reached) return reached;
       return remainingSteps(a) === 0 ? { kind: 'done', met: false, why } : { kind: 'continue' };
+    }
+    // route handle 被注册表/库判定不可复用：原样重放只会再次失败，不能进通用自动重试。
+    // 只有 walk_path 消费 routeId 并报告顶层 invalidation/problem/unsupported；navigate_to
+    // 每次从实测位置重新规划、不持有 handle（失效字段只嵌在 segment 里），不在此列。
+    const invalidation = invalidationReasonOf(data);
+    if (step.skill === 'walk_path' && invalidation !== undefined && ROUTE_HANDLE_PROBLEMS.has(invalidation)) {
+      return {
+        kind: 'stuck',
+        why: `${step.skill} 报告路线 handle 不可复用（${invalidation}）；不自动重放已消费/过期/换作用域的路线，已确认 ${a.navigation?.completedSegments ?? 0} 段与实测位置保留，下一段请从实测位置重新规划`,
+      };
     }
   }
   if (softMiss(a, step, result)) {

@@ -18,6 +18,18 @@ import { walkLandRules } from '../../adapter/land-rules.ts';
 import { searchLandRouteAsync, type LandRouteVerification, type LandSearchResult } from '../../spatial/land-search.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 
+/**
+ * 注册表拒绝 routeId 的六种原因。这是 route handle 是否“还能被注册表消费”的判定，
+ * 与库在执行期报告的路线失效原因（route_invalidated/route_start_changed/scope_changed）
+ * 分开：后者不是注册表问题，不能拿来实现 registryResult 的分类。
+ */
+export const ROUTE_REGISTRY_PROBLEM_KINDS = [
+  'invalid_request', 'route_not_found', 'route_consumed', 'route_expired', 'scope_mismatch', 'route_not_executable',
+] as const;
+export type RouteRegistryProblemKind = typeof ROUTE_REGISTRY_PROBLEM_KINDS[number];
+export const isRouteRegistryProblem = (reason: string | undefined): reason is RouteRegistryProblemKind =>
+  reason !== undefined && (ROUTE_REGISTRY_PROBLEM_KINDS as readonly string[]).includes(reason);
+
 type Scope = { worldId: string; dim: string; sessionId: string };
 type RouteSource = 'auto' | 'search' | 'memory' | 'spatial';
 /** Shared wall-clock budget for the strict + historical 3D A* passes. */
