@@ -102,6 +102,39 @@ test('3D 搜索：预算不足明确报 BUDGET_EXHAUSTED', () => {
   assert.equal(result.status, 'BUDGET_EXHAUSTED');
 });
 
+test('3D 搜索：0.5 半砖顶面生成 step，不要求整数脚高', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
+  fill(map, 'minecraft:stone', [at(0, -1, 0), at(1, -1, 0)]);
+  fill(map, 'minecraft:stone_slab', [at(1, 0, 0)], { type: 'bottom' });
+  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(1.5, 0.5, 0.5)), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.boundaries));
+  assert.deepEqual(result.transitions.map((transition) => transition.kind), ['step']);
+  assert.equal(result.transitions[0]!.to.y, 0.5);
+});
+
+test('3D 搜索：允许 0 < drop < 1 从半砖/箱顶走出', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
+  fill(map, 'minecraft:stone_slab', [at(0, 0, 0)], { type: 'top' });
+  fill(map, 'minecraft:stone_slab', [at(1, 0, 0)], { type: 'bottom' });
+  const result = searchLandRoute(map, request(at(0.5, 1, 0.5), at(1.5, 0.5, 0.5)), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.boundaries));
+  assert.deepEqual(result.transitions.map((transition) => transition.kind), ['drop']);
+  assert.equal(result.transitions[0]!.drop, 0.5);
+});
+
+test('3D 搜索：目标 y 不在真实站立顶面时吸附到最近顶面', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));
+  fill(map, 'minecraft:stone', [at(0, -1, 0)]);
+  fill(map, 'minecraft:stone_slab', [at(1, 0, 0)], { type: 'bottom' });
+  const result = searchLandRoute(map, request(at(0.5, 0, 0.5), at(1.5, 0, 0.5)), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.boundaries));
+  assert.equal(result.resolvedTarget.y, 0.5, '目标列真实脚高是半砖顶面');
+  assert.equal(result.transitions[0]!.to.y, 0.5);
+});
+
 test('3D 搜索：历史模式用过期体素给出候选路线，严格模式仍报 UNKNOWN', () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 2, 1));

@@ -1,3 +1,4 @@
+import { supportTop } from '../perception/geometry.ts';
 import {
   evaluateLandTransition,
   evaluateWalkStep,
@@ -184,6 +185,36 @@ class MinHeap {
 }
 
 /**
+ * 一列里真实可站立面的脚高。不是按整数层猜，而是读已观察方块的碰撞顶面，
+ * 包括 0.5 半砖、0.875 雪层、箱子/台阶顶面；0 < drop < 1 也保留。
+ * 严格模式跳过过期/旧会话/状态不完整的证据；历史模式允许过期证据但用它推导。
+ */
+function standableSurfaces(
+  map: VoxelMap, dim: string,
+  x: number, z: number, centerY: number, down: number, up: number,
+): { y: number; top: number }[] {
+  const min = Math.floor(centerY - down) - 1;
+  const max = Math.ceil(centerY + up) + 1;
+  const out: { y: number; top: number }[] = [];
+  const seen = new Set<string>();
+  for (let y = min; y <= max; y++) {
+    const view = map.cellAt(dim, x, y, z);
+    if (!view.observed) continue;
+    const evidence = view.evidence;
+    if (!evidence.observation.stateComplete) continue;
+    const top = supportTop(evidence.observation.state.name.replace(/^minecraft:/, ''), evidence.observation.state.properties);
+    if (top === null) continue;
+    const foot = y + top;
+    if (foot < centerY - down - 0.01 || foot > centerY + up + 0.01) continue;
+    const key = foot.toFixed(3);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ y: foot, top });
+  }
+  return out;
+}
+
+/**
  * 历史体素视图：只读地把已记录但过期/旧会话的证据视为可供几何推导的观察。
  * 不写回 VoxelMap、不改 observedAt；结果必须由调用方标记为历史路线，并由真实
  * 当前证据复验后再执行。没有记录过的格子仍保持 unobserved，不做外推。
@@ -242,7 +273,11 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   const start = request.body.feet;
   const startCell = { x: Math.floor(start.x), z: Math.floor(start.z) };
   const targetCell = { x: Math.floor(request.to.x), z: Math.floor(request.to.z) };
-  const targetY = request.to.y;
+  // 站立格目标的 y 可能写的是方块 y 或略偏；吸附到该列真实可站立顶面
+  // （半砖/雪层/台阶/箱子顶），不按整数层硬套。容器/门/床仍应由 go_near 处理。
+  const targetSurfaces = standableSurfaces(map, request.dim, targetCell.x, targetCell.z, request.to.y, 2, 2);
+  const targetY = targetSurfaces.length === 0 ? request.to.y
+    : targetSurfaces.reduce((best, surface) => Math.abs(surface.y - request.to.y) < Math.abs(best - request.to.y) ? surface.y : best, targetSurfaces[0]!.y);
   const resolvedTarget: Vec3Like = {
     x: start.x + (targetCell.x - startCell.x),
     y: targetY,
@@ -281,11 +316,25 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     if (stats.nodesExpanded >= maxNodes) { budget = true; break; }
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const nx = node.cx + dx, nz = node.cz + dz;
-      const candidates: { kind: LandSearchKind; ny: number; drop: number; cost: number }[] = [
-        { kind: 'walk', ny: node.cy, drop: 0, cost: 1 },
-        { kind: 'step', ny: node.cy + 1, drop: 0, cost: 2 },
-        ...Array.from({ length: maxDrop }, (_, i) => ({ kind: 'drop' as const, ny: node.cy - (i + 1), drop: i + 1, cost: 2 + i })),
-      ];
+      // 候选高度来自这一列真实可站立面，而不是 node.cy ± 整数：
+      // 这样半砖 0.5、雪层 0.875、台阶/箱子顶、0<drop<1 都能成为边。
+      const surfaces = standableSurfaces(map, request.dim, nx, nz, node.cy, maxDrop, 1.01);
+      const candidates: { kind: LandSearchKind; ny: number; drop: number; cost: number }[] = [];
+      for (const surface of surfaces) {
+        const dy = surface.y - node.cy;
+        if (Math.abs(dy) <= 0.01) candidates.push({ kind: 'walk', ny: surface.y, drop: 0, cost: 1 });
+        else if (dy > 0 && dy <= 1.01) candidates.push({ kind: 'step', ny: surface.y, drop: 0, cost: 2 + dy });
+        else if (dy < 0 && -dy <= maxDrop + 0.01) candidates.push({ kind: 'drop', ny: surface.y, drop: -dy, cost: 2 + -dy });
+      }
+      // 整列没有已观察的可站立面：不能静默当作“没有边”。留下未知边界，
+      // 让上层区分“需要观察/靠近”和“已观察地形明确阻塞”。
+      if (candidates.length === 0) {
+        stats.unknownEdges += 1;
+        if (boundaries.length < 64) boundaries.push({
+          from: { ...node.stance }, to: stanceFor(nx, node.cy, nz), kind: 'walk',
+          status: 'UNKNOWN', reason: 'no observed standable surface in this column',
+        });
+      }
       for (const candidate of candidates) {
         if (stats.edgesEvaluated >= maxEdges) { budget = true; break; }
         const to = nx === targetCell.x && nz === targetCell.z && Math.abs(candidate.ny - targetY) <= EPS
