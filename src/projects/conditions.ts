@@ -11,7 +11,10 @@ const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'ob
 const finite = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const validPos = (p: unknown): p is Vec3Like => object(p) && finite(p.x, -29_999_984, 29_999_984) && finite(p.z, -29_999_984, 29_999_984) && finite(p.y, -2048, 2048);
 
-export type ConditionPerception = Pick<Percept, 'ts' | 'observation' | 'self' | 'light'>;
+export type ConditionPerception = Pick<Percept, 'ts' | 'observation' | 'self' | 'light'> & {
+  /** 活动级的实测探索回执；没有它时 exploration 条件只能返回 unknown。 */
+  activityExploration?: { maxHorizontal: number; visitedCells: number; newChunks: number | null; found: string[]; blocked: boolean };
+};
 
 export function observationReady(state: AgentState): boolean {
   return state.connected && state.alive && state.observationReady === true && !!state.sessionId &&
@@ -25,6 +28,13 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
     if (typeof raw.item !== 'string' || !adapter.isKnownItem(raw.item)) throw new Error('验收条件包含未知物品');
     if (!finite(raw.count, 1, 2304) || !Number.isInteger(raw.count)) throw new Error('物品数量须为 1–2304 的整数');
     return { type: 'inventory_min', item: raw.item, count: raw.count };
+  }
+  if (raw.type === 'exploration') {
+    const min = raw.min_distance, find = raw.find;
+    if (min === undefined && find === undefined) throw new Error('exploration 条件至少要写 min_distance 或 find 之一');
+    if (min !== undefined && (!Number.isInteger(min) || min < 1 || min > 256)) throw new Error('min_distance 须为 1–256 的整数');
+    if (find !== undefined && (typeof find !== 'string' || !find.trim() || find.length > 80)) throw new Error('find 须为非空方块/物品名');
+    return { type: 'exploration', ...(min !== undefined ? { min_distance: min } : {}), ...(find !== undefined ? { find: find.trim().replace(/^minecraft:/, '') } : {}) };
   }
   if (raw.type === 'location_near') {
     if (typeof raw.dimension !== 'string' || !raw.dimension || raw.dimension.length > 100 || !validPos(raw.pos) || !finite(raw.radius, 0, 256)) {
@@ -110,6 +120,21 @@ export function observeCondition(condition: Condition, senses?: Pick<Senses, 'ob
 /** Receives one complete adapter snapshot; every branch, including all_of, uses that same snapshot. */
 export function evaluateCondition(condition: Condition, state: AgentState, worldId = state.worldId, observations: BlockObservation[] = [], percept?: ConditionPerception): ConditionResult {
   if (!observationReady(state) || state.worldId !== worldId) return { status: 'unknown', actual: null, reason: '没有同一世界的有效存活观测' };
+  if (condition.type === 'exploration') {
+    const evidence = percept?.activityExploration;
+    if (!evidence) return { status: 'unknown', actual: null, reason: '没有本段活动的实测探索回执（exploration 条件只在活动内可用）' };
+    const distanceMet = condition.min_distance === undefined
+      || evidence.maxHorizontal >= condition.min_distance || (evidence.newChunks ?? 0) > 0;
+    const foundMet = condition.find === undefined
+      || evidence.found.some((name) => name.replace(/^minecraft:/, '') === condition.find);
+    return {
+      status: distanceMet && foundMet ? 'satisfied' : 'unsatisfied',
+      actual: { maxHorizontal: evidence.maxHorizontal, visitedCells: evidence.visitedCells, newChunks: evidence.newChunks,
+        found: evidence.found, blocked: evidence.blocked,
+        ...(condition.min_distance !== undefined ? { requiredDistance: condition.min_distance } : {}),
+        ...(condition.find !== undefined ? { requiredFind: condition.find } : {}) },
+    };
+  }
   if (condition.type === 'inventory_min') {
     const count = state.inventory.filter((i) => i.name === condition.item).reduce((sum, i) => sum + i.count, 0);
     if (!Number.isFinite(count) || count < 0) return { status: 'unknown', actual: null, reason: '背包数量无效' };

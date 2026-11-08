@@ -31,6 +31,13 @@ interface SelfData {
   /** 最近几个主目标（阶段目标）的起止和结局：回顾阶段目标时看自己是不是一直在原地打转 */
   stages?: StageRecord[];
   observedProgress?: ObservedProgress;
+  /** 当前任务事实：无进展尝试和最近一次局部失败；跨重连/换维度保留，但要按世界/会话/时间重新核对。 */
+  taskFacts?: TaskFacts;
+}
+
+export interface TaskFacts {
+  noProgressRuns?: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[];
+  lastLocalFailure?: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null;
 }
 
 export interface StageRecord { goal: string; setAt: number; endAt: number; outcome: 'done' | 'dropped' | 'switched'; stepsDone: number; steps: number }
@@ -200,6 +207,8 @@ export class SelfModel {
   private touch() { this.dirty = true; }
   observedProgress(): ObservedProgress | null { return this.data.observedProgress ?? null; }
   setObservedProgress(value: ObservedProgress) { this.data.observedProgress = { ...value }; this.touch(); }
+  taskFacts(): TaskFacts { return this.data.taskFacts ?? {}; }
+  setTaskFacts(value: TaskFacts) { this.data.taskFacts = value; this.touch(); }
   flush() {
     if (!this.file || !this.dirty) return;
     this.dirty = false;

@@ -18,7 +18,12 @@ export type Condition =
   | { type: 'inventory_space_min'; free_slots: number }
   | { type: 'all_of'; conditions: Condition[] }
   /** 哪个先成立就算成立：“铁够 20 个或背包满” */
-  | { type: 'any_of'; conditions: Condition[] };
+  | { type: 'any_of'; conditions: Condition[] }
+  /**
+   * 有界探索验收：按本段活动的实测位移/新区块（min_distance）或实际看见的目标（find）判定。
+   * 只适用于会移动或观察的步骤，不能用原地查询冒充远行。
+   */
+  | { type: 'exploration'; min_distance?: number; find?: string };
 
 export type EvidenceStatus = 'satisfied' | 'unsatisfied' | 'unknown';
 

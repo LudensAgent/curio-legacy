@@ -59,6 +59,32 @@ test('闸门拒绝已出现过的动作签名，换成不同做法则放行并�
   assert.equal(mind.progressGate, null);
 });
 
+test('判重带上区域和证据版本：同一做法去了新区块就不再是重复', () => {
+  const { mind, activity } = harness();
+  mind.d.adapter = { state: () => ({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: { x: 0.5, y: 64, z: 0.5 } }) };
+  mind.d.memory.visitedChunkCount = 0;
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) {
+    mind.noteProgressOutcome({ ...activity, startPos: { x: 0.5, y: 64, z: 0.5 } }, { outcome: 'done', gained: {}, summary: '没找到' }, false);
+  }
+  const repeat = {
+    kind: 'new', notes: [], activity: { what: '再查一次', steps: [{ skill: 'find_item', args: { item: 'oak_log' } }] },
+  };
+  assert.equal(mind.enforceProgressGate(repeat, {}), false, '同一区域、同一证据版本仍是重复');
+
+  const moved = harness();
+  moved.mind.d.adapter = mind.d.adapter;
+  moved.mind.d.memory.visitedChunkCount = 0;
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) {
+    moved.mind.noteProgressOutcome({ ...moved.activity, startPos: { x: 0.5, y: 64, z: 0.5 } }, { outcome: 'done', gained: {}, summary: '没找到' }, false);
+  }
+  moved.mind.d.memory.visitedChunkCount = 4; // 进了新区块：证据版本变了
+  const afterExplore = {
+    kind: 'new', notes: [], activity: { what: '再查一次', steps: [{ skill: 'find_item', args: { item: 'oak_log' } }] },
+  };
+  assert.equal(moved.mind.enforceProgressGate(afterExplore, {}), true);
+  assert.equal(moved.mind.progressGate, null);
+});
+
 test('有物品、清单或新区块进展就清空无进展记录', () => {
   const { mind, activity } = harness();
   for (let i = 0; i < 3; i++) mind.noteProgressOutcome(activity, { outcome: 'done', gained: {}, summary: '没找到' }, false);

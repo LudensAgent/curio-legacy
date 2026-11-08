@@ -134,6 +134,19 @@ function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
       return [...skills].every((skill) => NON_MOVING_STEPS.has(skill))
         ? `done_when 需要到达 (${condition.pos.x},${condition.pos.y},${condition.pos.z}) 附近，但这几步（${[...skills].join('、') || '无'}）都不会移动（resolve_target/plan_route/look_around 只读，不算移动）；把移动步骤放进这段活，或换一个这段活能确认的收工条件`
         : null;
+    case 'exploration': {
+      if (condition.min_distance !== undefined && [...skills].every((skill) => NON_MOVING_STEPS.has(skill))) {
+        return `done_when 要求本段实测离起点 ${condition.min_distance} 格，但这几步（${[...skills].join('、') || '无'}）都不会移动；把会实际移动的步骤放进这段活，或改用 find`;
+      }
+      const nonObserving = new Set(['move_step', 'navigate_to', 'walk_path', 'press_keys', 'descend_to', 'excavate_run',
+        'pillar_one', 'place_cell', 'place_support', 'craft', 'smelt', 'sleep', 'eat', 'wait', 'store_items',
+        'travel_portal', 'recall_portal', 'boat_path', 'swim_path', 'resolve_target', 'plan_route', 'assess_landings',
+        'find_item', 'remember_place', 'sign_text', 'edit_book']);
+      if (condition.find !== undefined && [...skills].every((skill) => nonObserving.has(skill))) {
+        return `done_when 要求本段实际看见 ${condition.find}，但这几步（${[...skills].join('、') || '无'}）都不会观察目标；把观察/搜索/采集步骤放进这段活，或改用 min_distance`;
+      }
+      return null;
+    }
     case 'all_of':
       return condition.conditions.map((child) => doneWhenGap(child, skills)).find((gap): gap is string => gap !== null) ?? null;
     case 'any_of': {

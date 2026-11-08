@@ -68,8 +68,8 @@ export interface MindContext {
   /** 游戏自己的系统消息（死亡播报、成就、公告），原话 */
   gameMessages?: string[];
   repeatedFailures?: string[];
-  /** 动作结束时实际观察到的失败；地形可能随后改变。 */
-  recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string; repeats?: number }[];
+  /** 动作结束时实际观察到的失败；地形可能随后改变。scope 说明它只否定哪一层。 */
+  recentActionFailures?: { skill: string; args: unknown; failure_code: string | null; summary: string; position: AgentState['pos']; observed_at: string; repeats?: number; scope?: 'step'; implication?: string }[];
   /** 动作成功但附带、要心智掂量的事实（如挖到了人造建材）；位置和环境可能随后改变。 */
   recentActionCaveats?: { skill: string; args: unknown; caveat: string; position: AgentState['pos']; observed_at: string }[];
   /** 建筑师正在后台画的图纸 */
@@ -193,11 +193,11 @@ export function moveDetails(names: string[]): string {
 }
 
 const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
-{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround|inPortal","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
+{"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround|inPortal","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"exploration","min_distance":16}（本段实测离起点至少 16 格或进了新区块）｜{"type":"exploration","find":"oak_log"}（本段实际看见目标）｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near；没把握就省略 done_when，做完再看结果。`;
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near，可以用 exploration 写有界探索（min_distance / find）；没把握就省略 done_when，做完再看结果。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
