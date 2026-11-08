@@ -94,23 +94,30 @@ export const goNear: Skill<ApproachArgs> = {
       const name = ctx.adapter.blockAt({ x: to.x, y, z: to.z })?.replace(/^minecraft:/, '');
       return name !== undefined && name !== null && sameKind(name);
     }));
-    const usable = candidates.flatMap((to) => {
-      const strict = searchLandRoute(spatial.session.voxel, { ...request, to });
-      const historical = strict.status === 'FOUND' || !args.historical
-        ? null : searchLandRoute(spatial.session.voxel, { ...request, to, allowStale: true });
-      const result: LandSearchResult | null = strict.status === 'FOUND' ? strict
-        : historical?.status === 'FOUND' ? historical : null;
-      if (result === null || result.transitions.some((transition) => !args.allowed.includes(transition.kind))) return [];
-      return [{ to, result }];
-    });
+    // 先只跑严格证据；严格全失败才用历史证据回退。原实现边搜严格边搜历史，
+    // 即使后面的候选有严格路线，也会为前面每个失败候选白跑一遍历史搜索。
+    const strictResults = candidates.map((to) => ({
+      to, result: searchLandRoute(spatial.session.voxel, { ...request, to }),
+    }));
+    const usable: { to: Vec3Like; result: LandSearchResult }[] = strictResults.flatMap(({ to, result }) =>
+      result.status === 'FOUND' && !result.transitions.some((transition) => !args.allowed.includes(transition.kind))
+        ? [{ to, result }] : []);
+    if (!usable.length && args.historical) {
+      usable.push(...strictResults.flatMap(({ to, result }) => {
+        if (result.status === 'FOUND') return [];
+        const historical = searchLandRoute(spatial.session.voxel, { ...request, to, allowStale: true });
+        return historical.status === 'FOUND'
+          && !historical.transitions.some((transition) => !args.allowed.includes(transition.kind))
+          ? [{ to, result: historical }] : [];
+      }));
+    }
     usable.sort((a, b) => (a.result.evidenceMode === b.result.evidenceMode ? 0 : a.result.evidenceMode === 'current' ? -1 : 1)
       || a.result.cost - b.result.cost);
     const chosen = usable[0];
     if (!chosen) {
-      const attempts = candidates.map((to) => {
-        const strict = searchLandRoute(spatial.session.voxel, { ...request, to });
-        return { to, status: strict.status, boundaries: strict.boundaries.length };
-      });
+      const attempts = strictResults.map(({ to, result }) => ({
+        to, status: result.status, boundaries: result.boundaries.length,
+      }));
       return fail('PATH_NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格；不会把目标方块本身当站立格`, {
         target, targetName, candidates: attempts, position: { ...state.pos },
       });
