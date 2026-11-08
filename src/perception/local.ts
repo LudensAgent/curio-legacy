@@ -101,6 +101,9 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
   };
   const word = (f: number, u: number, r: number) => `${f > 0 ? '前' : f < 0 ? '后' : ''}${r < 0 ? '左' : r > 0 ? '右' : ''}${u > 0 ? `上${u}` : u < 0 ? `下${-u}` : ''}` || '原地';
   const stand: string[] = [], place: string[] = [];
+  // 与 move_step 单步预检同一组判据：曼哈顿 1；同层脚高一致，上一级/下一级 0.5–1 格。
+  // stand 是候选（含对角和分数脚高），不保证一步到达；executable 才是可直接交给 move_step 的落点。
+  const executable: { at: [number, number, number]; xyz: [number, number, number]; foot: number; facing: Facing; primitive: 'move_step' }[] = [];
   for (const u of [0, -1, 1]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
     if (f === 0 && r === 0) continue;
     if (u === 1 && !isOpen(at(0, 2, 0))) continue; // 往上迈要先跳，头顶得空
@@ -114,7 +117,17 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     const probe = bodyProbe(foot, cell.x, cell.z, stateAtWorld);
     if (probe.unknown.length || probe.blockers.length) continue;
     const offset = Math.abs(foot - (feet.y + u)) > 0.01 ? `（脚高 ${foot.toFixed(2)}）` : '';
-    stand.push(`[${f},${u},${r}] ${word(f, u, r)}${offset}`);
+    const diagonal = f !== 0 && r !== 0;
+    stand.push(`[${f},${u},${r}] ${word(f, u, r)}${offset}${diagonal ? '（对角，需多步）' : ''}`);
+    const horizontal = Math.abs(f) + Math.abs(r);
+    const dv = foot - feet.y;
+    // 规范化的竖直写法：同层 0，向上 1，向下 -1；只有与枚举层一致时才列为可执行单步，
+    // 避免把半砖/雪层的分数脚高伪装成同层（或同一列在不同 u 层重复列出）。
+    const vertical = Math.abs(dv) <= 0.01 ? 0 : dv > 0 ? 1 : -1;
+    const stepable = vertical === 0 || (dv >= 0.49 && dv <= 1.01) || (dv >= -1.01 && dv <= -0.49);
+    if (horizontal === 1 && stepable && u === vertical) {
+      executable.push({ at: [f, vertical, r], xyz: [cell.x, foot, cell.z], foot, facing, primitive: 'move_step' });
+    }
   }
   for (const u of [0, -1, 1, 2]) for (let f = 1; f >= -1; f--) for (let r = -1; r <= 1; r++) {
     if (f === 0 && r === 0 && (u === 0 || u === 1)) continue;
@@ -125,7 +138,10 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     place.push(`[${f},${u},${r}] ${word(f, u, r)}`);
   }
   return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers, body: bodyCells,
-    spots: { stand: stand.slice(0, 8), place: place.slice(0, 8), note: 'stand 是脚部目标格（括号里的脚高按实际碰撞顶面，半砖/雪层等可为分数）；place 是已看清的空位且旁边有已观察的可贴面方块。两者都按当前可见格和碰撞形状估计，未知格不计入；实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格' } };
+    spots: {
+      stand: stand.slice(0, 8), executable: executable.slice(0, 8), place: place.slice(0, 8),
+      note: 'stand 是候选脚部目标格：括号里的脚高按实际碰撞顶面（半砖/雪层等可为分数），对角项需要多步，不能直接当 move_step 的一步；executable 是按 move_step 单步规则（曼哈顿 1、同层脚高一致、上下级 0.5–1 格、身体净空）预检过的落点，xyz 是世界脚位，执行前仍会按最新位置重新预检。place 是已看清的空位且旁边有已观察的可贴面方块。地图来自本次视觉，body 的脚/头所在格来自触觉事实；两者证据范围不同，未知格不计入。实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格',
+    } };
 }
 
 export function describeCell(adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like): string {

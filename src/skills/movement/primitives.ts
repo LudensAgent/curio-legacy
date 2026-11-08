@@ -55,14 +55,14 @@ function stairHint(stair: ReturnType<typeof stairHandoff>): string {
 
 /**
  * 候选脚高是不是真的能站：方块顶面只是 surfaceCandidateY，上方两格被占时不能当作可站立脚高。
- * 返回阻挡事实；没有阻挡返回 null。
+ * 只回报阻挡格坐标，不回显方块名——没有经过视觉确认的方块不能在动作反馈里被点名。
  */
-function standableFootProblem(at: StateAt, footY: number, cell: Vec3Like): { kind: PrimitiveProblemKind; blocker?: { cell: Vec3Like; name: string } } | null {
+function standableFootProblem(at: StateAt, footY: number, cell: Vec3Like): { kind: PrimitiveProblemKind; blocker?: { cell: Vec3Like } } | null {
   const body = inspectBody(at, footY, cell.x, cell.z);
   const blocker = body.blockers[0];
   if (blocker) return {
     kind: blocker.cell.y <= Math.floor(footY + 0.05) ? 'TARGET_BLOCKED' : 'HEAD_BLOCKED',
-    blocker: { cell: blocker.cell, name: blocker.name },
+    blocker: { cell: blocker.cell },
   };
   return body.unknown.length ? { kind: 'UNKNOWN_GEOMETRY' } : null;
 }
@@ -274,7 +274,7 @@ const moveStepSkill: Skill<MoveArgs> = {
       const standable = correctedU !== null && below !== null ? standableFootProblem(at, below.foot, target) : null;
       if (standable !== null) {
         const where = standable.blocker
-          ? `候选脚高 y=${below!.foot.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          ? `候选脚高 y=${below!.foot.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的方块占据`
           : `候选脚高 y=${below!.foot.toFixed(2)} 处有未加载格`;
         return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${below!.foot.toFixed(2)}，但那不是可站立脚高：${where}；move_step 不给脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
           ...facts, surfaceCandidateY: below!.foot, standableFootY: null, movementNotAttempted: true,
@@ -315,7 +315,7 @@ const moveStepSkill: Skill<MoveArgs> = {
       const standable = standableFootProblem(at, direct, target);
       if (standable !== null) {
         const where = standable.blocker
-          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的方块占据`
           : `候选脚高 y=${direct.toFixed(2)} 处有未加载格`;
         return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${direct.toFixed(2)}，但那不是可站立脚高：${where}；不提供脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
           targetCell: target, expectedFoot: targetFoot, surfaceCandidateY: direct, standableFootY: null, movementNotAttempted: true,
@@ -335,7 +335,7 @@ const moveStepSkill: Skill<MoveArgs> = {
       const standable = corrected !== null ? standableFootProblem(at, direct, target) : null;
       if (standable !== null) {
         const where = standable.blocker
-          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的 ${standable.blocker.name} 占据`
+          ? `候选脚高 y=${direct.toFixed(2)} 处的身体空间被 (${standable.blocker.cell.x},${standable.blocker.cell.y},${standable.blocker.cell.z}) 的方块占据`
           : `候选脚高 y=${direct.toFixed(2)} 处有未加载格`;
         return fail('PATH_NOT_FOUND', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑顶面候选是 y=${direct.toFixed(2)}，但那不是可站立脚高：${where}；不提供脚高修正建议，先处理这一格的阻挡/证据，或换落点`, {
           actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: null, targetCell: target, movementNotAttempted: true,
@@ -926,7 +926,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
         ...(intended ? { intendedStandTarget: intended } : {}),
         continuation: topWorld === null || blocker ? 'blocked' as const
           : onSupport ? 'ready' as const : 'needs_rebind' as const,
-        ...(blocker ? { intendedStandBlocked: { cell: { ...blocker.cell }, name: blocker.name } } : {}),
+        ...(blocker ? { intendedStandBlocked: { cell: { ...blocker.cell } } } : {}),
       };
     };
     // stateAt 只判几何/支撑；名称与材质说明只来自本次 visibleStates，未看清就如实写未看清。
