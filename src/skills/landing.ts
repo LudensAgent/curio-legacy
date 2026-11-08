@@ -54,8 +54,27 @@ export const assessLandings: Skill<{ radius: number }> = {
       // 给下行动作一个可直接复制的参数；仍由 Agent 选择哪个落点，不在这里代选。
       return { ...assessed, descend: { target: { ...option.target } } };
     });
-    const handoff = '要下行时从选项里选一个未被挡住的落点，把它的 target（或 descend.target）原样传给 descend_to：{"target":{"x":数值,"y":数值,"z":数值}}；descend_to 没有 mode/nearest 参数。';
-    return ok(options.length ? `看清 ${options.length} 处较低表面；落差、摔伤粗估与未确认项见数据，尚未移动；${handoff}` : `当前视野没有可确认的较低表面；可能受视角、遮挡或光照限制，不能推断四周都没有落点。${handoff}`,
-      { source: 'current_visible_landings', hp: state.hp, options, handoff, effectEvidence: { verified: true, changed: false, reasons: ['只读可见几何与风险估算，未执行下落'] } });
+    const landings = options.map((option, index) => ({
+      id: `L${index + 1}`,
+      target: option.target,
+      descend: option.descend,
+      drop: option.drop,
+      approach: option.approach,
+      clearance: option.clearance,
+      corridor: option.corridor,
+      risk: option.risk,
+    }));
+    const adjacent = landings.filter((landing) => landing.approach === 'adjacent').length;
+    const ready = landings.filter((landing) => landing.approach === 'adjacent'
+      && landing.clearance === 'clear' && (landing.corridor === 'clear' || landing.corridor === 'unknown')).length;
+    const preview = landings.slice(0, 3).map((landing) =>
+      `${landing.id} ${JSON.stringify(landing.descend.target)} drop${landing.drop} ${landing.approach}/${landing.clearance}/${landing.corridor} ${landing.risk}`).join('；');
+    const handoff = adjacent === 0
+      ? '当前没有相邻（approach=adjacent）落点：descend_to 只能选相邻落点；先用 move_step 靠近，或用 excavate_run/mine_cell 开挖台阶、place_support/pillar_one 制造一级台阶；由你决定。descend_to 不接受 mode/nearest。'
+      : `要下行时从相邻且净空清楚的选项里选一个，把它的 target（或 descend.target）原样传给 descend_to：{"target":{"x":数值,"y":数值,"z":数值}}；descend_to 没有 mode/nearest 参数。`;
+    return ok(options.length
+      ? `看清 ${options.length} 处较低表面；${preview}；相邻 ${adjacent} 处（可直接尝试 descend_to 的 ${ready} 处）；落差、摔伤粗估与未确认项见数据，尚未移动；${handoff}`
+      : `当前视野没有可确认的较低表面；可能受视角、遮挡或光照限制，不能推断四周都没有落点。${handoff}`,
+      { source: 'current_visible_landings', hp: state.hp, options, landings, adjacent, ready, handoff, effectEvidence: { verified: true, changed: false, reasons: ['只读可见几何与风险估算，未执行下落'] } });
   },
 };

@@ -46,6 +46,17 @@ function landingBelow(adapter: SkillCtx['adapter'], target: Vec3Like, maxDepth =
   return null;
 }
 
+/** 目标相对当前脚位的方向；用于把 2+ 格高差交给 excavate_run，不替 Agent 决定挖不挖。 */
+function stairHandoff(feet: Vec3Like, target: Vec3Like, delta: number): { mode: 'stairs' | 'stairs_up'; direction: 'north' | 'east' | 'south' | 'west'; steps: number } {
+  const dx = target.x - feet.x, dz = target.z - feet.z;
+  const direction = Math.abs(dx) >= Math.abs(dz) ? (dx > 0 ? 'east' : 'west') : (dz > 0 ? 'south' : 'north');
+  return { mode: delta > 0 ? 'stairs_up' : 'stairs', direction, steps: Math.max(1, Math.min(8, Math.ceil(Math.abs(delta)))) };
+}
+
+function stairHint(stair: ReturnType<typeof stairHandoff>): string {
+  return `这是 ${stair.steps} 格高差，move_step 不处理；可朝 ${stair.direction} 用 excavate_run {"mode":"${stair.mode}","direction":"${stair.direction}","steps":${stair.steps}} 开挖阶梯，或 ${stair.mode === 'stairs_up' ? 'place_support/pillar_one 补一级' : 'assess_landings 选相邻落点后用 descend_to'}（由你决定）`;
+}
+
 function shapeOf(name: string, properties: Record<string, string | number | boolean> = {}): string {
   const top = supportTop(name, properties);
   if (name === 'snow') return `雪层（${String(properties.layers ?? 1)} 层）`;
@@ -169,6 +180,8 @@ export const moveStep: Skill<CellArgs> = {
       // 目标脚格没有支撑时，用“最近的同列可站立面相对当前脚高”判断它属于同层还是 ±1；
       // u 是目标格相对脚格的竖直偏移，不能直接按“下方第几格”硬套（半砖会让脚高与格偏移不一致）。
       const correctedU = below === null ? null : verticalStep(below.foot - baseFoot);
+      const stair = below !== null && Math.abs(below.foot - baseFoot) > 1.01
+        ? stairHandoff(feet, target, below.foot - baseFoot) : null;
       const dropRemediation = correctedU === null && below !== null && below.drop > 1.01
         ? { assess: true as const, landing: { x: target.x, y: below.foot, z: target.z }, drop: below.drop,
             descend: { target: { x: target.x, y: below.foot, z: target.z } } }
@@ -177,43 +190,49 @@ export const moveStep: Skill<CellArgs> = {
         ? absolute
           ? { xyz: { x: target.x, y: below!.foot, z: target.z } }
           : { at: [rel[0], correctedU, rel[2]] as Rel }
-        : dropRemediation;
-      const correction = correctedU === null
+        : dropRemediation
+          ? { ...dropRemediation, ...(stair ? { stairs: stair } : {}) }
+          : stair ? { stairs: stair } : null;
+      const correction = (correctedU === null
         ? below
           ? `同列下方 ${below.drop.toFixed(2)} 格才有可站立脚面 y=${below.foot.toFixed(2)}，与当前脚高相差 ${Math.abs(below.foot - baseFoot).toFixed(2)} 格，不符合 move_step 的同层/±1 规则；要下去先用 assess_landings 确认落点，再 descend_to（move_step 不处理 >1 落差），或补支撑后按同层走`
           : '同列下方没有找到可站立面；要补支撑用 place_support 目标脚下方那一格'
         : absolute
           ? `同一列可站立脚高是 y=${below!.foot.toFixed(2)}；把 y 写成 ${below!.foot.toFixed(2)}`
-          : `同一相邻格的正确写法是 [${rel[0]},${correctedU},${rel[2]}]（仍锁定这一格，不自动改目标）`;
+          : `同一相邻格的正确写法是 [${rel[0]},${correctedU},${rel[2]}]（仍锁定这一格，不自动改目标）`) + (stair ? `；${stairHint(stair)}` : '');
       return fail(correctedU === null ? 'PATH_NOT_FOUND' : 'BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 在当前脚高 ${wanted.toFixed(2)} 没有可站立面；${correction}`, { ...facts, movementNotAttempted: true, ...(remediation ? { remediation } : {}), ...after(ctx, args.facing, target) });
     }
     // 绝对 xyz 的 y 是调用者指定的脚高：支撑面必须与它一致，不能悄悄改成实际支撑面。
     if (absolute && Math.abs(direct - target.y) > 0.01) {
-      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${target.y.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步`, { targetCell: target, expectedFoot: target.y, actualSupport: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z } }, ...after(ctx, args.facing, target) });
+      const stair = Math.abs(direct - baseFoot) > 1.01 ? stairHandoff(feet, target, direct - baseFoot) : null;
+      return fail('BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 的支撑面在 y=${direct.toFixed(2)}，与绝对脚高 ${target.y.toFixed(2)} 不符；若要到这一格，把 y 写成 ${direct.toFixed(2)}。未执行迈步${stair ? `；${stairHint(stair)}` : ''}`, { targetCell: target, expectedFoot: target.y, actualSupport: direct, movementNotAttempted: true, remediation: { xyz: { x: target.x, y: direct, z: target.z }, ...(stair ? { stairs: stair } : {}) }, ...after(ctx, args.facing, target) });
     }
     if (!absolute) {
       const delta = direct - baseFoot;
       const corrected = verticalStep(delta);
       const correctedAt = corrected === null ? null : [rel[0], corrected, rel[2]] as Rel;
       // >1 格的落差不是 move_step 能处理的；给出“先 assess_landings 再 descend_to”的结构化交接。
+      const stair = Math.abs(delta) > 1.01 ? stairHandoff(feet, target, delta) : null;
       const dropBelow = correctedAt === null ? landingBelow(adapter, target) : null;
       const dropRemediation = dropBelow && dropBelow.drop > 1.01
         ? { assess: true as const, landing: { x: target.x, y: dropBelow.foot, z: target.z }, drop: dropBelow.drop,
             descend: { target: { x: target.x, y: dropBelow.foot, z: target.z } } }
         : null;
-      const fix = correctedAt ? { at: correctedAt } : dropRemediation;
+      const fix = correctedAt ? { at: correctedAt }
+        : dropRemediation ? { ...dropRemediation, ...(stair ? { stairs: stair } : {}) }
+          : stair ? { stairs: stair } : null;
       // 预检失败也要给出同一相邻格的准确写法；不自动重放，由心智决定是否改用这个落点。
-      const correction = correctedAt === null
+      const correction = (correctedAt === null
         ? Math.abs(delta) < 0.49
           ? `实际高差 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} 格，不足半格，不能算同层或上下级`
           : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
-        : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`;
+        : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`) + (stair ? `；${stairHint(stair)}` : '');
       if (rel[1] === 0 && Math.abs(delta) > 0.01) {
         return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...after(ctx, args.facing, target) });
       }
       if (rel[1] === -1 && (direct > baseFoot - 0.5 + 0.01 || direct < baseFoot - 1 - 0.01)) {
         const hint = correctedAt === null
-          ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}`
+          ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}${stair ? `；${stairHint(stair)}` : ''}`
           : correction;
         return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...after(ctx, args.facing, target) });
       }
