@@ -142,10 +142,12 @@ test('三段含转弯的偏移起点路线走通并 ARRIVED，末位用实际测
   assert.equal(bot.control.forward, false, '到达后应松开前进键');
 });
 
-test('未知形状返回能力缺口，不当作可通行', () => {
-  const r = walkCollisionProvider.resolve({ name: 'minecraft:oak_slab', properties: {} }, { x: 0, y: 0, z: 0 }, { cell: () => ({ kind: 'unknown' } as never) });
-  assert.equal(r.kind, 'unsupported_shape');
-  if (r.kind === 'unsupported_shape') assert.match(r.block, /oak_slab/);
+test('未知形状返回能力缺口，不当作可通行；已知半砖有真实支撑顶面', () => {
+  const unknown = walkCollisionProvider.resolve({ name: 'minecraft:not_a_real_block', properties: {} }, { x: 0, y: 0, z: 0 }, { cell: () => ({ kind: 'unknown' } as never) });
+  assert.equal(unknown.kind, 'unsupported_shape');
+  const slab = walkCollisionProvider.resolve({ name: 'minecraft:oak_slab', properties: { type: 'bottom' } }, { x: 0, y: 0, z: 0 }, { cell: () => ({ kind: 'unknown' } as never) });
+  assert.equal(slab.kind, 'shape');
+  assert.equal(slab.kind === 'shape' ? slab.shape.supportFaces[0]?.top : null, 0.5);
 });
 
 test('无 physicsTick（断线/服务器停帧）时按期限有界退出，不挂起', async () => {
