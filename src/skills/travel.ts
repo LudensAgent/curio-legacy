@@ -213,7 +213,13 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     const store = travelStore(ctx.memory);
     const destination = store.observe(to, observed?.pos ?? to.pos, endpoint.kind, !!observed);
     store.record(endpoint.id, destination.id, result.from, to);
-    const roundTripVerified = store.snapshot(to.worldId).routes.some((r) => r.fromId === endpoint.id && r.toId === destination.id && r.returnVerified);
+    const routes = store.snapshot(to.worldId).routes;
+    const roundTripVerified = routes.some((r) => r.fromId === endpoint.id && r.toId === destination.id && r.returnVerified);
+    // 快速往返是事实而不是结论：两次反向穿越间隔很短时如实说出，是否带回物品由背包账判断。
+    // 当前这趟是 endpoint→destination，方向相反；反向记录不可能由本次刚写入，不必再排除“刚刚”。
+    const reverse = routes.filter((r) => r.fromId === destination.id && r.toId === endpoint.id
+      && Date.now() - r.ts < 10 * 60_000).sort((a, b) => b.ts - a.ts)[0];
+    const quickReturn = reverse ? { msAgo: Date.now() - reverse.ts, fromId: destination.id, toId: endpoint.id } : null;
     ctx.memory.setWorld(to.worldId);
     const stand = result.stand ?? to;
     const leftPortal = result.leftPortal;
@@ -229,12 +235,15 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
     const leftPortalConfirmed = leftPortal === undefined ? null : standBodyPortal === null;
     const settleNote = leftPortal === undefined ? ''
       : leftPortalConfirmed
-        ? '；已离开门口'
+        ? `；已站到门外 (${stand.pos.x.toFixed(1)},${stand.pos.y.toFixed(1)},${stand.pos.z.toFixed(1)})，面朝离开门的方向`
         : leftPortal
           ? `；适配器报告已离开门口，但落点观测仍显示身体在 ${standBodyPortal} 里`
           : '；到达后仍在门方块里';
     const dwellNote = result.transition && result.transition.insideMs > 0 ? `；门内停留 ${(result.transition.insideMs / 1000).toFixed(1)}s 后切换` : '';
-    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, standBodyPortal, leftPortalConfirmed, transition: result.transition, roundTripVerified });
+    const quickNote = quickReturn
+      ? `；距上次反向穿越仅 ${quickReturn.msAgo < 120_000 ? `${Math.round(quickReturn.msAgo / 1000)}s` : `${Math.round(quickReturn.msAgo / 60_000)} 分钟`}（快速往返；是否带回物品看背包账，不能把穿越本身当成进展）`
+      : '';
+    return ok(`已通过实际传送到达 ${to.dim}，记录两端位置；返程入口 ${destination.id}${observed ? '' : ' 尚需寻找'}${roundTripVerified ? '；往返已验证' : ''}${dwellNote}${settleNote}${quickNote}`, { fromId: endpoint.id, toId: destination.id, from: result.from, to, stand: result.stand, leftPortal, standBodyPortal, leftPortalConfirmed, transition: result.transition, roundTripVerified, ...(quickReturn ? { quickReturn } : {}) });
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 

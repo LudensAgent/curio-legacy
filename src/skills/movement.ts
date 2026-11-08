@@ -66,11 +66,13 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     const facts = (views: number, hit: ReturnType<typeof sighted> = null) => {
       const eye = ctx.adapter.eye();
       return { searched: views > 0, scanViews: views, turned: views > 0,
-        ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
-        alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
         // directionInspected 只说明扫过这个扇区；currentFacing 是扫描结束时身体的实际朝向。
         // 扫视不等于转向完成，后续按世界方向移动要显式定向。
+        ...(args.direction ? { direction: args.direction, directionInspected: views > 0 } : {}),
+        alreadyVisible: views === 0 && !!hit, newlyDiscovered: !!hit && !priorKnown.has(hit.key),
         ...(eye ? { finalView: { yaw: eye.yaw, pitch: eye.pitch }, currentFacing: facingOfYaw(eye.yaw) } : {}),
+        // 只覆盖本次视线；没看到不是“世界其它地方没有”。
+        ...(args.for ? { coverage: { mode: 'current_vision', views, unknownBeyond: true } } : {}),
         ...(hit ? { found: hit.what, dist: hit.dist, ...(hit.pos ? { foundPos: hit.pos } : {}), source: 'current_vision' } : {}) };
     };
     if (args.for) {
@@ -98,7 +100,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     // 扫完回到平视：否则接下来的行走、地平线扫描和远景都会被最后一下低头挡住
     const end = ctx.adapter.eye();
     if (end) { await ctx.adapter.look(end.yaw, -0.05); ctx.senses.refresh(); }
-    if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}；旧记忆不算本次看见，视野外或遮挡后的情况仍未知`, facts(yaws.length));
+    if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}（只覆盖当前视野；旧记忆不算本次看见，更远处和遮挡后未知——不代表其它地方没有）`, facts(yaws.length));
     const facingNote = end ? `（扫完身体朝向 ${facingOfYaw(end.yaw)}，扫视不等于转向）` : '';
     return ok(args.direction ? `看了看 ${args.direction} 方向${facingNote}` : `环顾了一圈${facingNote}`, facts(yaws.length));
   },

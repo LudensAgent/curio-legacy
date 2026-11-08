@@ -64,6 +64,7 @@ test('go_near 走到箱子旁的可达相邻站立格，不打开箱子', async 
   assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(r.data?.chosen, { x: 1, y: 64, z: 0 });
   assert.equal(r.data?.targetName, 'chest');
+  assert.ok(r.summary.includes('target 写 {"x":2,"y":64,"z":0}'), r.summary);
   assert.equal(Math.floor(adapter.pos.x), 1);
   assert.equal(Math.floor(adapter.pos.z), 0);
   assert.ok(!adapter.actions.some((a) => a.startsWith('useBlock')), 'go_near 不替 Agent 开箱/拿东西');
