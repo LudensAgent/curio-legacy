@@ -51,3 +51,24 @@ test('TraversalRecorder 不记录游泳/骑乘位移', () => {
   recorder.flush();
   assert.equal(calls.length, 0);
 });
+
+test('8 点上限 flush 后新段以旧段末点为首点，并补一条 seam segment', () => {
+  const { calls, recorder } = recorderWithCalls();
+  for (let x = 0; x < 10; x++) recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(x, 64, 0) });
+  recorder.flush();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0]!.fragment.polyline.at(-1), at(7, 64, 0));
+  assert.deepEqual(calls[1]!.fragment.polyline[0], at(7, 64, 0), '新段首点必须是旧段末点');
+  assert.ok(calls[1]!.segments.some((segment) => segment.from.x === 7 && segment.to.x === 8), '补出 7→8 的 seam segment');
+});
+
+test('瞬移不把旧段末点带进新段', () => {
+  const { calls, recorder } = recorderWithCalls();
+  for (let x = 0; x < 8; x++) recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(x, 64, 0) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(100, 64, 0) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(101, 64, 0) });
+  recorder.flush();
+  assert.equal(calls[0]!.fragment.polyline.at(-1)?.x, 7);
+  assert.equal(calls[1]!.fragment.polyline[0]?.x, 100, '瞬移后新段从实测位置开始，不携带旧末点');
+  assert.ok(!calls[1]!.segments.some((segment) => segment.from.x === 7), '不得伪造 7→100 的 seam');
+});

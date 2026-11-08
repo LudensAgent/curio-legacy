@@ -125,11 +125,11 @@ test('plan_route source:"auto" 目标脚高变化且 spatial 无路时，不回�
   const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
   t.after(() => ctx.memory.close());
   clearRouteRecords();
-  const r = await planRoute.run(ctx, { to: at(3, 1, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
+  const r = await planRoute.run(ctx, { to: at(3, 5, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
   assert.equal(r.status, 'failed');
   assert.doesNotMatch(r.summary, /this walk planner|fixed feet height/, '目标换层时不再调用必然失败的同高 search');
-  assert.match(r.summary, /目标脚高 1 与当前 0 不同|不能表示换层/);
-  assert.equal(r.data?.heightChange, 1);
+  assert.match(r.summary, /目标脚高 5 与当前 0 不同|不能表示换层/);
+  assert.equal(r.data?.heightChange, 5);
   assert.ok(Array.isArray(r.data?.boundaries), '保留空间 3D 的边界事实');
 });
 

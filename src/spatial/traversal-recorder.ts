@@ -59,6 +59,8 @@ export class TraversalRecorder {
     bridgeSupports: number;
   } | null = null;
   private sequence = 0;
+  /** 因 8 点上限 flush 后，把上一段末点带进下一段的 seam；瞬移/换会话/水里不携带。 */
+  private pendingStart: { worldId: string; dim: string; sessionId: string; pos: Vec3Like } | null = null;
 
   constructor(
     private readonly sink: Pick<SharedSpatialSession, 'recordWalkCorridor'> | undefined,
@@ -81,11 +83,15 @@ export class TraversalRecorder {
       || moved > TELEPORT
       || !observedStep(previous.pos, pos)
     );
-    if (discontinuous) this.flush();
+    if (discontinuous) {
+      this.flush();
+      this.pendingStart = null;
+    }
 
     // 水里/岩浆里/骑乘的位移不是普通步行；结束当前段，不把游泳或船速算成 walk。
     if (observation.inWater || observation.inLava || observation.riding) {
       this.flush();
+      this.pendingStart = null;
       this.last = { worldId, dim, sessionId, pos: { ...pos } };
       return;
     }
@@ -96,14 +102,22 @@ export class TraversalRecorder {
     }
 
     if (this.run === null) {
+      // 8 点上限 flush 后，用上一段末点作为新段首点；下一帧会补上 seam segment，
+      // 这样拓扑在长走分段处仍由同一个 exact 节点连接，而不是两段各自起头。
+      const carried = this.pendingStart !== null
+        && this.pendingStart.worldId === worldId && this.pendingStart.dim === dim && this.pendingStart.sessionId === sessionId
+        ? this.pendingStart.pos : null;
+      const start = carried ?? pos;
+      this.pendingStart = null;
       this.run = {
         id: `trail:${worldId}:${dim}:${this.now()}:${this.sequence++}`,
         worldId, dim, sessionId,
         startedAt: this.now(), lastAt: this.now(),
-        points: [{ ...pos }], segments: [], hasDug: observation.dug?.length ? true : false,
-        bridgeSupports: observation.onPlacedSupport?.(supportOf(pos)) ? 1 : 0,
+        points: [{ ...start }], segments: [], hasDug: observation.dug?.length ? true : false,
+        bridgeSupports: observation.onPlacedSupport?.(supportOf(start)) ? 1 : 0,
       };
-      return;
+      if (carried === null) return;
+      // 继续把本次观测作为 seam 的终点，进入下面的同一段追加逻辑。
     }
     const from = this.run.points.at(-1)!;
     if (d3(from, pos) < RECORD_STEP) return;
@@ -134,13 +148,18 @@ export class TraversalRecorder {
     });
     this.run.lastAt = observedAt;
     if (observation.onPlacedSupport?.(supportOf(pos))) this.run.bridgeSupports += 1;
-    if (this.run.points.length >= MAX_POINTS) this.flush();
+    if (this.run.points.length >= MAX_POINTS) this.flush(true);
   }
 
   /** 结束当前段；没有已确认 segment 时不写空 fragment。 */
-  flush(): void {
+  flush(carry = false): void {
     const run = this.run;
     this.run = null;
+    if (carry && run !== null && run.segments.length > 0) {
+      this.pendingStart = { worldId: run.worldId, dim: run.dim, sessionId: run.sessionId, pos: { ...run.points.at(-1)! } };
+    } else if (!carry) {
+      this.pendingStart = null;
+    }
     if (this.sink === undefined || run === null || run.segments.length === 0) return;
     const kind: TraversalKind = run.hasDug ? 'dug' : run.bridgeSupports >= Math.max(1, Math.ceil(run.points.length * BRIDGE_SUPPORT_RATIO)) ? 'bridge' : 'walked';
     const fragment: PathFragment = {
