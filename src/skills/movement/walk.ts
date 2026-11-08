@@ -83,6 +83,7 @@ function summaryOf(result: WalkPathResult): string {
     case 'NO_PATH': return `当前已知空间内没有可行路线${detail}`;
     case 'INVALIDATED': return `路线失效（${result.invalidation?.reason ?? result.problem?.kind ?? 'unknown'}）${detail}`;
     case 'PARTIAL': return `只确认了部分路段（${result.confirmedSegments} 段），未到达${detail}`;
+    case 'EFFECT_NOT_CONFIRMED': return `已请求移动，但没有实测确认的位移或落地证据${detail}`;
   }
 }
 
@@ -377,6 +378,13 @@ export const walkPath: Skill<WalkArgs> = {
         if (!spatial) {
           return gate(plan, id, 'invalid_request', 'NOT_CONNECTED', 'walk_path 需要宿主共享空间会话（ctx.spatial）', {
             kind: 'unavailable', detail: 'the host has no shared spatial session',
+          });
+        }
+        // Effective capability = library AND host wiring. A false walk bit is an
+        // explicit refusal before any body call, never a silent fallback.
+        if (!spatial.capabilities().effective.execute.walk) {
+          return gate(plan, id, 'capability_unavailable', 'NOT_CONNECTED', '有效能力报告未授予 execute.walk，未启动身体', {
+            kind: 'unavailable', detail: 'the effective capability report does not grant execute.walk',
           });
         }
         const current = ctx.adapter.state();

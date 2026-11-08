@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { composeCapabilities } from 'curio-minecraft-3d-memory';
 import type { MemoryHostCapabilities, NodePage, PathFragment } from 'curio-minecraft-3d-memory';
 import type { BlockObservation } from '../src/adapter/types.ts';
 import type { HostCapabilityReport } from '../src/spatial/capabilities.ts';
@@ -157,10 +158,14 @@ function forcedReport(
   library: MemoryHostCapabilities,
   overrides: Partial<{ [K in keyof MemoryHostCapabilities['memory']]: boolean }>,
 ): HostCapabilityReport {
+  const libraryWithOverrides = { ...library, memory: { ...library.memory, ...overrides } };
+  const composed = composeCapabilities(libraryWithOverrides);
   return {
     owner: 'host_composed', contract: library.contract,
-    library: { ...library, memory: { ...library.memory, ...overrides } },
+    library: libraryWithOverrides,
     host: { checkpoint: true, flush: true, close: true },
+    effective: composed.effective,
+    overclaims: composed.overclaims,
   };
 }
 
@@ -300,7 +305,7 @@ test('能力 false：recordNode/upsertEdge 门禁不调用库、不回退（直�
   }
 });
 
-test('共享节点被外部边引用：拓扑写入前失败关闭，不删除外部边', async () => {
+test('共享节点在同一格被再次经过：cell 规范不移动节点，外部边与历史都保留', async () => {
   const { svc, dir } = await openEvidenceSession();
   try {
     const base = [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }];
@@ -310,23 +315,23 @@ test('共享节点被外部边引用：拓扑写入前失败关闭，不删除�
     }).status, 'written');
     const before = edgesOf(svc).items.map((edge) => edge.id).sort();
 
-    // 新通道起始实测位置与既有节点同 floor 格但精确位置不同，且其边不属于本次计划。
+    // 实测精确位置在既有节点同 floor 格内抖动（0.2 vs 0），不是另一个节点。
+    // 原子写入按 cell 规范存储，节点位置不变，因此不会因为外部边而失败。
     const overlapping = [{ x: 0.2, y: 64, z: 0 }, { x: 0, y: 64, z: 1 }];
     const outcome = svc.recordWalkCorridor({
       fragment: corridorFragment('walk:shared-node', overlapping),
       segments: corridorSegments(overlapping, 'walk:shared-node'),
     });
-    assert.equal(outcome.status, 'failed');
-    assert.equal(outcome.status === 'failed' ? outcome.stage : null, 'topology_write');
-    if (outcome.status === 'failed') {
-      assert.match(outcome.message, /external edge/);
-      assert.match(outcome.message, /topology was not changed/);
-      assert.equal(outcome.traversalIds.length, 1, '历史前缀仍按序写入');
+    assert.equal(outcome.status, 'written');
+    if (outcome.status === 'written') {
+      assert.equal(outcome.traversalIds.length, 1);
     }
-    assert.deepEqual(edgesOf(svc).items.map((edge) => edge.id).sort(), before, '外部边未被删除');
+    const after = edgesOf(svc).items.map((edge) => edge.id).sort();
+    for (const id of before) assert.ok(after.includes(id), `外部边 ${id} 未被删除`);
+    assert.equal(after.length, before.length + 1, '新通道新增一条边，没有覆盖旧边');
     assert.deepEqual(svc.session.topology.getNode(`walk:${DIM}:0,64,0`)?.location, {
       kind: 'exact', pos: { x: 0, y: 64, z: 0 },
-    }, '外部节点位置未被改写');
+    }, '共享节点位置保持整数格，不因实测抖动改写');
   } finally {
     await closeEvidenceSession(svc, dir);
   }

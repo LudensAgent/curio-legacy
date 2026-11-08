@@ -579,6 +579,17 @@ test('main working-set snapshots keep bounded counts and a resident byte estimat
     lruTracked: 3,
     pinnedLeases: 1,
     pinnedSections: 1,
+    observedSections: 3,
+    observedCells: 48,
+    residentObservedSections: 3,
+    notResidentSections: 0,
+    persistedSections: 3,
+    pendingSections: 0,
+    pendingBytes: 0,
+    rejections: {
+      busy: 0, closed: 0, capacity: 0, no_record: 0, not_ready: 0,
+      read_failed: 0, invalid_argument: 0,
+    },
   };
   const key = { worldId: 'world', dim: 'overworld', cx: 12, sy: 4, cz: 13 };
   const snapshot = buildWorkingSetSnapshot({

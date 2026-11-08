@@ -36,6 +36,14 @@ function fakeSpatial(map: VoxelMap) {
     worldId: WORLD,
     session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
     closing: false, paused: false, observationAdmitted: true,
+    capabilities: () => ({
+      owner: 'host_composed',
+      contract: 'memory-host-contract/1',
+      library: { execute: { walk: true } },
+      host: {},
+      effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
+      overclaims: [],
+    }),
   } as unknown as SharedSpatialSession;
 }
 

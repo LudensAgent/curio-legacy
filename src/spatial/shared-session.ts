@@ -28,11 +28,12 @@ import type {
   VoxelLoading,
   WorkingSetStats,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-memory';
+import { SpatialMemoryStoreImpl, VoxelResidencyError, writeConfirmedCorridor } from 'curio-minecraft-3d-memory';
 import type {
   BatchChangeReport,
   ChangeReport,
   ConnectionType,
+  CorridorWriteReceipt,
   MemoryIngest,
   MoveMode,
   NodeKind,
@@ -566,6 +567,16 @@ function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[],
   return { nodes, edges: [...byId.values()] };
 }
 
+/** Human-readable atomic-corridor rejection that keeps the structured fields. */
+function corridorProblemMessage(receipt: CorridorWriteReceipt): string {
+  const problem = receipt.problem;
+  if (problem === undefined) return 'confirmed corridor write was rejected';
+  const external = problem.externalEdgeIds === undefined || problem.externalEdgeIds.length === 0
+    ? ''
+    : `; external edge(s): ${problem.externalEdgeIds.join(', ')}`;
+  return `${problem.kind}: ${problem.detail}${external}`;
+}
+
 export class SharedSpatialSession {
   readonly worldId: string;
   readonly databasePath: string;
@@ -970,11 +981,13 @@ export class SharedSpatialSession {
   }
 
   /**
-   * 已确认通道证据：先保存历史几何并逐确认段写实测 traversal/站位，再在历史前缀
-   * 之上写无语义路由节点与有向边。容量在历史写入后、拓扑写入前检查：超限时保留
-   * fragment/traversal 并跳过拓扑。拓扑失败也保留历史前缀，且已写入的拓扑节点/边
-   * 可能保留（前缀语义）。空段只保存 fragment、不写拓扑。不把未确认段、计划坐标
-   * 或时间接近补成亲历证据；记忆失败不改身体结果。
+   * 已确认通道证据：fragment、逐确认段 traversal、路由节点与有向边通过库的
+   * `writeConfirmedCorridor` 一次原子写入；任一步失败回滚全部，不留下
+   * fragment/traversal/拓扑的前缀半写入。宿主上限超限时只原子写历史前缀并明确
+   * 报告 topology skipped。站点标记（voxel）在历史写成功后单独写入。
+   * `coordinate:'cell'` 是显式拓扑坐标规范：节点 id 与实测端点统一到整数格，
+   * fragment polyline 仍保留原始实测点。空段只保存 fragment、不写拓扑。不把
+   * 未确认段、计划坐标或时间接近补成亲历证据；记忆失败不改身体结果。
    */
   recordWalkCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
     return this.recordCorridor(input, {
@@ -1001,30 +1014,38 @@ export class SharedSpatialSession {
       const mismatch = this.sessionMismatch(oldSession.sessionId)!;
       return { status: 'failed', stage: 'session_mismatch', message: mismatch, ...base };
     }
-
-    try {
-      this.memory.saveFragment(input.fragment);
-    } catch (error) {
-      return { status: 'failed', stage: 'save_fragment', message: messageOf(error), ...base };
+    const sessionId = this.scope?.sessionId;
+    if (sessionId === undefined) {
+      return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base };
     }
 
-    let deliveryError: { committed: true; error: unknown } | null = null;
-    for (const segment of input.segments) {
-      try {
-        this.memory.addTraversal({ ...segment, fragmentId: segment.fragmentId });
-      } catch (error) {
-        return { status: 'failed', stage: 'add_traversal', message: messageOf(error), ...base };
-      }
-      base.traversalIds.push(segment.id);
-      // 站位标记按格坐标（库要求整数格）：实测连续位置所在的格就是走过的格，
-      // 不四舍五入到别的格，也不从计划点补；与已写入的 traversal 一一对应。
-      const cell = { x: Math.floor(segment.to.x), y: Math.floor(segment.to.y), z: Math.floor(segment.to.z) };
-      const delivered = this.deliverApplied(this.session.voxel.markTraversed(segment.dim, cell), 1);
-      if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
-    }
+    const traversals = input.segments.map((segment) => ({ ...segment, fragmentId: segment.fragmentId }));
+    const topology = input.segments.length === 0
+      ? null
+      : planWalkTopology(input.fragment.dim, input.segments, opts.topologyNamespace);
 
-    const topology = input.segments.length === 0 ? null : planWalkTopology(input.fragment.dim, input.segments, opts.topologyNamespace);
+    // Host-level route-size cap: keep the old "history written, topology skipped"
+    // outcome, but write the history prefix atomically instead of leaving a
+    // fragment without its traversals or a partial node/edge set.
     if (topology !== null && (topology.nodes.length > opts.maxTopologyNodes || topology.edges.length > opts.maxTopologyEdges)) {
+      const historyOnly = writeConfirmedCorridor(this.session.history, this.session.topology, {
+        fragment: input.fragment,
+        traversals,
+        nodes: [],
+        edges: [],
+        sessionId,
+        coordinate: 'cell',
+      });
+      if (historyOnly.status === 'rejected') {
+        return {
+          status: 'failed',
+          stage: historyOnly.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
+          message: corridorProblemMessage(historyOnly),
+          ...base,
+        };
+      }
+      base.traversalIds.push(...historyOnly.traversals.inserted, ...historyOnly.traversals.unchanged);
+      this.markCorridorStances(input.segments);
       return {
         status: 'failed', stage: 'capacity',
         message: `history written (fragment + ${base.traversalIds.length} traversal(s)); topology skipped: `
@@ -1033,67 +1054,63 @@ export class SharedSpatialSession {
         ...base,
       };
     }
-    if (topology !== null) {
-      try {
-        const plannedEdgeIds = new Set(topology.edges.map((edge) => edge.id));
-        const movedNodeIds = new Set<string>();
-        // 只读预检：节点位置需要校准时，若仍被本次计划外的边引用（共享节点），
-        // 先失败关闭，绝不删除外部边或做破坏性半写。
-        for (const node of topology.nodes) {
-          const existing = this.session.topology.getNode(node.id);
-          if (existing === null) continue;
-          const location = existing.location;
-          const positionChanged = location.kind !== 'exact'
-            || location.pos.x !== node.pos.x
-            || location.pos.y !== node.pos.y
-            || location.pos.z !== node.pos.z;
-          if (!positionChanged) continue;
-          const adjacency = this.session.topology.adjacency(node.id, { includeBlocked: true });
-          const external = [...adjacency.outEdges, ...adjacency.inEdges]
-            .filter((edge) => !plannedEdgeIds.has(edge.id));
-          if (external.length > 0) {
-            return {
-              status: 'failed', stage: 'topology_write',
-              message: `node "${node.id}" is referenced by external edge(s) `
-                + `${external.map((edge) => edge.id).join(', ')}; topology was not changed`,
-              ...base,
-            };
-          }
-          movedNodeIds.add(node.id);
-        }
-        const label = `${opts.topologyNamespace}:${input.fragment.id}`;
-        // 重走时先去掉本次将要重建的边，才能把节点位置校准到本次实测端点；
-        // 库要求 evidence 端点与节点位置逐值相等，位置漂移不能让旧端点继续冒充本次证据。
-        for (const edge of topology.edges) {
-          if (this.session.topology.getEdge(edge.id) !== null) this.session.topology.forgetEdge(edge.id);
-        }
-        for (const node of topology.nodes) {
-          if (movedNodeIds.has(node.id)) {
-            this.session.topology.updateNode(node.id, { location: { kind: 'exact', pos: { ...node.pos } } });
-          }
-          this.memory.recordNode(label, node.pos, undefined, {
-            dim: input.fragment.dim, kind: node.kind, id: node.id,
-            ...(node.observedAt === null ? {} : { observedAt: node.observedAt }),
-          });
-        }
-        for (const edge of topology.edges) {
-          // 边必须用 TopologyStore 而不是 MemoryIngest.upsertEdge：facade 会丢 directed/modes。
-          this.session.topology.saveEdge({
-            id: edge.id, from: edge.from, to: edge.to, type: edge.type,
-            basis: 'traversed', evidenceIds: edge.evidenceIds,
-            fragmentId: input.fragment.id, source: opts.edgeSource,
-            directed: true, modes: edge.modes,
-          });
-        }
-      } catch (error) {
-        return {
-          status: 'failed', stage: 'topology_write',
-          message: `history written; already-written topology nodes/edges may remain (prefix semantics): ${messageOf(error)}`,
-          ...base,
-        };
-      }
+
+    // One atomic write for fragment + traversals + nodes + edges. `cell` is the
+    // explicit topology coordinate spec: node ids are already floor-cell based,
+    // and measured feet positions jitter inside a cell. Canonicalizing once here
+    // keeps repeated traversals of the same block cell endpoint-identical, while
+    // the fragment still retains the raw measured polyline. No proximity snapping.
+    const receipt = writeConfirmedCorridor(this.session.history, this.session.topology, {
+      fragment: input.fragment,
+      traversals,
+      nodes: (topology?.nodes ?? []).map((node) => ({
+        id: node.id,
+        pos: { ...node.pos },
+        kind: node.kind,
+        source: 'agent' as const,
+        ...(node.observedAt === null ? {} : { observedAt: node.observedAt }),
+      })),
+      edges: (topology?.edges ?? []).map((edge) => ({
+        id: edge.id,
+        from: edge.from,
+        to: edge.to,
+        type: edge.type,
+        evidenceIds: [...edge.evidenceIds],
+        modes: [...edge.modes],
+        directed: true,
+        fragmentId: input.fragment.id,
+        source: opts.edgeSource,
+      })),
+      sessionId,
+      coordinate: 'cell',
+    });
+    if (receipt.status === 'rejected') {
+      return {
+        status: 'failed',
+        stage: receipt.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
+        message: corridorProblemMessage(receipt),
+        ...base,
+      };
     }
+
+    base.traversalIds.push(...receipt.traversals.inserted, ...receipt.traversals.unchanged);
+    const deliveryError = this.markCorridorStances(input.segments);
     return { status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError };
+  }
+
+  /**
+   * 站位标记按格坐标（库要求整数格）：实测连续位置所在的格就是走过的格，
+   * 不四舍五入到别的格，也不从计划点补；与已写入的 traversal 一一对应。
+   * 返回第一个报告转发失败（写入已提交），与历史写错误分开。
+   */
+  private markCorridorStances(segments: readonly WalkCorridorSegment[]): { committed: true; error: unknown } | null {
+    let deliveryError: { committed: true; error: unknown } | null = null;
+    for (const segment of segments) {
+      const cell = { x: Math.floor(segment.to.x), y: Math.floor(segment.to.y), z: Math.floor(segment.to.z) };
+      const delivered = this.deliverApplied(this.session.voxel.markTraversed(segment.dim, cell), 1);
+      if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
+    }
+    return deliveryError;
   }
 
   /**
