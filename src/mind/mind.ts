@@ -214,7 +214,10 @@ export class Mind {
   private lastSourceSwitch: { at: number; from: string; to: string | null; reason: string; worldId: string; sessionId: string } | null = null;
   /** 最近一次实测新区块进展：只记区域标识与新区块数，不复制格点/几何。 */
   private lastRegionExpansion: { at: number; region: string; chunks: number; dim: string; worldId: string; sessionId: string } | null = null;
+  /** 拒绝计数只针对同一次局部失败：拒绝一次后，同一次失败的第二次尝试直接放行。 */
   private sourceSwitchRejects = 0;
+  /** 计数所属的失败时间；换了新的局部失败，重新给一次“先重想”的机会。 */
+  private sourceSwitchRejectAt = 0;
   static readonly PROGRESS_GATE_ACTIVITIES = 8;
   static readonly PROGRESS_GATE_COOLDOWN_MS = 10 * 60_000;
   static readonly PROGRESS_GATE_REJECT_LIMIT = 2;
@@ -286,7 +289,8 @@ export class Mind {
       fact && now - fact.at < Mind.SEARCH_STATE_TTL_MS && fact.worldId === state.worldId && fact.sessionId === state.sessionId ? fact : null;
     this.noProgressRuns = (facts.noProgressRuns ?? []).filter((run) => now - run.at < 30 * 60_000).slice(-16);
     const failure = facts.lastLocalFailure;
-    this.lastLocalFailure = failure && now - failure.at < Mind.LOCAL_FAILURE_TTL_MS ? failure : null;
+    this.lastLocalFailure = failure && now - failure.at < Mind.LOCAL_FAILURE_TTL_MS
+      && failure.worldId === state.worldId && failure.sessionId === state.sessionId ? failure : null;
     this.lastSourceSwitch = recent(facts.lastSourceSwitch);
     this.lastRegionExpansion = recent(facts.lastRegionExpansion);
   }
@@ -1110,38 +1114,49 @@ export class Mind {
     const failure = this.lastLocalFailure;
     if (!failure || info.urgent || this.order || this.userSuggestion) return true;
     const now = Date.now();
-    if (now - failure.at > Mind.LOCAL_FAILURE_TTL_MS) {
+    const state = this.safe(() => this.d.adapter.state(), null);
+    // 过期、换了世界/会话的局部失败不再是当前决策的依据；同一次失败才保留“拒绝一次→第二次放行”的计数。
+    if (now - failure.at > Mind.LOCAL_FAILURE_TTL_MS
+      || (!!state && (state.worldId !== failure.worldId || state.sessionId !== failure.sessionId))) {
       this.lastLocalFailure = null;
+      this.sourceSwitchRejects = 0;
+      this.sourceSwitchRejectAt = 0;
       this.persistTaskFacts();
       return true;
     }
     const activity = decision.activity ?? decision.next;
     if (!activity) return true;
     const switchesDimension = activity.steps.some((step) => ['travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill));
-    if (!switchesDimension) { this.sourceSwitchRejects = 0; return true; }
+    if (!switchesDimension) return true;
+    // 计数跟着这次失败走：中间做别的事不算“新的尝试”，换了失败记录才重新拒绝一次。
+    if (this.sourceSwitchRejectAt !== failure.at) { this.sourceSwitchRejects = 0; this.sourceSwitchRejectAt = failure.at; }
     const newEvidenceStep = activity.steps.some((step) => {
       if (['take_items', 'store_items', 'use_gui', 'gather', 'forage', 'hunt', 'fish'].includes(step.skill)) return true;
       return step.skill === 'expedition' && !!(step.args as Record<string, unknown> | undefined)?.find;
     });
-    const state = this.safe(() => this.d.adapter.state(), null);
     const newChunks = !!state && state.worldId === failure.worldId && this.d.memory.visitedChunkCount > (failure.chunks ?? this.d.memory.visitedChunkCount);
-    const newPlan = !!(decision.plan as { switchReason?: string } | undefined)?.switchReason;
+    const newPlan = !!(decision.plan?.switchReason || decision.switchReason);
     if (newEvidenceStep || newChunks || newPlan) {
       this.noteSourceSwitch(activity, failure, newEvidenceStep ? 'activity-evidence' : newChunks ? 'new-chunks' : 'plan-reason');
       this.lastLocalFailure = null;
       this.sourceSwitchRejects = 0;
+      this.sourceSwitchRejectAt = 0;
       this.persistTaskFacts();
       return true;
     }
     if (this.sourceSwitchRejects >= 1) {
       this.noteSourceSwitch(activity, failure, 'unverified-second-attempt');
-      this.d.bus.publish('source_switch_unverified', 'P2', '再次在没有新证据时换维度/来源；放行，但这次失败不能当作来源耗尽的证据', { failure });
+      const note = '同一次局部失败下再次在没有新证据时换维度/来源：按未验证放行；这次换来源之后的结果不能当作来源耗尽的证据';
+      this.d.bus.publish('source_switch_unverified', 'P2', note, { failure });
+      decision.notes.push(note);
       this.lastLocalFailure = null;
       this.sourceSwitchRejects = 0;
+      this.sourceSwitchRejectAt = 0;
       this.persistTaskFacts();
       return true;
     }
     this.sourceSwitchRejects += 1;
+    this.sourceSwitchRejectAt = failure.at;
     const note = `最近一次失败（${failure.skill} ${failure.code ?? ''}：${failure.summary}）只说明那一步/那个落点不成立，不能推出这个维度或来源没有资源。要换维度/来源，先在 activity 里加入新的具体证据动作（打开指定容器 take_items/store_items、expedition {find} 沿路搜索、采集/打猎等），或在 plan 里写 switch_reason 说明新证据；这次换来源被拒绝一次`;
     decision.notes.push(note);
     this.d.bus.publish('source_switch_rejected', 'P2', note, { failure });
