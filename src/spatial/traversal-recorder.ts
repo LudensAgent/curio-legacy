@@ -1,6 +1,6 @@
 import type { PathFragment } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../adapter/types.ts';
-import type { SharedSpatialSession, WalkCorridorSegment } from './shared-session.ts';
+import type { SharedSpatialSession, WalkCorridorSegment, WalkMemoryOutcome } from './shared-session.ts';
 
 /** 一次实测身体观测；只接收已经确认连接、存活、观测就绪的位置。 */
 export interface TraversalObservation {
@@ -32,6 +32,53 @@ const DUG_PROXIMITY = 6;
  * 主动落盘短段，否则一次短距离步行会一直留在内存里，直到下次断点或进程退出才写入。
  */
 const IDLE_FLUSH_MS = 3000;
+
+/**
+ * 回执有界保留条数。回执只用于证据链观察/报告已发生的写入，旧回执被淘汰；
+ * 不累积长期历史，也不替代共享空间库本身。
+ */
+export const MAX_TRAVERSAL_RECEIPTS = 16;
+
+/**
+ * sink 在调用边界抛出（而不是返回结构化失败）时的 recorder 侧结局。
+ * 它不属于 `WalkMemoryOutcome`：库/共享会话从未返回该阶段。抛错时无法知道库
+ * 是否已经写入 traversal 或提交拓扑，因此这些字段一律是 `'unknown'`，不是
+ * “空数组/未写入”的事实。
+ */
+export interface TraversalSinkException {
+  status: 'failed';
+  stage: 'sink_exception';
+  message: string;
+  fragmentId: string;
+  /** 抛错前 sink 是否已接收 traversal 未知；'unknown' 不是空数组事实。 */
+  traversalIds: 'unknown';
+  /** 没有结构化结果，节点/边数与是否写入都未知。 */
+  topology: { nodes: 'unknown'; edges: 'unknown'; written: 'unknown' };
+}
+
+/** 回执里的真实结局：共享会话的结构化结果，或 recorder 侧 sink 抛错。 */
+export type TraversalWriteOutcome = WalkMemoryOutcome | TraversalSinkException;
+
+/**
+ * 一次已确认段的真实落盘回执：复述 `recordWalkCorridor` 的结局与本次实测段。
+ * 不含计划点/插值；失败时 `outcome.traversalIds` 只保留真实写入的前缀。
+ */
+export interface TraversalWriteReceipt {
+  /** 本次 recorder 生命周期内单调递增的回执序号。 */
+  sequence: number;
+  fragmentId: string;
+  /** 来源标签（walked/dug/bridge）；只是来源，不是当前可通行证明。 */
+  kind: TraversalKind;
+  /** 本段实际确认的 segment 数。 */
+  segmentCount: number;
+  /** 实测段首/末（原始实测位置，不是计划点）。 */
+  from: Vec3Like;
+  to: Vec3Like;
+  /** 末个实测记录点的真实观测时间。 */
+  observedAt: number;
+  /** 真实写入结局；结构化失败保留已写前缀，sink 抛错时写入状态标 unknown。 */
+  outcome: TraversalWriteOutcome;
+}
 
 const d3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const cellKey = (p: Vec3Like) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
@@ -76,6 +123,9 @@ export class TraversalRecorder {
   private sequence = 0;
   /** 因 8 点上限 flush 后，把上一段末点带进下一段的 seam；瞬移/换会话/水里不携带。 */
   private pendingStart: { worldId: string; dim: string; sessionId: string; pos: Vec3Like } | null = null;
+  /** 有界写入回执（旧→新）；证据链只读，不重放。 */
+  private readonly receiptsLog: TraversalWriteReceipt[] = [];
+  private receiptSequence = 0;
 
   constructor(
     private readonly sink: Pick<SharedSpatialSession, 'recordWalkCorridor'> | undefined,
@@ -173,8 +223,13 @@ export class TraversalRecorder {
     if (this.run.points.length >= MAX_POINTS) this.flush(true);
   }
 
-  /** 结束当前段；没有已确认 segment 时不写空 fragment。 */
-  flush(carry = false): void {
+  /** 最近的有界写入回执（旧→新）。只报告已发生的真实写入，不触发重试。 */
+  receipts(limit = MAX_TRAVERSAL_RECEIPTS): readonly TraversalWriteReceipt[] {
+    return this.receiptsLog.slice(Math.max(0, this.receiptsLog.length - Math.max(0, limit)));
+  }
+
+  /** 结束当前段；没有已确认 segment 时不写空 fragment，也不产生回执。 */
+  flush(carry = false): TraversalWriteReceipt | null {
     const run = this.run;
     this.run = null;
     // carry 时即使本段还没有 segment，也要保留最后已确认记录点：否则 8 点 flush 之后
@@ -184,7 +239,7 @@ export class TraversalRecorder {
     } else if (!carry) {
       this.pendingStart = null;
     }
-    if (this.sink === undefined || run === null || run.segments.length === 0) return;
+    if (this.sink === undefined || run === null || run.segments.length === 0) return null;
     const kind: TraversalKind = run.hasDug ? 'dug' : run.bridgeSupports >= Math.max(1, Math.ceil(run.points.length * BRIDGE_SUPPORT_RATIO)) ? 'bridge' : 'walked';
     const fragment: PathFragment = {
       id: run.id,
@@ -199,11 +254,36 @@ export class TraversalRecorder {
       lastUsedAt: run.lastAt,
       uses: 1,
     };
+    let outcome: TraversalWriteOutcome;
+    let exceptionMessage: string | null = null;
+    // 只把 sink 调用本身的抛错转成 recorder 侧结局；成功/结构化失败时保持原样。
     try {
-      const outcome = this.sink.recordWalkCorridor({ fragment, segments: run.segments });
-      if (outcome.status === 'failed') this.onFailure?.(`空间记忆写入失败：${outcome.stage} ${outcome.message}`);
+      outcome = this.sink.recordWalkCorridor({ fragment, segments: run.segments });
     } catch (error) {
-      this.onFailure?.(`空间记忆写入异常：${(error as Error)?.message ?? String(error)}`);
+      exceptionMessage = `空间记忆写入异常：${(error as Error)?.message ?? String(error)}`;
+      outcome = {
+        status: 'failed', stage: 'sink_exception', message: exceptionMessage,
+        fragmentId: fragment.id, traversalIds: 'unknown',
+        topology: { nodes: 'unknown', edges: 'unknown', written: 'unknown' },
+      };
     }
+    const receipt: TraversalWriteReceipt = {
+      sequence: this.receiptSequence += 1,
+      fragmentId: fragment.id,
+      kind,
+      segmentCount: run.segments.length,
+      from: { ...run.points[0]! },
+      to: { ...run.points.at(-1)! },
+      observedAt: run.lastAt,
+      outcome,
+    };
+    this.receiptsLog.push(receipt);
+    if (this.receiptsLog.length > MAX_TRAVERSAL_RECEIPTS) {
+      this.receiptsLog.splice(0, this.receiptsLog.length - MAX_TRAVERSAL_RECEIPTS);
+    }
+    // 回执先定稿入日志，再通知失败；回调抛错不得改写已记录的证据。
+    if (exceptionMessage !== null) this.onFailure?.(exceptionMessage);
+    else if (outcome.status === 'failed') this.onFailure?.(`空间记忆写入失败：${outcome.stage} ${outcome.message}`);
+    return receipt;
   }
 }

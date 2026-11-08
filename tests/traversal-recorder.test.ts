@@ -1,14 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WalkCorridorEvidence } from '../src/spatial/shared-session.ts';
-import { TraversalRecorder } from '../src/spatial/traversal-recorder.ts';
+import { MAX_TRAVERSAL_RECEIPTS, TraversalRecorder } from '../src/spatial/traversal-recorder.ts';
 
 function recorderWithCalls(now: () => number = () => 1000) {
   const calls: WalkCorridorEvidence[] = [];
   const recorder = new TraversalRecorder({
     recordWalkCorridor: (input: WalkCorridorEvidence) => {
       calls.push(input);
-      return { status: 'written' as const, fragmentId: input.fragment.id, traversalIds: input.segments.map((segment) => segment.id), stancesMarked: input.segments.length, deliveryError: null };
+      return {
+        status: 'written' as const, fragmentId: input.fragment.id,
+        traversalIds: input.segments.map((segment) => segment.id),
+        stancesMarked: input.segments.length, deliveryError: null,
+        topology: { nodes: input.fragment.polyline.length, edges: input.segments.length, written: true },
+      };
     },
   }, now);
   return { calls, recorder };
@@ -176,4 +181,119 @@ test('dug 段的 segments 仍是 confirmed_traversal，端点等于实测位置�
     assert.deepEqual(segment.from, fragment.polyline[index]);
     assert.deepEqual(segment.to, fragment.polyline[index + 1]);
   });
+});
+
+test('flush 返回真实写入回执；失败回执保留阶段、已写入前缀与零拓扑计数', () => {
+  const calls: WalkCorridorEvidence[] = [];
+  let attempt = 0;
+  const recorder = new TraversalRecorder({
+    recordWalkCorridor: (input) => {
+      calls.push(input);
+      attempt += 1;
+      if (attempt === 2) {
+        return {
+          status: 'failed' as const, stage: 'capacity' as const, message: 'topology cap',
+          fragmentId: input.fragment.id, traversalIds: [input.segments[0]!.id],
+          topology: { nodes: input.fragment.polyline.length, edges: input.segments.length, written: false },
+        };
+      }
+      return {
+        status: 'written' as const, fragmentId: input.fragment.id,
+        traversalIds: input.segments.map((segment) => segment.id),
+        stancesMarked: input.segments.length, deliveryError: null,
+        topology: { nodes: input.fragment.polyline.length, edges: input.segments.length, written: true },
+      };
+    },
+  }, () => 1000);
+
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5) });
+  const first = recorder.flush();
+  assert.equal(first?.outcome.status, 'written');
+  assert.equal(first?.segmentCount, 1);
+  assert.deepEqual(first?.from, at(0.5, 64, 0.5));
+  assert.deepEqual(first?.to, at(1.5, 64, 0.5));
+
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(2.5, 64, 0.5) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(3.5, 64, 0.5) });
+  const second = recorder.flush();
+  assert.equal(second?.outcome.status, 'failed');
+  assert.equal(second?.outcome.stage, 'capacity');
+  assert.deepEqual(second?.outcome.traversalIds, [calls[1]!.segments[0]!.id], '失败只保留真实已写入前缀');
+  assert.equal(second?.outcome.topology.written, false);
+
+  assert.deepEqual(recorder.receipts().map((receipt) => receipt.sequence), [1, 2]);
+  assert.equal(new TraversalRecorder({ recordWalkCorridor: () => { throw new Error('must not be called'); } }).flush(), null,
+    '没有确认段时不写空回执');
+});
+
+test('sink 抛错只生成 sink_exception 回执；onFailure 抛错不改写已定稿的失败回执', () => {
+  const failures: string[] = [];
+  const throwing = new TraversalRecorder({
+    recordWalkCorridor: () => { throw new Error('boom'); },
+  }, () => 1000, (message) => failures.push(message));
+  throwing.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5) });
+  throwing.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5) });
+  const exception = throwing.flush();
+  const outcome = exception?.outcome;
+  assert.ok(outcome?.status === 'failed');
+  if (outcome?.status !== 'failed') assert.fail('sink throw must produce a failed receipt');
+  assert.equal(outcome.stage, 'sink_exception', '只把 sink 抛错转成 recorder 侧结局');
+  assert.equal(outcome.traversalIds, 'unknown', '无法知道库是否写入时不得伪造空数组');
+  assert.equal(outcome.topology.nodes, 'unknown');
+  assert.equal(outcome.topology.edges, 'unknown');
+  assert.equal(outcome.topology.written, 'unknown', '抛错后写入状态是未知，不是未写');
+  assert.equal(failures.length, 1);
+  assert.match(failures[0]!, /空间记忆写入异常：boom/);
+
+  // 库已返回“历史已写、拓扑失败”的真实结果后，onFailure（bus.publish）抛错：
+  // 已定稿的回执必须保留真实阶段与已写入前缀，不能被改写成异常。
+  const calls: WalkCorridorEvidence[] = [];
+  const prefix = new TraversalRecorder({
+    recordWalkCorridor: (input) => {
+      calls.push(input);
+      return {
+        status: 'failed' as const, stage: 'capacity' as const, message: 'topology skipped',
+        fragmentId: input.fragment.id, traversalIds: [input.segments[0]!.id],
+        topology: { nodes: input.fragment.polyline.length, edges: input.segments.length, written: false },
+      };
+    },
+  }, () => 1000, () => { throw new Error('bus down'); });
+  prefix.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5) });
+  prefix.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5) });
+  assert.throws(() => prefix.flush(), /bus down/);
+  const kept = prefix.receipts();
+  assert.equal(kept.length, 1, '回调抛错前回执已经定稿');
+  assert.equal(kept[0]!.outcome.status, 'failed');
+  if (kept[0]!.outcome.status !== 'failed') assert.fail('expected failed receipt');
+  assert.equal(kept[0]!.outcome.stage, 'capacity');
+  assert.deepEqual(kept[0]!.outcome.traversalIds, [calls[0]!.segments[0]!.id], '已写入前缀不被回调抛错改写');
+  assert.equal(kept[0]!.outcome.topology.written, false);
+});
+
+test('写入回执有界保留；每次确认段都真实写入，旧回执被淘汰而最新可读', () => {
+  let written = 0;
+  const recorder = new TraversalRecorder({
+    recordWalkCorridor: (input) => {
+      written += 1;
+      return {
+        status: 'written' as const, fragmentId: input.fragment.id,
+        traversalIds: input.segments.map((segment) => segment.id),
+        stancesMarked: input.segments.length, deliveryError: null,
+        topology: { nodes: input.fragment.polyline.length, edges: input.segments.length, written: true },
+      };
+    },
+  }, () => 1000);
+  for (let i = 0; i < MAX_TRAVERSAL_RECEIPTS + 4; i++) {
+    recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(i * 10, 64, 0) });
+    recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(i * 10 + 1, 64, 0) });
+    recorder.flush();
+  }
+  assert.equal(written, MAX_TRAVERSAL_RECEIPTS + 4, '每次确认段都真实写入，不因回执有界而少写');
+  const receipts = recorder.receipts();
+  assert.equal(receipts.length, MAX_TRAVERSAL_RECEIPTS);
+  assert.equal(receipts[0]!.sequence, 5);
+  assert.equal(receipts.at(-1)!.sequence, MAX_TRAVERSAL_RECEIPTS + 4);
+  assert.equal(recorder.receipts(2).length, 2);
+  assert.equal(recorder.receipts(2).at(-1)!.sequence, MAX_TRAVERSAL_RECEIPTS + 4);
 });
