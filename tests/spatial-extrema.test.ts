@@ -119,5 +119,6 @@ test('spatial_extrema：跨维度 farthest 没给 origin 时拒绝，参数边�
   assert.equal(spatialExtrema.validate({ metric: 'deepest', maxFragments: 0 }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'deepest', kinds: ['nope'] }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'deepest', origin: { x: 0, y: 0 } }, w).ok, false);
+  assert.equal(spatialExtrema.validate({ metric: 'deepest', space: 'diagonal' }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'nope' }, w).ok, false);
 });

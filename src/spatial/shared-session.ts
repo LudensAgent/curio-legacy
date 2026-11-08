@@ -193,8 +193,7 @@ export type SharedSpatialFragmentSaveResult =
   | { status: 'written' }
   | { status: 'rejected'; reason: SharedSpatialWriteRejection };
 
-/** 一条已确认段的实测证据；`from` 来自库实际发出的 `ExecutableMove.from`。 */
-/** walk/dug 共用的确认段；类型名沿用 walk 历史，避免再建一套重复类型。 */
+/** walk/dug 共用的确认段；from/to 是实测脚位（walk 取自库实际 move，dug 取自上一落点）。 */
 export interface WalkCorridorSegment {
   id: string;
   fragmentId: string;
@@ -206,6 +205,7 @@ export interface WalkCorridorSegment {
   observedAt: number | null;
   source: string;
   executionId: string;
+  actionId?: string;
   /** 实测移动方式；缺省表示 traversal 不声明模式，拓扑边类型仍按实测 dy 记录几何。 */
   mode?: TraversalEvidence['mode'];
 }

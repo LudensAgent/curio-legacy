@@ -331,6 +331,33 @@ test('excavate_run 中途失败：只记录已确认落地的前缀', async () =
   }
 });
 
+test('excavate_run 取消：记录已确认前缀后中止', async () => {
+  const { spatial, dir } = await openSession();
+  try {
+    const controller = new AbortController();
+    let moves = 0;
+    const w = new (class extends FakeAdapter {
+      override async moveTo(target: Parameters<FakeAdapter['moveTo']>[0], options: Parameters<FakeAdapter['moveTo']>[1]) {
+        const result = await super.moveTo(target, options);
+        moves += 1;
+        // 第一段完整确认；第二次移动后中止，让取消发生在第二段落地确认前。
+        if (moves === 2) controller.abort();
+        return result;
+      }
+    })();
+    Object.assign(w, { pos: { x: 0.5, y: 64, z: 0.5 }, worldId: WORLD, sessionId: SESSION, dim: DIM });
+    w.inv.set('iron_pickaxe', 1);
+    const ctx = { ...makeCtx(w, { deadlineMs: 30000 }), signal: controller.signal, spatial, taskId: 'cancel-task' };
+    await assert.rejects(() => excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 3 }));
+    const dug = spatial.session.history.fragments({ dim: DIM, limit: 100 }).items.find((fragment) => fragment.id.startsWith('dug:cancel-task:'));
+    assert.ok(dug, '取消前已确认的落地仍要写入');
+    assert.equal(dug.links?.length, 1, '只记录取消前确认的段');
+    assert.equal(spatial.session.history.traversals({ fragmentId: dug.id, limit: 100 }).items.length, 1);
+  } finally {
+    await closeSession(spatial, dir);
+  }
+});
+
 test('excavate_run 挖后复核不是空气（被回填）时 0 次写入', async () => {
   const { spatial, dir } = await openSession();
   try {

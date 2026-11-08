@@ -30,6 +30,11 @@ const fragmentFacts = (fragment: PathFragment) => ({
   ...(fragment.entrances.length ? { entrances: fragment.entrances.map((p) => ({ ...p })) } : {}),
 });
 
+type FragmentFacts = ReturnType<typeof fragmentFacts>;
+type ExtremaBest =
+  | { kind: 'deepest'; point: Vec3Like; pointY: number; deepestY: number; value: number; fragment: FragmentFacts }
+  | { kind: 'farthest'; point: Vec3Like; distance: number; origin: Vec3Like; space: 'horizontal' | 'euclidean'; fragment: FragmentFacts };
+
 export const spatialExtrema: Skill<ExtremaArgs> = {
   name: 'spatial_extrema',
   description: '只读查询共享空间记忆里挖过/走过的最深点或离给定原点最远的记录点；返回历史几何事实，不代表当前可通行。',
@@ -87,7 +92,7 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
     });
 
     let withoutPolyline = 0, archivedSkipped = 0;
-    let best: Record<string, unknown> | null = null;
+    let best: ExtremaBest | null = null;
     let bestValue = args.metric === 'deepest' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
     for (const fragment of scan.items) {
       if (!args.includeArchived && fragmentArchivedAt(fragment) !== undefined) { archivedSkipped += 1; continue; }
@@ -95,9 +100,10 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       if (args.metric === 'deepest') {
         const lowest = fragment.polyline.reduce((winner, point) => point.y < winner.y ? point : winner);
         const value = Math.min(fragment.deepestY, lowest.y);
-        if (value < bestValue || (value === bestValue && best !== null && fragment.id < String((best.fragment as { id: string }).id))) {
+        if (value < bestValue || (value === bestValue && best !== null && fragment.id < best.fragment.id)) {
           bestValue = value;
           best = {
+            kind: 'deepest',
             point: { ...lowest },
             pointY: lowest.y,
             deepestY: fragment.deepestY,
@@ -108,9 +114,10 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       } else if (origin !== null) {
         const farthest = fragment.polyline.reduce((winner, point) => distance(point, origin, space) > distance(winner, origin, space) ? point : winner);
         const value = distance(farthest, origin, space);
-        if (value > bestValue || (value === bestValue && best !== null && fragment.id < String((best.fragment as { id: string }).id))) {
+        if (value > bestValue || (value === bestValue && best !== null && fragment.id < best.fragment.id)) {
           bestValue = value;
           best = {
+            kind: 'farthest',
             point: { ...farthest },
             distance: value,
             origin: { ...origin },
@@ -135,12 +142,13 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       evidence: 'historical',
       currentPassability: 'UNKNOWN',
     };
-    const point = best === null ? null : best.point as Vec3Like;
-    const deepestY = args.metric === 'deepest' && best !== null ? (best as { deepestY: number }).deepestY : null;
-    const depthNote = point !== null && deepestY !== null && deepestY < point.y ? `；记录里还有更低观测 y=${deepestY}（未保留为脚点）` : '';
     const label = args.metric === 'deepest'
-      ? (best === null || point === null ? '没有找到符合条件的最深记录点' : `最深记录脚点 (${Math.floor(point.x)},${point.y},${Math.floor(point.z)})${depthNote}，fragment ${(best.fragment as { id: string }).id}`)
-      : (best === null || point === null ? '没有找到符合条件的最远记录点' : `最远记录点 (${Math.floor(point.x)},${point.y},${Math.floor(point.z)})，距原点 ${(best.distance as number).toFixed(1)} 格，fragment ${(best.fragment as { id: string }).id}`);
+      ? (best === null || best.kind !== 'deepest'
+        ? '没有找到符合条件的最深记录点'
+        : `最深记录脚点 (${Math.floor(best.point.x)},${best.point.y},${Math.floor(best.point.z)})${best.deepestY < best.point.y ? `；记录里还有更低观测 y=${best.deepestY}（未保留为脚点）` : ''}，fragment ${best.fragment.id}`)
+      : (best === null || best.kind !== 'farthest'
+        ? '没有找到符合条件的最远记录点'
+        : `最远记录点 (${Math.floor(best.point.x)},${best.point.y},${Math.floor(best.point.z)})，距原点 ${best.distance.toFixed(1)} 格，fragment ${best.fragment.id}`);
     return ok(`${label}；历史记录，不代表当前可通行；是否前往由你决定`, data);
   },
 };

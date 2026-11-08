@@ -86,11 +86,11 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     const scan = pageFragments(spatial, { dim, maxFragments: 1000, signal: ctx.signal, deadline: ctx.deadline });
     const records: ReturnType<typeof fragmentRecord>[] = [];
     const maxPoints = args.maxPoints ?? 200_000;
-    let points = 0, archivedSkipped = 0;
+    let points = 0, archivedSkipped = 0, truncatedByPoints = false;
     let truncated = scan.truncated || scan.partial;
     for (const fragment of scan.items) {
       if (fragmentArchivedAt(fragment) !== undefined) { archivedSkipped += 1; continue; }
-      if (points + fragment.polyline.length > maxPoints) { truncated = true; break; }
+      if (points + fragment.polyline.length > maxPoints) { truncated = true; truncatedByPoints = true; break; }
       points += fragment.polyline.length;
       const record = fragmentRecord(fragment);
       const links = record.links?.length
@@ -111,7 +111,8 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     const overLimit = inspection.status === 'route' && inspection.waypoints.length > maxWaypoints;
     if (overLimit) truncated = true;
     const status = overLimit ? 'gap' : inspection.status;
-    const reason: MemoryRouteGapReason | undefined = overLimit ? 'truncated' : inspection.reason;
+    // 第一条 fragment 就超过 maxPoints 时没有图可查；如实报截断，不报成“没有记录”。
+    const reason: MemoryRouteGapReason | undefined = overLimit || (records.length === 0 && truncatedByPoints) ? 'truncated' : inspection.reason;
     const waypoints = overLimit ? [] : inspection.waypoints;
     const legs = overLimit ? [] : inspection.legs;
     const data = {
@@ -121,6 +122,7 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
       allowed,
       waypoints, legs,
       ...(inspection.nearest === undefined ? {} : { nearest: inspection.nearest }),
+      ...(inspection.nearestReachable === undefined ? {} : { nearestReachable: inspection.nearestReachable }),
       ...(inspection.rejectedLeg === undefined ? {} : { rejectedLeg: inspection.rejectedLeg }),
       snapRadius: inspection.near,
       snapped: inspection.snapped,
@@ -136,9 +138,11 @@ export const planMemoryRoute: Skill<MemoryRouteArgs> = {
     };
     const end = waypoints.at(-1);
     const truncatedNote = truncated ? '；本次扫描/图规模已截断，结果可能不完整' : '';
+    const nearestLabel = inspection.nearestReachable === false ? '最近记录点（不保证从起点可达）' : '最近可达';
+    const primitives = '执行/复核可用的现成动作：plan_route/walk_path（同高步行）、move_step（相邻一格）、descend_to（落差）、excavate_run（开挖）、pillar_one（垫高）；如何组合由你决定';
     const summary = status === 'route'
-      ? `历史路线 ${legs.length} 段、${waypoints.length} 个路点${end === undefined ? '' : `，终点 (${Math.floor(end.x)},${end.y},${Math.floor(end.z)})`}${truncatedNote}。这是历史几何，未验证当前可通行；执行和复核由你决定。`
-      : `没有可用的历史路线：${reasonText(reason)}${inspection.nearest === undefined ? '' : `；最近可达 (${Math.floor(inspection.nearest.x)},${inspection.nearest.y},${Math.floor(inspection.nearest.z)})`}${truncatedNote}。这是历史几何事实，未验证当前可通行；是否绕路/挖/垫由你决定。`;
+      ? `历史路线 ${legs.length} 段、${waypoints.length} 个路点${end === undefined ? '' : `，终点 (${Math.floor(end.x)},${end.y},${Math.floor(end.z)})`}${truncatedNote}。这是历史几何，未验证当前可通行；${primitives}。`
+      : `没有可用的历史路线：${reasonText(reason)}${inspection.nearest === undefined ? '' : `；${nearestLabel} (${Math.floor(inspection.nearest.x)},${inspection.nearest.y},${Math.floor(inspection.nearest.z)})`}${truncatedNote}。这是历史几何事实，未验证当前可通行；是否绕路/挖/垫由你决定。`;
     return ok(summary, data);
   },
 };
