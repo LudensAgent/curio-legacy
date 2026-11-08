@@ -45,7 +45,8 @@ export function inspectBody(at: StateAt, footY: number, cx: number, cz: number) 
 }
 
 export interface StandableBelow {
-  cell: Vec3Like;
+  /** 脚所在的格（可能是空气格，脚面来自它下方那一格）。 */
+  footCell: Vec3Like;
   state: ObservedState;
   foot: number;
   drop: number;
@@ -61,7 +62,7 @@ export function inspectStandableBelow(at: StateAt, cell: Vec3Like, fromFoot: num
     const state = at(below);
     if (state === null) return { landing: null, unknown: true };
     const foot = footSurfaceY(below, at);
-    if (foot !== null) return { landing: { cell: below, state, foot, drop: fromFoot - foot }, unknown: false };
+    if (foot !== null) return { landing: { footCell: below, state, foot, drop: fromFoot - foot }, unknown: false };
   }
   return { landing: null, unknown: false };
 }
