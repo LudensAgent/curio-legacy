@@ -15,7 +15,7 @@ import {
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkCollisionProvider } from '../../adapter/walk-route.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
-import { searchLandRoute, type LandSearchResult } from '../../spatial/land-search.ts';
+import { searchLandRouteAsync, type LandSearchResult } from '../../spatial/land-search.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 
 type Scope = { worldId: string; dim: string; sessionId: string };
@@ -311,7 +311,7 @@ export function landSearchSteps(result: LandSearchResult) {
   });
 }
 
-function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal, deadlineMs: number) {
+async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal, deadlineMs: number) {
   const request = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: BODY.width, height: BODY.height, pose: BODY.pose },
@@ -323,8 +323,9 @@ function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentSta
   };
   // 先用当前证据；找不到时再用历史体素试一次。历史路线只作为候选，
   // 逐段用真实当前证据复验，执行时仍由 move_step/descend_to 核实。
-  const strict = searchLandRoute(spatial.session.voxel, request);
-  const historical = strict.status === 'FOUND' ? null : searchLandRoute(spatial.session.voxel, { ...request, allowStale: true });
+  // 分片搜索：两次 A* 共用同一截止时间，并在计算期间让出事件循环。
+  const strict = await searchLandRouteAsync(spatial.session.voxel, request);
+  const historical = strict.status === 'FOUND' ? null : await searchLandRouteAsync(spatial.session.voxel, { ...request, allowStale: true });
   const result = strict.status === 'FOUND' ? strict
     : historical?.status === 'FOUND' ? historical
       : historical?.status === 'NO_PATH' ? historical
@@ -458,7 +459,7 @@ export const planRoute: Skill<PlanArgs> = {
       if (!spatial.session?.voxel) {
         if (args.source === 'spatial') return fail('NOT_CONNECTED', 'plan_route source:"spatial" 需要共享空间 VoxelMap');
       } else {
-        const candidate = spatialRoute(spatial, state, stance, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
+        const candidate = await spatialRoute(spatial, state, stance, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
         const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
         if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
         if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };

@@ -1,6 +1,6 @@
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
-import { searchLandRoute, type LandSearchResult, type LandSearchTransition } from '../../spatial/land-search.ts';
+import { searchLandRouteAsync, type LandSearchResult, type LandSearchTransition } from '../../spatial/land-search.ts';
 import { feetCell } from '../../perception/local.ts';
 import { fail, obj, ok, runSkill, validateSkill, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 import { moveStep } from './primitives.ts';
@@ -93,10 +93,11 @@ export const navigateTo: Skill<NavigateArgs> = {
       body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
       to: args.to, maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
     };
-    const strict = searchLandRoute(spatial.session.voxel, request);
+    // 分片搜索：搜索期间让出事件循环，按键/取消/观测不必等整段 A* 跑完。
+    const strict = await searchLandRouteAsync(spatial.session.voxel, request);
     let result = strict.status === 'FOUND' ? strict : null;
     if (result === null && args.historical) {
-      const historical = searchLandRoute(spatial.session.voxel, { ...request, allowStale: true });
+      const historical = await searchLandRouteAsync(spatial.session.voxel, { ...request, allowStale: true });
       if (historical.status === 'FOUND') result = historical;
     }
     if (result === null) {

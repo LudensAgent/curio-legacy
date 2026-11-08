@@ -90,6 +90,13 @@ export interface LandSearchResult {
     snapshotCount: number;
     /** `cellAt` evidence clones (one per cell read). */
     cloneCount: number;
+    /** Times the async search yielded to the event loop. */
+    yieldCount: number;
+    /**
+     * Longest uninterrupted compute slice (ms). For `searchLandRouteAsync` this is
+     * real event-loop blocking; the sync entry drains the same slices without yielding.
+     */
+    maxSyncSliceMs: number;
   };
 }
 
@@ -109,6 +116,8 @@ export interface LandRouteVerification {
 const EPS = 1e-9;
 /** Default wall-clock cap for one search pass; callers may share a shorter deadline. */
 export const DEFAULT_LAND_SEARCH_MS = 1500;
+/** Max synchronous compute between cooperative yields in the sliced (async) search. */
+const YIELD_SLICE_MS = 8;
 const DANGER = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'cobweb', 'pointed_dripstone']);
 const cell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
 const pointEqual = (a: Vec3Like, b: Vec3Like) => Math.abs(a.x - b.x) <= EPS && Math.abs(a.y - b.y) <= EPS && Math.abs(a.z - b.z) <= EPS;
@@ -321,7 +330,7 @@ function trackLandReads(
  * 默认只走当前证据 OPEN 的边；allowStale 时允许用历史体素推导候选路线，
  * 但结果标记为 historical，并用严格当前证据附上逐段复验。不挖、不放、不探索。
  */
-export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now = Date.now()): LandSearchResult {
+function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now = Date.now()): Generator<void, LandSearchResult, void> {
   const evidenceMode = request.allowStale === true ? 'historical' as const : 'current' as const;
   const assurance = evidenceMode === 'historical' ? 'historical_geometry' as const : 'geometry_only' as const;
   const maxNodes = request.maxNodes ?? 2048;
@@ -354,11 +363,21 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     staleEdges: 0, unsupportedEdges: 0, maxNodes, maxEdges, maxSearchMs, durationMs: 0,
     cancelReason: null as 'signal' | 'time' | 'nodes' | 'edges' | null,
     visitedSections: 0, sectionReads: 0, snapshotCount: 0, cloneCount: 0,
+    yieldCount: 0, maxSyncSliceMs: 0,
   };
   const baseMap = trackLandReads(map, visitedSections, stats);
   const traversability = evidenceMode === 'historical' ? historicalMapView(baseMap, request.sessionId, now) : baseMap;
+  // 分片边界：记录最长一段没有让出事件循环的同步计算。仅 async 调用方真正让出。
+  let sliceStart = startedAt;
+  const noteYield = (): void => {
+    const at = clock();
+    stats.maxSyncSliceMs = Math.max(stats.maxSyncSliceMs, at - sliceStart);
+    sliceStart = at;
+    stats.yieldCount += 1;
+  };
   const finishStats = (): void => {
     stats.durationMs = Math.max(0, clock() - startedAt);
+    stats.maxSyncSliceMs = Math.max(stats.maxSyncSliceMs, clock() - sliceStart);
     stats.visitedSections = visitedSections.size;
   };
   const stopReason = (): 'signal' | 'time' | null =>
@@ -466,6 +485,11 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
       if (budget) break;
     }
     if (budget) break;
+    // 分批让出：async 调用方据此保持事件循环；sync 调用方只记录切片长度。
+    if (clock() - sliceStart >= YIELD_SLICE_MS) {
+      noteYield();
+      yield;
+    }
   }
 
   if (found === null) {
@@ -492,6 +516,28 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
     cost: nodes.get(found)!.g, resolvedTarget, stats,
     ...(evidenceMode === 'historical' ? { verification: verifyLandRoute(map, request, transitions, now) } : {}),
   };
+}
+
+/** 同步入口：内部仍是有界 A*；脚本、基准和需要同步结果的调用方使用。 */
+export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now = Date.now()): LandSearchResult {
+  const chunks = searchLandRouteChunks(map, request, now);
+  let step = chunks.next();
+  while (!step.done) step = chunks.next();
+  return step.value;
+}
+
+/**
+ * 分片入口：每约 8ms 计算让出一次事件循环，长搜索不再独占主线程。
+ * 取消仍按节点/边和期限检查；返回结果与同步入口一致。
+ */
+export async function searchLandRouteAsync(map: VoxelMap, request: LandSearchRequest, now = Date.now()): Promise<LandSearchResult> {
+  const chunks = searchLandRouteChunks(map, request, now);
+  let step = chunks.next();
+  while (!step.done) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    step = chunks.next();
+  }
+  return step.value;
 }
 
 /** 对已选路线逐段复验；walk 用同高判定，step/drop 用 land transition 判定。 */

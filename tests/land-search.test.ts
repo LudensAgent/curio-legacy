@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { walkLandRules } from '../src/adapter/land-rules.ts';
-import { searchLandRoute, verifyLandRoute } from '../src/spatial/land-search.ts';
+import { searchLandRoute, searchLandRouteAsync, verifyLandRoute } from '../src/spatial/land-search.ts';
 
 const WORLD = 'world', DIM = 'overworld', SESSION = 's1';
 let sequence = 0;
@@ -246,4 +246,26 @@ test('3D 搜索：signal 在边评估之间也能停止并保留 cancelReason=si
   }), 2000);
   assert.equal(result.status, 'CANCELLED');
   assert.equal(result.stats.cancelReason, 'signal');
+});
+
+test('分片搜索：异步入口按时间片让出事件循环，结果与同步一致', async () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(6, 2, 1));
+  fill(map, 'minecraft:stone', [0, 1, 2, 3, 4, 5].map((x) => at(x, -1, 0)));
+  const feet = at(0.5, 0, 0.5), to = at(5.5, 0, 0.5);
+  // 可推进的时钟：每次读取前进 10ms，确保分片阈值被触发，且不靠真实耗时。
+  let t = 0;
+  const clock = () => (t += 10);
+  const sliced = await searchLandRouteAsync(map, request(feet, to, { maxSearchMs: 1e9, clock }), 2000);
+  assert.equal(sliced.status, 'FOUND', JSON.stringify(sliced.stats));
+  assert.ok(sliced.stats.yieldCount > 0, '长搜索应真实让出事件循环');
+  assert.ok(sliced.stats.maxSyncSliceMs >= 8, `切片长度应可观测：${sliced.stats.maxSyncSliceMs}`);
+  const sync = searchLandRoute(map, request(feet, to), 2000);
+  assert.equal(sync.status, sliced.status);
+  assert.equal(sync.transitions.length, sliced.transitions.length);
+
+  const aborted = new AbortController();
+  aborted.abort();
+  const cancelled = await searchLandRouteAsync(map, request(feet, to, { signal: aborted.signal }), 2000);
+  assert.equal(cancelled.status, 'CANCELLED');
 });
