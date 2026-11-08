@@ -46,7 +46,7 @@ const MAX_POINTS = 160;
  *  图只由 path/links 的数量决定（uses、lastUsedAt 等字段不影响拓扑），用计数做失效信号；
  *  动作内的数组引用作为缓存键，动作结束后数组被回收，图随之释放。 */
 const graphCache = new WeakMap<object, {
-  hop: number; link: number; points: number; links: number; cuts: number; reverses: number;
+  hop: number; link: number; heal: boolean; points: number; links: number; cuts: number; reverses: number;
   graph: { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> };
 }>();
 
@@ -309,8 +309,8 @@ export function passageLevels(rec: Pick<PassageRecord, 'path'>): number[] {
  *  边仍按无向存储（碎片化/分量判断需要）；`blocked` 只标出「反向没有证据」的有向禁行：
  *  显式 link 是纯垂直下坠（同 x/z，a 高、b 低、差 ≥2）时，只证明 a→b，反向 climb 不可走；
  *  带水平位移的 dy≤-2 可能是跨了两级台阶，保持双向。 */
-export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> } {
-  const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
+export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts: { hop?: number; link?: number; heal?: boolean } = {}): { nodes: Vec3Like[]; owner: number[]; edges: Map<number, Set<number>>; blocked: Map<number, Set<number>> } {
+  const hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK, heal = opts.heal ?? true;
   let points = 0, linkCount = 0, cuts = 0, reverses = 0;
   for (const r of recs) {
     points += r.path.length;
@@ -319,7 +319,7 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
     for (const l of r.links ?? []) { if (l.cut) cuts++; if (l.reverse) reverses++; }
   }
   const hit = graphCache.get(recs);
-  if (hit && hit.hop === hop && hit.link === link && hit.points === points && hit.links === linkCount
+  if (hit && hit.hop === hop && hit.link === link && hit.heal === heal && hit.points === points && hit.links === linkCount
     && hit.cuts === cuts && hit.reverses === reverses) return hit.graph;
 
   const nodes: Vec3Like[] = [];
@@ -395,7 +395,7 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
         if (j <= i) continue;
         const a = nodes[i]!, b = nodes[j]!;
         // 跨 record：挨得近的点连起来（碎片自愈）。
-        if (owner[i] !== owner[j]) { if (d3(a, b) <= link) add(i, j); continue; }
+        if (owner[i] !== owner[j]) { if (heal && d3(a, b) <= link) add(i, j); continue; }
         // 同一条 record：只补「两个已记录脚点水平正交相邻（|Δy|≤1）」这一个缺口——它们本来就是一步之遥的落脚点，
         // 旧数据里漏记这一步会把一条道断成两团。不按 ≤link 的几何距离硬连，也不补 2 格以上的缺口或斜角缺口。
         if (Math.abs(a.y - b.y) <= 1 && Math.abs(a.x - b.x) + Math.abs(a.z - b.z) === 1) add(i, j);
@@ -404,7 +404,7 @@ export function passageGraph(recs: Pick<PassageRecord, 'path' | 'links'>[], opts
   }
   for (const [key, [u, v]] of oneWay) if (!twoWay.has(key)) (blocked.get(v) ?? blocked.set(v, new Set()).get(v)!).add(u);
   const graph = { nodes, owner, edges, blocked };
-  graphCache.set(recs, { hop, link, points, links: linkCount, cuts, reverses, graph });
+  graphCache.set(recs, { hop, link, heal, points, links: linkCount, cuts, reverses, graph });
   return graph;
 }
 
@@ -485,32 +485,190 @@ function graphShortest(nodes: Vec3Like[], edges: Map<number, Set<number>>, origi
   return { dist, prev };
 }
 
-export function passageRoute(recs: Pick<PassageRecord, 'path' | 'links'>[], from: Vec3Like, to: Vec3Like,
-  opts: { near?: number; hop?: number; link?: number } = {}): Vec3Like[] | null {
-  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK;
-  const { nodes, edges, blocked } = passageGraph(recs, { hop, link });
+export type PassageTransition = 'walk' | 'step' | 'drop' | 'climb';
+export type PassageLegEvidence = 'linked' | 'adjacent' | 'legacy' | 'healed';
+
+export interface PassageRouteLeg {
+  from: Vec3Like;
+  to: Vec3Like;
+  points: Vec3Like[];
+  transitions: PassageTransition[];
+  recordId?: string;
+  kind?: PassageRecord['kind'];
+  deepestY?: number;
+  reversible: boolean;
+  evidence: PassageLegEvidence;
+}
+
+export interface PassageRouteInspection {
+  status: 'route' | 'gap';
+  waypoints: Vec3Like[];
+  legs: PassageRouteLeg[];
+  snapped: { from: Vec3Like; to: Vec3Like; fromDistance: number | null; toDistance: number | null };
+  near: number;
+  hop: number;
+  heal: boolean;
+  nearest?: Vec3Like;
+  reason?: 'empty' | 'from_far_from_records' | 'to_far_from_records' | 'disconnected' | 'disallowed_transition';
+}
+
+type RouteRecord = Pick<PassageRecord, 'path' | 'links'> & Partial<Pick<PassageRecord, 'id' | 'kind' | 'deepestY'>>;
+
+/** 只看几何：同高平走、一格上下 step、更大的下坠 drop、上爬 climb（不声称是梯子）。 */
+function routeTransition(from: Vec3Like, to: Vec3Like): PassageTransition {
+  const dy = to.y - from.y;
+  const horizontal = Math.abs(to.x - from.x) + Math.abs(to.z - from.z);
+  if (horizontal === 0) return dy < 0 ? 'drop' : 'climb';
+  if (Math.abs(dy) < 0.5) return 'walk';
+  if (dy >= 1.5) return 'climb';
+  if (dy <= -1.5) return 'drop';
+  return 'step';
+}
+
+const pointPairKey = (a: Vec3Like, b: Vec3Like) => `${a.x},${a.y},${a.z}|${b.x},${b.y},${b.z}`;
+
+/**
+ * 历史通道图上的只读路线检查：返回稀疏路点 + 每段 transition/可逆性/证据，或结构化缺口。
+ * 只读历史几何，不验证当前通行、不执行、不改图。
+ */
+export function passageRouteInspection(
+  recs: RouteRecord[],
+  from: Vec3Like,
+  to: Vec3Like,
+  opts: { near?: number; hop?: number; link?: number; heal?: boolean; allowed?: readonly PassageTransition[]; fallbackNear?: boolean } = {},
+): PassageRouteInspection {
+  const near = opts.near ?? 5, hop = opts.hop ?? 7, link = opts.link ?? PASSAGE_LINK, heal = opts.heal ?? false;
+  const { nodes, owner, edges, blocked } = passageGraph(recs, { hop, link, heal });
+  const allowed = new Set<PassageTransition>(opts.allowed ?? ['walk', 'step', 'drop', 'climb']);
+  const links = new Set<string>();
+  for (const rec of recs) for (const l of rec.links ?? []) {
+    links.add(pointPairKey(l.a, l.b));
+    links.add(pointPairKey(l.b, l.a));
+  }
   const closest = (p: Vec3Like) => {
     let best = -1, bd = Infinity;
     nodes.forEach((q, i) => { const d = d3(q, p); if (d < bd) { bd = d; best = i; } });
-    return bd <= near ? best : -1;
+    return bd <= near ? { index: best, distance: bd } : null;
   };
-  const a = closest(from), b = closest(to);
-  if (a < 0 || b < 0) return null;
-  if (a === b) return [nodes[a]];
-  let { dist, prev } = graphShortest(nodes, edges, a, b, blocked);
-  // 最近的那个节点可能落在另一团互不相连的通道里。先按它走（常见路径可提前结束 Dijkstra），
-  // 走不到就在同 near 范围内换一个真正可达的节点——否则一个几何上更近却断开的碎片会让整条路失效。
+  const fromHit = closest(from), toHit = closest(to);
+  const snapped = {
+    from: fromHit === null ? { ...from } : { ...nodes[fromHit.index]! },
+    to: toHit === null ? { ...to } : { ...nodes[toHit.index]! },
+    fromDistance: fromHit?.distance ?? null,
+    toDistance: toHit?.distance ?? null,
+  };
+  const gap = (reason: PassageRouteInspection['reason'], nearest?: Vec3Like): PassageRouteInspection => ({
+    status: 'gap', waypoints: [], legs: [], snapped, near, hop, heal, ...(nearest === undefined ? {} : { nearest }), ...(reason === undefined ? {} : { reason }),
+  });
+  if (nodes.length === 0) return gap('empty');
+  if (fromHit === null) return gap('from_far_from_records');
+  if (toHit === null) return gap('to_far_from_records');
+  const a = fromHit.index, b = toHit.index;
+  if (a === b) return { status: 'route', waypoints: [{ ...nodes[a]! }], legs: [], snapped, near, hop, heal };
+
+  const pathIndex = new Map<number, Map<string, number>>();
+  const indexOfPoint = (recIndex: number, p: Vec3Like) => {
+    let index = pathIndex.get(recIndex);
+    if (index === undefined) {
+      index = new Map();
+      recs[recIndex]!.path.forEach((q, i) => index!.set(`${q.x},${q.y},${q.z}`, i));
+      pathIndex.set(recIndex, index);
+    }
+    return index.get(`${p.x},${p.y},${p.z}`) ?? -1;
+  };
+  const legCache = new Map<string, PassageRouteLeg>();
+  const legInfo = (u: number, v: number): PassageRouteLeg => {
+    const cacheKey = `${u},${v}`;
+    const cached = legCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const sameRecord = owner[u] !== undefined && owner[u] === owner[v];
+    const rec = sameRecord ? recs[owner[u]!] : undefined;
+    const points: Vec3Like[] = (() => {
+      if (rec === undefined) return [{ ...nodes[u]! }, { ...nodes[v]! }];
+      const i = indexOfPoint(owner[u]!, nodes[u]!);
+      const j = indexOfPoint(owner[u]!, nodes[v]!);
+      if (i < 0 || j < 0) return [{ ...nodes[u]! }, { ...nodes[v]! }];
+      const slice = i <= j ? rec.path.slice(i, j + 1) : rec.path.slice(j, i + 1).reverse();
+      return slice.length >= 2 ? slice.map((p) => ({ ...p })) : [{ ...nodes[u]! }, { ...nodes[v]! }];
+    })();
+    const transitions = [...new Set(points.slice(1).map((p, i) => routeTransition(points[i]!, p)))];
+    const linked = links.has(pointPairKey(nodes[u]!, nodes[v]!));
+    const evidence: PassageLegEvidence = linked
+      ? 'linked'
+      : !sameRecord
+        ? 'healed'
+        : d3(nodes[u]!, nodes[v]!) <= 1.5 ? 'adjacent' : 'legacy';
+    const leg = {
+      from: { ...nodes[u]! }, to: { ...nodes[v]! }, points, transitions,
+      ...(sameRecord && rec?.id !== undefined ? { recordId: rec.id } : {}),
+      ...(sameRecord && rec?.kind !== undefined ? { kind: rec.kind } : {}),
+      ...(sameRecord && typeof rec?.deepestY === 'number' ? { deepestY: rec.deepestY } : {}),
+      reversible: !blocked.get(v)?.has(u),
+      evidence,
+    } satisfies PassageRouteLeg;
+    legCache.set(cacheKey, leg);
+    return leg;
+  };
+  const legAllowed = (u: number, v: number) => legInfo(u, v).transitions.every((transition) => allowed.has(transition));
+  const filtered = new Map<number, Set<number>>();
+  for (const [u, vs] of edges) for (const v of vs) {
+    if (!legAllowed(u, v)) continue;
+    (filtered.get(u) ?? filtered.set(u, new Set()).get(u)!).add(v);
+  }
+  const reconstruct = (prev: number[], target: number) => {
+    const route: number[] = [];
+    for (let v = target; v >= 0; v = prev[v]!) route.unshift(v);
+    return route;
+  };
+
+  let { dist, prev } = graphShortest(nodes, filtered, a, b, blocked);
   let target = b;
   if (dist[target] === Infinity) {
-    ({ dist, prev } = graphShortest(nodes, edges, a, -1, blocked));
-    let bd = Infinity;
-    target = -1;
-    nodes.forEach((q, i) => { const d = d3(q, to); if (dist[i] < Infinity && d <= near && d < bd) { bd = d; target = i; } });
-    if (target < 0) return null;
+    // 未过滤的图若本来能走，说明是 allowed 把某段排除了；把该段作为缺口事实交回。
+    const raw = graphShortest(nodes, edges, a, b, blocked);
+    if (raw.dist[b] !== Infinity) {
+      const rawRoute = reconstruct(raw.prev, b);
+      const offending = rawRoute.slice(1).map((v, i) => legInfo(rawRoute[i]!, v)).find((leg) => leg.transitions.some((transition) => !allowed.has(transition)));
+      return gap('disallowed_transition', offending?.from ?? nodes[a]);
+    }
+    const all = graphShortest(nodes, filtered, a, -1, blocked);
+    // 旧 passageRoute：目标附近换一个真正可达的节点（兼容行为，只在显式开启时用）。
+    if (opts.fallbackNear === true) {
+      let reachable = -1, bd = Infinity;
+      nodes.forEach((q, i) => {
+        if (all.dist[i] !== Infinity) { const d = d3(q, to); if (d <= near && d < bd) { bd = d; reachable = i; } }
+      });
+      if (reachable >= 0) { dist = all.dist; prev = all.prev; target = reachable; }
+      else {
+        let nearest = -1, nd = Infinity;
+        nodes.forEach((q, i) => {
+          if (all.dist[i] !== Infinity) { const d = d3(q, to); if (d < nd) { nd = d; nearest = i; } }
+        });
+        return gap('disconnected', nearest < 0 ? undefined : nodes[nearest]);
+      }
+    } else {
+      // 新查询：目标分量不连通就如实报缺口，不悄悄改到附近另一个点。
+      let nearest = -1, nd = Infinity;
+      nodes.forEach((q, i) => {
+        if (all.dist[i] !== Infinity) { const d = d3(q, to); if (d < nd) { nd = d; nearest = i; } }
+      });
+      return gap('disconnected', nearest < 0 ? undefined : nodes[nearest]);
+    }
   }
-  const route: Vec3Like[] = [];
-  for (let v = target; v >= 0; v = prev[v]) route.unshift(nodes[v]);
-  return route;
+  const route = reconstruct(prev, target);
+  return {
+    status: 'route',
+    waypoints: route.map((index) => ({ ...nodes[index]! })),
+    legs: route.slice(1).map((v, i) => legInfo(route[i]!, v)),
+    snapped, near, hop, heal,
+  };
+}
+
+export function passageRoute(recs: RouteRecord[], from: Vec3Like, to: Vec3Like,
+  opts: { near?: number; hop?: number; link?: number; heal?: boolean } = {}): Vec3Like[] | null {
+  // 旧 API 保留“目标附近换一个可达节点”的兼容行为；新查询默认关闭。
+  const inspection = passageRouteInspection(recs, from, to, { ...opts, heal: opts.heal ?? true, fallbackNear: true });
+  return inspection.status === 'route' ? inspection.waypoints : null;
 }
 
 /** 从 here 连得上的通道分量（here 水平离网 >6 格时退回全部记录）。 */

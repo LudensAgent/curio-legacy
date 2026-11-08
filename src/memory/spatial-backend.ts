@@ -109,9 +109,10 @@ const decodeFlags = (value: unknown): Uint8Array | undefined =>
 const flagAt = (bytes: Uint8Array | undefined, i: number) =>
   !!bytes && (i >> 3) < bytes.length && (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
 
-function fragmentRecord(fragment: PathFragment): PassageRecord {
+export function fragmentRecord(fragment: PathFragment): PassageRecord {
   const meta = metaOf(fragment.metadata);
-  const curio = meta?.type === 'passage' ? meta : undefined;
+  // 任何 curio metadata 都可能带 linkMeta（方向位）；不局限于旧 passage 类型。
+  const curio = meta;
   // 库的 fragment.links 只保留 a/b；方向证据在 metadata.curio.linkMeta 里。
   // 新格式是 { cut?: base64bits, reverse?: base64bits }；旧版本存的是 [{i,cut,reverse}]，继续兼容读取。
   const legacy = new Map<number, { cut?: boolean; reverse?: boolean }>();
