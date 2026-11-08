@@ -142,7 +142,7 @@ function descOf(s: { name: string; description: string }, chars: number): string
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
   const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
   const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
-  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
+  const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 12)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数；不写 names 列出全部动作，含进阶动作）：${onDemand.join('、')}` : '';
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
 }
@@ -150,7 +150,7 @@ export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVE
 /** 进阶动作（portal/end_/dragon/…）：不进静态目录，按需作为 user 提醒给出，避免平时噪音、也不破坏 system 前缀缓存 */
 export function advancedMovesLine(): string {
   const names = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name);
-  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 14)}）`).join('、')}` : '';
+  return names.length ? `进阶动作可用（参数用 moves 查）：${names.map((n) => `${n}（${briefOf(SKILLS[n].description, 12)}）`).join('、')}` : '';
 }
 
 /**
