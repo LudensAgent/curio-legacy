@@ -105,6 +105,26 @@ function selectRecordedRoute(
     : { kind: 'start_mismatch', ...best };
 }
 
+/**
+ * `plan_route` 的 to 沿用其它动作的方块格坐标约定：x/z 是整数时表示“走到那一格”。
+ * 库的步行格点以实测脚位为原点，只接受整数 X/Z 偏移；玩家实际脚位几乎总带小数
+ * （如 -61.3/-42.7），直接把整数格坐标传进去会被判成“非整数偏移”。
+ * 这里在目标格内取与当前脚下相同的偏移，既落在目标格内，又正好是库的格点。
+ * 分数 x/z 仍按精确脚位原样传入，供测试/内部调用使用。
+ */
+function targetStance(to: Vec3Like, from: Vec3Like): { stance: Vec3Like; cell?: Vec3Like } {
+  if (!Number.isInteger(to.x) || !Number.isInteger(to.z)) return { stance: { ...to } };
+  const cell = { x: Math.floor(to.x), y: to.y, z: Math.floor(to.z) };
+  return {
+    stance: {
+      x: from.x + (cell.x - Math.floor(from.x)),
+      y: to.y,
+      z: from.z + (cell.z - Math.floor(from.z)),
+    },
+    cell,
+  };
+}
+
 const measuredSample = (state: AgentState): BodySample => ({
   worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
   pos: { ...state.pos }, observedAt: Date.now(),
@@ -261,8 +281,8 @@ function historyStartFailure(
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划步行路线：薄适配库 planRoute 做有界搜索，或按 ≤0.05 起点复验历史 fragment。返回库签发的单次 routeId、边界、置信度、过期时间；候选 executable:false。不移动/观察/写库，不重新搜索、无 pathfinder 兜底。当前只支持 walk、exact 到达、同高单格；其余模式/台阶/下落/水面返回结构化 unsupported。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0}, "mode"?:"walk", "source"?:"auto|search|history", "pathId"?:"历史 fragment ID", "arrival"?:{"kind":"exact"}, "deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（名字先用 resolve_target）；history 可给 pathId，或按 ≤0.05 起点召回，终点由库给出 requestedTarget/resolvedTarget。不支持 near/reach_block、非空 avoid、挖/放/搭柱。',
+  description: '只读规划步行路线：库 planRoute 有界搜索，或按 ≤0.05 起点复验历史 fragment。返回单次 routeId、置信度、过期时间；候选 executable:false。不移动/观察/写库，不重新搜索、无 pathfinder 兜底。当前只支持 walk、exact、同高单格（整数 x/z 按方块格）；台阶/下落/水不支持。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0}, "mode"?:"walk", "source"?:"auto|search|history", "pathId"?:"历史片段 ID", "arrival"?:{"kind":"exact"}, "deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）；history 可给 pathId 或按 ≤0.05 起点召回，终点由库给出 requestedTarget/resolvedTarget。不支持 near/reach_block、非空 avoid、挖/放/搭柱。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -316,13 +336,17 @@ export const planRoute: Skill<PlanArgs> = {
     // 换会话/换维：旧 routeId 必须失效；重启由进程内注册表天然满足。
     noteRouteScope(scope);
     const from = { ...state.pos };
+    const { stance, cell } = targetStance(args.to, from);
+    const cellNote = cell === undefined
+      ? ''
+      : `；目标格 (${cell.x},${cell.y},${cell.z})，按当前脚下偏移取格内站位 (${stance.x.toFixed(2)},${stance.y},${stance.z.toFixed(2)})`;
 
     let pathId = args.pathId;
     if (pathId === undefined && args.source !== 'search') {
       const recall = selectRecordedRoute(spatial, state, from);
       if (recall?.kind === 'match') pathId = recall.pathId;
       else if (recall?.kind === 'start_mismatch' && args.source === 'history') {
-        return historyStartFailure(recall.pathId, from, recall.routeStart, recall.drift, { ...args.to }, { ...recall.routeEnd });
+        return historyStartFailure(recall.pathId, from, recall.routeStart, recall.drift, { ...stance }, { ...recall.routeEnd });
       }
     }
     if (args.source === 'history' && pathId === undefined) {
@@ -331,7 +355,8 @@ export const planRoute: Skill<PlanArgs> = {
         classification: 'INSUFFICIENT_EVIDENCE',
         source: 'history',
         start: from,
-        requestedTarget: { ...args.to },
+        requestedTarget: { ...stance },
+        ...(cell === undefined ? {} : { targetCell: cell }),
         detail: 'no recorded fragment starts within 0.05 of the measured feet',
       });
     }
@@ -345,7 +370,7 @@ export const planRoute: Skill<PlanArgs> = {
     });
     const sample = measuredSample(state);
     const result = await libraryPlanRoute({
-      to: { ...args.to }, mode: 'walk', source: args.source,
+      to: { ...stance }, mode: 'walk', source: args.source,
       ...(pathId === undefined ? {} : { pathId }),
       arrival: { kind: 'exact' },
       ...(args.constraints === undefined ? {} : { constraints: { ...(args.constraints.maxNodes === undefined ? {} : { maxNodes: args.constraints.maxNodes }), ...(args.constraints.maxEdges === undefined ? {} : { maxEdges: args.constraints.maxEdges }) } }),
@@ -366,7 +391,12 @@ export const planRoute: Skill<PlanArgs> = {
 
     if (result.plan === undefined) {
       const problem: PlanProblem = result.problem ?? { kind: 'unavailable', detail: 'route planning returned neither a plan nor a problem' };
-      return planProblemResult(problem, result.message, search);
+      const outcome = planProblemResult(problem, result.message, search);
+      return cell === undefined ? outcome : {
+        ...outcome,
+        summary: `${outcome.summary}${cellNote}`,
+        data: { ...(outcome.data ?? {}), targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance },
+      };
     }
     const plan = result.plan;
     // 历史路线只从实测脚位开始：库给的可执行结论必须与起点一致；不符就返回拒绝，不硬套。
@@ -380,6 +410,9 @@ export const planRoute: Skill<PlanArgs> = {
     const label = plan.source === 'history'
       ? `历史路线 ${plan.pathId ?? ''}（${plan.kind ?? 'unknown'}）`
       : '已知空间路线';
-    return ok(`${label}已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，执行前仍会按当前证据复核`, planData(plan, scope, search));
+    const data = planData(plan, scope, search);
+    return ok(`${label}已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，执行前仍会按当前证据复核${cellNote}`, cell === undefined ? data : {
+      ...data, targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance,
+    });
   },
 };
