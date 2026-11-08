@@ -122,3 +122,58 @@ test('瞬移不把旧段末点带进新段', () => {
   assert.equal(calls[1]!.fragment.polyline[0]?.x, 100, '瞬移后新段从实测位置开始，不携带旧末点');
   assert.ok(!calls[1]!.segments.some((segment) => segment.from.x === 7), '不得伪造 7→100 的 seam');
 });
+
+test('远离实测路径的 dug 不把自然洞穴行走误标为 dug', () => {
+  const { calls, recorder } = recorderWithCalls();
+  // 首次观测就带一条很远的挖空证据（不在本次行走附近）；不得因此把整段标成 dug。
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5), dug: [{ pos: at(50.5, 64, 50.5), name: 'stone', ts: 1 }] });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(2.5, 64, 0.5) });
+  recorder.flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.fragment.kind, 'walked', '远处 dug 只是无关证据，不改变这段自然行走的来源标签');
+  assert.equal(calls[0]!.fragment.polyline.length, 3);
+});
+
+test('瞬移重启新段时，远处 dug 同样不重标为 dug', () => {
+  const { calls, recorder } = recorderWithCalls();
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5) });
+  // 瞬移触发新 run；附带一条离新段很远的 dug（离旧位置也远）。
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(30.5, 64, 0.5), dug: [{ pos: at(0.5, 64, 100.5), name: 'stone', ts: 2 }] });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(31.5, 64, 0.5) });
+  recorder.flush();
+  assert.equal(calls.length, 1, '瞬移前只有一个点、没有已确认 segment，不写空 fragment');
+  assert.equal(calls[0]!.fragment.kind, 'walked');
+});
+
+test('未进入的挖空不写进 polyline，也不被当成走过的位置', () => {
+  const { calls, recorder } = recorderWithCalls();
+  const excavated = at(2, 63, 0.5);
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5), dug: [{ pos: excavated, name: 'stone', ts: 1 }] });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5) });
+  recorder.flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.fragment.kind, 'dug', '邻近挖空只作为来源标签');
+  assert.deepEqual(calls[0]!.fragment.polyline, [at(0.5, 64, 0.5), at(1.5, 64, 0.5)], 'polyline 只含实测身体位置');
+  assert.ok(!calls[0]!.fragment.polyline.some((point) => point.x === excavated.x && point.y === excavated.y && point.z === excavated.z), '未进入的挖空不得出现在 polyline');
+  assert.ok(!calls[0]!.segments.some((segment) => segment.from.x === excavated.x || segment.to.x === excavated.x), '未进入的挖空不得成为 segment 端点');
+});
+
+test('dug 段的 segments 仍是 confirmed_traversal，端点等于实测位置，几何来源为 traversal', () => {
+  const { calls, recorder } = recorderWithCalls();
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(0.5, 64, 0.5) });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(1.5, 64, 0.5), dug: [{ pos: at(1, 63, 0), name: 'stone', ts: 1 }] });
+  recorder.observe({ worldId: 'w', dim: 'overworld', sessionId: 's', pos: at(2.5, 64, 0.5) });
+  recorder.flush();
+  assert.equal(calls.length, 1);
+  const { fragment, segments } = calls[0]!;
+  assert.equal(fragment.kind, 'dug');
+  assert.equal(fragment.geometrySource, 'traversal', 'dug 不得改写几何来源');
+  assert.deepEqual(fragment.polyline, [at(0.5, 64, 0.5), at(1.5, 64, 0.5), at(2.5, 64, 0.5)]);
+  assert.equal(segments.length, 2);
+  segments.forEach((segment, index) => {
+    assert.equal(segment.source, 'confirmed_traversal');
+    assert.deepEqual(segment.from, fragment.polyline[index]);
+    assert.deepEqual(segment.to, fragment.polyline[index + 1]);
+  });
+});

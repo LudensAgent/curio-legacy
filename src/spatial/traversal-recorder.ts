@@ -25,6 +25,8 @@ const MAX_POINTS = 8;
 const TELEPORT = 24;
 const RECORD_STEP = 1;
 const BRIDGE_SUPPORT_RATIO = 0.5;
+/** dug 只是来源标签：挖空证据距实测路径超过这个距离时，与本次行走无关。 */
+const DUG_PROXIMITY = 6;
 /**
  * 这么久没有新的已确认记录点，说明这段位移已经结束。观测间隔约 0.7s；
  * 主动落盘短段，否则一次短距离步行会一直留在内存里，直到下次断点或进程退出才写入。
@@ -41,6 +43,14 @@ const observedStep = (a: Vec3Like, b: Vec3Like): boolean => {
 };
 
 const supportOf = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y) - 1, z: Math.floor(p.z) });
+
+/**
+ * dug 只作 fragment 的来源标签，不证明任何几何。只有挖空证据落在本次实测路径
+ * （已记录点或当前实测位置）附近时，才认为这段已走过的路涉及挖掘；远离路径的
+ * 挖空证据不得把一段自然行走改标成 dug。
+ */
+const dugOnPath = (dug: TraversalObservation['dug'], points: readonly Vec3Like[]): boolean =>
+  dug?.some((entry) => points.some((point) => d3(entry.pos, point) <= DUG_PROXIMITY)) ?? false;
 
 /**
  * 统一的空间记忆记录器：把身体实际走过的连续位移写成共享会话的 fragment +
@@ -106,9 +116,6 @@ export class TraversalRecorder {
     }
 
     this.last = { worldId, dim, sessionId, pos: { ...pos } };
-    if (observation.dug?.some((dug) => d3(dug.pos, pos) <= 6)) {
-      if (this.run !== null) this.run.hasDug = true;
-    }
 
     if (this.run === null) {
       // 8 点上限 flush 后，用上一段末点作为新段首点；下一帧会补上 seam segment，
@@ -122,7 +129,7 @@ export class TraversalRecorder {
         id: `trail:${worldId}:${dim}:${this.now()}:${this.sequence++}`,
         worldId, dim, sessionId,
         startedAt: this.now(), lastAt: this.now(),
-        points: [{ ...start }], segments: [], hasDug: observation.dug?.length ? true : false,
+        points: [{ ...start }], segments: [], hasDug: dugOnPath(observation.dug, [start]),
         bridgeSupports: observation.onPlacedSupport?.(supportOf(start)) ? 1 : 0,
       };
       if (carried === null) return;
@@ -131,6 +138,7 @@ export class TraversalRecorder {
     const from = this.run.points.at(-1)!;
     if (d3(from, pos) < RECORD_STEP) {
       // 格子内抖动/慢速移动不产生记录点，但同样按停走阈值落盘，不能让它无限期留在内存。
+      if (dugOnPath(observation.dug, [...this.run.points, pos])) this.run.hasDug = true;
       if (this.now() - this.run.lastAt >= IDLE_FLUSH_MS) this.flush(true);
       return;
     }
@@ -141,7 +149,7 @@ export class TraversalRecorder {
         id: `trail:${worldId}:${dim}:${this.now()}:${this.sequence++}`,
         worldId, dim, sessionId,
         startedAt: this.now(), lastAt: this.now(),
-        points: [{ ...pos }], segments: [], hasDug: observation.dug?.length ? true : false,
+        points: [{ ...pos }], segments: [], hasDug: dugOnPath(observation.dug, [pos]),
         bridgeSupports: observation.onPlacedSupport?.(supportOf(pos)) ? 1 : 0,
       };
       return;
@@ -160,6 +168,7 @@ export class TraversalRecorder {
       mode: 'walk',
     });
     this.run.lastAt = observedAt;
+    if (dugOnPath(observation.dug, this.run.points)) this.run.hasDug = true;
     if (observation.onPlacedSupport?.(supportOf(pos))) this.run.bridgeSupports += 1;
     if (this.run.points.length >= MAX_POINTS) this.flush(true);
   }
