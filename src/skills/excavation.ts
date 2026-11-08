@@ -5,18 +5,8 @@ import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
-import { markSelfModified, type WalkCorridorSegment } from '../spatial/shared-session.ts';
-import type { PathFragment } from 'curio-minecraft-3d-memory';
+import { markSelfModified } from '../spatial/shared-session.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
-
-/** 记录回执：只报告记忆写没写、写到哪，不把记忆失败混进身体动作结果。 */
-type ExcavationRouteMemory = {
-  status: 'written' | 'failed' | 'skipped';
-  fragmentId?: string;
-  traversalIds?: string[];
-  stage?: string;
-  message?: string;
-};
 
 export interface ExcavationArgs {
   entry: string;
@@ -343,9 +333,6 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   /** 风险与邻格未知作为数据返回，成功/失败都带；不让它们只活在错误文本里。 */
   const ledger: RiskLedger = { risks: [], unknownAdjacent: [], riskKeys: new Set(), unknownKeys: new Set() };
   const path: { pos: Vec3Like; observationId: number }[] = [];
-  /** 已确认落地的连续段；只记录实测到达，不把计划/未确认步补进来。 */
-  const confirmedSegments: { from: Vec3Like; to: Vec3Like; sessionId: string; observedAt: number }[] = [];
-  let routeMemory: ExcavationRouteMemory | undefined;
   /** stairs 下行时，记录点下一级没有精确支撑、但同列 ≤4 格内有安全楼面而多落下的地方。 */
   const adjustedDrops: { requestedFoot: number; landingFoot: number; drop: number; block: string; blockCell: Vec3Like }[] = [];
   /** 按 Agent 显式 fill 授权补上的支撑格；材料会真实消耗。 */
@@ -363,50 +350,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       excavatedBlocks: excavated, noDropBlocks, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       risks: ledger.risks.map((risk) => ({ ...risk, at: { ...risk.at } })), riskCells: ledger.risks.map((risk) => ({ ...risk.at })), unknownAdjacent: ledger.unknownAdjacent.map((at) => ({ ...at })),
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
-      ...(routeMemory ? { routeMemory } : {}),
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
-  };
-  /** 只把已确认落地写成 dug fragment/traversal/拓扑；记忆失败不改身体结果。 */
-  const recordRoute = () => {
-    if (routeMemory !== undefined) return;
-    if (confirmedSegments.length === 0 || !ctx.spatial) { routeMemory = { status: 'skipped' }; return; }
-    const first = confirmedSegments[0]!;
-    const last = confirmedSegments.at(-1)!;
-    const polyline = [{ ...first.from }, ...confirmedSegments.map((segment) => ({ ...segment.to }))];
-    const fragment: PathFragment = {
-      id: `dug:${ctx.taskId}:${origin.observationId}`,
-      worldId: origin.worldId,
-      dim: origin.dim,
-      kind: 'dug',
-      entrances: [{ ...first.from }],
-      polyline,
-      geometrySource: 'traversal',
-      links: confirmedSegments.map((segment) => ({ a: { ...segment.from }, b: { ...segment.to } })),
-      deepestY: Math.min(...polyline.map((point) => point.y)),
-      createdAt: first.observedAt,
-      lastUsedAt: last.observedAt,
-      uses: 1,
-      externalRef: ctx.taskId,
-      metadata: { curio: { v: 1, type: 'route', source: 'excavate_run', mode: args.mode } },
-    };
-    const segments: WalkCorridorSegment[] = confirmedSegments.map((segment, index) => ({
-      id: `${fragment.id}:${index}`,
-      fragmentId: fragment.id,
-      from: { ...segment.from },
-      to: { ...segment.to },
-      worldId: origin.worldId,
-      dim: origin.dim,
-      sessionId: segment.sessionId,
-      observedAt: segment.observedAt,
-      source: 'confirmed_excavate_run',
-      executionId: ctx.taskId,
-      actionId: ctx.taskId,
-      ...(args.mode === 'tunnel' ? { mode: 'walk' as const } : {}),
-    }));
-    const outcome = ctx.spatial.recordRouteCorridor({ fragment, segments });
-    routeMemory = outcome.status === 'written'
-      ? { status: 'written', fragmentId: outcome.fragmentId, traversalIds: outcome.traversalIds }
-      : { status: 'failed', fragmentId: outcome.fragmentId, traversalIds: outcome.traversalIds, stage: outcome.stage, message: outcome.message };
   };
   try {
     if (!Number.isInteger(args.steps) || args.steps < 1 || args.steps > 8 || !Object.hasOwn(DIRECTIONS, args.direction) || !['stairs', 'stairs_up', 'tunnel'].includes(args.mode)) throw new ExcavationStop('BAD_ARGS', '开挖必须显式指定方向与模式，每次最多8步');
@@ -464,7 +408,6 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       return false;
     };
     if (await observe()) {
-      recordRoute();
       return ok('在当前实际入口观察到目标，未继续开挖', { ...details(), stoppedByObservation: true });
     }
     const direction = DIRECTIONS[args.direction];
@@ -594,8 +537,6 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       standingCell(ctx, next, ledger, args);
       completed++;
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
-      const segmentFrom = confirmedSegments.at(-1)?.to ?? { ...origin.pos };
-      confirmedSegments.push({ from: { ...segmentFrom }, to: { ...landed.pos }, sessionId: origin.sessionId, observedAt: Date.now() });
       assertSession(ctx, origin);
       checkpointId = ctx.memory.transaction(() => {
         const checkpoint = ctx.memory.addLandmark('waypoint', `${EXCAVATION_CHECKPOINT_LABEL}（${args.mode}/${args.direction}）`, origin.dim, next, 0);
@@ -607,20 +548,16 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
       if (await observe()) {
-        recordRoute();
         return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
       }
     }
-    recordRoute();
     return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}${noDropNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
-      recordRoute();
       (error as Error & { partial?: Record<string, unknown> }).partial = details();
       throw error;
     }
-    recordRoute();
     const msg = (error as Error).message;
     const cavity = error instanceof ExcavationStop && error.nextLanding ? cavityGap(ctx, error.nextLanding, error.below, fillTried) : null;
     const fall = cavity && 'fall' in cavity ? cavity.fall : null;

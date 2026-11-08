@@ -26,9 +26,9 @@ import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
-const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'passages'];
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge'];
 /** 需要完整上下文（技能、图纸、Wiki 资料、矿道记录）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
-const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge', 'passages'];
+const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
 /**
  * 水里低氧阈值：身体在水里、氧气低于这个数时，只够“瞥一眼”，不够完整想一轮。
  * 完整认真想的中位约 9 秒、长尾几十秒；水下氧气从 10 掉到 0 往往也在这几秒内，等回答回来可能已经溺死。
@@ -383,7 +383,7 @@ export class Thinker {
       // 把查询（design/skill/recipes…）写成了 routine 里的一步：替它查了，再请它据此做决定
       const embedded = embeddedQuery(raw);
       if (embedded && queries < 3) {
-        if (tier === 'glance' && ['knowledge', 'passages'].includes(embedded.kind)) {
+        if (tier === 'glance' && ['knowledge'].includes(embedded.kind)) {
           if (lowAir) suppressEscalation(`把 ${embedded.kind} 查询写成了动作`);
           else {
             tier = 'deliberate';
@@ -448,31 +448,6 @@ export class Thinker {
 
   private async query(kind: string, raw: Record<string, any>, ctx: MindContext, signal?: AbortSignal, maxBytes?: number): Promise<string> {
     try {
-      if (kind === 'passages') {
-        if (raw.id !== undefined && (typeof raw.id !== 'string' || !raw.id.trim())) return 'id 需要非空的矿道记录 ID 字符串；不指定 id 可列出记录';
-        if (raw.offset !== undefined && (typeof raw.offset !== 'number' || !Number.isSafeInteger(raw.offset) || raw.offset < 0)) return 'offset 需要非负整数，表示历史脚点的起始索引';
-        const id = raw.id as string | undefined;
-        const offset = (raw.offset ?? 0) as number;
-        if (id === undefined && raw.offset !== undefined) return 'offset 需要与 id 一起使用；不指定 id 时列出矿道记录';
-        const context = { worldId: ctx.state.worldId, dim: ctx.state.dim, historical: true, connectivity: 'unknown',
-          note: '历史脚点已稀疏采样、去重或合并，不代表连续顺序或双向可走；地表参考点也不保证现在是入口。archive 标记的记录来自历史归档，不在当前工作集。' };
-        const records = this.memory.allPassages(ctx.state.dim).filter((rec) => (rec.worldId ?? 'default') === ctx.state.worldId).map((rec) => {
-          const nearest = rec.path.reduce<{ index: number; distance: number } | null>((best, point, index) => {
-            const distance = Math.hypot(point.x - ctx.state.pos.x, point.y - ctx.state.pos.y, point.z - ctx.state.pos.z);
-            return !best || distance < best.distance ? { index, distance } : best;
-          }, null);
-          return { rec, summary: { id: rec.id, kind: rec.kind ?? 'dug', surfaceReferences: rec.entrances, deepestY: rec.deepestY, createdAt: rec.createdAt,
-            lastUsedAt: rec.lastUsedAt, dug: rec.dug, ores: rec.ores, pointCount: rec.path.length,
-            nearestPointIndex: nearest?.index ?? null, distance: nearest?.distance ?? null,
-            ...(rec.archivedAt !== undefined ? { archived: true } : {}) } };
-        }).sort((a, b) => (a.summary.distance ?? Infinity) - (b.summary.distance ?? Infinity));
-        if (id === undefined) return JSON.stringify({ ...context, action: 'list', records: records.map(({ summary }) => summary) });
-        const record = records.find(({ rec }) => rec.id === id.trim());
-        if (!record) return JSON.stringify({ ...context, error: '当前世界和维度没有这个矿道记录', id: id.trim() });
-        const points = record.rec.path.slice(offset, offset + 32);
-        return JSON.stringify({ ...context, action: 'read', ...record.summary, path: points, offset, total: record.rec.path.length,
-          nextOffset: offset + points.length < record.rec.path.length ? offset + points.length : null });
-      }
       if (kind === 'knowledge') {
         if (!this.knowledge) return '知识库未启用，无法查询游戏资料';
         const result = this.knowledge.query(raw, maxBytes);

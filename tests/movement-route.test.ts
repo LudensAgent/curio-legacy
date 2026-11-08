@@ -158,49 +158,6 @@ test('plan_route 参数边界：非 walk、near、非空 avoid、未知字段都
   assert.equal(planRoute.validate({ to: { x: 1, y: 64, z: 0 }, nope: true }, w).ok, false);
 });
 
-test('plan_route source:"history" 可显式给 pathId，也可在附近记录路线中召回', async (t) => {
-  const w = flatAdapter();
-  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
-  const frag = fragment('frag-dug', [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }]);
-  const spatial = fakeSpatial(map, { 'frag-dug': frag });
-  const ctx = { ...makeCtx(w), spatial };
-  t.after(() => ctx.memory.close());
-  clearRouteRecords();
-
-  // 历史里没有起点匹配的记录路线：明确失败，不猜测。
-  const empty = { ...ctx, spatial: fakeSpatial(map) };
-  const missing = await planRoute.run(empty, { to: { x: 20, y: 64, z: 20 }, mode: 'walk', source: 'history', arrival: { kind: 'exact' } });
-  assert.equal(missing.status, 'failed');
-  assert.match(missing.summary, /记录路线/);
-
-  const explicit = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'history', pathId: 'frag-dug', arrival: { kind: 'exact' } });
-  assert.equal(explicit.status, 'succeeded', explicit.summary);
-  assert.equal(explicit.data?.kind, 'dug');
-  assert.equal(explicit.data?.confidence, 'verified');
-  assert.equal((explicit.data?.points as unknown[]).length, 3);
-  assert.match(String(explicit.data?.routeId), /^rt_/, 'routeId 由库注册表签发');
-
-  const recalled = await planRoute.run(ctx, { to: { x: 2.5, y: 64, z: 0.5 }, mode: 'walk', source: 'history', arrival: { kind: 'exact' } });
-  assert.equal(recalled.status, 'succeeded', recalled.summary);
-  assert.equal(recalled.data?.source, 'history');
-  assert.equal(recalled.data?.pathId, 'frag-dug');
-  assert.deepEqual(w.actions, [], '规划阶段不移动');
-});
-
-test('plan_route history 拒绝变高路线，不伪装成可执行', async (t) => {
-  const w = flatAdapter();
-  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
-  const frag = fragment('frag-stairs', [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 63, z: 0.5 }]);
-  const spatial = fakeSpatial(map, { 'frag-stairs': frag });
-  const ctx = { ...makeCtx(w), spatial };
-  t.after(() => ctx.memory.close());
-  const r = await planRoute.run(ctx, { to: { x: 2, y: 63, z: 0 }, mode: 'walk', source: 'history', pathId: 'frag-stairs', arrival: { kind: 'exact' } });
-  assert.equal(r.status, 'failed');
-  assert.equal(r.failureCode, 'BAD_ARGS');
-  assert.equal((r.data?.unsupported as { kind?: string } | undefined)?.kind, 'unsupported_geometry');
-  assert.match(r.summary, /height|same-height/i);
-});
-
 test('plan_route source:"search" 用 WalkRouteSearch 返回候选路线，规划阶段零移动', async (t) => {
   const w = flatAdapter();
   const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
@@ -298,4 +255,52 @@ test('plan_route 目标与当前同格时按零段路线成功，而不是把 .7
   assert.deepEqual(r.data?.targetCell, { x: -1, y: 64, z: 0 });
   assert.equal((r.data?.points as unknown[]).length, 1);
   assert.match(r.summary, /0 段/);
+});
+
+function memorySpatial(map: VoxelMap, inspection: Record<string, unknown>) {
+  const base = fakeSpatial(map) as unknown as Record<string, unknown>;
+  return {
+    ...base,
+    query: (request: Record<string, unknown>) => ({
+      status: 'ok', contract: 'memory-host-contract/1', worldId: WORLD, dim: DIM,
+      sessionId: SESSION, computedAt: Date.now(), readOnly: true, executable: false,
+      data: { kind: 'historyRoute', inspection: { ...inspection, request } },
+    }),
+  } as unknown as SharedSpatialSession;
+}
+
+test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 routeId', async (t) => {
+  const w = flatAdapter();
+  const map = flatMap((_x, y) => y === 63 ? 'stone' : 'air');
+  const evidence = (id: string, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }) => ({
+    id, fragmentId: 'frag', from, to, worldId: WORLD, dim: DIM, sessionId: SESSION,
+    observedAt: 1, source: 'confirmed_traversal', mode: 'walk',
+  });
+  const points = [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }];
+  const spatial = memorySpatial(map, {
+    worldId: WORLD, dim: DIM, from: points[0], to: points[2], near: 5, status: 'FOUND',
+    fromNodeId: 'n0', toNodeId: 'n2', points, nodeIds: ['n0', 'n1', 'n2'], edgeIds: ['e0', 'e1'],
+    segments: [
+      { edgeId: 'e0', from: 'n0', to: 'n1', type: 'HORIZONTAL', direction: 'forward', evidenceId: 't0', evidence: evidence('t0', points[0]!, points[1]!) },
+      { edgeId: 'e1', from: 'n1', to: 'n2', type: 'STAIRCASE', direction: 'forward', evidenceId: 't1', evidence: evidence('t1', points[1]!, points[2]!) },
+    ],
+    gaps: [], stats: null, diagnostics: [], message: 'found',
+    historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN',
+  });
+  const ctx = { ...makeCtx(w), spatial };
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'memory', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.source, 'memory');
+  assert.equal(r.data?.executable, false);
+  assert.equal(r.data?.routeId, undefined);
+  assert.deepEqual((r.data?.points as unknown[]).length, 3);
+  assert.deepEqual((r.data?.legs as { transition: string }[]).map((leg) => leg.transition), ['walk', 'step']);
+  assert.deepEqual(r.data?.targetCell, { x: 2, y: 64, z: 0 });
+  assert.deepEqual(w.actions, [], '记忆规划不移动');
+  const auto = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
+  assert.equal(auto.status, 'succeeded', auto.summary);
+  assert.equal(auto.data?.source, 'memory', 'auto 先查共享记忆');
+  assert.deepEqual((auto.data?.legs as { transition: string }[]).map((leg) => leg.transition), ['walk', 'step']);
 });

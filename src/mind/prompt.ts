@@ -15,7 +15,6 @@ import { travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
 import { describeBuild, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
-import { dedupePassages, passageDeepestAnchor, passageFarthestAnchor, passageNext, passageSurfaceAnchor } from '../memory/passages.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
@@ -120,7 +119,6 @@ export const COMMON_MOVES = ['move_step', 'mine_cell', 'place_cell', 'place_supp
 const ADVANCED = /portal|end_|dragon|stronghold|search_structure/;
 
 /** 空间记忆查询/回程规划：不进静态 system 目录（预算不够且不是每念都用），按情境作为 user 提醒出现。 */
-const MEMORY_MOVES = new Set(['spatial_extrema', 'plan_memory_route']);
 
 /** 描述取第一句话，太长就在逗号处截断（不截在半个词上） */
 function briefOf(d: string, n: number): string {
@@ -143,7 +141,7 @@ function descOf(s: { name: string; description: string }, chars: number): string
  * 当前活动用到的动作单独作为 user 提醒，这样 system 前缀保持字节稳定，最大程度命中服务端前缀缓存。
  */
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
-  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name) && !MEMORY_MOVES.has(s.name));
+  const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
   const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
   const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数；不写 names 列出全部动作，含进阶动作）：${onDemand.join('、')}` : '';
@@ -159,12 +157,6 @@ function purposeLine(label: string, names: string[]): string {
 export function advancedMovesLine(): string {
   return purposeLine('进阶动作可用（参数用 moves 查）', Object.values(SKILLS)
     .filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && ADVANCED.test(s.name)).map((s) => s.name));
-}
-
-/** 空间记忆查询：按情境补在 user 消息末尾，不占静态 system 目录。 */
-export function memoryMovesLine(): string {
-  return purposeLine('空间记忆查询/回程规划可用（参数用 moves 查）', Object.values(SKILLS)
-    .filter((s) => MEMORY_MOVES.has(s.name) && !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name)).map((s) => s.name));
 }
 
 /**
@@ -223,13 +215,10 @@ const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是�
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
 
-const PASSAGES_QUERY = `{"kind":"passages"} 查当前世界和维度的矿道记录；加 "id":"记录ID","offset":0 分页读历史脚点，每页最多32点。脚点不代表连续或双向可走，当前通路需现场确认。`;
-
 const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数；不写 names 列出全部动作（含平时不显示的进阶动作）
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
-- ${PASSAGES_QUERY}
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中。
  *  每条只留名字、状态和一句用途；状态用图例说明，瞥一眼连用途也省掉，按需用 skill 查。 */
@@ -246,7 +235,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
 2. 看【专注】：在推进清单就 continue。
 3. 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
-4. 拿不准就先查（knowledge / skill / moves / recipes / recall / passages）；输出前核对动作名和参数。`;
+4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
 - 去记得的地方或坐标 → resolve_target 解析目标，再 plan_route 规划、walk_path 执行；找没见过的东西 → look_around + plan_route/walk_path；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
@@ -255,6 +244,7 @@ const CHOOSE = `【选动作】
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补这一格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
+- plan_route 的 source:"memory"/"auto" 可能返回历史路点/过渡而不是 routeId：按 legs 用 walk_path（同高段）、move_step（相邻）或 descend_to（落差）执行；climb 由你决定梯子/垫高
 - plan_route/walk_path 不挖墙、不垫路、不搭柱；需要改变地形时显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】
@@ -304,7 +294,6 @@ const GLANCE_GUIDE = `这次只是抬头看一眼，不必把每个细节重新�
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
-- ${PASSAGES_QUERY}
 - 盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
 - 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust。做完清单一项写 "plan":{"done":[序号]}。
 - 技能书在文末：需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。
@@ -338,106 +327,11 @@ export const NEAR_END_REASON = '手上这段活的最后一步正在执行，结
 
 const MINING_INTENT = /下矿|矿道|矿洞|找铁|挖铁|找矿|挖矿|粗铁|铁矿|往下挖|下挖|下到 ?y|挖(阶梯|台阶)[^上]{0,6}(下|降)|石层|深层/;
 
-/** 打算里说要从地下回地面 */
-const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
-
-/** 打算里要往远处走/找结构：下界找要塞、开平巷、横探，和“下矿找深层”不是同一个方向。 */
-const EXPLORE_INTENT = /找要塞|要塞|找结构|结构|探索|平巷|横着|横探|往远|走远|巡逻|前进|找路|往[东南西北]/;
-
-/** 支撑格是实心：站在这里不会马上掉下去；未观测（null）不当作空气。 */
-const solidSupport = (n: string | null) => n !== null && !isSoftBlock(n) && !LIQUID_BLOCKS.has(n);
-/** 脚/头两格可走时，按下方支撑格给出「能直接走/不是地板/未观测」的当前事实。 */
-function stepSupportFact(support: string | null): string {
-  if (solidSupport(support)) return '，可以直接走过去';
-  if (support === null) return '，下方支撑格未观测';
-  if (LIQUID_BLOCKS.has(support)) return `；下一步落脚点下方是 ${support}（液体），不能站`;
-  if (/^(air|cave_air|void_air)$/.test(support)) return `；下一步落脚点下方是 ${support}，没有地板`;
-  if (isSoftBlock(support)) return `；下一步落脚点下方是 ${support}（火把/装饰方块不是地板），记录点可能悬空；实际楼面需现场确认（由你定）`;
-  return `；下一步落脚点下方是 ${support}，不能站`;
-}
-
 /** 打算里说木头/砍树/原木（材料账只在相关意图出现；前导非字母避免 dialog 之类误匹配） */
 const WOOD_INTENT = /砍|伐|原木|木头|树干|找树|木料|木材|橡木|(^|[^a-z])(log|wood|stem|hyphae|bamboo)s?\b|\bchop\b|\btree\b/;
 
-/** 沿来路回入口的下一步：把全部记下的通道连成网（碎片也接得上），取朝地表锚点走的下一个路点，核对下一步那两格（脚下+头顶）现在是否还通，给出「可走/被堵」的当前事实。 */
-function passageWayBack(ctx: MindContext): string | null {
-  const p = ctx.percept, s = ctx.state;
-  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  // 和记录路线查询用同一份去重后的网：重复记录形成的伪岔路不能污染“下一步”。
-  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
-  const to = passageSurfaceAnchor(recs, here);
-  if (!to) return null;
-  const g = passageNext(recs, here, to);
-  if (!g) return null;
-  const next = g.next;
-  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
-  const foot = at(next.x, next.y, next.z);
-  const head = at(next.x, next.y + 1, next.z);
-  const open = (n: string | null) => n !== null && isSoftBlock(n);
-  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
-  const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
-  const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它回入口的方向走`;
-  const follow = g.inside ? '；也可以用 spatial_query 查这条记录，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它带路' : '；挡路时先用 mine_cell / excavate_run 清开，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它带路';
-  if (open(foot) && open(head)) {
-    const support = at(next.x, next.y - 1, next.z);
-    return `${along}；沿它回入口的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
-  }
-  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `${along}；沿它回入口的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
-}
-
-/** 沿旧矿道往最深处走的下一步：和 passageWayBack 对称，但方向朝全网最深的脚点，供想下更深时接上旧通道 */
-function passageWayDown(ctx: MindContext): string | null {
-  const p = ctx.percept, s = ctx.state;
-  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  // 和记录路线查询用同一份去重后的网：重复记录形成的伪岔路不能污染“下一步”。
-  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
-  const to = passageDeepestAnchor(recs, here);
-  if (!to) return null;
-  const g = passageNext(recs, here, to);
-  if (!g) return null;
-  const next = g.next;
-  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
-  const foot = at(next.x, next.y, next.z);
-  const head = at(next.x, next.y + 1, next.z);
-  const open = (n: string | null) => n !== null && isSoftBlock(n);
-  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
-  const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
-  const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它最深处走`;
-  const follow = g.inside ? '；也可以用 spatial_query 查这条记录，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它带路' : '；挡路时先用 mine_cell / excavate_run 清开，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它带路';
-  if (open(foot) && open(head)) {
-    const support = at(next.x, next.y - 1, next.z);
-    return `${along}；沿它往最深处走的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
-  }
-  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `${along}；沿它往最深处走的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
-}
-
-/** 沿旧矿道往水平最远处走的下一步：和“下最深”对称，供下界找要塞/结构探索时复用旧道走远。 */
-function passageWayFar(ctx: MindContext): string | null {
-  const p = ctx.percept, s = ctx.state;
-  const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  const recs = dedupePassages(ctx.memory.allPassages(s.dim).filter((r) => !r.worldId || r.worldId === s.worldId));
-  const to = passageFarthestAnchor(recs, here);
-  if (!to) return null;
-  const g = passageNext(recs, here, to);
-  if (!g) return null;
-  const next = g.next;
-  const at = (x: number, y: number, z: number) => ctx.blockAt?.({ x, y, z }) ?? null;
-  const foot = at(next.x, next.y, next.z);
-  const head = at(next.x, next.y + 1, next.z);
-  const open = (n: string | null) => n !== null && isSoftBlock(n);
-  const pos = `${Math.round(next.x)},${Math.round(next.y)},${Math.round(next.z)}`;
-  const kind = g.kind === 'walked' ? '走过的路' : g.kind === 'bridge' ? '我搭的桥' : '自己挖过的旧矿道';
-  const along = g.inside ? `你正沿着${kind}` : `附近有${kind}，朝它水平最远处走`;
-  const follow = g.inside ? '；也可以用 spatial_query 查这条记录，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它往远处带路' : '；挡路时先用 mine_cell / excavate_run 清开，再 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 让我沿它往远处带路';
-  if (open(foot) && open(head)) {
-    const support = at(next.x, next.y - 1, next.z);
-    return `${along}；沿它往水平最远处的下一步 (${pos}) 现在仍是 2 格高的空走廊${stepSupportFact(support)}${follow}`;
-  }
-  const reason = !open(foot) ? `脚下那格现在是 ${foot ?? '未加载'}` : `头顶那格现在是 ${head ?? '未加载'}`;
-  return `${along}；沿它往水平最远处的下一步 (${pos}) 被堵了：${reason}。挖开这一格、还是改走别的路，由你定${follow}`;
-}
+/** 打算里说要从地下回地面 */
+const SURFACE_INTENT = /回地面|回到地面|回前哨|回基地|回入口|退回入口|回地表|见天|爬出|挖出去|出矿|上地面|上到地面|往上爬|往上走|往上挖|挖(阶梯|台阶).{0,8}上/;
 
 /** 打算里说要过水 / 到对岸 */
 const WATER_CROSS_INTENT = /过水|过河|渡河|过海|过湖|涉水|划船|坐船|游过去|游到|对岸|对面|跨过.{0,8}(水|河|海|湖)|去.{0,12}(对岸|对面)|到.{0,12}(对岸|对面)/;
@@ -505,8 +399,7 @@ export function decisionReminders(ctx: MindContext): string[] {
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
     const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
-    const back = passageWayBack(ctx);
-    out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}${back ? `；${back}` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
+    out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
     tripShown = true;
   }
   // 木料/矿石的历史账：只陈述账本里的段活数、数量、路程和现有量。
@@ -585,43 +478,11 @@ export function situationalReminders(ctx: MindContext): string[] {
     // 往下挖有稳定辅助：手工 mine_cell[1,-1,0]+move_step 的斜下格支撑超出 place_support 范围，容易卡住
     const stairFails = (ctx.recentActionFailures ?? []).filter((f) => (f.skill === 'move_step' || f.skill === 'mine_cell') && f.failure_code === 'PATH_NOT_FOUND');
     out.push(`下矿有稳定下行辅助：excavate_run {"mode":"stairs","direction":"…","steps":4}（逐格确认工具、地板、头部空间、干燥和真实落地，遇水/岩浆/沙砾不冒险）或 assess_landings + descend_to${stairFails.length >= 2 ? '；刚才 move_step/mine_cell 连续走不通——这是手工阶梯的固有限制：斜下格支撑超出 place_support 范围，容易卡住' : ''}`);
-    const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
-    for (const t of tunnels) {
-      out.push(`记得自己${t.text}`);
-    }
-    // live 工作集只留最近用过的少量通道，长/深的旧矿道可能已被归档；不显出来，
-    // Agent 会以为附近只有刚挖出来的浅 stub（2026-11-05 现场：主矿道 y-61 在归档，提示只给了 2 点的 y71 stub）。
-    const liveIds = new Set(ctx.memory.passages(p.self.dim).map((r) => r.id));
-    const archivedTunnels = ctx.memory.archivedPassages(p.self.dim)
-      .filter((r) => !liveIds.has(r.id) && (!r.worldId || r.worldId === s.worldId) && (r.kind ?? 'dug') !== 'bridge')
-      .map((r) => ({ r, dist: Math.min(...[...r.path, ...r.entrances].map((q) => Math.hypot(q.x - here.x, q.z - here.z))) }))
-      .filter((x) => x.dist <= 160)
-      .sort((a, b) => a.r.deepestY - b.r.deepestY || b.r.path.length - a.r.path.length)
-      .slice(0, 2);
-    if (archivedTunnels.length) {
-      out.push(`附近还有历史归档的旧矿道（不在当前工作集）：${archivedTunnels.map(({ r }) => `${r.id}（最低 y${r.deepestY}，${r.path.length} 个脚点）`).join('；')}；用 spatial_query 看历史脚点，再用 plan_route {"source":"history","pathId":"<记录ID>"} + walk_path 显式跟随`);
-    }
-    // 想下更深时：有旧矿道就给出朝最深处走的下一步（和回入口的下一步对称）
-    // 但要回地面/回入口时方向优先：活动文字里常同时出现「旧矿道」和「回地面」，两个方向不能一起给
-    if (!SURFACE_INTENT.test(intent)) {
-      const down = passageWayDown(ctx);
-      if (down) out.push(down);
-    }
     // 消耗品预算：下矿前把火把够不够、还能做多少摆出来（只报事实，备多少由它定）
     out.push(...supplyFacts({ inv: s.inventory, torchEvery: ctx.self.habits().torch_every, only: new Set(['torch']), difficulty: s.difficulty, gamerules: s.gamerules, stock: p.storage?.stock }));
     // 世界规则事实：keepInventory 开着时死亡不掉落（只是事实，怎么备仍由它定）
     const keepInv = s.gamerules?.keepInventory;
     if (keepInv === true || keepInv === 'true') out.push('keepInventory 开着（死亡不掉落）');
-  }
-  // 下界找要塞/结构探索要的是“更远”，不是“最深”：旧道提示走 farthest 口径，不能只给最深。
-  // 只在没有命中下矿口径时追加，避免和上面的“往最深处”提示同时出现。
-  if (!MINING_INTENT.test(intent) && (EXPLORE_INTENT.test(intent) || p.self.dim !== 'overworld')) {
-    const tunnels = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).filter((f) => f.dist <= 160).slice(0, 2);
-    for (const t of tunnels) out.push(`记得自己${t.text}`);
-    if (!SURFACE_INTENT.test(intent)) {
-      const far = passageWayFar(ctx);
-      if (far) out.push(far);
-    }
   }
   // 冶炼燃料预算：手上这段活要 smelt 时，先把燃料够不够摆出来（只报事实，燃料比走 methods/fuel 的原版默认）
   const smeltStep = ctx.activity?.steps?.find((st) => st.skill === 'smelt');
@@ -653,15 +514,9 @@ export function situationalReminders(ctx: MindContext): string[] {
     const feed = s.inventory.filter((i) => /^(wheat|wheat_seeds|carrot|potato|beetroot|beetroot_seeds|melon_seeds|pumpkin_seeds)$/.test(i.name)).map((i) => `${i.name}×${i.count}`).slice(0, 4);
     out.push(`肉的账：这局已经打猎 ${hunting.trips} 次、大约 ${hunting.animals} 只，最近几次每次为了肉走 ${hunting.recentWalked ?? '?'} 格；现在看得见能吃的动物 ${seenNow} 只，128 格内记得的还有约 ${remembered} 只${feed.length ? `；背包里有 ${feed.join(' ')}` : ''}`);
   }
-  // 回地面时给出沿旧矿道回入口的下一步（并核对当前是否还通），不当作已确认的开口。
-  if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true) {
-    const back = passageWayBack(ctx);
-    if (back) out.push(back);
-    else {
-      const t = myFacilities(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['passage']).find((f) => f.inside);
-      if (t) out.push(`记得自己挖过的通道，入口参考点 (${Math.round(t.pos.x)},${Math.round(t.pos.y)},${Math.round(t.pos.z)})；当前开口是否可通尚未确认`);
-      if (p.self.surface_dir) out.push(`往 ${p.self.surface_dir.dir} 方向约 ${p.self.surface_dir.dist} 格外先有天光，可能更接近洞口/地表（这条路是否可通未确认，走过去再核实）`);
-    }
+  // 回地面时给方向事实，不把历史矿道当成已确认的开口。
+  if (SURFACE_INTENT.test(intent) && p.self.sky_visible !== true && p.self.surface_dir) {
+    out.push(`往 ${p.self.surface_dir.dir} 方向约 ${p.self.surface_dir.dist} 格外先有天光，可能更接近洞口/地表（这条路是否可通未确认，走过去再核实）`);
   }
   // 过水：站在水边/水里时，把材料代价摆出来，怎么过由它定
   if (p.self.inWater || WATER_CROSS_INTENT.test(intent)) {
@@ -838,13 +693,13 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
 function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
-  // 自己的设施（箱子、工作站、床、挖过的通道）在 my_facilities 里单独说，这里只列别的地点
+  // 自己的设施（箱子、工作站、床）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
   const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
     .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
-  const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'passage']).slice(0, 8).map((f) => f.text) : [];
+  const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
   // 最近几次死亡地点（事实，不分维度）：Agent 自己判断要不要回到最远点继续，还是绕开
@@ -971,11 +826,6 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   if (!glance && advanced) {
     const line = advancedMovesLine();
     if (line) reminders.push(line);
-  }
-  // 空间记忆查询/回程规划：探索、采集、脱困或非主世界时补一句，不占静态 system 目录。
-  if (!glance && (advanced || ['explore', 'gather', 'survive'].includes(ctx.activity?.kind ?? ''))) {
-    const memory = memoryMovesLine();
-    if (memory) reminders.push(memory);
   }
   if (glance) {
     const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));

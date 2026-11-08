@@ -127,7 +127,7 @@ class FrozenAdapter extends WalkingAdapter {
   }
 }
 
-const walk = (to: { x: number; y: number; z: number }, source: 'auto' | 'search' | 'history' = 'search', more: Record<string, unknown> = {}) => ({
+const walk = (to: { x: number; y: number; z: number }, source: 'auto' | 'search' | 'memory' = 'search', more: Record<string, unknown> = {}) => ({
   to, mode: 'walk' as const, source, arrival: { kind: 'exact' as const }, ...more,
 });
 
@@ -167,31 +167,6 @@ test('walk_path 单次消费 routeId，并返回完整终态信封', async (t) =
   assert.equal((second.data?.invalidation as { reason?: string }).reason, 'route_consumed');
   assert.equal(second.data?.confirmed, false);
   assert.deepEqual(w.pos, positionAfter, '重复 routeId 不得再次执行');
-  assertedMoved(w);
-});
-
-test('候选计划 executable:false 在执行前拒绝，不写控制', async (t) => {
-  const w = walkingAdapter();
-  const frag = fragment('frag-candidate', [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }]);
-  const ctx = { ...makeCtx(w), spatial: fakeSpatial(flatMap((_x, y) => y === 63 ? 'stone' : 'air'), { 'frag-candidate': frag }) };
-  t.after(() => ctx.memory.close());
-  clearRouteRecords();
-
-  const planned = await planRoute.run(ctx, walk({ x: 3.5, y: 64, z: 0.5 }, 'history', { pathId: 'frag-candidate' }));
-  assert.equal(planned.status, 'succeeded', planned.summary);
-  assert.equal(planned.data?.executable, false);
-
-  const result = await walkPath.run(ctx, { routeId: String(planned.data?.routeId) });
-  assert.equal(result.status, 'failed');
-  assert.equal(result.data?.outcome, 'INVALIDATED');
-  assert.equal((result.data?.problem as { kind?: string } | undefined)?.kind, 'route_invalidated', '库入口把注册表拒绝映射成 route_invalidated');
-  assert.equal((result.data?.invalidation as { reason?: string }).reason, 'route_not_executable', '注册表 consume 是唯一的可执行性边界');
-  assert.equal(result.data?.confirmed, false);
-  assert.equal(result.data?.plan, null, '注册表拒绝时没有计划可报');
-  assert.equal(result.data?.remainingPoints, undefined);
-  assert.equal(result.data?.confirmedSegments, undefined);
-  assert.deepEqual(result.data?.consumption, { placed: [] });
-  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: 0.5 }, '拒绝执行时身体不动');
   assertedMoved(w);
 });
 
@@ -305,56 +280,6 @@ test('起点漂移 >0.05 返回 INVALIDATED，不启动身体', async (t) => {
   assert.equal(result.data?.confirmedSegments, 0);
   assert.deepEqual(w.pos, { x: 0.7, y: 64, z: 0.5 });
   assertedMoved(w);
-});
-
-test('历史路线执行用 plan.start 作为 body.feet（0.03 漂移仍可执行）', async (t) => {
-  const w = walkingAdapter();
-  const frag = fragment('frag-near', [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }]);
-  const ctx = { ...makeCtx(w), spatial: fakeSpatial(flatMap((_x, y) => y === 63 ? 'stone' : 'air'), { 'frag-near': frag }) };
-  t.after(() => ctx.memory.close());
-  clearRouteRecords();
-
-  const planned = await planRoute.run(ctx, walk({ x: 2.5, y: 64, z: 0.5 }, 'history', { pathId: 'frag-near' }));
-  assert.equal(planned.status, 'succeeded', planned.summary);
-  assert.equal(planned.data?.executable, true);
-  // 规划后脚位小幅漂移（≤0.05）；执行仍应从 plan.start 出发，否则 startKnownWalkRoute 会以 wrong_start 拒绝。
-  w.pos = { ...w.pos, x: w.pos.x + 0.03 };
-
-  const result = await walkPath.run(ctx, { routeId: String(planned.data?.routeId) });
-  assert.equal(result.status, 'succeeded', result.summary);
-  assert.equal(result.data?.outcome, 'ARRIVED');
-  assert.equal(result.data?.routeKind, 'known');
-  assert.equal(result.data?.pathId, 'frag-near');
-  assert.equal(result.data?.confirmed, true);
-  assert.equal(result.data?.confirmedSegments, 2);
-  assert.deepEqual(result.data?.remainingPoints, []);
-});
-
-test('历史路线执行只用规划快照，规划后改写的 polyline 不会扩展执行几何', async (t) => {
-  const w = walkingAdapter();
-  const fragments: Record<string, PathFragment> = {
-    'frag-short': fragment('frag-short', [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }]),
-  };
-  const ctx = { ...makeCtx(w), spatial: fakeSpatial(flatMap((_x, y) => y === 63 ? 'stone' : 'air'), fragments) };
-  t.after(() => ctx.memory.close());
-  clearRouteRecords();
-
-  const planned = await planRoute.run(ctx, walk({ x: 2.5, y: 64, z: 0.5 }, 'history', { pathId: 'frag-short' }));
-  assert.equal(planned.status, 'succeeded', planned.summary);
-  assert.equal((planned.data?.points as unknown[]).length, 3);
-
-  // 库的 walkPath 只执行消费到的 plan.points 快照；规划后把历史片段改写得更长，执行器也读不到新增点。
-  fragments['frag-short'] = fragment('frag-short', [
-    { x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 },
-    { x: 3.5, y: 64, z: 0.5 }, { x: 4.5, y: 64, z: 0.5 },
-  ]);
-  const result = await walkPath.run(ctx, { routeId: String(planned.data?.routeId) });
-  assert.equal(result.status, 'succeeded', result.summary);
-  assert.equal(result.data?.outcome, 'ARRIVED');
-  assert.equal(result.data?.confirmedSegments, 2, '只确认规划快照内的 2 段');
-  assert.deepEqual(result.data?.remainingPoints, []);
-  assert.ok(w.pos.x <= 2.62, `执行不得越过规划末点 2.5：x=${w.pos.x}`);
-  assert.deepEqual(w.actions, [], '只走规划快照，不挖/放');
 });
 
 test('执行中证据 TTL 失效映射为 INVALIDATED，保留实测位置', async (t) => {

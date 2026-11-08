@@ -64,11 +64,8 @@ const MAX_FRAGMENT_LINKS = 16_384;
 /** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
 const MAX_WALK_TOPOLOGY_NODES = 8;
 const MAX_WALK_TOPOLOGY_EDGES = 8;
-/** 有界开挖最多 8 步（最多 9 节点/8 边）；给 dug 路线留出独立上限。 */
-const MAX_ROUTE_TOPOLOGY_NODES = 16;
-const MAX_ROUTE_TOPOLOGY_EDGES = 16;
 
-/** 已确认 corridor 写入的拓扑参数：walk 与 excavate 共用同一套历史/证据规则。 */
+/** 已确认 corridor 写入的拓扑参数；所有路径来源共用同一套历史/证据规则。 */
 interface CorridorWriteOptions {
   topologyNamespace: string;
   edgeSource: string;
@@ -932,16 +929,6 @@ export class SharedSpatialSession {
       edgeSource: 'confirmed_walk_path',
       maxTopologyNodes: MAX_WALK_TOPOLOGY_NODES,
       maxTopologyEdges: MAX_WALK_TOPOLOGY_EDGES,
-    });
-  }
-
-  /** excavate_run 的已确认路线：与 walk 共用写入规则，但用 dug 命名空间/来源和独立上限。 */
-  recordRouteCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
-    return this.recordCorridor(input, {
-      topologyNamespace: 'dug',
-      edgeSource: 'confirmed_excavate_run',
-      maxTopologyNodes: MAX_ROUTE_TOPOLOGY_NODES,
-      maxTopologyEdges: MAX_ROUTE_TOPOLOGY_EDGES,
     });
   }
 

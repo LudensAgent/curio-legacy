@@ -17,12 +17,11 @@ import { walkCollisionProvider } from '../../adapter/walk-route.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 
 type Scope = { worldId: string; dim: string; sessionId: string };
-type RouteSource = 'auto' | 'search' | 'history';
+type RouteSource = 'auto' | 'search' | 'memory';
 type PlanArgs = {
   to: Vec3Like;
   mode: 'walk';
   source: RouteSource;
-  pathId?: string;
   arrival: { kind: 'exact' };
   constraints?: { avoid?: string[]; maxNodes?: number; maxEdges?: number };
   deadlineMs?: number;
@@ -30,8 +29,6 @@ type PlanArgs = {
 type PlanProblem = NavProblem | RouteUnsupported;
 
 const BODY = { feet: { x: 0, y: 0, z: 0 }, width: 0.6, height: 1.8, pose: 'standing' as const };
-/** 历史召回/执行起点容差；超过就必须重新规划，不能从别的起点硬套。 */
-const START_TOLERANCE = 0.05;
 const REGISTRY_CAPACITY = 128;
 const REGISTRY_TTL_MS = 30_000;
 const SEARCH_DEFAULTS = { maxNodes: 512, maxEdges: 2048, maxFrontiers: 32, maxDiagnostics: 32 };
@@ -73,37 +70,6 @@ const finitePoint = (v: unknown): Vec3Like | null => {
   return ['x', 'y', 'z'].every((k) => typeof p[k] === 'number' && Number.isFinite(p[k]))
     ? { x: p.x as number, y: p.y as number, z: p.z as number } : null;
 };
-
-const distance3 = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-
-type Recall =
-  | { kind: 'match'; pathId: string }
-  | { kind: 'start_mismatch'; pathId: string; drift: number; routeStart: Vec3Like; routeEnd: Vec3Like };
-
-/**
- * 宿主侧历史召回：只按起点做有界选择，不按终点过滤、不截断几何、不补边。
- * 终点是否等于请求由库的 history 规划给出 requested/resolvedTarget（允许略近的候选）。
- * 起点与实测脚位相差 >0.05 的片段不会硬套；source:'history' 会返回拒绝事实。
- */
-function selectRecordedRoute(
-  spatial: NonNullable<SkillCtx['spatial']>,
-  state: { worldId: string; dim: string },
-  from: Vec3Like,
-): Recall | null {
-  const page = spatial.session.history.fragments({ dim: state.dim, limit: 64 });
-  let best: { pathId: string; drift: number; routeStart: Vec3Like; routeEnd: Vec3Like } | null = null;
-  for (const fragment of page.items) {
-    if (fragment.worldId !== state.worldId || fragment.polyline.length < 2) continue;
-    const routeStart = fragment.polyline[0]!;
-    const drift = distance3(routeStart, from);
-    if (best !== null && drift >= best.drift) continue;
-    best = { pathId: fragment.id, drift, routeStart, routeEnd: fragment.polyline.at(-1)! };
-  }
-  if (best === null) return null;
-  return best.drift <= START_TOLERANCE
-    ? { kind: 'match', pathId: best.pathId }
-    : { kind: 'start_mismatch', ...best };
-}
 
 /**
  * `plan_route` 的 to 沿用其它动作的方块格坐标约定：x/z 是整数时表示“走到那一格”。
@@ -249,46 +215,89 @@ function planData(plan: RoutePlan, scope: Scope, search: WalkRouteSearch) {
   };
 }
 
-/** 历史起点不符：结构化 failure，不返回可执行 routeId，也不从路线中间开始。 */
-function historyStartFailure(
-  pathId: string | undefined,
-  start: Vec3Like,
-  routeStart: Vec3Like,
-  drift: number,
-  requestedTarget: Vec3Like,
-  resolvedTarget: Vec3Like,
-): SkillResult {
-  const detail = `historical route "${pathId ?? 'recalled'}" starts at (${routeStart.x}, ${routeStart.y}, ${routeStart.z}) `
-    + `but the measured body is at (${start.x}, ${start.y}, ${start.z}) (drift ${drift.toFixed(3)} > ${START_TOLERANCE})`;
-  return fail('PATH_NOT_FOUND', `历史路线起点与当前实测脚位相差 ${drift.toFixed(2)} 格（须 ≤${START_TOLERANCE}）；不能从别的起点硬套，重新 plan_route 或改用 source:"auto"/"search"`, {
-    backend: 'spatial_library',
-    classification: 'HISTORY_START_MISMATCH',
-    source: 'history',
-    ...(pathId === undefined ? {} : { pathId }),
-    start,
-    routeStart,
-    drift,
-    requestedTarget,
-    resolvedTarget,
-    unsupported: { kind: 'unsupported_geometry', detail },
-  });
+type MemoryTransition = 'walk' | 'step' | 'drop' | 'climb' | 'swim' | 'portal' | 'other';
+
+/** 拓扑边类型 → 通用过渡；行走/挖洞/桥的区别只在 fragment 证据里，不在这里分支。 */
+const transitionOf = (type: string): MemoryTransition => {
+  switch (type) {
+    case 'HORIZONTAL': case 'CAVE_PASSAGE': case 'BRIDGE': return 'walk';
+    case 'STAIRCASE': return 'step';
+    case 'DROP': return 'drop';
+    case 'VERTICAL_SHAFT': case 'LADDER': case 'CLIMB': return 'climb';
+    case 'SWIM': return 'swim';
+    case 'PORTAL': return 'portal';
+    default: return 'other';
+  }
+};
+
+/**
+ * 共享空间记忆的路线：库的 topology 查询已经把 walked/dug/bridge/built 统一成
+ * 节点/边；这里只把边类型翻译成通用过渡，不按 fragment.kind 走不同逻辑。
+ */
+function memoryRoute(spatial: NonNullable<SkillCtx['spatial']>, dim: string, from: Vec3Like, to: Vec3Like) {
+  const query = spatial.query({ kind: 'historyRoute', dim, from, to, near: 5 });
+  const data = query.data;
+  if (query.status !== 'ok' || data?.kind !== 'historyRoute') {
+    return {
+      status: 'gap' as const,
+      summary: `空间记忆路线查询失败：${query.status}${query.problem?.kind ? `（${query.problem.kind}）` : ''}`,
+      facts: { source: 'memory', backend: 'spatial_topology', queryStatus: query.status, problem: query.problem ?? null, executable: false, currentPassability: 'UNKNOWN' as const },
+    };
+  }
+  const inspection = data.inspection;
+  if (inspection.status !== 'FOUND' || inspection.points.length === 0) {
+    return {
+      status: 'gap' as const,
+      summary: `空间记忆里没有可用路线：${inspection.status}；${inspection.message}`,
+      facts: {
+        source: 'memory', backend: 'spatial_topology', status: inspection.status,
+        fromNodeId: inspection.fromNodeId, toNodeId: inspection.toNodeId,
+        gaps: inspection.gaps, message: inspection.message,
+        historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN' as const,
+      },
+    };
+  }
+  const legs = inspection.segments.map((segment, index) => ({
+    index,
+    from: { ...inspection.points[index]! },
+    to: { ...inspection.points[index + 1]! },
+    edgeType: segment.type,
+    transition: transitionOf(segment.type),
+    direction: segment.direction,
+    evidenceId: segment.evidenceId,
+    mode: segment.evidence.mode ?? null,
+    source: segment.evidence.source,
+  }));
+  const counts = legs.reduce<Record<string, number>>((all, leg) => ({ ...all, [leg.transition]: (all[leg.transition] ?? 0) + 1 }), {});
+  const detail = Object.entries(counts).map(([transition, count]) => `${transition}×${count}`).join('、');
+  return {
+    status: 'route' as const,
+    summary: `空间记忆路线 ${legs.length} 段（${detail || '无'}）：从 (${from.x.toFixed(1)},${from.y.toFixed(1)},${from.z.toFixed(1)}) 到 (${to.x.toFixed(1)},${to.y.toFixed(1)},${to.z.toFixed(1)})；这是历史几何，未验证当前可通；执行/复核可用 walk_path（同高段）、move_step（相邻过渡）、descend_to（落差），climb 需要梯子/垫高，由你决定`,
+    facts: {
+      source: 'memory', backend: 'spatial_topology', status: inspection.status,
+      fromNodeId: inspection.fromNodeId, toNodeId: inspection.toNodeId,
+      points: inspection.points, legs,
+      gaps: inspection.gaps, message: inspection.message,
+      historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN' as const,
+    },
+  };
 }
 
 /**
- * 只读路线规划：薄适配库的 `planRoute` + `RoutePlanRegistryImpl`。
+ * 只读路线规划：共享空间记忆的 topology 历史路线 + 库的已知空间搜索。
  * 不移动、不转头、不观察、不写库；不重新搜索、无 pathfinder 兜底、不自造 routeId。
- * 返回库签发的单次 routeId；候选计划 executable:false，执行层必须拒绝。
+ * `source:"memory"` 只查历史拓扑；`auto` 先查历史、没有可用路线再查同高空间搜索。
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划步行路线：库 planRoute 有界搜索，或按 ≤0.05 起点复验历史 fragment。返回单次 routeId、置信度、过期时间；候选 executable:false。不移动/观察/写库，不重新搜索、无 pathfinder 兜底。当前只支持 walk、exact、同高单格（整数 x/z 按方块格）；台阶/下落/水不支持。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0}, "mode"?:"walk", "source"?:"auto|search|history", "pathId"?:"历史片段 ID", "arrival"?:{"kind":"exact"}, "deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）；history 可给 pathId 或按 ≤0.05 起点召回，终点由库给出 requestedTarget/resolvedTarget。不支持 near/reach_block、非空 avoid、挖/放/搭柱。',
+  description: '只读规划步行路线：共享空间记忆 topology 的历史路线（source:"memory"/"auto"），或库的同高空间搜索（source:"search"）。返回记忆路点/过渡或 routeId；不移动/观察/写库，不挖/放/搭柱。auto 先记忆后搜索；历史几何不代表当前可通。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。memory 返回记忆路点/过渡，不是执行授权；search 仍只支持同高单格。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
   validate(raw) {
     const a = obj(raw);
-    const allowed = new Set(['to', 'mode', 'source', 'pathId', 'fragmentId', 'arrival', 'constraints', 'deadlineMs']);
+    const allowed = new Set(['to', 'mode', 'source', 'arrival', 'constraints', 'deadlineMs']);
     const unknown = Object.keys(a).filter((k) => !allowed.has(k));
     if (unknown.length) return { ok: false, error: `plan_route 不认识参数 ${unknown.join('、')}；只接受 ${[...allowed].join('、')}` };
     const to = finitePoint(a.to);
@@ -296,11 +305,7 @@ export const planRoute: Skill<PlanArgs> = {
     const mode = a.mode ?? 'walk';
     if (mode !== 'walk') return { ok: false, error: 'plan_route 当前只支持 mode:"walk"；游泳用 swim_path，船用 boat_path' };
     const source = a.source ?? 'auto';
-    if (source !== 'auto' && source !== 'search' && source !== 'history') return { ok: false, error: 'source 必须是 auto、search 或 history' };
-    const pathId = a.pathId ?? a.fragmentId;
-    if (pathId !== undefined && (typeof pathId !== 'string' || !pathId.trim())) return { ok: false, error: 'pathId 必须是非空历史 fragment ID' };
-    if (a.pathId !== undefined && a.fragmentId !== undefined && a.pathId !== a.fragmentId) return { ok: false, error: 'pathId 与 fragmentId 同时出现时必须相同' };
-    if (source === 'search' && pathId !== undefined) return { ok: false, error: 'source:"search" 不接受 pathId；要沿历史路线用 source:"history"' };
+    if (source !== 'auto' && source !== 'search' && source !== 'memory') return { ok: false, error: 'source 必须是 auto、memory 或 search' };
     const arrival = a.arrival ?? { kind: 'exact' };
     if (!arrival || typeof arrival !== 'object' || Array.isArray(arrival) || (arrival as Record<string, unknown>).kind !== 'exact') {
       return { ok: false, error: 'arrival 当前只支持 {"kind":"exact"}；要走到附近请指定具体目标格' };
@@ -321,7 +326,7 @@ export const planRoute: Skill<PlanArgs> = {
     }
     const deadlineMs = a.deadlineMs;
     if (deadlineMs !== undefined && (typeof deadlineMs !== 'number' || !Number.isFinite(deadlineMs) || deadlineMs <= 0)) return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
-    return { ok: true, args: { to, mode: 'walk', source, ...(typeof pathId === 'string' ? { pathId } : {}), arrival: { kind: 'exact' }, ...(constraints ? { constraints } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
+    return { ok: true, args: { to, mode: 'walk', source, arrival: { kind: 'exact' }, ...(constraints ? { constraints } : {}), ...(deadlineMs !== undefined ? { deadlineMs } : {}) } };
   },
   async run(ctx, args) {
     const spatial = ctx.spatial;
@@ -341,24 +346,14 @@ export const planRoute: Skill<PlanArgs> = {
       ? ''
       : `；目标格 (${cell.x},${cell.y},${cell.z})，按当前脚下偏移取格内站位 (${stance.x.toFixed(2)},${stance.y},${stance.z.toFixed(2)})`;
 
-    let pathId = args.pathId;
-    if (pathId === undefined && args.source !== 'search') {
-      const recall = selectRecordedRoute(spatial, state, from);
-      if (recall?.kind === 'match') pathId = recall.pathId;
-      else if (recall?.kind === 'start_mismatch' && args.source === 'history') {
-        return historyStartFailure(recall.pathId, from, recall.routeStart, recall.drift, { ...stance }, { ...recall.routeEnd });
-      }
-    }
-    if (args.source === 'history' && pathId === undefined) {
-      return fail('NOT_FOUND', '没有起点与当前实测脚位（≤0.05）匹配的记录路线（walked/bridge/dug/built）；用 spatial_query 列出，或改用 source:"search"', {
-        backend: 'spatial_library',
-        classification: 'INSUFFICIENT_EVIDENCE',
-        source: 'history',
-        start: from,
-        requestedTarget: { ...stance },
-        ...(cell === undefined ? {} : { targetCell: cell }),
-        detail: 'no recorded fragment starts within 0.05 of the measured feet',
-      });
+    // 共享空间记忆优先：所有 kind 的历史通道在同一张拓扑图里，不按旧矿道/桥分支。
+    if ((args.source === 'memory' || args.source === 'auto') && typeof spatial.query === 'function') {
+      const memory = memoryRoute(spatial, state.dim, from, stance);
+      const facts = { ...memory.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
+      if (memory.status === 'route') return ok(`${memory.summary}${cellNote}`, facts);
+      if (args.source === 'memory') return fail('PATH_NOT_FOUND', `${memory.summary}${cellNote}`, facts);
+    } else if (args.source === 'memory') {
+      return fail('NOT_CONNECTED', 'plan_route source:"memory" 需要共享空间会话的查询端口');
     }
 
     const search = new WalkRouteSearch(spatial.session.voxel, {
@@ -370,8 +365,7 @@ export const planRoute: Skill<PlanArgs> = {
     });
     const sample = measuredSample(state);
     const result = await libraryPlanRoute({
-      to: { ...stance }, mode: 'walk', source: args.source,
-      ...(pathId === undefined ? {} : { pathId }),
+      to: { ...stance }, mode: 'walk', source: 'search',
       arrival: { kind: 'exact' },
       ...(args.constraints === undefined ? {} : { constraints: { ...(args.constraints.maxNodes === undefined ? {} : { maxNodes: args.constraints.maxNodes }), ...(args.constraints.maxEdges === undefined ? {} : { maxEdges: args.constraints.maxEdges }) } }),
       deadlineMs: deadline,
@@ -399,19 +393,8 @@ export const planRoute: Skill<PlanArgs> = {
       };
     }
     const plan = result.plan;
-    // 历史路线只从实测脚位开始：库给的可执行结论必须与起点一致；不符就返回拒绝，不硬套。
-    if (plan.source === 'history') {
-      const routeStart = plan.points[0];
-      const drift = routeStart === undefined ? Infinity : distance3(plan.start, routeStart);
-      if (routeStart === undefined || drift > START_TOLERANCE) {
-        return historyStartFailure(plan.pathId, plan.start, routeStart ?? plan.resolvedTarget, drift, plan.requestedTarget, plan.resolvedTarget);
-      }
-    }
-    const label = plan.source === 'history'
-      ? `历史路线 ${plan.pathId ?? ''}（${plan.kind ?? 'unknown'}）`
-      : '已知空间路线';
     const data = planData(plan, scope, search);
-    return ok(`${label}已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，执行前仍会按当前证据复核${cellNote}`, cell === undefined ? data : {
+    return ok(`已知空间路线已规划：${plan.points.length - 1} 段，${plan.confidence}/${plan.verdict ?? 'UNKNOWN'}；routeId ${plan.routeId}，执行前仍会按当前证据复核${cellNote}`, cell === undefined ? data : {
       ...data, targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance,
     });
   },
