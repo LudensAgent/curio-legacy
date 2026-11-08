@@ -55,6 +55,7 @@ const HOST_COMPOSED_CAPABILITIES = {
     resourceAnchors: true,
     containerAnchors: true,
     containerContents: false,
+    frontiers: false,
   },
   plan: {
     walkSearch: true,
