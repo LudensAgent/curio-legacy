@@ -232,8 +232,8 @@ export function createWalkBodyPort(opts: {
  */
 export const walkPath: Skill<WalkArgs> = {
   name: 'walk_path',
-  description: '执行 plan_route 返回的 routeId。只沿已规划路线走，不重新搜索、不换路、不挖/垫/搭柱；每段按当前证据复验，证据失效即停并返回 INVALIDATED。routeId 单次使用。ARRIVED 必须由实测身体位置确认；PARTIAL 只表示部分进展，不是到达。',
-  argsDoc: '{"routeId":"plan_route 返回的 routeId", "deadlineMs"?:绝对 epoch 毫秒}；只接受这两个参数。需要适配器的 walkBody/walkTick 和共享空间会话；路线不可执行/已消费/过期/作用域不符/起点改变时拒绝执行。',
+  description: '执行 plan_route source:"search" 返回的 routeId。memory/spatial 的 points/steps 不是 routeId。只沿已规划路线走，不重新搜索、不换路、不挖/垫/搭柱；每段按当前证据复验，证据失效即停并返回 INVALIDATED。routeId 单次使用。ARRIVED 必须由实测身体位置确认；PARTIAL 只表示部分进展，不是到达。',
+  argsDoc: '{"routeId":"plan_route source:\'search\' 返回的 routeId", "deadlineMs"?:绝对 epoch 毫秒}；只接受这两个参数。需要适配器的 walkBody/walkTick 和共享空间会话；路线不可执行/已消费/过期/作用域不符/起点改变时拒绝执行。',
   timeoutMs: 30000,
   movement: true,
   outcomeBoundary: true,
@@ -241,7 +241,10 @@ export const walkPath: Skill<WalkArgs> = {
     const a = obj(raw);
     const unknown = Object.keys(a).filter((k) => !['routeId', 'deadlineMs'].includes(k));
     if (unknown.length) return { ok: false, error: `walk_path 不认识参数 ${unknown.join('、')}；只接受 routeId、deadlineMs` };
-    if (typeof a.routeId !== 'string' || !a.routeId.trim()) return { ok: false, error: 'routeId 需要 plan_route 返回的非空 ID' };
+    if (typeof a.routeId !== 'string' || !a.routeId.trim()) return { ok: false, error: 'routeId 需要 plan_route source:"search" 当场返回的非空 ID；memory/spatial 的 points/steps 不是 routeId' };
+    if (/^(pending|todo|later|auto|routeId|\$.*|<.*>|{.*})$/i.test(a.routeId.trim())) {
+      return { ok: false, error: `routeId "${a.routeId.trim()}" 是占位符，不能执行；plan_route source:"search" 成功会返回 rt_… 的 routeId；memory/spatial 返回的是 points/steps，按 steps 执行，不要调用 walk_path` };
+    }
     if (a.deadlineMs !== undefined && (typeof a.deadlineMs !== 'number' || !Number.isFinite(a.deadlineMs) || a.deadlineMs <= 0)) return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
     return { ok: true, args: { routeId: a.routeId, ...(a.deadlineMs !== undefined ? { deadlineMs: a.deadlineMs } : {}) } };
   },

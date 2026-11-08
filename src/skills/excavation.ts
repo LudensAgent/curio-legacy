@@ -453,11 +453,15 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           // 补支撑统一交给 place_support：它在内部处理站位/边缘放置并复核可站顶面，避免第二套支撑逻辑。
           const placed = await placeSupport.run(ctx, { at: [0, 0, 0], xyz: supportCell, facing: FACING[args.direction], item: fillItem });
           if (placed.status !== 'succeeded') {
-            const attempts = (placed.data as { attempts?: unknown } | undefined)?.attempts;
-            const failureCode = placed.failureCode ?? 'PATH_NOT_FOUND';
+            const data = placed.data as { attempts?: unknown; failureCause?: string } | undefined;
+            const attempts = data?.attempts;
+            // place_support 现在把参照面/站位失败报成 BAD_ARGS；这里按结构化原因或参照面事实
+            // 仍归为“缺支撑”，不能把“没有可点的面”误当成材料/工具能力缺口。
+            const referenceGap = data?.failureCause === 'reference' || /NO_REFERENCE|NO_PLACEMENT_FACE|EDGE_/.test(placed.summary);
+            const failureCode = referenceGap ? 'PATH_NOT_FOUND' : (placed.failureCode ?? 'PATH_NOT_FOUND');
             // 只有「仍无支撑」才是缺支撑；材料/工具/效果类失败是能力缺口，不能继续报 missing_support。
             const stop = new ExcavationStop(failureCode,
-              `[${args.direction}] 下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 是 ${supportState.name}；按 fill:"${args.fill}" 调用 place_support 没成：${placed.summary}${Array.isArray(attempts) ? `；站位尝试 ${JSON.stringify(attempts)}` : ''}`, false, failureCode === 'PATH_NOT_FOUND' ? 'missing_support' : 'capability');
+              `[${args.direction}] 下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 是 ${supportState.name}；按 fill:"${args.fill}" 调用 place_support 没成：${placed.summary}${Array.isArray(attempts) ? `；站位尝试 ${JSON.stringify(attempts)}` : ''}`, false, referenceGap ? 'missing_support' : 'capability');
             if (Array.isArray(attempts)) stop.fillAttempts = attempts as Record<string, unknown>[];
             stop.nextLanding = { ...next };
             stop.supportMissing = supportGap(stop.nextLanding, args.direction, args.fill);

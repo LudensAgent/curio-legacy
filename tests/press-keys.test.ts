@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
+import type { DriveResult } from '../src/adapter/types.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { glanceSystem, movesCatalog } from '../src/mind/prompt.ts';
@@ -69,6 +70,38 @@ for (const scenario of [
   assert.doesNotMatch(result.summary, /已上岸|已换气|站稳|安全/);
   assert.equal(drive.mock.callCount(), 1);
   assert.deepEqual(adapter.actions, [], 'feedback does not add swimming or terrain work');
+});
+
+test('guard CLIFF with real displacement is reported as partial progress, not ERROR', async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.onGround = true;
+  adapter.drive = async (): Promise<DriveResult> => {
+    adapter.pos = { x: 3.5, y: 63, z: 0.5 };
+    return { ok: false, reason: 'CLIFF', stopped: 'cliff', moved: 3.1, ms: 2000 };
+  };
+  const result = await pressKeys.run(ctx, { keys: { forward: true, sprint: true }, ms: 2000, guard: true });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.stopped, 'cliff');
+  assert.equal(result.data?.guardStop, true);
+  assert.match(result.summary, /崖边提前停键/);
+  assert.match(result.summary, /move_step/);
+  assert.match(result.summary, /descend_to/);
+});
+
+test('guard CLIFF without displacement reports the stop as a failure with facts', async (t) => {
+  const adapter = new TestWorld(), ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.onGround = true;
+  adapter.drive = async (): Promise<DriveResult> => ({ ok: false, reason: 'CLIFF', stopped: 'cliff', moved: 0, ms: 500 });
+  const result = await pressKeys.run(ctx, { keys: { forward: true }, ms: 500, guard: true });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal(result.data?.stopped, 'cliff');
+  assert.match(result.summary, /未前进/);
+  assert.match(result.summary, /move_step|descend_to/);
 });
 
 test('a land jump is reported as airborne without inventing a water exit', async (t) => {

@@ -123,3 +123,34 @@ test('a queued next activity keeps its own declared frame and cannot borrow the 
   assert.equal(rejected.next, undefined);
   assert.match(rejected.notes.join(' '), /next 已忽略.*必须显式声明 next.facing/);
 });
+
+test('done_when 需要物品/位置时，只有只读步骤的活整段拒绝', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  const readonly = validateDraft({
+    what: '环视找树',
+    steps: [
+      { skill: 'resolve_target', args: { target: 'N 60' } },
+      { skill: 'look_around', args: { seconds: 5 } },
+    ],
+    done_when: { type: 'inventory_min', item: 'oak_log', count: 3 },
+  }, adapter, memory, []);
+  assert.ok('error' in readonly);
+  assert.match(readonly.error, /没有能产生|采集|制作/);
+
+  memory.addLandmark('discovery', '北边目标', 'overworld', { x: 0, y: 64, z: -60 }, 1);
+  const noMove = validateDraft({
+    what: '算个落点就算走到了',
+    steps: [{ skill: 'resolve_target', args: { target: 'N 60' } }],
+    done_when: { type: 'location_near', dimension: 'overworld', pos: { x: 0, y: 64, z: -60 }, radius: 4 },
+  }, adapter, memory, []);
+  assert.ok('error' in noMove);
+  assert.match(noMove.error, /没有真正移动|移动步骤/);
+
+  const ok = validateDraft({
+    what: '砍树',
+    steps: [{ skill: 'gather', args: { block: 'oak_log', count: 3, dig: true } }],
+    done_when: { type: 'inventory_min', item: 'oak_log', count: 3 },
+  }, adapter, memory, []);
+  assert.ok(!('error' in ok), 'error' in ok ? ok.error : '');
+});
