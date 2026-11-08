@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, markContinuation, rebindStanceTarget, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -836,11 +836,20 @@ export class Mind {
   private beginActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], how: string, hypothesis?: string) {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
-    // 收工条件开工前就已经成立（比如 onGround=true）：它判断不了这段活做没做完，改成“步骤做完就收工”
+    a.startChunks = this.d.memory.visitedChunkCount;
+    // 收工条件开工前就已经成立（比如 held=stone_axe）：它不能验收这段活的目标。
+    // 保留原条件、把这段标成“有界尝试”，而不是静默换成“步骤做完就收工”让 done 冒充目标完成。
     if (a.doneWhen && doneWhenMet(a, state, this.safe(() => this.d.perception.snapshot(), undefined))) {
-      a.adaptations.push('收工条件开工前就已成立，不能用来判断做完没有，改成步骤做完就收工');
-      this.d.bus.publish('decision_normalized', 'P3', `「${a.what}」的收工条件开工前就已成立，改成步骤做完就收工`, { doneWhen: a.doneWhen });
+      a.attemptOnly = { reason: '收工条件开工前就已成立，不能用来验收目标', originalDoneWhen: a.doneWhen };
+      a.adaptations.push('收工条件开工前就已成立：这段按有界尝试记录，步骤做完只代表操作结束，不当作目标完成');
+      this.d.bus.publish('decision_normalized', 'P3', `「${a.what}」的收工条件开工前就已成立：这段按有界尝试记录，不当作目标完成`, { doneWhen: a.doneWhen, attemptOnly: true });
       delete a.doneWhen;
+    }
+    // 标题说“走远/换地方/找远处资源”，步骤却没有任何会移动身体的动作：提示计划覆盖缺口，但不替它改步骤。
+    const coverageGap = planCoverageGap(a);
+    if (coverageGap) {
+      a.planCoverageGap = coverageGap;
+      this.d.bus.publish('plan_coverage_gap', 'P2', `「${a.what}」${coverageGap}`, { planId: a.id });
     }
     if (hypothesis) { a.hypothesis = hypothesis; this.d.self.startExperiment(hypothesis, a.id); }
     const agenda = draft.agendaId ? this.d.self.data.agenda.find((x) => x.id === draft.agendaId) : this.d.self.activeAgenda();
@@ -875,16 +884,28 @@ export class Mind {
     }
     // 收工条件只表示触发了停止，不能由此断言操作者的整条指令已经完成。
     if (this.order?.activityId === a.id) {
-      if (outcome === 'done' && !a.doneWhen) {
+      if (outcome === 'done' && !a.doneWhen && !a.attemptOnly) {
         this.d.bus.publish('operator_order_end', 'P2', `照操作者的指令做完了：${this.order.text}`, { status: 'done', via: 'activity' });
         this.order = null;
       } else delete this.order.activityId;
     }
     const state = this.d.adapter.state();
     if (a.dropped?.length) summary = `${summary}；计划里这些步骤未通过校验，没有执行：${a.dropped.join('、')}`;
-    const record = recordOf(a, outcome, summary, state);
+    const newChunks = typeof a.startChunks === 'number' ? this.d.memory.visitedChunkCount - a.startChunks : null;
+    const record = recordOf(a, outcome, summary, state, { newChunks });
+    // 完成事实分层：操作结束、资源定位、资源取得、上层目标各说各的，不把 done 当成资源目标完成。
+    const completionNotes = [
+      ...(record.completion === 'attempt' ? [`有界尝试：${a.attemptOnly?.reason ?? '收工条件不能验收目标'}（操作结束不代表目标完成）`] : []),
+      ...(record.resource?.goalIncomplete ? [`资源目标未完成（定位${record.resource.located ? '是' : '否'}、取得${record.resource.acquired ? '是' : '否'}）`] : []),
+      ...(a.planCoverageGap ? [`计划覆盖缺口：${a.planCoverageGap}`] : []),
+      ...(record.exploration?.localOnly ? [`本次实测离起点最远 ${record.exploration.maxHorizontal.toFixed(1)} 格、访问 ${record.exploration.visitedCells} 个脚格、新区块 +${newChunks ?? 0}；只在原地/附近观察，不能说明远处区域已搜索`] : []),
+    ];
+    if (completionNotes.length) {
+      summary = `${summary}；${completionNotes.join('；')}`;
+      record.summary = summary.slice(0, 500);
+    }
     const planBefore = this.d.self.plan()?.progressAt;
-    const chunksBefore = this.d.memory.visitedChunkCount;
+    const chunksBefore = a.startChunks ?? this.d.memory.visitedChunkCount;
     const failed = [...a.results].reverse().find((r) => r.status === 'failed' && !(SKILLS[r.skill]?.readOnly && r.failureCode === 'NOT_FOUND'));
     if (outcome === 'done') { this.recentEnds = []; this.attention.resetLoop(); }
     this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
@@ -917,12 +938,17 @@ export class Mind {
     ];
     const changed = !!gains || !!effects?.placements.length || !!effects?.removed || !!effects?.moved;
     this.d.self.think(`${a.what} → ${outcome === 'done' ? '收工' : outcome === 'stuck' ? '卡住了' : '停下了'}${gains ? `，得到 ${gains}` : ''}：${summary.slice(0, 180)}`, 'outcome');
-    const status = outcome === 'done' ? 'succeeded' : outcome === 'unmet' ? 'condition_unmet' : outcome === 'stuck' ? 'failed' : 'interrupted';
+    const status = outcome === 'done'
+      ? (record.completion === 'attempt' ? 'attempted' : 'succeeded')
+      : outcome === 'unmet' ? 'condition_unmet' : outcome === 'stuck' ? 'failed' : 'interrupted';
     const goalType = ['tidy', 'social', 'other', 'experiment'].includes(a.kind) ? 'investigate' : a.kind;
     this.d.memory.recordGoal({ goal: a.what, goalType, source: a.source === 'rule' ? 'rule' : 'llm', status: record.completion === 'condition' ? 'condition_met' : status, summary, durationSec: record.durationSec,
       steps: signatureOf(a.steps).split('>'), plan: a.steps, worldId: state.worldId, dimension: state.dim });
-    this.d.bus.publish('attempt_end', outcome === 'stuck' ? 'P1' : 'P3', `一段活「${a.what}」→ ${outcome}：${summary}${gains ? `（得到 ${gains}）` : ''}`,
-      { planId: a.id, status, outcome, ...(record.completion ? { completion: record.completion } : {}), gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
+    this.d.bus.publish('attempt_end', outcome === 'stuck' ? 'P1' : 'P3', `一段活「${a.what}」→ ${record.completion === 'attempt' ? 'attempt' : outcome}：${summary}${gains ? `（得到 ${gains}）` : ''}`,
+      { planId: a.id, status, outcome, ...(record.completion ? { completion: record.completion } : {}), operationCompleted: record.operationCompleted,
+        ...(record.resource ? { resource: record.resource } : {}), ...(record.exploration ? { exploration: record.exploration } : {}),
+        ...(a.planCoverageGap ? { planCoverageGap: a.planCoverageGap } : {}), ...(a.attemptOnly ? { attemptOnly: a.attemptOnly.reason } : {}),
+        gained: record.gained, durationSec: record.durationSec, what: a.what, kind: a.kind, signature: record.signature,
         how: a.steps.slice(0, 6).map((st) => `${st.skill} ${argsLabel(st)}`).join(' > ').slice(0, 300), effectEvidence: { verified: true, changed, reasons: effectReasons } });
     try { this.d.onGoalEnd?.(record.completion === 'condition' ? 'condition_met' : status); } catch { /* 习惯化失败不影响游玩 */ }
     if (outcome === 'done' && record.completion !== 'condition' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);

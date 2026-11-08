@@ -22,7 +22,12 @@ export const DECISION_KINDS: readonly DecisionKind[] = ['continue', 'adjust', 'n
 /** routine 里的一步；optional = 顺手、碰运气的事（见到动物就打、有果子就摘），失败了这段活照常往下做 */
 export type ActivityStep = Step & { optional?: boolean; /** 逻辑动作实例 ID，区分同参数的不同动作，跨重试/恢复/计划调整稳定 */ id?: string };
 
-export interface StepResult { skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number; pos?: { x: number; y: number; z: number }; view?: string }
+export interface StepResult {
+  skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number;
+  pos?: { x: number; y: number; z: number }; view?: string;
+  /** 只保留判定“定位/取得/移动/覆盖”用的回执字段，不把整份 local 图塞进活动历史。 */
+  data?: Record<string, unknown>;
+}
 
 /** 只保留最近十分钟的结束经历，用来认出在同一带反复失败。 */
 export interface ActivityEnd {
@@ -52,6 +57,10 @@ export interface Activity {
   doneWhen?: Condition;
   /** 这一段是由已满足的收工条件结束的，不能推断自由文本目标也已完成。 */
   conditionTriggered?: boolean;
+  /** 收工条件开工前就成立/不能验收目标：这段按“有界尝试”记录，不当作目标完成。 */
+  attemptOnly?: { reason: string; originalDoneWhen?: Condition };
+  /** 计划声称要走远/找资源，但步骤里没有会实际改变位置的动作。 */
+  planCoverageGap?: string;
   /** 自己的预想（自由文字），收工后和实际结果放在一起回看 */
   expect?: string;
   /** 卡住时的备选思路（交给下一次思考，不自动执行） */
@@ -61,6 +70,10 @@ export interface Activity {
   source: 'llm' | 'rule' | 'habit';
   monologue: string;
   startedAt: number;
+  /** 开工时的身体位置；结束时的实测位移和覆盖范围从这里算，不靠自然语言。 */
+  startPos: { x: number; y: number; z: number };
+  /** 开工时已访问区块数；结束时用它算新区块，避免把活动期间已有的探索算成这一趟的。 */
+  startChunks?: number;
   failures: number;
   consecutiveFailures: number;
   /** 本段活里身体自己做过的应变（换个地方找、重试），每种只做一次 */
@@ -103,7 +116,13 @@ export interface ActivityRecord {
   /** 当时采用的相对坐标参考系，供下一段核对。 */
   facing?: Facing;
   /** 收工条件只是中止这段活动的触发依据，不自动验证活动描述中的全部目标。 */
-  completion?: 'condition' | 'steps' | 'unmet';
+  completion?: 'condition' | 'steps' | 'unmet' | 'attempt';
+  /** 操作本身结束 ≠ 资源目标完成；这两件事分开记。旧记录没有该字段时不要猜。 */
+  operationCompleted?: boolean;
+  /** 资源型活动的定位/取得/上层目标状态；从执行回执和背包变化算，不靠模型口述。 */
+  resource?: { intent: boolean; located: boolean; acquired: boolean; goalIncomplete: boolean };
+  /** 实测探索覆盖：位置来自每步回执，不来自活动标题。 */
+  exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
 }
