@@ -1,6 +1,6 @@
 import type { PlacementFaceAttempt, Vec3Like } from '../../adapter/types.ts';
 import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
-import { estimatedFallDamage, isReplaceable, supportCellsUnderBody, supportTop, type StateAt } from '../../perception/geometry.ts';
+import { estimatedFallDamage, isReplaceable, MIN_STEP_DELTA, PLAYER_STEP_HEIGHT, supportCellsUnderBody, supportTop, verticalStepKind, type StateAt } from '../../perception/geometry.ts';
 import { LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
@@ -87,8 +87,8 @@ function shapeOf(name: string, properties: Record<string, string | number | bool
  */
 const moveStepSkill: Skill<MoveArgs> = {
   name: 'move_step',
-  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。同层要求目标格脚高与当前脚高一致；上一级可高 0.5–1 格（含半砖，向上半格用 [1,1,0]，会跳）；下一级按目标格支撑顶面可低 0.5–1 格；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（半砖、雪层、地毯可为分数脚高）。目标脚高不符、下方是空腔或落差超过 1 格时如实返回支撑格和落差，不自动改落点；补支撑用 place_support，更大落差用 descend_to。在岩浆/水里或乘骑时不做普通迈步。',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；[1,0,0] 同层（脚高须一致），[1,1,0] 上一级高 0.5–1 格（含半砖），[1,-1,0] 下一级支撑顶面低 0.5–1 格；同列 [0,1,0] 只在梯子上可爬）',
+  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。同层要求目标格脚高与当前脚高一致；上一级可高 0.01–1 格（含半砖、雪层、地毯等非整块脚高，用 [1,1,0]；超过 0.6 格要起跳，头顶需净空）；下一级按目标格支撑顶面可低 0.01–1 格；脚下是梯子时 [0,1,0] 沿梯子爬一格。落点按实际碰撞顶面计算（半砖、雪层、地毯可为分数脚高）。目标脚高不符、下方是空腔或落差超过 1 格时如实返回支撑格和落差，不自动改落点；补支撑用 place_support，更大落差用 descend_to。在岩浆/水里或乘骑时不做普通迈步。',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]"}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；[1,0,0] 同层（脚高须一致），[1,1,0] 上一级高 0.01–1 格（含半砖、雪层；超过 0.6 格要起跳），[1,-1,0] 下一级支撑顶面低 0.01–1 格；同列 [0,1,0] 只在梯子上可爬）',
   timeoutMs: 8000,
   movement: true,
   // 计划录入只检查写法；相邻性、落差、支撑和净空由每一步执行前的 validate + run 用最新位置确认。
@@ -254,11 +254,6 @@ const moveStepSkill: Skill<MoveArgs> = {
     const absolute = args.xyz !== undefined;
     const baseFoot = startPos.y;
     const wanted = absolute ? targetFoot! : baseFoot + rel[1];
-    /** 实际支撑与当前脚高的单格关系；null 表示超出 ±1，move_step 不处理。 */
-    const verticalStep = (delta: number): -1 | 0 | 1 | null =>
-      Math.abs(delta) <= 0.01 ? 0
-        : delta >= 0.49 && delta <= 1.01 ? 1
-          : delta >= -1.01 && delta <= -0.49 ? -1 : null;
     if (direct === null) {
       const belowScan = inspectStandableBelow(at, target, wanted);
       const below = belowScan.landing;
@@ -267,8 +262,8 @@ const moveStepSkill: Skill<MoveArgs> = {
         : { support: { ...target, y: target.y - 1 }, ...(belowScan.unknown ? { geometryUnknown: true } : {}) };
       // 目标脚格没有支撑时，用“最近的同列可站立面相对当前脚高”判断它属于同层还是 ±1；
       // u 是目标格相对脚格的竖直偏移，不能直接按“下方第几格”硬套（半砖会让脚高与格偏移不一致）。
-      const correctedU = below === null ? null : verticalStep(below.foot - baseFoot);
-      const stair = below !== null && Math.abs(below.foot - baseFoot) > 1.01
+      const correctedU = below === null ? null : verticalStepKind(below.foot - baseFoot);
+      const stair = below !== null && Math.abs(below.foot - baseFoot) > 1 + MIN_STEP_DELTA
         ? stairHandoff(feet, target, below.foot - baseFoot) : null;
       // 顶面候选不等于可站立脚高：候选处身体空间被占/未知时，先给真实阻挡，不给必败的“改脚高”。
       const standable = correctedU !== null && below !== null ? standableFootProblem(at, below.foot, target) : null;
@@ -304,14 +299,14 @@ const moveStepSkill: Skill<MoveArgs> = {
       const problemKind = belowScan.unknown ? 'UNKNOWN_GEOMETRY'
         : below === null ? 'NO_SUPPORT'
           : correctedU !== null ? 'FOOT_HEIGHT_MISMATCH'
-            : Math.abs(below.foot - baseFoot) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH';
+            : Math.abs(below.foot - baseFoot) > 1 + MIN_STEP_DELTA ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH';
       // 同列有可站立面但落差超出 ±1：这是能力边界，不是普通“寻路无解”；
       // problem.kind 已结构化分类，failureCode 也用 BAD_ARGS + unsupportedGeometry 明确标出。
       const unsupported = problemKind === 'UNSUPPORTED_STEP_HEIGHT';
       return fail(unsupported ? 'BAD_ARGS' : correctedU === null ? 'PATH_NOT_FOUND' : 'BAD_ARGS', `没有执行迈步：目标格 (${target.x},${target.y},${target.z}) 在当前脚高 ${wanted.toFixed(2)} 没有可站立面；${correction}`, { ...facts, movementNotAttempted: true, ...(unsupported ? { unsupportedGeometry: true } : {}), ...(remediation ? { remediation } : {}), ...problemOf(problemKind, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
     }
     // 绝对 xyz 的 y 是调用者指定的脚高：支撑面必须与它一致，不能悄悄改成实际支撑面。
-    if (absolute && Math.abs(direct - targetFoot!) > 0.01) {
+    if (absolute && Math.abs(direct - targetFoot!) > MIN_STEP_DELTA) {
       const standable = standableFootProblem(at, direct, target);
       if (standable !== null) {
         const where = standable.blocker
@@ -328,7 +323,7 @@ const moveStepSkill: Skill<MoveArgs> = {
     }
     if (!absolute) {
       const delta = direct - baseFoot;
-      const corrected = verticalStep(delta);
+      const corrected = verticalStepKind(delta);
       const correctedAt = corrected === null ? null : [rel[0], corrected, rel[2]] as Rel;
       // 支撑顶面只是候选：两格高的整块墙会把顶面算到下一层，但那一层的身体空间仍被占。
       // 这种情况下先报真实阻挡，不给出一个下一轮必败的“上一级”修正。
@@ -344,9 +339,11 @@ const moveStepSkill: Skill<MoveArgs> = {
         });
       }
       // >1 格的落差不是 move_step 能处理的；给出“先 assess_landings 再 descend_to”的结构化交接。
-      const stair = Math.abs(delta) > 1.01 ? stairHandoff(feet, target, delta) : null;
+      const overOne = Math.abs(delta) > 1 + MIN_STEP_DELTA;
+      const stepProblem: PrimitiveProblemKind = overOne ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH';
+      const stair = overOne ? stairHandoff(feet, target, delta) : null;
       const dropBelow = correctedAt === null ? inspectStandableBelow(at, target, wanted).landing : null;
-      const dropRemediation = dropBelow && dropBelow.drop > 1.01
+      const dropRemediation = dropBelow && dropBelow.drop > 1 + MIN_STEP_DELTA
         ? { assess: true as const, landing: { x: target.x, y: dropBelow.foot, z: target.z }, drop: dropBelow.drop,
             descend: { target: { x: target.x, y: dropBelow.foot, z: target.z } } }
         : null;
@@ -355,25 +352,23 @@ const moveStepSkill: Skill<MoveArgs> = {
           : stair ? { stairs: stair } : null;
       // 预检失败也要给出同一相邻格的准确写法；不自动重放，由心智决定是否改用这个落点。
       const correction = (correctedAt === null
-        ? Math.abs(delta) < 0.49
-          ? `实际高差 ${delta >= 0 ? '+' : ''}${delta.toFixed(2)} 格，不足半格，不能算同层或上下级`
-          : `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
+        ? `实际落差 ${Math.abs(delta).toFixed(2)} 格，超出 move_step 的 ±1 范围${dropRemediation ? '；要下去先用 assess_landings 确认落点，再 descend_to' : ''}`
         : `同一相邻格的正确写法是 [${correctedAt.join(',')}]（仍锁定这一格，不自动改目标）`) + (stair ? `；${stairHint(stair)}` : '');
-      if (rel[1] === 0 && Math.abs(delta) > 0.01) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf('FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+      if (rel[1] === 0 && corrected !== 0) {
+        return fail('BAD_ARGS', `没有执行迈步：目标格的实际脚高是 y=${direct.toFixed(2)}，不是同层 y=${baseFoot.toFixed(2)}；${correction}`, { actualFoot: direct, expectedFoot: baseFoot, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(stepProblem, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
-      if (rel[1] === -1 && (direct > baseFoot - 0.5 + 0.01 || direct < baseFoot - 1 - 0.01)) {
+      if (rel[1] === -1 && corrected !== -1) {
         const hint = correctedAt === null
           ? `落点不符；${dropRemediation ? '先 assess_landings 确认落点，再 descend_to' : '先用 place_support 补支撑或换落点'}${stair ? `；${stairHint(stair)}` : ''}`
           : correction;
-        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.5–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+        return fail('BAD_ARGS', `没有执行迈步：下一级目标格的实际脚高是 y=${direct.toFixed(2)}，不在当前脚高下方 0.01–1 格内；${hint}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(stepProblem, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
-      if (rel[1] === 1 && (direct < baseFoot + 0.5 - 0.01 || direct > baseFoot + 1 + 0.01)) {
-        return fail('BAD_ARGS', `没有执行迈步：目标格没有高半格以上、且不超过 1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(Math.abs(delta) > 1.01 ? 'UNSUPPORTED_STEP_HEIGHT' : 'FOOT_HEIGHT_MISMATCH', 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
+      if (rel[1] === 1 && corrected !== 1) {
+        return fail('BAD_ARGS', `没有执行迈步：目标格没有高 0.01–1 格的可站立面（实际脚高 y=${direct.toFixed(2)}，当前 y=${baseFoot.toFixed(2)}）；${correction}`, { actualFoot: direct, expectedFoot: wanted, surfaceCandidateY: direct, standableFootY: direct, movementNotAttempted: true, ...(fix ? { remediation: fix } : {}), ...problemOf(stepProblem, 'precondition'), ...effectUnconfirmed('movement'), ...after(ctx, args.facing, target) });
       }
     }
     const targetY = absolute ? targetFoot! : direct;
-    if (targetY > baseFoot + 0.5) {
+    if (targetY > baseFoot + PLAYER_STEP_HEIGHT) {
       const jumpBody = inspectBody(at, targetY, feet.x, feet.z);
       const jump = jumpBody.blockers[0];
       if (jump) {

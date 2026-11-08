@@ -150,6 +150,21 @@ function supportSurfaceTop(cell: Vec3Like, state: ObservedState | null, footprin
  * 仍留给 [1,±1,0]，不能靠平走冒充。step 与 localMap 必须共用同一个值。
  */
 export const RELATIVE_FOOT_TOLERANCE = 0.95;
+/** 1.20.1 站立玩家的 stepHeight（格）。不超过它由原版自动迈步完成，不需要起跳。 */
+export const PLAYER_STEP_HEIGHT = 0.6;
+/** 相邻上下级的最小实际高差；更小按同层处理，避免把采样噪声当成台阶。 */
+export const MIN_STEP_DELTA = 0.01;
+
+/**
+ * 单步竖直关系：同层 0，上一级 1，下一级 -1，超出 ±1 为 null。
+ * move_step 预检与局部图的 executable 落点共用这一份判据。
+ */
+export function verticalStepKind(delta: number): -1 | 0 | 1 | null {
+  if (Math.abs(delta) <= MIN_STEP_DELTA) return 0;
+  if (delta > 0 && delta <= 1 + MIN_STEP_DELTA) return 1;
+  if (delta < 0 && delta >= -1 - MIN_STEP_DELTA) return -1;
+  return null;
+}
 
 /**
  * 坠落伤害的粗估（生命点，2 点 = 1 颗心）：原版超过 3 格开始受伤，
