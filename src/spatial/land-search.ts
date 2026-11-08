@@ -264,7 +264,9 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   }
 
   if (found === null) {
-    const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : stats.unknownEdges > 0 ? 'UNKNOWN' : 'NO_PATH';
+    // STALE 和 UNKNOWN 都是“证据不足”，不是“已观测地形断连”。把 stale 当成
+    // NO_PATH 会让上层误报“没有路”，其实只需要重新观察刷新证据。
+    const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : (stats.unknownEdges > 0 || stats.staleEdges > 0) ? 'UNKNOWN' : 'NO_PATH';
     return { status, assurance: 'geometry_only', executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
   }
 

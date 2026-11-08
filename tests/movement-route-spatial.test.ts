@@ -120,6 +120,44 @@ test('plan_route source:"auto" 在没有历史查询端口时使用 spatial', as
   assert.equal(r.data?.source, 'spatial');
 });
 
+test('plan_route source:"auto" 目标脚高变化且 spatial 无路时，不回退到同高 search', async (t) => {
+  const map = flatWorld();
+  const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(3, 1, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.doesNotMatch(r.summary, /this walk planner|fixed feet height/, '目标换层时不再调用必然失败的同高 search');
+  assert.match(r.summary, /目标脚高 1 与当前 0 不同|不能表示换层/);
+  assert.equal(r.data?.heightChange, 1);
+  assert.ok(Array.isArray(r.data?.boundaries), '保留空间 3D 的边界事实');
+});
+
+test('plan_route source:"search" 仍明确报告固定脚高能力边界', async (t) => {
+  const map = flatWorld();
+  const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(3, 1, 0), mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /fixed feet height 0/);
+});
+
+test('plan_route source:"spatial" 把过期证据归为 UNKNOWN，不冒充 NO_PATH', async (t) => {
+  const map = flatWorld();
+  map.markStale(DIM, 'expired');
+  const { ctx } = ctxAt(map, at(0.5, 0, 0.5));
+  t.after(() => ctx.memory.close());
+  clearRouteRecords();
+  const r = await planRoute.run(ctx, { to: at(3, 0, 0), mode: 'walk', source: 'spatial', arrival: { kind: 'exact' } });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /UNKNOWN/);
+  assert.doesNotMatch(r.summary, /NO_PATH/, '过期证据不能被说成已观察地形断连');
+  assert.match(r.summary, /STALE|过期/);
+  const boundaries = r.data?.boundaries as { status: string }[] | undefined;
+  assert.ok(boundaries?.some((boundary) => boundary.status === 'STALE'), '保留 STALE 边界事实');
+});
+
 test('plan_route source:"spatial" 无法确认时返回边界事实，不伪造 steps', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fill(map, 'minecraft:stone', [at(0, -1, 0)]);
