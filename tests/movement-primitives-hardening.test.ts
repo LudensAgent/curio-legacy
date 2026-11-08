@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ActionResult, PlacementFaceAttempt, Vec3Like } from '../src/adapter/types.ts';
+import type { ActionResult, MoveOpts, MoveTarget, PlacementFaceAttempt, Vec3Like } from '../src/adapter/types.ts';
 import { mineCell, moveStep, pillarOne, placeCell, placeSupport } from '../src/skills/movement/index.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx, observeAllBlocks } from './survival-helpers.ts';
@@ -31,7 +31,7 @@ test('mine_cell 挖脚下支撑：2 格落差必须显式 fall，1 格落差不�
 
   const consented = await mineCell.run(ctx, { at: [0, -1, 0], facing: 'N', fall: true });
   assert.equal(consented.status, 'succeeded', consented.summary);
-  assert.equal(consented.data?.actionEffect, 'confirmed');
+  assert.deepEqual(consented.data?.effect, { confirmed: true, kind: 'block_removed' });
   assert.equal(drop2.blockAt({ x: 0, y: 63, z: 0 }), 'air');
 
   const drop1 = flat();
@@ -167,6 +167,7 @@ test('place_cell 返回净消耗与库存核对字段', async (t) => {
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.consumed, 1);
   assert.deepEqual(r.data?.inventory, { item: 'cobblestone', before: 2, after: 1, consumed: 1, verified: true });
+  assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'block_placed' });
 });
 
 test('place_support 回执失败但世界已形成支撑：不再换站位重试', async (t) => {
@@ -189,6 +190,7 @@ test('place_support 回执失败但世界已形成支撑：不再换站位重试
   assert.equal(w.places, 1, '世界已形成支撑后不得继续换站位');
   assert.equal(w.actions.some((a) => a.startsWith('moveTo:')), false);
   assert.equal(r.data?.consumed, 1);
+  assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'support_formed' });
 });
 
 test('place_support 回执成功但世界没变：不得成功，也不再换站位', async (t) => {
@@ -230,7 +232,7 @@ test('place_support 目标格变成非支撑方块：停止并报告已发生变
   const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'EFFECT_NOT_CONFIRMED');
-  assert.equal(r.data?.effect, 'changed_without_support');
+  assert.equal(r.data?.placementEffect, 'changed_without_support');
   assert.equal(w.places, 1, '不得继续消耗更多材料');
   assert.equal(w.actions.some((a) => a.startsWith('moveTo:')), false);
 });
@@ -314,6 +316,29 @@ test('move_step 负坐标按脚格换算，不偏移一格', async (t) => {
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(Math.floor(w.pos.x), 0);
   assert.equal(Math.floor(w.pos.z), -1);
+  assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'movement' });
+});
+
+test('move_step 把相邻一步的扫掠/跳跃/落地交给适配器 adjacentStep', async (t) => {
+  class RecordingWorld extends FakeAdapter {
+    targets: MoveTarget[] = [];
+    opts: MoveOpts[] = [];
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      this.targets.push(target);
+      this.opts.push(opts);
+      return super.moveTo(target, opts);
+    }
+  }
+  const w = new RecordingWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.targets[0]?.kind, 'xyz');
+  assert.equal(w.opts[0]?.adjacentStep, true, '单步由适配器的身体控制完成，不另起整段寻路');
+  assert.equal(w.opts[0]?.allowTerrainChanges, false);
+  assert.equal(w.opts[0]?.maxDropDown, undefined);
 });
 
 test('move_step 在岩浆中明确拒绝，不进入普通步行等待', async (t) => {
@@ -367,6 +392,48 @@ test('pillar_one 需要显式 item，eye 不可用时朝向返回 null 而不是
   assert.equal('local' in (r.data ?? {}), false, '朝向未知时不能给出伪装的局部坐标');
   assert.equal(r.data?.consumed, 1);
   assert.equal((r.data?.inventory as { verified?: boolean } | undefined)?.verified, true);
+  assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'movement' });
+});
+
+test('pillar_one 适配器抛错但世界已垫高：按已确认效果结算并保留异常', async (t) => {
+  class PillarThenThrow extends FakeAdapter {
+    override async pillarUp(itemNames: string[], signal: AbortSignal): ReturnType<FakeAdapter['pillarUp']> {
+      await super.pillarUp(itemNames, signal);
+      throw new Error('TIMEOUT: 垫高回执超时');
+    }
+  }
+  const w = new PillarThenThrow();
+  w.pos = { x: 0.5, y: 60, z: 0.5 };
+  w.removed.add('0,60,0');
+  w.removed.add('0,61,0');
+  w.removed.add('0,62,0');
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await pillarOne.run(ctx, { item: 'any' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.reconciled, true);
+  assert.match(String(r.data?.adapterError), /TIMEOUT/);
+  assert.deepEqual(r.data?.effect, { confirmed: true, kind: 'movement' });
+});
+
+test('place_support 每次尝试都带结构化 problem.kind', async (t) => {
+  class AlwaysNoReference extends FakeAdapter {
+    override async placeBlockAt(_pos: Vec3Like, _names: string[], _signal: AbortSignal) {
+      return { ok: false, reason: 'NO_REFERENCE' };
+    }
+  }
+  const w = new AlwaysNoReference();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,63,0');
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'failed');
+  const attempts = r.data?.attempts as { problem?: { kind?: string } }[];
+  assert.ok(attempts.length > 0);
+  assert.ok(attempts.every((a) => a.problem?.kind === 'NO_REFERENCE'), JSON.stringify(attempts));
 });
 
 test('place_cell 占用分类使用 TARGET_OCCUPIED，而不是 PATH_NOT_FOUND 语义', async (t) => {

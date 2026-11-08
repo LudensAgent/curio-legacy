@@ -184,7 +184,8 @@ const GAP_EVIDENCE_FIELDS = [
   'movementNotAttempted', 'obscured', 'failureCause', 'pillarFailure', 'pillarClearance', 'reference', 'occupied',
   'problems', 'landingSupport', 'completedSteps', 'excavatedBlocks', 'ascendedLevels', 'descendedLevels',
   'goalReached', 'climbed', 'spent', 'targetCell', 'target', 'targetFoot', 'was', 'drop', 'expectedFoot', 'below', 'partialStop',
-  'unsupportedGeometry', 'problem', 'cavity', 'position', 'placed', 'consumed',
+  'unsupportedGeometry', 'problem', 'placementEffect', 'cavity', 'position', 'placed', 'consumed',
+  'consumptionVerified', 'consumptionPending',
 ] as const;
 
 function gapEvidence(result: SkillResult): string {
