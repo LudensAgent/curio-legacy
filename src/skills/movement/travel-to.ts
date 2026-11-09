@@ -155,7 +155,10 @@ export const travelTo: Skill<TravelToArgs> = {
       ...(args.allowDig ? { allowTerrainChanges: true } : {}),
       allowPlace: args.allowPlace, allowTower: args.allowTower,
       ...(args.allowSwim ? {} : { allowSwimming: false }),
-      sprint: args.sprint, avoid, searchRadius: HOP_SEARCH_RADIUS,
+      sprint: args.sprint, avoid,
+      // 不下水时才限制绕路余量：寻路器的水格代价是陆路的 10 倍，授权游泳时一段水路的代价远超“直线 + 48”，
+      // 加了上限等于不让游。
+      ...(args.allowSwim ? {} : { searchRadius: HOP_SEARCH_RADIUS }),
     };
     // via:history：查自己走过的历史路线（共享空间记忆拓扑），把节点按间距抽成路点。历史只是路点提示，
     // 每跳仍按实测验收；某个路点走不通就放弃剩余历史路点并在回执里列出，不写回记忆。
@@ -199,12 +202,15 @@ export const travelTo: Skill<TravelToArgs> = {
     };
 
     let best = gap(start), staleRounds = 0, hops = 0, failedHops = 0, detours = 0, lastError = '';
-    let stop: 'ARRIVED' | 'NO_ROUTE' | 'NO_PROGRESS' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
+    let stop: 'ARRIVED' | 'NO_ROUTE' | 'NO_PROGRESS' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
+    // 没授权下水却进了水（窄堤失足、末段补推等）：立刻停下交回，不再分跳、不再扫视，换气/上岸怎么做由 Agent 定。
+    const fellIn = () => !args.allowSwim && !s0.inWater && adapter.state().inWater;
     try {
       for (;;) {
         const s = adapter.state();
         if (!s.alive) { stop = 'NOT_ALIVE'; break; }
         if (s.dim !== s0.dim) { stop = 'DIMENSION_CHANGED'; break; }
+        if (fellIn()) { stop = 'IN_WATER'; break; }
         if (arrived(s.pos)) { stop = 'ARRIVED'; break; }
         if (deadline - Date.now() < 1000) { stop = 'TIMEOUT'; break; }
         ctx.progress(1 - Math.min(1, gap(s.pos) / Math.max(1, gap(start))), `第 ${hops + 1} 跳，剩余约 ${Math.round(gap(s.pos))} 格`);
@@ -228,8 +234,9 @@ export const travelTo: Skill<TravelToArgs> = {
           if (Math.hypot(after.x - before.x, after.z - before.z) >= 2 || Math.abs(after.y - before.y) >= 2 || arrived(after)) { moved = true; alongHistory = turn === null && goal.kind === 'near' && waypoint < waypoints.length; break; }
           // 朝历史路点的一跳没动起来：这段历史路线当前走不通，放弃剩余历史路点（只在回执里列出，不写回记忆）。
           if (turn === null && goal.kind === 'near' && waypoint < waypoints.length) { abandonedAt = { ...waypoints[waypoint] }; waypoints.length = waypoint; }
-          if (deadline - Date.now() < 1000 || !adapter.state().alive) break;
+          if (deadline - Date.now() < 1000 || !adapter.state().alive || fellIn()) break;
         }
+        if (fellIn()) { stop = 'IN_WATER'; break; }
         const now = gap(adapter.state().pos);
         if (!moved) { stop = deadline - Date.now() < 1000 ? 'TIMEOUT' : 'NO_ROUTE'; if (arrived(adapter.state().pos)) stop = 'ARRIVED'; break; }
         // 沿历史路点前进时离目标可能先变远（历史路线本来会绕）：这一轮算进展，不累计“没更近”。
@@ -277,8 +284,9 @@ export const travelTo: Skill<TravelToArgs> = {
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
       NOT_ALIVE: '途中死亡',
+      IN_WATER: `没授权下水（allowSwim:false）却进了水，已停下，氧气 ${adapter.state().oxygen}/20；换气、上岸怎么做由你定`,
     }[stop];
-    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'NO_ROUTE' ? 'PATH_NOT_FOUND' : stop === 'NO_PROGRESS' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
+    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'NO_ROUTE' ? 'PATH_NOT_FOUND' : stop === 'NO_PROGRESS' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
     const permissions = `当前授权 allowDig:${args.allowDig} allowPlace:${args.allowPlace} allowSwim:${args.allowSwim}`;
     return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
   },

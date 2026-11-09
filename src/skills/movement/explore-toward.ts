@@ -23,6 +23,8 @@ type ExploreArgs = {
 
 /** 单次探索的方向距离上限（格）；更远由 Agent 分次续走。 */
 export const MAX_EXPLORE_DISTANCE = 512;
+/** 每段交给 travel_to 的到达半径（格）；走完全程的判定与它一致，否则每段都“到了”却永远差几格算不上走完。 */
+const SEGMENT_RANGE = 3;
 /** 连续这么多段沿方向推进不足 2 格就停（没挪动，或只是横着/往回走），不在原地或侧向反复试。 */
 const MAX_STUCK_SEGMENTS = 2;
 
@@ -86,7 +88,7 @@ export const exploreToward: Skill<ExploreArgs> = {
     const startChunks = ctx.memory.visitedChunkCount;
     const segments: { target: { x: number; z: number }; stopReason: string; end: Vec3Like; closer: number }[] = [];
     let stuck = 0, bestAlong = project(s0.pos).along;
-    let stop: 'DISTANCE_MET' | 'UNTIL_SEEN' | 'BLOCKED' | 'NO_ALONG_PROGRESS' | 'LATERAL_DRIFT' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
+    let stop: 'DISTANCE_MET' | 'UNTIL_SEEN' | 'BLOCKED' | 'NO_ALONG_PROGRESS' | 'LATERAL_DRIFT' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
     let sighting: Record<string, unknown> | undefined;
     let lastFailure: SkillResult | undefined;
     const factsNow = () => {
@@ -103,7 +105,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         if (!s.alive) { stop = 'NOT_ALIVE'; break; }
         if (s.dim !== s0.dim) { stop = 'DIMENSION_CHANGED'; break; }
         const { along } = project(s.pos);
-        if (along >= args.distance - 2) { stop = 'DISTANCE_MET'; break; }
+        if (along >= args.distance - SEGMENT_RANGE) { stop = 'DISTANCE_MET'; break; }
         const left = deadline - Date.now();
         if (left < 10000) { stop = 'TIMEOUT'; break; }
         ctx.progress(Math.max(0, along) / args.distance, `往 ${args.direction} 已推进 ${Math.round(along)}/${args.distance} 格`);
@@ -111,7 +113,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         const reach = Math.min(args.distance, Math.max(0, along) + args.segment);
         const target = { x: Math.round(args.origin.x + ux * reach), z: Math.round(args.origin.z + uz * reach) };
         const parsed = travelTo.validate({
-          to: target, range: 3, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
+          to: target, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
           allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left),
         }, adapter);
         if (!parsed.ok) return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；没有移动`, { backend });
@@ -121,11 +123,13 @@ export const exploreToward: Skill<ExploreArgs> = {
         const hopStop = String(hop.data?.stopReason ?? hop.status);
         const closer = Number(hop.data?.closer ?? 0);
         segments.push({ target, stopReason: hopStop, end, closer });
-        if (hopStop === 'NOT_ALIVE' || hopStop === 'DIMENSION_CHANGED') { stop = hopStop; break; }
+        if (hopStop === 'NOT_ALIVE' || hopStop === 'DIMENSION_CHANGED' || hopStop === 'IN_WATER') { stop = hopStop; break; }
         if (hop.status !== 'succeeded') lastFailure = hop;
         // 每段结束朝探索方向扫视一次：新看到的地形同时进入空间记忆；until 只认本次视野里看见的。
         const glance = await lookAround.run(ctx, { seconds: 2, direction: args.direction, ...(args.until ? { for: args.until } : {}) });
         if (args.until && glance.status === 'succeeded') { stop = 'UNTIL_SEEN'; sighting = glance.data; break; }
+        // 最后一段的目标就是全程终点：travel_to 按同一到达半径确认到了，就是走完全程。
+        if (reach >= args.distance && hop.status === 'succeeded') { stop = 'DISTANCE_MET'; break; }
         if (hopStop === 'TIMEOUT' && deadline - Date.now() < 10000) { stop = 'TIMEOUT'; break; }
         // 进展按沿冻结方向的实测推进算：横着走或往回绕不算前进（下界岩洞里 pathfinder 可能绕出反方向的路）。
         const now = project(end);
@@ -169,8 +173,9 @@ export const exploreToward: Skill<ExploreArgs> = {
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
       NOT_ALIVE: '途中死亡',
+      IN_WATER: `没授权下水却进了水，已停下（没有再走、没有扫视），氧气 ${adapter.state().oxygen}/20；换气、上岸怎么做由你定`,
     }[stop];
-    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
+    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
     return fail(code, `往 ${args.direction} 探索停下：${why}；${measured}${effects}。这只说明辅助走不通，不描述没看见的地形；继续、换方向或换手段由你决定`, facts);
   },
 };

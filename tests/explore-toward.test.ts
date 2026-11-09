@@ -114,3 +114,12 @@ test('explore_toward 被打断时把已走出的推进与偏离挂在取消回�
   assert.match(String(partial.progressNote), /被打断时实测 .*沿 E 推进/);
   assert.deepEqual((partial.continuation as { direction: string }).direction, 'E');
 });
+
+test('explore_toward 末段按 travel_to 的到达半径算走完：停在 93/96 也算走完，不再报“没挪动”', async () => {
+  // 模拟寻路在到达半径（3 格）边缘就收手：每跳停在目标前 3 格。
+  const h = harness({ walk: (goal, from) => goal.kind === 'xz' ? { x: Math.max(from.x, goal.x - 2.9), y: from.y, z: goal.z + 0.5 } : from });
+  const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 96 }, h.adapter));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.stopReason, 'DISTANCE_MET');
+  assert.ok((r.data?.progress as { along: number }).along >= 93);
+});

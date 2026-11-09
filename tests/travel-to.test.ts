@@ -5,13 +5,15 @@ import { SKILLS } from '../src/skills/index.ts';
 import { travelTo } from '../src/skills/movement/travel-to.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
 
-function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => boolean; dug?: { pos: Vec3Like; name: string; ts: number }[] } = {}) {
+function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => boolean; dug?: { pos: Vec3Like; name: string; ts: number }[]; fallInAfter?: number } = {}) {
   let pos: Vec3Like = { x: 0.5, y: 64, z: 0.5 };
+  let inWater = false, moves = 0;
   const calls: { target: MoveTarget; opts: MoveOpts; from: Vec3Like }[] = [];
   const adapter = {
-    state: () => ({ pos: { ...pos }, dim: 'overworld', worldId: 'w', alive: true, connected: true, riding: null }),
+    state: () => ({ pos: { ...pos }, dim: 'overworld', worldId: 'w', alive: true, connected: true, riding: null, inWater, oxygen: inWater ? 12 : 20 }),
     async moveTo(target: MoveTarget, opts: MoveOpts) {
       calls.push({ target, opts, from: { ...pos } });
+      if (options.fallInAfter !== undefined && ++moves > options.fallInAfter) inWater = true;
       if (options.blocked?.(target, pos)) throw new Error('No path: 寻路结束但尚未到达目标');
       if (target.kind === 'xz') pos = { x: target.x + 0.5, y: pos.y, z: target.z + 0.5 };
       else if (target.kind === 'near') pos = { x: target.pos.x + 0.5, y: target.pos.y, z: target.pos.z + 0.5 };
@@ -119,4 +121,24 @@ test('travel_to via:history 按自己走过的历史路线路点分跳；路点�
   const d = await travelTo.run(none.ctx, argsOf({ to: '30,0', via: 'history' }, none.adapter));
   assert.equal(d.status, 'succeeded');
   assert.match(d.summary, /没有可用的历史路线/);
+});
+
+test('travel_to 不下水时限制单跳绕路；授权游泳时不加上限（水格代价高，加了等于不让游）', async () => {
+  const dry = harness();
+  await travelTo.run(dry.ctx, argsOf({ to: '30,0' }, dry.adapter));
+  assert.equal(dry.calls[0].opts.searchRadius, 48);
+  const wet = harness();
+  await travelTo.run(wet.ctx, argsOf({ to: '30,0', allowSwim: true }, wet.adapter));
+  assert.equal(wet.calls[0].opts.searchRadius, undefined);
+  assert.equal(wet.calls[0].opts.allowSwimming, undefined);
+});
+
+test('travel_to 没授权下水却掉进水里：立刻停下报 IN_WATER 与氧气，不再继续分跳', async () => {
+  const h = harness({ fallInAfter: 1 });
+  const r = await travelTo.run(h.ctx, argsOf({ to: '100,0' }, h.adapter));
+  assert.equal(r.status, 'failed');
+  assert.equal(r.data?.stopReason, 'IN_WATER');
+  assert.equal(r.failureCode, 'STUCK');
+  assert.match(r.summary, /进了水，已停下，氧气 12\/20/);
+  assert.equal(h.calls.length, 2, '掉进水的那一跳之后不再发新的寻路');
 });
