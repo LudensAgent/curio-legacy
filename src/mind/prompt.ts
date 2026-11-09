@@ -32,7 +32,7 @@ import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
 export { noteGoneSpots } from '../memory/recollection.ts';
 
-const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'go_near', 'walk_path']);
+const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near', 'walk_path']);
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -256,7 +256,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去记得的地方或坐标 → resolve_target 算点 → navigate_to 走到站立格；远处（几十到上百格）的坐标、方向+距离、记得的地标/base/传送门 → travel_to（显式 pathfinder 辅助，在已加载区块里分跳走，默认不挖不放不搭；路不通就停下报实测位置与剩余距离）；只朝某方向推进/走一段 → advance（冻结方向与距离，回执用 along/lateral 报告实测进展）；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：advance、navigate_to 的 maxSegments 或 plan_route 的 steps（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；分段只限本次执行步数，不缩短原目标；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去记得的地方或坐标 → resolve_target 算点 → navigate_to 走到站立格；远处（几十到上百格）的坐标、方向+距离、记得的地标/base/传送门 → travel_to（显式 pathfinder 辅助，在已加载区块里分跳走，默认不挖不放不搭；路不通就停下报实测位置与剩余距离）；朝某方向走远路找东西（几十到几百格）→ explore_toward（每段扫视一次，until 看见就停；方向与是否续走由你定）；只朝某方向推进/走一段 → advance（冻结方向与距离，回执用 along/lateral 报告实测进展）；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：advance、navigate_to 的 maxSegments 或 plan_route 的 steps（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；分段只限本次执行步数，不缩短原目标；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补它下方的支撑格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
