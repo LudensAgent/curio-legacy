@@ -27,6 +27,32 @@ test('the recorded north narrative with explicit south steps is rejected until t
   assert.deepEqual(adapter.actions, []);
 });
 
+test('approach_visible 不能拿 exploration.find 当收工条件；远距离近似仍可写 min_distance', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  // 远处目标可能满足 min_distance，不能在设计期一刀切拒绝；重复接近由运行时 ARRIVED 守卫处理。
+  const distance = validateDraft({
+    what: '接近北边两格的方块',
+    steps: [{ skill: 'approach_visible', args: { target: { block: { x: 1, y: 64, z: 0 } } } }],
+    done_when: { type: 'exploration', min_distance: 1 },
+  }, adapter, memory, []);
+  assert.ok(!('error' in distance), JSON.stringify(distance));
+
+  const omitted = validateDraft({
+    what: '接近北边两格的方块',
+    steps: [{ skill: 'approach_visible', args: { target: { block: { x: 1, y: 64, z: 0 } } } }],
+  }, adapter, memory, []);
+  assert.ok(!('error' in omitted), JSON.stringify(omitted));
+
+  const find = validateDraft({
+    what: '接近北边两格的方块',
+    steps: [{ skill: 'approach_visible', args: { target: { block: { x: 1, y: 64, z: 0 } } } }],
+    done_when: { type: 'exploration', find: 'oak_log' },
+  }, adapter, memory, []);
+  assert.ok('error' in find);
+  assert.match(find.error, /都不会观察目标/);
+});
+
 test('all horizontal primitive aliases bind to the declared frame and even optional conflicts are rejected', (t) => {
   const adapter = new TestWorld(), memory = new WorldMemory(null);
   t.after(() => memory.close());

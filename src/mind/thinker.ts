@@ -138,7 +138,7 @@ function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
       if (condition.min_distance !== undefined && [...skills].every((skill) => NON_MOVING_STEPS.has(skill))) {
         return `done_when 要求本段实测离起点 ${condition.min_distance} 格，但这几步（${[...skills].join('、') || '无'}）都不会移动；把会实际移动的步骤放进这段活，或改用 find`;
       }
-      const nonObserving = new Set(['move_step', 'navigate_to', 'walk_path', 'press_keys', 'descend_to', 'excavate_run',
+      const nonObserving = new Set(['move_step', 'navigate_to', 'approach_visible', 'walk_path', 'press_keys', 'descend_to', 'excavate_run',
         'pillar_one', 'place_cell', 'place_support', 'craft', 'smelt', 'sleep', 'eat', 'wait', 'store_items',
         'travel_portal', 'recall_portal', 'boat_path', 'swim_path', 'resolve_target', 'plan_route', 'assess_landings',
         'find_item', 'remember_place', 'sign_text', 'edit_book']);

@@ -631,14 +631,16 @@ test('approach_visible 遵守调用方 maxSteps，截断时返回 PARTIAL/BUDGET
   assert.deepEqual(r.data?.originalTarget, { kind: 'position', pos: { x: 3.5, y: 64, z: 0.5 } });
 });
 
-test('approach_visible 位置脚高超出到达容差时在移动前拒绝', async (t) => {
+test('approach_visible 把 position 的近似 y 解析成同列真实脚高', async (t) => {
   const { adapter, ctx } = setup(flatMap());
-  const before = { ...adapter.pos };
   t.after(() => ctx.memory.close());
+  // 3,63,0 是草方块格；真正站立的脚高是 64。请求点允许近似，解析结果要如实回报。
   const r = await call(ctx, { pos: { x: 3, y: 63, z: 0 } });
-  assert.equal(r.status, 'failed', r.summary);
-  assert.equal(r.data?.outcome, 'UNSUPPORTED');
-  assert.deepEqual(adapter.pos, before);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.deepEqual(r.data?.resolvedStance, { x: 3.5, y: 64, z: 0.5 });
+  const offset = (r.data?.interaction as { requestedOffset: { vertical: number } }).requestedOffset;
+  assert.equal(offset.vertical, 1);
 });
 
 test('approach_visible 视觉范围不可用时回退 12 格，而不是默认 32', async (t) => {
@@ -897,6 +899,105 @@ test('approach_visible 按解析 stance 验收落在格边的到达，不因测�
   const offset = (r.data?.interaction as { requestedOffset: { horizontal: number } }).requestedOffset;
   assert.ok(offset.horizontal > 0.75, JSON.stringify(offset));
   assert.deepEqual(r.data?.resolvedStance, { x: 1.5, y: 64, z: 0.5 });
+});
+
+/** 只让 x≥5 的远处现场读不到；观察到的走廊仍可读。 */
+class PartialWorld extends Fake {
+  override blockAt(pos: Vec3Like): string {
+    return pos.x >= 5 ? (null as unknown as string) : super.blockAt(pos);
+  }
+}
+
+test('approach_visible 终点站位未知时先执行可验证前缀并返回 PARTIAL', async (t) => {
+  const map = corridorMap(9, 4);
+  const adapter = new PartialWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = context(adapter, map, { observeBlocks: undefined, effectiveRange: () => 64 });
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 8.5, y: 64, z: 0.5 } });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.outcome, 'PARTIAL');
+  assert.equal(r.data?.stop, 'UNKNOWN');
+  assert.equal(Math.floor(adapter.pos.x), 4);
+  assert.deepEqual(r.data?.originalTarget, { kind: 'position', pos: { x: 8.5, y: 64, z: 0.5 } });
+  assert.equal(r.data?.stanceValidated, false);
+  assert.equal((r.data?.prefix as { endpoint: Vec3Like }).endpoint.x, 4.5);
+});
+
+/** 第一步走完后立刻触发父取消，验证前缀回退的取消语义。 */
+class AbortInMoveWorld extends PartialWorld {
+  controller?: AbortController;
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    await super.moveTo(target, opts);
+    this.controller?.abort();
+  }
+}
+
+test('approach_visible 前缀导航被取消时保持 cancelled 状态', async (t) => {
+  const map = corridorMap(9, 4);
+  const adapter = new AbortInMoveWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = context(adapter, map, { observeBlocks: undefined, effectiveRange: () => 64 });
+  const controller = new AbortController();
+  ctx.signal = controller.signal;
+  adapter.controller = controller;
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 8.5, y: 64, z: 0.5 } });
+  assert.equal(r.status, 'cancelled', r.summary);
+  assert.equal(r.data?.outcome, 'CANCELLED');
+});
+
+test('approach_visible 目标脚下是岩浆时拒绝，不向前缀移动', async (t) => {
+  const { adapter, ctx } = setup(flatMap());
+  adapter.blocks.push({ name: 'lava', pos: { x: 3, y: 63, z: 0 } });
+  const before = { ...adapter.pos };
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 3.5, y: 64, z: 0.5 } });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.outcome, 'UNSUPPORTED');
+  assert.deepEqual(adapter.pos, before);
+});
+
+test('approach_visible 只接受扫描窗口内的近似脚高', async (t) => {
+  const { adapter, ctx } = setup(flatMap());
+  t.after(() => ctx.memory.close());
+  // 真实脚高 64，请求 60 相差 4，超出 ±3 窗口；不能报到达，原目标保留。
+  const r = await call(ctx, { pos: { x: 3, y: 60, z: 0 } });
+  assert.notEqual(r.data?.outcome, 'ARRIVED');
+  assert.deepEqual(r.data?.originalTarget, { kind: 'position', pos: { x: 3, y: 60, z: 0 } });
+});
+
+test('approach_visible 目标格被方块占据时不走前缀回退', async (t) => {
+  const { adapter, ctx } = setup(flatMap());
+  // 2 格高的柱子顶部仍在 ±3 窗口内，会解析成柱顶；用超过窗口的高墙验证基底阻挡。
+  adapter.blocks.push(...[64, 65, 66, 67].map((y) => ({ name: 'stone', pos: { x: 3, y, z: 0 } })));
+  const before = { ...adapter.pos };
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 3.5, y: 64, z: 0.5 } });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.outcome, 'UNSUPPORTED');
+  assert.deepEqual(adapter.pos, before);
+});
+
+test('approach_visible 位置目标先观察未知列，再解析可站立面', async (t) => {
+  const map = worldMap([
+    { name: 'minecraft:air', cells: airCells(0) },
+    { name: 'minecraft:grass_block', cells: floorCells(0) },
+  ]);
+  const adapter = new BlindWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  adapter.blockProperties.set('1,63,0', { type: 'bottom' });
+  for (let z = -1; z <= 1; z++) for (let y = 63; y <= 66; y++) adapter.revealed.add(`0,${y},${z}`);
+  const ctx = context(adapter, map, { observeBlocks: observeIntoMap(adapter, map), effectiveRange: () => 32 });
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 1.9, y: 64, z: 0.9 } }, { allowed: ['walk', 'step', 'drop'] });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal((r.data?.resolvedStance as Vec3Like).y, 63.5);
+  const stanceObservation = (r.data?.evidence as { stanceObservation: { attempted: boolean; acquired: number } }).stanceObservation;
+  assert.equal(stanceObservation.attempted, true);
+  assert.ok(stanceObservation.acquired > 0);
 });
 
 test('approach_visible 拒绝超过累计位移预算的绕行路线', async (t) => {
