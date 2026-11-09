@@ -27,3 +27,9 @@ test('kind 与唯一目标键一致时接受，不一致或缺少目标时仍然
   assert.equal(approachVisible.validate({ target: { kind: 'position', block: { x: 1, y: 64, z: 0 } } }, adapter).ok, false);
   assert.equal(approachVisible.validate({ target: { kind: 'position' } }, adapter).ok, false);
 });
+
+test('argsDoc 与运行时接受的外部 target 形状一致', () => {
+  for (const marker of ['{"target":{"pos"', '{"target":{"block"', '{"target":{"entity":{"id"', '{"target":{"entity":{"name"', '不要再套 kind', '"maxSteps"?:1-64']) {
+    assert.ok(approachVisible.argsDoc.includes(marker), `argsDoc 缺少 ${marker}`);
+  }
+});
