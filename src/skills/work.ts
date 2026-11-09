@@ -1,6 +1,6 @@
 import { chestHint, needsFromShortfall } from './chest-hint.ts';
 import { canAcceptItem, describePlan, dropItemsOf, materialPlan } from '../methods/shortfall.ts';
-import { lookAround } from './movement.ts';
+import { lookAround, noteFruitlessSearch, repeatSearchNote } from './movement.ts';
 import { findStation, myBed, rememberStation } from './stations.ts';
 import { classifyBlock, MAN_MADE_NOTE, ownBuildingAt } from './build.ts';
 import { AbortedError, dist3, sleep } from '../util.ts';
@@ -206,7 +206,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     let manMade = 0;
     let failsInRow = 0;
     let underNote = '';
-    let searched = false;
+    let searched = false, fruitlessHere = 1;
     let lost = 0;
     const risky: Record<TargetRisk, number> = { hazard: 0, wet: 0, deep: 0 };
     const riskCache = new Map<string, TargetRisk | null>();
@@ -275,11 +275,14 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           ctx.progress(dug / args.count, `四下找找还有没有 ${args.block}`);
           const r = await lookAround.run(ctx, { seconds: 3, for: args.block });
           if (r.status === 'succeeded') continue;
+          fruitlessHere = Number(r.data?.searchedHere ?? 1);
         }
         // 没找到不证明原地点已消失；只有实际看见变化或亲手拆除才能作废。
         const unconfirmed = ctx.memory.resourceLandmarksNear(names, s.dim, s.pos, 5);
         const staleNote = unconfirmed.length ? `；附近 ${unconfirmed.length} 处历史 ${args.block} 地点尚未重新确认，保留线索` : '';
         const looked = searched ? '（已转头找过）' : '';
+        // 转头找过的那次 look_around 已记下“这里没找到”；没转头（在水里）时这里补记一次。
+        const times = searched ? fruitlessHere : noteFruitlessSearch(ctx, args.block);
         const skipped = risky.hazard + risky.wet + risky.deep;
         const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
         const manMadeNote = manMade ? `；其中 ${manMade} 块${MAN_MADE_NOTE}` : '';
@@ -287,15 +290,15 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
         const spots = names.some((n) => isResourceBlock(n)) ? oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3) : [];
         const remembered = spots.length
-          ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就先用 plan_route → walk_path 走到跟前再 gather`
+          ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就先用 travel_to 走到跟前再 gather`
           : !unconfirmed.length && isResourceBlock(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
         return dug > 0
           ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) }, manMadeCaveat)
           : fail('NOT_FOUND', skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
-            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}`, {
-              searched, coverage: { mode: 'seen_or_remembered', knownRadius: 256, unknownBeyond: true },
+            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}${remembered ? '' : repeatSearchNote(args.block, times)}`, {
+              searched, searchedHere: times, coverage: { mode: 'seen_or_remembered', knownRadius: 256, unknownBeyond: true },
               ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}),
             });
       }

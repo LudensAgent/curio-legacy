@@ -15,6 +15,21 @@ export const FOOD_ANIMAL_NAMES = ['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'm
 /** 目标的类别写法：animal/food = 能吃的动物，hostile = 敌对生物 */
 const CATEGORY: Record<string, string[]> = { animal: FOOD_ANIMAL_NAMES, animals: FOOD_ANIMAL_NAMES, food: FOOD_ANIMAL_NAMES, food_animal: FOOD_ANIMAL_NAMES };
 
+/** 最近在哪儿找过什么、没找到（10 分钟内）：只记实际发生的扫视，用来如实告诉心智“这里已经找过几次”。 */
+const fruitless: { worldId: string; dim: string; pos: Vec3Like; target: string; at: number }[] = [];
+const FRUITLESS_MS = 10 * 60_000;
+/** 记下一次没找到，返回这附近（4 格内、同一维度）10 分钟内找同一目标没找到的次数（含本次）。 */
+export function noteFruitlessSearch(ctx: SkillCtx, target: string): number {
+  const s = ctx.adapter.state(), now = Date.now();
+  while (fruitless.length && (now - fruitless[0].at > FRUITLESS_MS || fruitless.length >= 64)) fruitless.shift();
+  fruitless.push({ worldId: s.worldId, dim: s.dim, pos: { ...s.pos }, target, at: now });
+  return fruitless.filter((f) => f.worldId === s.worldId && f.dim === s.dim && f.target === target && dist3(f.pos, s.pos) <= 4).length;
+}
+/** 同一处反复没找到时附在回执后的事实：原地再转看到的是同一片视野；要不要、往哪移动由心智定。 */
+export const repeatSearchNote = (target: string, times: number) => times >= 2
+  ? `；这附近已经第 ${times} 次找 ${target} 都没看见，原地再转看到的还是同一片视野；要看新的地方得移动（例如 explore_toward {"direction":"…","until":"${target}"}），往哪走由你定`
+  : '';
+
 type SightRef = { kind: 'block'; pos: Vec3Like } | { kind: 'entity'; id: number; name: string };
 const entityIdOf = (ref?: SightRef) => ref?.kind === 'entity' ? ref.id : undefined;
 
@@ -133,7 +148,10 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     // 扫完回到平视：否则接下来的行走、地平线扫描和远景都会被最后一下低头挡住
     const end = ctx.adapter.eye();
     if (end) { await ctx.adapter.look(end.yaw, -0.05); ctx.senses.refresh(); }
-    if (args.for) return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}（只覆盖当前视野；旧记忆不算本次看见，更远处和遮挡后未知——不代表其它地方没有）`, facts(yaws.length));
+    if (args.for) {
+      const times = noteFruitlessSearch(ctx, args.for);
+      return fail('NOT_FOUND', `${args.direction ? `${args.direction} 方向` : '四周'}本次视野未见 ${args.for}（只覆盖当前视野；旧记忆不算本次看见，更远处和遮挡后未知——不代表其它地方没有）${repeatSearchNote(args.for, times)}`, { ...facts(yaws.length), searchedHere: times });
+    }
     const facingNote = end ? `（扫完身体朝向 ${facingOfYaw(end.yaw)}，扫视不等于转向）` : '';
     // 附近实体的稳定引用随扫描回执给出：模型可以直接用 id/位置，不必从方向和距离推算。
     const visibleEntities = args.for ? undefined : visibleNow();
