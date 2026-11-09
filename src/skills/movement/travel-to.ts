@@ -181,6 +181,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const gap = (p: Vec3Like) => target.y === undefined ? flat(p) : Math.hypot(flat(p), Math.floor(p.y) - Math.floor(target.y));
     const arrived = (p: Vec3Like) => gap(p) <= args.range;
     const avoid = [...new Set([...args.avoid, ...(args.allowHazard ? [] : HAZARD_AVOID)])];
+    const hopBudget = !args.allowSwim && !args.allowDig && !args.allowPlace;
     const moveOpts = {
       signal,
       ...(args.allowDig ? { allowTerrainChanges: true, ...(args.tool ? { digTool: args.tool } : {}) } : {}),
@@ -189,9 +190,10 @@ export const travelTo: Skill<TravelToArgs> = {
       sprint: args.sprint, avoid,
       // 不另外授权冒险时，路线尽量离岩浆边远一点（只加代价，唯一的路仍可走）
       ...(args.allowHazard ? {} : { lavaEdgeCost: 10 }),
-      // 不下水时才限制绕路余量：寻路器的水格代价是陆路的 10 倍，授权游泳时一段水路的代价远超“直线 + 48”，
-      // 加了上限等于不让游。
-      ...(args.allowSwim ? {} : { searchRadius: HOP_SEARCH_RADIUS }),
+      // 只在纯步行时限制绕路余量：余量按寻路代价算，不按格数。水格代价是陆路的 10 倍；挖一块计
+      // 1+3×挖掘秒数（铁镐挖下界岩一步两块就约 3.6，徒手更高），放一块 +1。授权游泳/挖/放时，
+      // 一跳 24 格直穿的代价就超过“直线 + 48”，加了上限等于不让用这些授权。
+      ...(hopBudget ? { searchRadius: HOP_SEARCH_RADIUS } : {}),
     };
     // via:history / {fragment}：查自己走过的路线，把路点按三维路程间距抽稀。历史只是路点提示，
     // 每跳仍按实测验收；某个路点走不通就放弃剩余历史路点并在回执里列出，不写回记忆。
@@ -385,7 +387,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const receipt = (r: SkillResult) => navReceipt(r, { backend, originalRequest: request, resolvedTarget, outcome, position: end, trace, arrival });
     if (stop === 'ARRIVED') return receipt(ok(`到了 ${target.label} 附近：${measured}${effects}${historyNote}`, facts));
     const why = {
-      NO_ROUTE: '辅助在已加载区块里没找到能让身体前进的下一跳（正前方与偏转都试过）',
+      NO_ROUTE: `辅助在已加载区块里没找到能让身体前进的下一跳（正前方与偏转都试过${hopBudget ? `；每跳只接受代价不超过直线约 +${HOP_SEARCH_RADIUS} 的路线，更远的绕行没有尝试` : ''}）`,
       VERTICAL_GAP: `目标在${verticalGap(end) < 0 ? '下' : '上'}方 ${Math.abs(verticalGap(end))} 格、水平只差 ${round1(flat(end))} 格，辅助找不到${verticalGap(end) < 0 ? '下行' : '上行'}的路；水平偏转绕行帮不上高差，没有再绕（行走辅助一次最多下落 ${WALK_MAX_DROP} 格${args.allowDig ? '' : '，没授权挖'}${args.allowTower ? '' : '、没授权搭柱'}）`,
       NO_PROGRESS: revisited ? `绕了一圈又回到之前到过的 (${revisited.x},${revisited.y},${revisited.z}) 附近，没有更接近目标，不再来回绕` : `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,

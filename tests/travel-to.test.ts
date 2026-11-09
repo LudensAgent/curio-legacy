@@ -263,6 +263,12 @@ test('travel_to 不下水时限制单跳绕路；授权游泳时不加上限（�
   await travelTo.run(wet.ctx, argsOf({ to: '30,0', allowSwim: true }, wet.adapter));
   assert.equal(wet.calls[0].opts.searchRadius, undefined);
   assert.equal(wet.calls[0].opts.allowSwimming, undefined);
+  // 挖/放的代价同样按寻路代价计：授权后一跳直穿就超过“直线 + 48”，不加上限
+  for (const extra of [{ allowDig: true }, { allowPlace: true }]) {
+    const h = harness();
+    await travelTo.run(h.ctx, argsOf({ to: '30,0', ...extra }, h.adapter));
+    assert.equal(h.calls[0].opts.searchRadius, undefined, JSON.stringify(extra));
+  }
 });
 
 test('travel_to 没授权下水却掉进水里：立刻停下报 IN_WATER 与氧气，不再继续分跳', async () => {
