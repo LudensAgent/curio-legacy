@@ -45,7 +45,9 @@ test('approach_visible 在静态指导与目录里可发现，target 三种写�
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
-  assert.match(directory, /常用动作.*walk_path/);
+  assert.match(directory, /常用动作.*travel_to/);
+  assert.doesNotMatch(directory.split('\n')[0], /walk_path/, 'walk_path 不再占常用动作的完整参数');
+  assert.match(directory, /walk_path/, '降级的动作仍在目录里，可按需查参数');
   assert.match(directory, /- equip_armor：/, '没有参数的动作也要给用途');
   const details = moveDetails(['plan_route', 'walk_path', 'fly_to', 'trade', 'use_gui', 'spatial_query', 'building_archive']);
   assert.match(details, /- walk_path \{.*deadlineMs/);
