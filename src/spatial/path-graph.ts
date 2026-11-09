@@ -13,6 +13,9 @@
 import type { PathFragment, Vec3Like } from 'curio-minecraft-3d-memory';
 
 const BUCKET = 8;
+/** 记录里相邻两点高差超过普通步行（2 格）的是一次掉落：往下走照常，逆着它往上要爬升，按这个倍数加代价。 */
+const DROP_STEP = 2;
+const CLIMB_PENALTY = 4;
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 const dist = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const bucketKey = (x: number, y: number, z: number, size: number) => `${Math.floor(x / size)},${Math.floor(y / size)},${Math.floor(z / size)}`;
@@ -24,6 +27,8 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
   const adj = new Map<string, Map<string, number>>();
   const fragmentOf = new Map<string, string>();
   const joined = new Set<string>();
+  /** `低格|高格`：从低处沿这条边往上，是逆着一次记录过的掉落爬回去 */
+  const climbs = new Set<string>();
   let recorded = 0;
   const cell = (p: Vec3Like, fragmentId: string) => {
     const c = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
@@ -42,7 +47,11 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
     const pairs = fragment.links?.length
       ? fragment.links.map((l) => [l.a, l.b] as const)
       : fragment.polyline.slice(1).map((p, i) => [fragment.polyline[i]!, p] as const);
-    for (const [a, b] of pairs) if (link(cell(a, fragment.id), cell(b, fragment.id))) recorded++;
+    for (const [a, b] of pairs) {
+      const ka = cell(a, fragment.id), kb = cell(b, fragment.id);
+      if (link(ka, kb)) recorded++;
+      if (Math.abs(a.y - b.y) > DROP_STEP) climbs.add(a.y < b.y ? `${ka}|${kb}` : `${kb}|${ka}`);
+    }
     if (pairs.length === 0) for (const p of fragment.polyline) cell(p, fragment.id);
   }
   for (const [k, c] of cells) {
@@ -57,7 +66,7 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
     const list = buckets.get(b);
     if (list) list.push(k); else buckets.set(b, [k]);
   }
-  return { cells, adj, fragmentOf, joined, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2 } };
+  return { cells, adj, fragmentOf, joined, climbs, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2, drops: climbs.size } };
 }
 
 /** 半径内离 p 最近的记录格；只扫覆盖半径的网格桶。 */
@@ -117,6 +126,8 @@ export type PathGraphRoute =
     fragments: string[];
     /** 路线里用到的 26 邻域贴合连接数（不是走过的边） */
     joinsUsed: number;
+    /** 路线里逆着记录过的掉落往上的段（当初是掉下来的，原路返回要爬升 height 格） */
+    climbs: { from: Vec3Like; to: Vec3Like; height: number }[];
     length: number;
     startSnap: number;
     endDistance: number;
@@ -146,7 +157,7 @@ export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like,
     if (d < closestDistance) { closest = key; closestDistance = d; }
     if (++expanded % 4096 === 0 && Date.now() > deadline) break;
     for (const [next, w] of graph.adj.get(key)!) {
-      const nc = c + w;
+      const nc = c + (graph.climbs.has(`${key}|${next}`) ? w * CLIMB_PENALTY : w);
       if (nc < (cost.get(next) ?? Infinity)) { cost.set(next, nc); parent.set(next, key); queue.push({ key: next, cost: nc }); }
     }
   }
@@ -156,11 +167,17 @@ export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like,
   const points = keys.map((k) => ({ ...graph.cells.get(k)! }));
   const fragments = [...new Set(keys.map((k) => graph.fragmentOf.get(k)!))];
   const joinsUsed = keys.slice(1).filter((k, i) => graph.joined.has(`${keys[i]}|${k}`)).length;
+  const climbs = keys.slice(1).flatMap((k, i) => {
+    if (!graph.climbs.has(`${keys[i]}|${k}`)) return [];
+    const from = graph.cells.get(keys[i]!)!, to = graph.cells.get(k)!;
+    return [{ from: { ...from }, to: { ...to }, height: to.y - from.y }];
+  });
   const endDistance = dist(graph.cells.get(end)!, to);
   const status = reached !== null || endDistance <= near ? 'FOUND' : 'PARTIAL';
   return {
-    status, points, fragments, joinsUsed,
-    length: Math.round(cost.get(end)! * 10) / 10,
+    status, points, fragments, joinsUsed, climbs,
+    // 路程按实际几何算，不含爬升惩罚
+    length: Math.round(keys.slice(1).reduce((sum, k, i) => sum + dist(graph.cells.get(keys[i]!)!, graph.cells.get(k)!), 0) * 10) / 10,
     startSnap: Math.round(start.distance * 10) / 10,
     endDistance: Math.round(endDistance * 10) / 10,
     message: status === 'FOUND'

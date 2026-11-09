@@ -726,7 +726,7 @@ export class Perception {
         }
         this.traversal?.observe({
           worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, pos: s.pos,
-          inWater: s.inWater, inLava: s.inLava, riding: !!s.riding,
+          inWater: s.inWater, inLava: s.inLava, riding: !!s.riding, onGround: s.onGround,
           dug,
           onPlacedSupport: (support) => this.placedSupports.has(supportKey(support)),
         });

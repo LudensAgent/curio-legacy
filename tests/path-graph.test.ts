@@ -38,3 +38,18 @@ test('路径图缺口：每对分量只报最近一对格，超过 maxGap 的不
   assert.deepEqual([gaps[0]!.a.x, gaps[0]!.b.x].sort((x, y) => x - y), [9, 13]);
   assert.equal(gaps[0]!.distance, 4);
 });
+
+test('记录过的掉落是单向的：往下照常走，逆着往上要爬升，路线里单独列出且优先绕开', () => {
+  const base = { worldId: 'w', dim: 'the_nether', entrances: [], geometrySource: 'traversal' as const, deepestY: 0, createdAt: 0, lastUsedAt: 0, uses: 1 };
+  const graph = buildPathGraph([
+    { ...base, id: 'top', kind: 'walked', polyline: [{ x: 0, y: 70, z: 0 }, { x: 1, y: 70, z: 0 }] },
+    { ...base, id: 'drop', kind: 'walked', polyline: [{ x: 1, y: 70, z: 0 }, { x: 2, y: 52, z: 0 }] },
+    { ...base, id: 'bottom', kind: 'walked', polyline: [{ x: 2, y: 52, z: 0 }, { x: 6, y: 52, z: 0 }] },
+  ]);
+  const down = routeOnPathGraph(graph, { x: 0, y: 70, z: 0 }, { x: 6, y: 52, z: 0 }, 2, Date.now() + 1000);
+  assert.equal(down.status, 'FOUND');
+  assert.deepEqual(down.status === 'START_NOT_RECORDED' ? null : down.climbs, []);
+  const up = routeOnPathGraph(graph, { x: 6, y: 52, z: 0 }, { x: 0, y: 70, z: 0 }, 2, Date.now() + 1000);
+  assert.equal(up.status, 'FOUND');
+  assert.deepEqual(up.status === 'START_NOT_RECORDED' ? null : up.climbs, [{ from: { x: 2, y: 52, z: 0 }, to: { x: 1, y: 70, z: 0 }, height: 18 }]);
+});

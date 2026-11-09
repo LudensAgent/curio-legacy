@@ -230,6 +230,7 @@ export const travelTo: Skill<TravelToArgs> = {
           history = {
             found: true, source: 'path_fragments', status: route.status, points: points.length, fragments: route.fragments.slice(0, 8),
             joinsUsed: route.joinsUsed, startSnap: route.startSnap, endDistance: route.endDistance,
+            ...(route.climbs.length ? { climbs: route.climbs.length, climbHeight: route.climbs.reduce((sum, c) => sum + c.height, 0), firstClimb: route.climbs[0]!.from } : {}),
             ...(scan.partial || scan.truncated ? { fragmentsIncomplete: true } : {}),
           };
         } else {
@@ -377,7 +378,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const effects = dug.length || placed.length ? `；挖掉 ${dug.length} 块、放下 ${placed.length} 块（见 sideEffects）` : '';
     const historyNote = history === undefined ? ''
       : history.found !== true ? `；没有可用的历史路线（${String(history.reason)}），按直线分跳`
-        : `；按${history.source === 'path_fragments' ? `记录过的路径片段（${(history.fragments as string[]).length} 条${history.status === 'PARTIAL' ? `，记录只到离目标 ${String(history.endDistance)} 格处` : ''}）` : '历史路线'}走到 ${Math.min(waypoint, routePoints.length)}/${routePoints.length} 个路点、最大偏离 ${round1(offRoute)} 格${abandonedAt === undefined ? '' : `，路点 ${at(abandonedAt)} 当前走不通，已放弃剩余历史路点${abandonedVertical > WALK_MAX_DROP ? `（记录里到这个路点前有 ${abandonedVertical} 格直上直下的竖直段，像竖井；行走辅助一次最多下落 ${WALK_MAX_DROP} 格、不挖不搭柱时不走这种段）` : ''}`}`;
+        : `；按${history.source === 'path_fragments' ? `记录过的路径片段（${(history.fragments as string[]).length} 条${history.status === 'PARTIAL' ? `，记录只到离目标 ${String(history.endDistance)} 格处` : ''}）` : '历史路线'}走到 ${Math.min(waypoint, routePoints.length)}/${routePoints.length} 个路点、最大偏离 ${round1(offRoute)} 格${typeof history.climbs === 'number' ? `；这条记录里有 ${history.climbs} 处当初是掉下来的（共 ${String(history.climbHeight)} 格，第一处从 ${at(history.firstClimb as Vec3Like)} 往上），原路返回要爬升这些高度，行走辅助不挖不搭柱时上不去` : ''}${abandonedAt === undefined ? '' : `，路点 ${at(abandonedAt)} 当前走不通，已放弃剩余历史路点${abandonedVertical > WALK_MAX_DROP ? `（记录里到这个路点前有 ${abandonedVertical} 格直上直下的竖直段，像竖井；行走辅助一次最多下落 ${WALK_MAX_DROP} 格、不挖不搭柱时不走这种段）` : ''}`}`;
     const measured = `实测 ${at(end)}，水平位移 ${displacement.horizontal} 格、垂直 ${displacement.vertical} 格，${hops} 跳`;
     const outcome: NavOutcome = stop === 'ARRIVED' ? 'ARRIVED' : stop === 'TIMEOUT' ? 'TIMEOUT' : closer >= 2 ? 'PARTIAL' : stop === 'NO_ROUTE' || stop === 'VERTICAL_GAP' ? 'NO_PATH' : stop === 'NO_PROGRESS' ? 'BLOCKED' : 'FAILED';
     const arrival = {
@@ -403,9 +404,10 @@ export const travelTo: Skill<TravelToArgs> = {
       const scan = pageFragments(ctx.spatial, { dim: s0.dim, maxFragments: 1000, signal, deadline: Date.now() + 1500 });
       const route = routeOnPathGraph(buildPathGraph(scan.items), end, { x: target.x, y: target.y ?? end.y, z: target.z }, HISTORY_NEAR, Date.now() + 1000);
       if (route.status !== 'START_NOT_RECORDED' && route.points.length > 1) {
-        const recorded = { fragments: route.fragments.slice(0, 8), points: route.points.length, endDistance: route.endDistance, status: route.status };
+        const climbHeight = route.climbs.reduce((sum, c) => sum + c.height, 0);
+        const recorded = { fragments: route.fragments.slice(0, 8), points: route.points.length, endDistance: route.endDistance, status: route.status, ...(climbHeight ? { climbs: route.climbs.length, climbHeight } : {}) };
         Object.assign(facts, { recordedRoute: recorded });
-        recordedNote = `；记录里有从你附近出发、沿自己走过的路（片段 ${recorded.fragments.join('、')}，${recorded.points} 格）${route.status === 'PARTIAL' ? `到离目标 ${route.endDistance} 格处` : '到目标附近'}的连续路径，via:"history" 会沿它走（历史记录，现在是否还通未确认）`;
+        recordedNote = `；记录里有从你附近出发、沿自己走过的路（片段 ${recorded.fragments.join('、')}，${recorded.points} 格）${route.status === 'PARTIAL' ? `到离目标 ${route.endDistance} 格处` : '到目标附近'}的连续路径，via:"history" 会沿它走（历史记录，现在是否还通未确认）${climbHeight ? `；其中 ${route.climbs.length} 处当初是掉下来的，沿它返回要爬升共 ${climbHeight} 格` : ''}`;
       }
     }
     return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}${recordedNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
