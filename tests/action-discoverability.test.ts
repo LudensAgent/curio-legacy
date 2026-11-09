@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { advancedMovesLine, moveDetails, moveDirectory, movesCatalog } from '../src/mind/prompt.ts';
+import { advancedMovesLine, deliberateSystem, glanceSystem, moveDetails, moveDirectory, movesCatalog } from '../src/mind/prompt.ts';
 import { LLM_HIDDEN, SKILLS } from '../src/skills/index.ts';
 
 test('the empty moves query lists every callable action but hides body-only fillers', () => {
@@ -33,6 +33,14 @@ test('空间记忆是 plan_route 的 source，不再是单独的导航技能', (
 test('基础下行辅助不被进阶动作正则误藏', () => {
   assert.match(movesCatalog(28), /^- descend_to /m, 'descend_to 是基础移动辅助，应在静态目录里给完整参数');
   assert.doesNotMatch(advancedMovesLine(), /descend_to/, 'descend_to 不是下界/末地动作，不应等进阶情境才出现');
+});
+
+test('approach_visible 在静态指导与目录里可发现，target 三种写法可按需查', () => {
+  for (const system of [deliberateSystem(''), glanceSystem('')]) assert.match(system, /approach_visible/);
+  const catalog = movesCatalog(28);
+  assert.match(catalog, /^- approach_visible /m);
+  const details = moveDetails(['approach_visible']);
+  for (const marker of ['"target"', '"pos"', '"block"', '"entity"', '"radius"']) assert.ok(details.includes(marker), `缺少 ${marker}`);
 });
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
