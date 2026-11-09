@@ -38,6 +38,10 @@ interface SelfData {
 export interface TaskFacts {
   noProgressRuns?: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[];
   lastLocalFailure?: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null;
+  /** 最近一次带证据放行的换维：只记来源/目标/理由与作用域，几何仍由共享空间库承担。 */
+  lastSourceSwitch?: { at: number; from: string; to: string | null; reason: string; worldId: string; sessionId: string } | null;
+  /** 最近一次实测新区块进展：只记区域标识与新区块数，不复制格点/几何。 */
+  lastRegionExpansion?: { at: number; region: string; chunks: number; dim: string; worldId: string; sessionId: string } | null;
 }
 
 export interface StageRecord { goal: string; setAt: number; endAt: number; outcome: 'done' | 'dropped' | 'switched'; stepsDone: number; steps: number }

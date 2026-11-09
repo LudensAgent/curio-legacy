@@ -15,8 +15,20 @@ import {
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkCollisionProvider } from '../../adapter/walk-route.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
-import { searchLandRouteAsync, type LandSearchResult } from '../../spatial/land-search.ts';
+import { searchLandRouteAsync, summarizeBoundaries, type LandRouteVerification, type LandSearchResult } from '../../spatial/land-search.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
+
+/**
+ * 注册表拒绝 routeId 的六种原因。这是 route handle 是否“还能被注册表消费”的判定，
+ * 与库在执行期报告的路线失效原因（route_invalidated/route_start_changed/scope_changed）
+ * 分开：后者不是注册表问题，不能拿来实现 registryResult 的分类。
+ */
+export const ROUTE_REGISTRY_PROBLEM_KINDS = [
+  'invalid_request', 'route_not_found', 'route_consumed', 'route_expired', 'scope_mismatch', 'route_not_executable',
+] as const;
+export type RouteRegistryProblemKind = typeof ROUTE_REGISTRY_PROBLEM_KINDS[number];
+export const isRouteRegistryProblem = (reason: string | undefined): reason is RouteRegistryProblemKind =>
+  reason !== undefined && (ROUTE_REGISTRY_PROBLEM_KINDS as readonly string[]).includes(reason);
 
 type Scope = { worldId: string; dim: string; sessionId: string };
 type RouteSource = 'auto' | 'search' | 'memory' | 'spatial';
@@ -235,6 +247,42 @@ const transitionOf = (type: string): MemoryTransition => {
 };
 
 /**
+ * 历史 leg 的几何跨度。拓扑 leg 是节点到节点，可能跨多格；这里只描述记录几何，
+ * 不证明支撑/净空/流体，也不把相邻一格当作当前可通行。`oneCellHop` 仅表示
+ * 几何上可能由一步水平移动（或一格上下）覆盖，执行前仍须按当前证据复验。
+ */
+function legGeometry(from: Vec3Like, to: Vec3Like) {
+  const dx = Math.abs(to.x - from.x), dy = Math.abs(to.y - from.y), dz = Math.abs(to.z - from.z);
+  const oneCellHop = dx + dz === 1 ? dy <= 1.001 : dx === 0 && dz === 0 && dy > 0.001 && dy <= 1.001;
+  // maxSpan 是切比雪夫跨度（对角 (1,1) 仍为 1），不是格数；oneCellHop 才是“几何上可能一步”。
+  return { span: { dx, dy, dz }, maxSpan: Math.max(dx, dy, dz), oneCellHop };
+}
+
+/**
+ * 历史候选复验中的首个当前证据 BLOCKED 段；没有复验或没有 BLOCKED 时返回 null。
+ * 只报告事实，不挖/不放，也不把该段自动改道。
+ */
+export function blockerOf(verification: LandRouteVerification | undefined) {
+  if (verification === undefined) return null;
+  const index = verification.transitions.findIndex((entry) => entry.status === 'BLOCKED');
+  if (index < 0) return null;
+  const entry = verification.transitions[index]!;
+  return {
+    index,
+    transition: entry.transition,
+    status: entry.status,
+    ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+    hazards: entry.hazards,
+  };
+}
+
+/** 只执行 blocker 之前的前缀；STALE/UNKNOWN 不算已观测阻挡，由执行动作逐步复核。 */
+export function executionWindow(verification: LandRouteVerification | undefined, maxSteps: number, total: number) {
+  const blocker = blockerOf(verification);
+  return { blocker, limit: Math.min(maxSteps, blocker === null ? total : blocker.index) };
+}
+
+/**
  * 共享空间记忆的路线：库的 topology 查询已经把 walked/dug/bridge/built 统一成
  * 节点/边；这里只把边类型翻译成通用过渡，不按 fragment.kind 走不同逻辑。
  */
@@ -261,29 +309,45 @@ function memoryRoute(spatial: NonNullable<SkillCtx['spatial']>, dim: string, fro
       },
     };
   }
-  const legs = inspection.segments.map((segment, index) => ({
-    index,
-    from: { ...inspection.points[index]! },
-    to: { ...inspection.points[index + 1]! },
-    edgeType: segment.type,
-    transition: transitionOf(segment.type),
-    direction: segment.direction,
-    evidenceId: segment.evidenceId,
-    mode: segment.evidence.mode ?? null,
-    source: segment.evidence.source,
-  }));
+  const legs = inspection.segments.map((segment, index) => {
+    const from = { ...inspection.points[index]! };
+    const to = { ...inspection.points[index + 1]! };
+    return {
+      index, from, to,
+      edgeType: segment.type,
+      transition: transitionOf(segment.type),
+      direction: segment.direction,
+      evidenceId: segment.evidenceId,
+      mode: segment.evidence.mode ?? null,
+      source: segment.evidence.source,
+      observedAt: segment.evidence.observedAt,
+      ...legGeometry(from, to),
+      historicalGeometry: true as const,
+      executable: false as const,
+      currentPassability: 'UNKNOWN' as const,
+    };
+  });
   const counts = legs.reduce<Record<string, number>>((all, leg) => ({ ...all, [leg.transition]: (all[leg.transition] ?? 0) + 1 }), {});
   const detail = Object.entries(counts).map(([transition, count]) => `${transition}×${count}`).join('、');
   const p = (v: Vec3Like) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
   const preview = legs.slice(0, 2).map((leg) => `第${leg.index + 1}段 ${leg.transition} ${p(leg.from)}→${p(leg.to)}`).join('；');
   const more = legs.length > 2 ? `；另有 ${legs.length - 2} 段` : '';
+  // 拓扑 leg 可能跨多格：只把真正相邻的一格说成可能的一步，其余要求重新搜索或逐格核实。
+  const walkLike = legs.filter((leg) => leg.transition === 'walk' || leg.transition === 'step');
+  const multiCell = walkLike.filter((leg) => !leg.oneCellHop);
+  const stepHint = walkLike.length === 0
+    ? '本路线没有 walk/step 段'
+    : multiCell.length > 0
+      ? `其中 ${multiCell.length}/${walkLike.length} 段 walk/step 跨多格，不是一步 move_step：先 plan_route source:"search" 取 routeId 后 walk_path，或按实测逐格 move_step 并每步核实当前证据`
+      : '相邻单格 walk/step 段可按当前证据逐段 move_step';
+  const endpoint = inspection.points.at(-1)!;
   return {
     status: 'route' as const,
-    summary: `空间记忆路线 ${legs.length} 段（${detail || '无'}）：从 ${p(from)} 到 ${p(to)}；先按现有动作执行：${preview}${more}（walk 段可再 plan_route source:"search" 取得 routeId 后 walk_path，或用 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal/other 用对应现有动作或停下由你决定）；这是历史几何，未验证当前可通，完成后按当前证据重新规划`,
+    summary: `空间记忆路线 ${legs.length} 段（${detail || '无'}）：从 ${p(from)} 到 ${p(to)}；先按现有动作执行：${preview}${more}（${stepHint}；drop 先 assess_landings 再 descend_to；climb/swim/portal/other 用对应现有动作或停下由你决定）；只到你选定的端点 ${p(endpoint)}，不要越过最后一点；这是历史几何，未验证当前可通，完成后按当前证据重新规划`,
     facts: {
       source: 'memory', backend: 'spatial_topology', status: inspection.status,
       fromNodeId: inspection.fromNodeId, toNodeId: inspection.toNodeId,
-      points: inspection.points, legs,
+      points: inspection.points, legs, selectedEndpoint: { ...inspection.points.at(-1)! },
       gaps: inspection.gaps, message: inspection.message,
       historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN' as const,
     },
@@ -297,7 +361,7 @@ const facingOf = (from: Vec3Like, to: Vec3Like): 'N' | 'E' | 'S' | 'W' => {
 };
 
 /** 3D 搜索结果只翻译成现有动作：walk/step/drop=1 → move_step，drop>1 → descend_to。 */
-export function landSearchSteps(result: LandSearchResult) {
+export function landSearchSteps(result: Pick<LandSearchResult, 'transitions'>) {
   return result.transitions.map((transition) => {
     // L1 move_step 的绝对 xyz 是“方块格”坐标；descend_to 的 target 也会规整到格心。
     const fromCell = { x: Math.floor(transition.from.x), y: transition.from.y, z: Math.floor(transition.from.z) };
@@ -331,6 +395,12 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
       : historical?.status === 'NO_PATH' ? historical
         : strict;
   const steps = result.status === 'FOUND' ? landSearchSteps(result) : [];
+  // boundarySummary 只汇总它伴随的 result.boundaries，避免同一回执里边界列表与计数
+  // 来自不同证据来源。当前证据（strict）的前缀单独命名，历史几何不冒充可通行。
+  const resultBoundarySummary = summarizeBoundaries(result.boundaries);
+  const currentPrefix = strict.prefix;
+  const currentBoundarySummary = summarizeBoundaries(strict.boundaries);
+  const accessible = result === strict ? currentPrefix : undefined;
   const counts = result.transitions.reduce<Record<string, number>>((all, transition) => ({ ...all, [transition.kind]: (all[transition.kind] ?? 0) + 1 }), {});
   const detail = Object.entries(counts).map(([kind, count]) => `${kind}×${count}`).join('、');
   const stepCounts = steps.reduce<Record<string, number>>((all, step) => ({ ...all, [step.skill]: (all[step.skill] ?? 0) + 1 }), {});
@@ -355,15 +425,29 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
           ? `搜索时间预算耗尽（${result.stats.durationMs}ms / ${SPATIAL_SEARCH_MS}ms），先规划更近的一段或走近再试`
           : `搜索节点/边预算耗尽（${result.stats.durationMs}ms），先规划更近的一段`
         : '先规划更近的一段，或走近/看清后再试';
+  const fmt = (v: Vec3Like) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
+  const accessibleNote = result === strict
+    ? accessible === undefined || accessible.transitions.length === 0
+      ? '没有已知可通行前缀'
+      : `已知可通行的最远 approach 只到 ${fmt(accessible.endpoint)}（${accessible.transitions.length} 段），这不是到达`
+    : currentPrefix === undefined || currentPrefix.transitions.length === 0
+      ? '历史搜索无完整路线；当前证据下也没有可达前缀'
+      : `历史搜索无完整路线；当前证据下存在可达前缀到 ${fmt(currentPrefix.endpoint)}（${currentPrefix.transitions.length} 段），这不是到达`;
+  const boundaryNote = `；${resultBoundarySummary.observationMayResolve ? '额外观察/靠近可能刷新证据' : resultBoundarySummary.total === 0 ? '没有记录到边界' : '额外观察不会改变已观测阻挡'}；${resultBoundarySummary.needsExplicitActionOrOtherRoute ? '存在需要显式动作/其他移动能力/换路线的边界（由你决定）' : '未记录到需要挖/建或换路线的边界'}`;
   const routeLabel = result.evidenceMode === 'historical' ? '历史体素路线（含过期证据，当前可通行性未知）' : '空间 3D 路线';
   const verification = result.verification;
-  const verifyNote = verification === undefined ? '' : `；严格当前证据复验：${verification.verdict}（当前 OPEN ${verification.openPrefix}/${result.transitions.length} 段）`;
+  // 历史候选的复验已经逐段在当前证据上重算；把首个 BLOCKED 段作为 blocker 事实
+  // 交给调用方，执行方据此停在 blocker 前，不自动挖/放。
+  const blocker = blockerOf(verification);
+  const verifyNote = verification === undefined
+    ? ''
+    : `；严格当前证据复验：${verification.verdict}（当前 OPEN ${verification.openPrefix}/${result.transitions.length} 段）${blocker === null ? '' : `；第 ${blocker.index + 1} 段 ${blocker.status}，执行时停在 blocker 前、不自动挖`}`;
   return {
     result,
     steps,
     summary: result.status === 'FOUND'
       ? `${routeLabel} ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。先执行：${stepPreview}${steps.length > 3 ? '；…' : ''}；只读规划，不是执行授权；执行时按现场事实逐步核实，失败再重新规划${verifyNote}；drop>1 的 descend_to 仍要求当前可见落点`
-      : `${result.evidenceMode === 'historical' ? '历史体素' : '空间 3D'}搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实${boundaryDetail ? `：${boundaryDetail}` : ''}）；${boundaryGuidance}`,
+      : `${result.evidenceMode === 'historical' ? '历史体素' : '空间 3D'}搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实${boundaryDetail ? `：${boundaryDetail}` : ''}）；${accessibleNote}；${boundaryGuidance}${boundaryNote}`,
     facts: {
       source: 'spatial', backend: 'spatial_voxel_search',
       assurance: result.assurance, evidenceMode: result.evidenceMode, currentPassability: 'UNKNOWN', executable: false,
@@ -371,7 +455,14 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
       boundaries: result.boundaries, cost: result.cost, resolvedTarget: result.resolvedTarget,
       stats: result.stats, budgetMs: SPATIAL_SEARCH_MS, searchMs: result.stats.durationMs,
       cancelReason: result.stats.cancelReason,
-      ...(verification === undefined ? {} : { verification }),
+      boundarySummary: resultBoundarySummary,
+      ...(accessible === undefined ? {} : { prefix: accessible, prefixSteps: landSearchSteps(accessible) }),
+      ...(result === strict ? {} : {
+        ...(currentPrefix === undefined ? {} : { currentPrefix }),
+        currentBoundaries: strict.boundaries,
+        currentBoundarySummary,
+      }),
+      ...(verification === undefined ? {} : { verification, verifiedOpenSegments: verification.openPrefix, blocker }),
     },
   };
 }
@@ -384,8 +475,8 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回路点/过渡，spatial 返回现有动作 steps（move_step/descend_to），search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。auto 先 memory→spatial；spatial 当前证据无路时会用历史体素给出标记为 historical、currentPassability UNKNOWN 的候选路线；只有目标脚高与当前一致时才回退 search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 只走当前脚高的同高格点，目标 y 不同时不会回退到 search；spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；memory/spatial 都不是 routeId，也不直接授权执行。',
+  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回历史路点/过渡（legs 均带 executable:false、currentPassability UNKNOWN；跨多格 leg 不是一步 move_step），spatial 返回现有动作 steps（move_step/descend_to），仅历史候选额外带当前证据逐段复验的 verifiedOpenSegments/blocker，search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。spatial 失败时额外返回当前证据可达前缀 endpoint/transitions/prefixSteps 与 boundarySummary（边界位置/方向/状态/原因；前缀不是到达）；若回执采用历史候选，当前证据前缀另放 currentPrefix/currentBoundaries/currentBoundarySummary，不混用。auto 先 memory→spatial；spatial 当前证据无路时会用历史体素给出标记为 historical、currentPassability UNKNOWN 的候选路线；只有目标脚高与当前一致时才回退 search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 只走当前脚高的同高格点，目标 y 不同时不会回退到 search；spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；spatial 失败时返回可达前缀与边界摘要，前缀不是到达，也不会自动执行；search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；memory/spatial 都不是 routeId，也不直接授权执行。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -464,7 +555,7 @@ export const planRoute: Skill<PlanArgs> = {
         if (args.source === 'spatial') return fail('NOT_CONNECTED', 'plan_route source:"spatial" 需要共享空间 VoxelMap');
       } else {
         const candidate = await spatialRoute(spatial, state, stance, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
-        const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
+        const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell }), requestedTarget: { ...args.to }, targetStance: { ...stance } };
         if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
         if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };
         if (args.source === 'spatial') {
