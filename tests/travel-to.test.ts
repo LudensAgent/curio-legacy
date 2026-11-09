@@ -197,6 +197,19 @@ test('travel_to 直走没到时回报记录里有没有沿走过的路通往目�
   assert.doesNotMatch(n.summary, /记录里有从你附近/);
 });
 
+test('travel_to/explore_toward 的 tool 原样交给寻路挖掘；需要 allowDig、背包里得有', async () => {
+  const h = harness();
+  (h.adapter as { state: () => unknown }).state = ((orig) => () => ({ ...(orig() as object), inventory: [{ name: 'stone_pickaxe', count: 1 }] }))(h.adapter.state.bind(h.adapter));
+  await travelTo.run(h.ctx, argsOf({ to: { x: 10, z: 0 }, allowDig: true, tool: 'stone_pickaxe' }, h.adapter));
+  assert.equal(h.calls[0]!.opts.digTool, 'stone_pickaxe');
+  assert.equal(h.calls[0]!.opts.allowTerrainChanges, true);
+  assert.match(String((travelTo.validate({ to: '10,0', tool: 'stone_pickaxe' }, h.adapter) as { error?: string }).error), /需要同时写 allowDig:true/);
+  assert.match(String((travelTo.validate({ to: '10,0', allowDig: true, tool: 'iron_pickaxe' }, h.adapter) as { error?: string }).error), /TOOL_MISSING/);
+  const plain = harness();
+  await travelTo.run(plain.ctx, argsOf({ to: { x: 10, z: 0 }, allowDig: true }, plain.adapter));
+  assert.equal(plain.calls[0]!.opts.digTool, undefined, '不写就不指定，按身体的工具选择规则');
+});
+
 test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目标在下方多少格', async () => {
   const h = harness({ blocked: () => true });
   const r = await travelTo.run(h.ctx, argsOf({ to: { x: 3, y: 10, z: 0 } }, h.adapter));

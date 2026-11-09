@@ -526,6 +526,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           }
         } catch { /* ignore */ }
         cornerSafe(mv);
+        // 寻路途中挖方块（allowDig 授权后）原本总挑挖得最快的工具：Agent 选了石镐也会被换成钻石镐。
+        // 改为：本次委托指定了工具就只用那把（不在背包则空手，代价估算随之变高）；没指定按它自己的选择规则，最后才按最快。
+        const fastest = bot.pathfinder.bestHarvestTool.bind(bot.pathfinder);
+        bot.pathfinder.bestHarvestTool = (block: any) => this.pathfinderDigTool(block, fastest);
         bot.pathfinder.setMovements(mv);
         // 远一点的目标默认 5 秒想不完就报错：多给点时间，想不完时 goto 会按“没找到路”处理
         bot.pathfinder.thinkTimeout = 10000;
@@ -1010,6 +1014,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 boat_path 操控它前进`);
+    this.pathDigTool = opts.digTool ?? null;
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
       const movements = cornerSafe(Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements));
@@ -1849,6 +1854,30 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const kind = name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
     if (kind) this.toolChoice.set(kind, name);
   }
+  /** 本次 moveTo 委托指定的寻路挖掘工具；每次 moveTo 开头重设，不残留到下一趟。 */
+  private pathDigTool: string | null = null;
+  /**
+   * 不指定工具时挖这一格按它自己的选择来：手上这把能挖（能掉东西、比空手快）就用手上的；
+   * 手上的不行，它亲手挑过这类工具（拿过铁镐）就还拿那种。都没有返回 undefined，由调用方按最快的挑。
+   * 用哪把镐是它自己的决定（“钻石镐留着，这次用石镐”），身体不替它换成更快的。
+   */
+  private pathfinderDigTool(block: any, fastest: (block: any) => Item | null): Item | null {
+    if (this.pathDigTool) return this.bestInvItem(this.pathDigTool) ?? null;
+    return this.preferredDigTool(block) ?? fastest(block);
+  }
+  private preferredDigTool(block: any): Item | undefined {
+    const b = this.bot, e = b.entity;
+    const timeFor = (type: number | null, ench: any[] = []) => {
+      try { return block.digTime(type, false, !!e.isInWater, !e.onGround, ench, e.effects ?? {}); } catch { return Infinity; }
+    };
+    const bare = timeFor(null);
+    const usable = (it: Item) => block.harvestTools ? !!block.harvestTools[it.type] : timeFor(it.type, (it as any).enchants ?? []) < bare;
+    const held = b.heldItem;
+    if (held && usable(held)) return held;
+    const kindOf = (name: string) => name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
+    const chosen = b.inventory.items().find((it: Item) => { const kind = kindOf(it.name); return !!kind && this.toolChoice.get(kind) === it.name && usable(it); });
+    return chosen ? this.bestInvItem(chosen.name) ?? chosen : undefined;
+  }
 
   /** 它亲手拿到主手的东西（不只是工具）：外层用它跨进程重启恢复，避免重启后退回“最快工具” */
   private noteHandChoice(name: string | null) {
@@ -1883,17 +1912,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try { return block.digTime(type, false, !!e.isInWater, !e.onGround, ench, e.effects ?? {}); } catch { return Infinity; }
     };
     const bare = timeFor(null);
-    // 手上这把能挖（能掉东西、比空手快）：就用手上的。用哪把镐是它自己的决定（“钻石镐留着，这次用铁镐”），身体不替它换
     const held = b.heldItem;
-    if (held && (block.harvestTools ? !!block.harvestTools[held.type] : timeFor(held.type, held.enchants ?? []) < bare)) return { ok: true };
-    // 手上的不行才去背包里找。它自己挑过这类工具（亲手拿过铁镐）就还拿那种；没挑过才按挖得最快的拿
-    const kindOf = (name: string) => name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
-    for (const it of b.inventory.items()) {
-      const kind = kindOf(it.name);
-      if (!kind || this.toolChoice.get(kind) !== it.name) continue;
-      if (block.harvestTools ? !block.harvestTools[it.type] : timeFor(it.type, it.enchants ?? []) >= bare) continue;
-      const pick = this.bestInvItem(it.name) ?? it;
-      if (b.heldItem?.type !== pick.type) await this.afterAction(() => b.equip(pick, 'hand'), check);
+    const preferred = this.preferredDigTool(block);
+    if (preferred) {
+      if (b.heldItem?.type !== preferred.type) await this.afterAction(() => b.equip(preferred, 'hand'), check);
       return { ok: true };
     }
     if (!block.harvestTools) bestTime = bare;

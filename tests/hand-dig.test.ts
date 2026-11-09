@@ -88,3 +88,25 @@ test('没挑过工具：按挖得最快的拿', async () => {
   await adapterWith(bot).dig({ x: 1, y: 64, z: 0 }, new AbortController().signal);
   assert.deepEqual(used, ['diamond_pickaxe']);
 });
+
+test('寻路途中挖方块按它的工具选择：指定了只用那把；没指定时手上能挖就用手上的，不换成最快的钻石镐', () => {
+  const stone = { name: 'stone_pickaxe', type: 274, count: 1 }, diamond = { name: 'diamond_pickaxe', type: 871, count: 1 };
+  const block = { name: 'netherrack', position: new Vec3(1, 64, 0), harvestTools: { 274: true, 871: true }, digTime: (t: number | null) => t === 871 ? 100 : t === 274 ? 300 : 5000 };
+  const bot: any = { entity: { position: new Vec3(0, 64, 0), onGround: true, isInWater: false, effects: {} }, heldItem: null, inventory: { items: () => [stone, diamond] } };
+  const adapter: any = adapterWith(bot);
+  const fastest = () => diamond;
+  const pick = () => adapter.pathfinderDigTool(block, fastest)?.name;
+
+  adapter.pathDigTool = 'stone_pickaxe';
+  assert.equal(pick(), 'stone_pickaxe', '委托指定的工具优先，哪怕钻石镐更快');
+  adapter.pathDigTool = 'iron_pickaxe';
+  assert.equal(pick(), undefined, '指定的工具不在背包：空手（代价随之变高），不偷换钻石镐');
+
+  adapter.pathDigTool = null;
+  bot.heldItem = stone;
+  assert.equal(pick(), 'stone_pickaxe', '手上石镐能挖就用手上的');
+  bot.heldItem = null;
+  assert.equal(pick(), 'diamond_pickaxe', '没拿也没挑过：才按最快');
+  adapter.noteToolChoice('stone_pickaxe');
+  assert.equal(pick(), 'stone_pickaxe', '亲手挑过石镐：还拿那种');
+});
