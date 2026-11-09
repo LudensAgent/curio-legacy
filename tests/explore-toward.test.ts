@@ -5,7 +5,7 @@ import { SKILLS } from '../src/skills/index.ts';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
 
-function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => boolean; bricksFromX?: number } = {}) {
+function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => boolean; bricksFromX?: number; walk?: (goal: MoveTarget, from: Vec3Like) => Vec3Like; signal?: AbortSignal } = {}) {
   let pos: Vec3Like = { x: 0.5, y: 64, z: 0.5 };
   const goals: MoveTarget[] = [];
   const looks: number[] = [];
@@ -17,7 +17,8 @@ function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => bool
     async moveTo(target: MoveTarget) {
       goals.push(target);
       if (options.blocked?.(target, pos)) throw new Error('No path');
-      if (target.kind === 'xz') pos = { x: target.x + 0.5, y: pos.y, z: target.z + 0.5 };
+      if (options.walk) pos = options.walk(target, pos);
+      else if (target.kind === 'xz') pos = { x: target.x + 0.5, y: pos.y, z: target.z + 0.5 };
     },
     recentDug: () => [], recentPlaced: () => [],
   } as unknown as GameAdapter;
@@ -30,7 +31,7 @@ function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => bool
   };
   let chunks = 0;
   const memory = { get visitedChunkCount() { return chunks += 1; }, lastDeath: () => null, findLandmark: () => undefined };
-  const ctx = { adapter, senses, memory, signal: new AbortController().signal, deadline: Date.now() + 120_000, progress() {} } as unknown as SkillCtx;
+  const ctx = { adapter, senses, memory, signal: options.signal ?? new AbortController().signal, deadline: Date.now() + 120_000, progress() {} } as unknown as SkillCtx;
   return { adapter, ctx, goals, looks, at: () => pos };
 }
 
@@ -82,4 +83,34 @@ test('explore_toward 连续几段走不通就停，只报辅助走不通', async
   assert.equal(r.failureCode, 'STUCK');
   assert.equal(r.data?.stopReason, 'BLOCKED');
   assert.match(r.summary, /不描述没看见的地形/);
+});
+
+test('explore_toward 按沿方向的实测推进验收：被绕到侧面超出 maxLateralDrift 就停，横着/往回走不算前进', async () => {
+  // 模拟 pathfinder 在岩洞里绕路：每跳都往北偏 12 格、往东只挪 1 格。
+  const drift = harness({ walk: (_goal, from) => ({ x: from.x + 1, y: from.y, z: from.z - 12 }) });
+  const r = await exploreToward.run(drift.ctx, argsOf({ direction: 'E', distance: 96 }, drift.adapter));
+  assert.equal(r.status, 'failed');
+  assert.equal(r.data?.stopReason, 'LATERAL_DRIFT', r.summary);
+  assert.match(r.summary, /横向偏离冻结方向超过 16 格/);
+
+  // 来回横摆、东向几乎不动：身体一直在动，但沿方向没有推进。
+  let flip = 1;
+  const sway = harness({ walk: (_goal, from) => ({ x: from.x, y: from.y, z: 0.5 + (flip = -flip) * 6 }) });
+  const s = await exploreToward.run(sway.ctx, argsOf({ direction: 'E', distance: 96 }, sway.adapter));
+  assert.equal(s.data?.stopReason, 'NO_ALONG_PROGRESS', s.summary);
+  assert.equal(s.failureCode, 'STUCK');
+});
+
+test('explore_toward 被打断时把已走出的推进与偏离挂在取消回执上', async () => {
+  const controller = new AbortController();
+  const h = harness({ signal: controller.signal, walk: (goal, from) => {
+    if (goal.kind === 'xz' && goal.x > 40) controller.abort();
+    return goal.kind === 'xz' ? { x: goal.x + 0.5, y: from.y, z: goal.z + 0.5 } : from;
+  } });
+  const error = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 200 }, h.adapter)).then(() => null, (e: unknown) => e);
+  const partial = (error as { partial?: Record<string, unknown> }).partial;
+  assert.ok(partial, '取消异常带 partial');
+  assert.ok((partial.progress as { along: number }).along >= 20);
+  assert.match(String(partial.progressNote), /被打断时实测 .*沿 E 推进/);
+  assert.deepEqual((partial.continuation as { direction: string }).direction, 'E');
 });
