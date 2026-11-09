@@ -27,7 +27,10 @@ function fixture(item = 'cobblestone') {
     async lookAt() {}, waitForTicks: async () => {},
     supportFeature: () => false, _genericPlace: async () => {}, swingArm: () => {},
     _client: { write() {} },
+    // 与 mineflayer 1.19+ 一致：activateItem 发带 sequence 的 use_item。
+    activateItem() { sequence++; bot._client.write('use_item', { hand: 0, sequence }); },
   };
+  let sequence = 0;
   const adapter = new MineflayerAdapter(config, new EventBus());
   adapter.bot = bot; adapter.mcData = registry; (adapter as any).connectedFlag = true;
   adapter.moveTo = async () => {};
@@ -114,7 +117,8 @@ test('boat and raft placement forces the look at the water surface then sends us
     f.bot.lookAt = async (point: any, force: any) => { looks.push({ point, force }); };
     f.bot._client.write = async (name: string, params: any) => {
       assert.equal(name, 'use_item', '放船要发 use_item（右键用物品）而不是 block_place');
-      assert.deepEqual(params, { hand: 0 });
+      assert.equal(params.hand, 0);
+      assert.equal(typeof params.sequence, 'number', '1.19+ 的 use_item 必须带 sequence');
       f.bot.entities[88] = { id: 88, name: 'boat', position: water.offset(0.5, 0.9, 0.5) };
     };
     const pending = f.adapter.useItemOn(item, { kind: 'block', pos: water }, new AbortController().signal);

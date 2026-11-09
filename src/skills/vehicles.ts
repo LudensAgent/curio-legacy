@@ -21,6 +21,16 @@ export function openWater(ctx: Ctx, p: Vec3Like, r = 2): number {
   return n;
 }
 
+/** 船身碰撞箱（1.375 宽、0.5625 高）浮在液面时会伸进相邻 8 列的水面那一层和上一层：这两层的 3×3 里不能有实心方块。 */
+const BOAT_CLEAR = new Set([...AIRISH, ...WATERISH, 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass']);
+/** 船能不能放在这格水面上：服务器放船前会检查船身碰撞箱，贴着岸/堤/墙的一格水面会被拒（不扣船、不出实体）。 */
+export function boatFits(ctx: Ctx, p: Vec3Like): boolean {
+  for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) for (const dy of [0, 1]) {
+    if (!BOAT_CLEAR.has(ctx.adapter.blockAt({ x: p.x + dx, y: p.y + dy, z: p.z + dz }) ?? '')) return false;
+  }
+  return true;
+}
+
 /** 能站人的格子：脚下实心、不是液体，脚和头两格可通过 */
 export function standable(ctx: Ctx, p: Vec3Like): boolean {
   const below = ctx.adapter.blockAt({ x: p.x, y: p.y - 1, z: p.z });

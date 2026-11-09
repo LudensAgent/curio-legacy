@@ -27,6 +27,8 @@ const runner = (a: FakeAdapter, memory = new WorldMemory(null)) => {
 test('基础动作可以组合出“造船过河”：放船 → 坐上去 → 划过去 → 靠岸下船（这是 LLM 自己能拼出来的组合，不是专门的技能）', async () => {
   const a = new FakeAdapter();
   lake(a);
+  // 站在岸边一格：最近那列水面紧贴岸（船身会撞岸，原版不让放），实际放在离岸一格的开阔水面上。
+  a.pos = { x: 1.5, y: 64, z: 0.5 };
   a.inv.set('oak_boat', 1);
   const run = runner(a);
   let r = await run('use_item', { item: 'oak_boat', on: 'water', dir: 'E' });

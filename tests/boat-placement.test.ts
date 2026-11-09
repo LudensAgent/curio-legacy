@@ -92,6 +92,8 @@ function boatFixture(opts: { feetY?: number; item?: string; blockers?: { name: s
     blockAt,
     async equip(held: any) { bot.heldItem = held; },
     clearControlStates() {}, deactivateItem() {}, pathfinder: { stop() {}, setGoal() {} },
+    // 与 mineflayer 1.19+ 一致：activateItem 发带 sequence 的 use_item。
+    activateItem() { bot._client.write('use_item', { hand: 0, sequence: 1 }); },
     waitForTicks: async () => {},
     supportFeature: () => false, _genericPlace: async () => {}, swingArm: () => {},
     _client: { write(name: string) { writes.push(name); } },
@@ -227,4 +229,28 @@ test('boat_path 水路判定未变：船仍按原口径把 1 格宽缝隙判为�
   const route = planBoatRoute(ctx, a.pos, { x: 15.5, z: 0.5 }, {});
   assert.equal(route?.reach, 'partial', '1 格宽缝隙挤不过去，应仍报 partial');
   assert.ok(route?.waypoints.every((w) => !(Math.floor(w.x) === 10 && Math.floor(w.z) === 0)), '不应把 1 格宽的缝当成水路');
+});
+
+// ------------------------------------------------------------------ 船身碰撞箱：贴岸一格水面不放
+test('use_item 放船只挑船身放得下的水面：贴着堤岸的一格水面如实报“放不下”，不对着它空发 use_item', async (t) => {
+  const a = new FakeAdapter();
+  // 一条 1 格宽的石堤（y63 顶）旁边是 y62 的水：紧贴堤岸那一列水面船身会撞堤。
+  for (let x = -2; x <= 6; x++) for (let z = -3; z <= 3; z++) a.blocks.push({ name: z === 0 ? 'stone' : 'water', pos: { x, y: 62, z } });
+  for (let x = -2; x <= 6; x++) for (let z = -3; z <= 3; z++) a.blocks.push({ name: z === 0 ? 'stone' : 'air', pos: { x, y: 63, z } });
+  a.pos = { x: 2.5, y: 64, z: 0.5 };
+  a.inv.set('oak_boat', 1);
+  const nearShore = [-1, 1].map((z) => ({ name: 'water', pos: { x: 2, y: 62, z }, dist: 2 }));
+  const used: unknown[] = [];
+  a.useItemOn = (async (_item: string, target: unknown) => { used.push(target); return { ok: true }; }) as typeof a.useItemOn;
+  const tight = makeCtx(a, { senses: { knownBlocks: () => nearShore, observeBlocks: () => [] } });
+  t.after(() => tight.memory.close());
+  const r = await useItem.run(tight, { item: 'oak_boat', on: 'water' });
+  assert.equal(r.failureCode, 'NOT_FOUND');
+  assert.match(r.summary, /贴着岸\/堤\/墙.*船身约 1\.375 格宽/);
+  assert.equal(used.length, 0, '放不下的水面不发 use_item');
+
+  const open = makeCtx(a, { senses: { knownBlocks: () => [...nearShore, { name: 'water', pos: { x: 2, y: 62, z: 2 }, dist: 2.5 }], observeBlocks: () => [] } });
+  t.after(() => open.memory.close());
+  await useItem.run(open, { item: 'oak_boat', on: 'water' });
+  assert.deepEqual(used, [{ kind: 'block', pos: { x: 2, y: 62, z: 2 } }], '只对离岸一格的开阔水面放船');
 });

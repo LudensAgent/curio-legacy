@@ -4947,7 +4947,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             ] } };
           }
           sent++;
-          await this.afterAction(async () => { b.swingArm('right'); await b._client.write('use_item', { hand: 0 }); }, check);
+          // 用 mineflayer 的 activateItem 发 use_item：1.19+ 的包必须带 sequence（手写 {hand} 缺字段）；船是瞬时使用，随即松开。
+          await this.afterAction(async () => { b.swingArm('right'); b.activateItem(); b.deactivateItem(); }, check);
           await this.waitForInteraction(() => !!appeared(), check, 1000);
           entity = appeared();
         }
