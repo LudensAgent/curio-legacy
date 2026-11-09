@@ -7,7 +7,7 @@ import { sighted, yawOfDir } from './movement.ts';
 import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type NavOutcome, type Skill, type SkillResult } from './types.ts';
 import { resolveItemAlias } from './work.ts';
 import { isStation, rememberStation } from './stations.ts';
-import { openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
+import { boatFits, openWater, planBoatRoute, type BoatRoute } from './vehicles.ts';
 import { planWaterRoute } from './water-route.ts';
 
 /**
@@ -191,6 +191,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         .filter((h) => !fluid || !boat || AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air'))
         .filter((h) => !fluid || !boat || openWater(ctx, h.pos, 2) >= 4)
         .filter((h) => dirOk(args.dir, s.pos, h.pos));
+      // 船身碰撞箱伸进相邻列：贴岸/贴墙那一格水面服务器必拒，先筛掉，并记下被筛掉几格好如实回报。
+      const tooTight = fluid && boat ? hits.filter((h) => !boatFits(ctx, h.pos)).length : 0;
+      if (tooTight) hits = hits.filter((h) => boatFits(ctx, h.pos));
       const hadSurface = hits.length > 0;
       if (collectSource && hadSurface) {
         const levels = new Map((senses.observeBlocks?.(hits.map((h) => h.pos)) ?? [])
@@ -209,6 +212,7 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
           const at = stale.slice(0, 3).map((h) => `(${h.pos.x},${h.pos.y},${h.pos.z})`).join('、');
           return fail('NOT_FOUND', `记得的 ${args.on} 已经不是当前方块了（记忆过期）：${at}${stale.length > 3 ? ` 等 ${stale.length} 处` : ''}；没有对着旧位置使用，先重新看见或换一处`, { stale: stale.slice(0, 8).map((h) => ({ ...h.pos })) });
         }
+        if (tooTight) return fail('NOT_FOUND', `看得见的 ${tooTight} 格水面都贴着岸/堤/墙：船身约 1.375 格宽，四周 3×3（水面层和上一层）有实心方块的水面服务器不让放船；没有放。离岸再远一格的开阔水面才放得下（要不要挪、往哪挪由你定）`, { tooTight });
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {
