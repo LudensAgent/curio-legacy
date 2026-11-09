@@ -1444,7 +1444,7 @@ export class Mind {
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     if (ev.type === 'milestone') this.d.self.feel({ type: 'milestone' });
-    if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(); }
+    if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(typeof (ev.data as { around?: unknown } | undefined)?.around === 'string' ? (ev.data as { around: string }).around : ''); }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });
@@ -1458,7 +1458,7 @@ export class Mind {
    * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
    */
   private hurtAt = 0;
-  private hurtWhileBusy() {
+  private hurtWhileBusy(cause = '') {
     const now = Date.now();
     if (now - this.hurtAt < 8000) return;
     this.hurtAt = now;
@@ -1471,8 +1471,25 @@ export class Mind {
       const waterEscape = state.inWater && WATER_ESCAPE.has(acting);
       if (!waterEscape && COMBAT.has(cur.skill)) return;
       const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
-      if (!hostiles.length) return;
       const hp = Math.round(state.hp * 10) / 10;
+      if (!hostiles.length) {
+        // 没有怪，但身体在掉血（着火、岩浆、摔、窒息、溺水……）：原来直接返回，手上的移动会一路烧到见底
+        // （下界实测 16.5 → 2 血，explore_toward 一直在走）。不替它脱险，只停下并把伤害事实交回心智；
+        // 走 glance——认真想要十几秒，着火时等不起。
+        if (!cause && !state.inLava) return;
+        const why = cause || '身体在岩浆里';
+        if (waterEscape) {
+          this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
+          return;
+        }
+        if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
+        this.d.arbiter.cancel('掉血了');
+        if (this.activity) this.resumeCheck = this.activity.id;
+        this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；手上的事先停了，怎么脱离由你定`, 'glance');
+        const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），手上的事先停了`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
       const hostileText = hostiles.slice(0, 3).map((h) => `${h.name} ${Math.round(h.dist)}格`).join('、');
       // 人在水里时停下来就是下沉：保留 Agent 自己选的出水/换气动作，只把挨打事实和怪的位置交给它。
       // 思考走 glance——缺氧时再排一次十几秒的 deliberate，命已经没了。
