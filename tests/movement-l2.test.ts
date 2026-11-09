@@ -84,3 +84,14 @@ test('boat_path 只驾驶已乘坐载具', async (t) => {
   assert.equal(r.failureCode, 'BAD_ARGS');
   assert.match(r.summary, /没有在乘坐/);
 });
+
+test('swim_path 把整数 x/z 当方块坐标取格心，带小数的脚坐标原样保留，再校验不变', () => {
+  const w = new FakeAdapter();
+  const v = swimPath.validate({ mode: 'dry_shore', xyz: { x: -502, y: 63, z: -210 } }, w);
+  assert.ok(v.ok);
+  assert.deepEqual(v.args.xyz, { x: -501.5, y: 63, z: -209.5 }, '整数 x/z 在方块边界上，身体会卡在两列之间');
+  assert.deepEqual(swimPath.validate(v.args, w), v);
+  const exact = swimPath.validate({ mode: 'water_point', xyz: [3.2, 62, -7.8] }, w);
+  assert.ok(exact.ok);
+  assert.deepEqual(exact.args.xyz, { x: 3.2, y: 62, z: -7.8 });
+});

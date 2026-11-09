@@ -668,7 +668,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     // 委托前就冻结自己的位置/氧气/观测时刻：state().pos 可能是可变引用，不克隆会被底层动作改成新主人的状态。
     const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
     // 目标格已观察为岩浆：swim_path 只有水面控制，明确拒绝而不是把身体开进岩浆；风险事实交给 Agent 决定下一步。
-    if (a.blockAt(args.xyz) === 'lava') {
+    if (a.blockAt({ x: Math.floor(args.xyz.x), y: Math.floor(args.xyz.y), z: Math.floor(args.xyz.z) }) === 'lava') {
       return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_path 只做水面游泳，不执行进入岩浆；如果确实要靠近，风险与做法由你选择`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     }
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
