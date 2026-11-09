@@ -7,6 +7,7 @@ export { walkPath } from './walk.ts';
 export { navigateTo } from './navigate.ts';
 export { advance } from './advance.ts';
 export { travelTo } from './travel-to.ts';
+export { exploreToward } from './explore-toward.ts';
 export {
   clearMovementSessions, createMovementSession, findMovementSession, activeMovementSession,
   intentKeyOf, MOVEMENT_SESSION_CAPACITY, MOVEMENT_SESSION_TTL_MS,
