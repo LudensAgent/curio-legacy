@@ -1,4 +1,4 @@
-import type { AgentState } from '../adapter/types.ts';
+import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
 import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
@@ -13,7 +13,7 @@ import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { portalAgeText, travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
-import { describeBuild, homeOf, myBuilds } from './home.ts';
+import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
@@ -736,12 +736,17 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
 function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  // 相对自己的方位、水平距离与高差：坐标换算方向容易算反，直接给出
+  const bearing = (pos: Vec3Like) => {
+    const d = Math.round(Math.hypot(pos.x - here.x, pos.z - here.z)), dy = Math.round(pos.y - here.y);
+    return `${d ? `${dirOf(here, pos)} ` : ''}${d}格${dy ? `，${dy > 0 ? '高' : '低'} ${Math.abs(dy)} 格` : ''}`;
+  };
   // 自己的设施（箱子、工作站、床）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
   const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
-    .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
-    .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
+    .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 8)
+    .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
@@ -752,21 +757,30 @@ function worldKnowledge(ctx: MindContext) {
   });
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
-  const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
-    // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
-    const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
-      .map((r) => [`${r.toId}:${r.returnVerified}`, { to: r.toId, return_verified: r.returnVerified }])).values()];
-    const nowBlock = ctx.blockAt?.(e.pos) ?? null;
-    const now = nowBlock === e.kind ? `仍是 ${e.kind}`
-      : nowBlock === null ? '未加载(未知)'
-      : `现为 ${nowBlock}`;
-    return {
-      id: e.id, dim: e.dim, kind: e.kind, pos: e.pos,
-      portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
-      recorded_ago: portalAgeText(e.observedAt),
-      ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
-    };
-  });
+  const endpointById = new Map(portalSnapshot.endpoints.map((e) => [e.id, e]));
+  // 只列当前维度、离自己最近的几处门：别的维度的门走不过去，只在 leads_to 里说明落点；
+  // 方块核对用的是当前维度的区块数据，跨维度的坐标查出来的不是那扇门。
+  const portals = portalSnapshot.endpoints.filter((e) => e.dim === p.self.dim)
+    .map((e) => ({ e, d: Math.hypot(e.pos.x - here.x, e.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 4)
+    .map(({ e }) => {
+      // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
+      const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
+        .map((r) => {
+          const to = endpointById.get(r.toId);
+          return [`${r.toId}:${r.returnVerified}`, { to: r.toId, ...(to ? { dim: to.dim, pos: to.pos } : {}), return_verified: r.returnVerified }];
+        })).values()];
+      const nowBlock = ctx.blockAt?.(e.pos) ?? null;
+      // 证据是客户端已加载的区块数据，只核对记录坐标这一格，不是这次视野亲眼看见
+      const now = nowBlock === null ? '区块未加载(未知)'
+        : nowBlock === e.kind ? `记录格仍是 ${e.kind}（区块数据）`
+        : `记录格现为 ${nowBlock}（区块数据，非视野所见）`;
+      return {
+        id: e.id, kind: e.kind, pos: e.pos, from_here: bearing(e.pos),
+        portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
+        recorded_ago: portalAgeText(e.observedAt),
+        ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
+      };
+    });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
