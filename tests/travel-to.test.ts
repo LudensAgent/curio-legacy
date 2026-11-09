@@ -177,6 +177,26 @@ test('travel_to via:history 拓扑没有路线时沿记录过的路径片段（�
   assert.equal(travelTo.validate({ to: '1,2', via: { fragment: '' } }, h.adapter).ok, false);
 });
 
+test('travel_to 直走没到时回报记录里有没有沿走过的路通往目标，不自动改走历史路线', async () => {
+  const cells = Array.from({ length: 30 }, (_, i) => ({ x: i, y: 64, z: 0 }));
+  const links = cells.slice(1).map((b, i) => ({ a: cells[i]!, b }));
+  const fragment = { id: 'psg_walk', worldId: 'w', dim: 'overworld', kind: 'walked', entrances: [], polyline: [cells[0]!, cells.at(-1)!], geometrySource: 'legacy', links, deepestY: 64, createdAt: 1, lastUsedAt: 1, uses: 1 };
+  const query = (q: { kind: string }) => q.kind === 'fragments' ? { status: 'ok', data: { kind: 'fragments', items: [fragment] } } : { status: 'ok', data: null };
+  const h = harness({ blocked: () => true });
+  (h.ctx as { spatial?: unknown }).spatial = { query };
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 29, z: 0 } }, h.adapter));
+  assert.equal(r.status, 'failed');
+  assert.ok(h.calls.every(({ target }) => target.kind !== 'near'), '没有擅自沿历史路点走');
+  assert.deepEqual((r.data?.recordedRoute as { fragments: string[] }).fragments, ['psg_walk']);
+  assert.match(r.summary, /记录里有从你附近出发.*via:"history" 会沿它走/);
+
+  const none = harness({ blocked: () => true });
+  (none.ctx as { spatial?: unknown }).spatial = { query: () => ({ status: 'ok', data: { kind: 'fragments', items: [] } }) };
+  const n = await travelTo.run(none.ctx, argsOf({ to: { x: 29, z: 0 } }, none.adapter));
+  assert.equal(n.data?.recordedRoute, undefined);
+  assert.doesNotMatch(n.summary, /记录里有从你附近/);
+});
+
 test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目标在下方多少格', async () => {
   const h = harness({ blocked: () => true });
   const r = await travelTo.run(h.ctx, argsOf({ to: { x: 3, y: 10, z: 0 } }, h.adapter));
