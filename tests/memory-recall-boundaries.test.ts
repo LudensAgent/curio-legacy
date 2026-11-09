@@ -241,3 +241,34 @@ test('Hindsight inference never refreshes container precision and keeps mention 
   assert.equal(writes, 0);
   assert.ok(Buffer.byteLength(JSON.stringify(result.memories)) <= settings.maxContextBytes);
 });
+
+test('记忆服务超时后长时间退避：后续想事情直接用本地回忆，不再每次等满超时', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-recall-backoff-'));
+  const memory = new WorldMemory(null), adapter = new FakeAdapter();
+  t.after(() => { memory.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  memory.setWorld(adapter.worldId);
+  let calls = 0;
+  const backend: MemoryBackend = {
+    async retain() {}, async clear() {},
+    recall: (_request, signal) => { calls++; return new Promise<MemoryEntry[]>((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))); },
+  };
+  const settings: MemorySettings = { provider: 'hindsight', worldId: adapter.worldId, agentId: 'test', baseUrl: 'http://unused.test',
+    bankId: 'test', apiKey: '', timeoutMs: 50, maxContextBytes: 5000 };
+  const service = new EpisodicMemory(settings, memory, new EventBus(), () => adapter.state(), directory, backend);
+  service.start();
+  t.after(() => service.stop());
+  const ask = () => service.recall({ percept: { self: { dim: 'overworld', pos: [0, 64, 0] }, objective: null, nearby: {} }, lastFailure: null, userSuggestion: null }, '箱子');
+  await ask();
+  assert.equal(calls, 1);
+  const real = Date.now;
+  t.after(() => { Date.now = real; });
+  // 旧退避 1 s 就会重试；超时改为至少 30 s。
+  Date.now = () => real() + 20_000;
+  const started = real();
+  await ask();
+  assert.equal(calls, 1, '退避期内不再请求远端');
+  assert.ok(real() - started < 40, '退避期内直接用本地回忆，不等超时');
+  Date.now = () => real() + 31_000;
+  await ask();
+  assert.equal(calls, 2, '退避结束后再试一次');
+});
