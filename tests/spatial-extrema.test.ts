@@ -86,11 +86,18 @@ test('spatial_extrema：kind/archived 过滤、分页与 truncated', async () =>
     [fragment('a', [at(0, 30, 0)])],
     [fragment('b', [at(0, 20, 0)]), fragment('archived', [at(0, 10, 0)], { metadata: { curio: { archivedAt: 5 } } })],
   ]);
-  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'deepest', kinds: ['dug'], maxFragments: 10 });
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'deepest', kinds: ['dug'], maxFragments: 10, includeArchived: false });
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal((r.data?.best as { fragment: { id: string } }).fragment.id, 'b', 'archived 默认过滤');
+  assert.equal((r.data?.best as { fragment: { id: string } }).fragment.id, 'b', 'includeArchived:false 时不计归档片段');
   assert.equal((r.data?.scanned as { pages: number }).pages, 2);
   assert.equal((r.data?.scanned as { archivedSkipped: number }).archivedSkipped, 1);
+  // 归档只是旧运行时工作集淘汰，不是失效：默认计入并标注
+  const { spatial: all } = fakeSpatial([[fragment('b', [at(0, 20, 0)]), fragment('archived', [at(0, 10, 0)], { metadata: { curio: { archivedAt: 5 } } })]]);
+  const parsed = spatialExtrema.validate({ metric: 'deepest' }, new FakeAdapter());
+  assert.ok(parsed.ok && parsed.args.includeArchived === true, '默认计入归档片段');
+  const d = await spatialExtrema.run(ctxOf(all), parsed.args);
+  assert.equal((d.data?.best as { fragment: { id: string; archived?: boolean } }).fragment.id, 'archived');
+  assert.equal((d.data?.best as { fragment: { archived?: boolean } }).fragment.archived, true);
   assert.equal(calls[0].fragmentKind, 'dug');
   assert.equal(calls[1].after, 'cursor-1');
 
@@ -122,4 +129,45 @@ test('spatial_extrema：跨维度 farthest 没给 origin 时拒绝，参数边�
   assert.equal(spatialExtrema.validate({ metric: 'deepest', origin: { x: 0, y: 0 } }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'deepest', space: 'diagonal' }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'nope' }, w).ok, false);
+});
+
+test('spatial_extrema：deepest 计入旧 links 里的每一格，maxDistance 只看离原点范围内的点', async () => {
+  const links = [{ a: at(0, 60, 0), b: at(1, 59, 0) }, { a: at(1, 59, 0), b: at(2, 12, 0) }, { a: at(200, 12, 0), b: at(200, -50, 0) }];
+  const { spatial } = fakeSpatial([[fragment('old', [at(0, 60, 0)], { links, deepestY: -50, geometrySource: 'legacy' })]]);
+  const all = await spatialExtrema.run(ctxOf(spatial), { metric: 'deepest' });
+  assert.equal((all.data?.best as { point: { y: number } }).point.y, -50, 'polyline 只是抽样，links 的格也算');
+  const { spatial: s2 } = fakeSpatial([[fragment('old', [at(0, 60, 0)], { links, deepestY: -50, geometrySource: 'legacy' })]]);
+  const near = await spatialExtrema.run(ctxOf(s2), { metric: 'deepest', maxDistance: 32 });
+  assert.equal((near.data?.best as { point: { y: number } }).point.y, 12);
+  assert.match(near.summary, /离原点 32 格内/);
+});
+
+test('spatial_extrema：gaps 列出记录路径断开处的最近格对与两侧片段', async () => {
+  const line = (id: string, x0: number, n: number) => fragment(id, [at(x0, 64, 0)], {
+    links: Array.from({ length: n - 1 }, (_, i) => ({ a: at(x0 + i, 64, 0), b: at(x0 + i + 1, 64, 0) })), geometrySource: 'legacy',
+  });
+  const { spatial } = fakeSpatial([[line('west', 0, 10), line('east', 14, 5), line('faraway', 100, 5)]]);
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'gaps', maxGap: 8, limit: 10 });
+  assert.equal(r.status, 'succeeded', r.summary);
+  const gaps = r.data?.gaps as { a: { x: number }; b: { x: number }; distance: number; delta: { dx: number }; sideA: { fragments: string[] }; sideB: { fragments: string[] }; fromOrigin: number }[];
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0]!.distance, 5);
+  assert.deepEqual([...gaps[0]!.sideA.fragments, ...gaps[0]!.sideB.fragments].sort(), ['east', 'west']);
+  assert.equal(r.data?.components, 3);
+  assert.match(r.summary, /中间实际是什么要看当前方块/);
+  const { spatial: s2 } = fakeSpatial([[line('west', 0, 10), line('east', 14, 5)]]);
+  const far = await spatialExtrema.run(ctxOf(s2), { metric: 'gaps', maxGap: 8, limit: 10, maxDistance: 2 });
+  assert.equal((far.data?.gaps as unknown[]).length, 0, '离原点太远的缺口不列');
+});
+
+test('spatial_extrema：explored 按区块访问记录给八方位最远与边缘区块', async () => {
+  const visits = [-1, 0, 1, 2, 3].map((cx) => ({ cx, cz: 0, count: 1 }));
+  const spatial = { closing: false, session: { lifecycle: 'open', ledger: { chunkVisits: () => visits } }, query: () => { throw new Error('不读片段'); } } as unknown as SharedSpatialSession;
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'explored' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.visitedChunks, 5);
+  const sectors = r.data?.sectors as Record<string, { farthest: { distance: number }; edgeChunks: number }>;
+  assert.equal(sectors.E!.farthest.distance, Math.round(3 * 16 + 8 - 0.5));
+  assert.equal(Object.values(sectors).reduce((n, sector) => n + sector.edgeChunks, 0), 5, '一排区块每块都有没去过的邻区块');
+  assert.deepEqual(r.data?.bounds, { minX: -16, maxX: 63, minZ: 0, maxZ: 15 });
 });
