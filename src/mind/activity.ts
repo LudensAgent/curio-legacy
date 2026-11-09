@@ -604,7 +604,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // 水面技能的 data.stage）；没有报告的技能保持没有，不由耗时或位置臆造阶段。
   const navStage = reportedStage(result);
   // 只留能判定“定位/取得/位移/覆盖”的回执字段；整份 data（尤其 local 图）不进活动历史。
-  const RECEIPT_KEYS = new Set(['found', 'foundPos', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
+  const RECEIPT_KEYS = new Set(['found', 'foundPos', 'foundRef', 'foundEntityId', 'visibleEntities', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
     'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall']);
   const receipt = result.data
     ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
@@ -667,6 +667,17 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     }
     const reached = conditionReached();
     if (reached) return reached;
+    // approach_visible 已实测抵达：重复同一个接近步骤不会产生新的探索距离。
+    // exploration 收工条件只验收本段，不能反过来逼着重放一个已完成的接近。
+    if (step.skill === 'approach_visible' && result.data?.outcome === 'ARRIVED'
+      && a.repeat > 1 && a.steps.slice(a.index).length === 0
+      && a.steps.every((own) => own.skill === step.skill && JSON.stringify(own.args) === JSON.stringify(step.args))
+      && hasExplorationCondition(a.doneWhen)) {
+      return {
+        kind: 'done', met: false,
+        why: `approach_visible 已实测抵达；重复同一接近不会产生新的探索距离，不再重复执行；位置 (${state.pos.x.toFixed(1)},${state.pos.y.toFixed(1)},${state.pos.z.toFixed(1)})${conditionUnmet()}`,
+      };
+    }
     // 挖了一部分后遇到空洞也算动作有实际效果，但重复回到同一格继续挖不能当作下行进展。
     // 只记录身体明确报告的停点；交回心智决定是否继续，不能替它选路。
     if (step.skill === 'excavate_run' && a.repeat > 1) {
@@ -984,6 +995,17 @@ function explorationOf(a: Activity, end: { x: number; y: number; z: number }, ne
   };
 }
 
+/**
+ * done_when 里是否含 exploration（含 all_of/any_of 嵌套）。
+ * 这类条件按本段实测位移验收，不能用重复一个已完成的接近来“凑距离”。
+ */
+function hasExplorationCondition(condition: Activity['doneWhen']): boolean {
+  if (condition === undefined) return false;
+  if (condition.type === 'exploration') return true;
+  return (condition.type === 'all_of' || condition.type === 'any_of')
+    && condition.conditions.some(hasExplorationCondition);
+}
+
 /** 活动内评估 done_when 时附带实测探索证据；没有它时 exploration 条件只能返回 unknown。 */
 function activityPerception(a: Activity, state: AgentState, percept?: Percept): ConditionPerception {
   return { ...(percept as unknown as ConditionPerception), activityExploration: explorationOf(a, state.pos, null) };
@@ -1026,7 +1048,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
     ...(intent || attemptOnly ? { resource: { intent, located, acquired, goalIncomplete: attemptOnly || (intent && !acquired) } } : {}),
-    ...(exploration.searchIntent ? { exploration } : {}),
+    ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
     at: Date.now(), signature: signatureOf(a.steps),

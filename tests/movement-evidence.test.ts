@@ -30,6 +30,7 @@ test('directional observation rejects remembered or opposite targets and disting
   assert.equal(found.data?.alreadyVisible, false);
   assert.equal(found.data?.turned, true);
   assert.deepEqual(found.data?.foundPos, newSouth.pos);
+  assert.deepEqual(found.data?.foundRef, { kind: 'block', pos: newSouth.pos });
   assert.deepEqual(found.data?.finalView, { yaw: adapter.eye()!.yaw, pitch: adapter.eye()!.pitch });
   const known = await lookAround.run(ctx, { for: 'stone', direction: 'S', seconds: 2 });
   assert.equal(views, 2, 'a currently visible target in the requested direction needs no extra turn');
@@ -43,4 +44,25 @@ test('directional observation rejects remembered or opposite targets and disting
   assert.equal(missing.failureCode, 'NOT_FOUND');
   assert.equal(missing.data?.searched, true);
   assert.equal(lookAround.outcomeBoundary, true, 'actual observation remains a decision boundary');
+});
+
+test('look_around 看见实体时给稳定 id 和真实位置，扫描回执列出附近实体', async (t) => {
+  t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { queueMicrotask(callback); return 0; }) as unknown as typeof setTimeout);
+  const adapter = new TestWorld();
+  const cow = { id: 7, name: 'cow', kind: 'passive' as const, pos: { x: 2.5, y: 64, z: 0.5 }, dist: 3, perception: 'seen' as const };
+  const ctx = makeCtx(adapter, { senses: { perceivedEntities: () => [cow] } });
+  t.after(() => ctx.memory.close());
+  t.mock.method(adapter, 'look', async () => {});
+
+  const found = await lookAround.run(ctx, { for: 'cow', seconds: 2 });
+  assert.equal(found.status, 'succeeded', found.summary);
+  assert.match(found.summary, /实体 id=7/);
+  assert.match(found.summary, /位置 \(2,64,0\)/);
+  assert.deepEqual(found.data?.foundRef, { kind: 'entity', id: 7, name: 'cow' });
+  assert.equal(found.data?.foundEntityId, 7);
+
+  const sweep = await lookAround.run(ctx, { seconds: 2 });
+  assert.match(sweep.summary, /附近看见 cow\(id=7/);
+  assert.match(sweep.summary, /位置 \(2,64,0\)/);
+  assert.equal((sweep.data?.visibleEntities as { id: number }[])[0]?.id, 7);
 });
