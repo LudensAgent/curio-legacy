@@ -40,6 +40,10 @@ export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: 
   return null;
 }
 
+/** 看见的位置要进回执摘要：只有方向+距离时，模型会把 resolve_target 的方向点误当成方块坐标。 */
+const seenAt = (hit: { pos?: Vec3Like }) => hit.pos
+  ? `，位置 (${Math.floor(hit.pos.x)},${Math.floor(hit.pos.y)},${Math.floor(hit.pos.z)})` : '';
+
 // ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number; for?: string; direction?: string }> = {
   name: 'look_around',
@@ -77,7 +81,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     };
     if (args.for) {
       const known = observed();
-      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外）；没有转头，也没有新的搜索发现`, facts(0, known));
+      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外${seenAt(known)}）；没有转头，也没有新的搜索发现`, facts(0, known));
     }
     // 定向：在该方向 ±75° 扇形里看 5 个角度；全向：转一圈 8 个角度
     const sector = args.direction ? DIRS[args.direction] : null;
@@ -93,7 +97,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       ctx.progress((k + 1) / yaws.length, args.for ? `寻找 ${args.for}` : '环顾四周');
       if (args.for) {
         const f = observed();
-        if (f) return ok(`${args.direction ? `${args.direction} 方向` : '转头后'}看见 ${f.what}（${f.dist} 格外）${priorKnown.has(f.key) ? '，是已知目标的当前观察' : '，本次新发现'}`, facts(k + 1, f));
+        if (f) return ok(`${args.direction ? `${args.direction} 方向` : '转头后'}看见 ${f.what}（${f.dist} 格外${seenAt(f)}）${priorKnown.has(f.key) ? '，是已知目标的当前观察' : '，本次新发现'}`, facts(k + 1, f));
       }
     }
     if (!sector) ctx.senses.markSweep();

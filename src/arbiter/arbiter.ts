@@ -188,6 +188,8 @@ export class Arbiter extends EventEmitter {
     const skill = SKILLS[step.skill];
     if (!skill) return { ok: false, error: `未知技能：${step.skill}` };
     if (isSkillDisabled(skill.name)) return { ok: false, error: `技能 ${step.skill} 已在控制台禁用；请启用或改用其他技能` };
+    // 步骤参数通常来自 validatePlanSkill 的规范化输出；这里会再校验一次，所以 skill.validate 必须
+    // 能接受自己返回的 args（幂等）。否则第一次通过、执行前必失败。
     return validateSkill(skill, step.args ?? {}, this.adapter);
   }
 

@@ -36,26 +36,46 @@ const point = (v: unknown): Vec3Like | null => {
 };
 const dist = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 
+function entityTarget(e: unknown): Target | string {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return 'entity 需要 {id?} 或 {name?}';
+  const r = e as Record<string, unknown>;
+  if (r.id !== undefined && (!Number.isInteger(r.id) || (r.id as number) < 0)) return 'entity.id 必须是非负整数';
+  if (r.name !== undefined && (typeof r.name !== 'string' || !r.name.trim())) return 'entity.name 必须是非空字符串';
+  if (r.id === undefined && r.name === undefined) return 'entity 需要 id 或 name';
+  return { kind: 'entity', ...(r.id !== undefined ? { id: r.id as number } : {}), ...(r.name !== undefined ? { name: String(r.name) } : {}) };
+}
+
 function targetOf(raw: unknown): Target | string {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'target 必须是对象';
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'target 必须是对象，例如 {"pos":{"x":0,"y":64,"z":0}}';
   const t = raw as Record<string, unknown>;
   const keys = Object.keys(t).filter((k) => t[k] !== undefined);
-  if (keys.length !== 1) return 'target 必须且只能指定 pos、block 或 entity 之一';
-  if (keys[0] === 'pos' || keys[0] === 'block') {
-    const p = point(t[keys[0]]);
-    if (!p) return `${keys[0]} 需要 {x,y,z} 三个有限数字`;
-    return { kind: keys[0] === 'pos' ? 'position' : 'block', pos: p };
+  const kind = typeof t.kind === 'string' ? t.kind.trim().toLowerCase() : undefined;
+  // validate() 返回的是规范化 target，而 Arbiter 在执行前会再校验一次；必须接受自己的输出。
+  // 实体规范化后是扁平的 {kind:"entity", id?, name?}，位置/方块是 {kind, pos}。
+  if (kind === 'entity' && !('pos' in t) && !('block' in t) && !('entity' in t)
+    && keys.every((k) => k === 'kind' || k === 'id' || k === 'name')) {
+    return entityTarget({ id: t.id, name: t.name });
   }
-  if (keys[0] === 'entity') {
-    const e = t.entity;
-    if (!e || typeof e !== 'object' || Array.isArray(e)) return 'entity 需要 {id?} 或 {name?}';
-    const r = e as Record<string, unknown>;
-    if (r.id !== undefined && (!Number.isInteger(r.id) || (r.id as number) < 0)) return 'entity.id 必须是非负整数';
-    if (r.name !== undefined && (typeof r.name !== 'string' || !r.name.trim())) return 'entity.name 必须是非空字符串';
-    if (r.id === undefined && r.name === undefined) return 'entity 需要 id 或 name';
-    return { kind: 'entity', ...(r.id !== undefined ? { id: r.id as number } : {}), ...(r.name !== undefined ? { name: String(r.name) } : {}) };
+  // kind 只是目标类型的说明，必须与唯一的目标键一致；规范化后的方块目标也写作 {kind:"block", pos}。
+  const payload = keys.filter((k): k is 'pos' | 'block' | 'entity' => k === 'pos' || k === 'block' || k === 'entity');
+  const key = payload[0];
+  const effective = kind === 'position' ? (key === 'pos' ? 'position' : undefined)
+    : kind === 'block' ? (key === 'pos' || key === 'block' ? 'block' : undefined)
+    : kind === 'entity' ? (key === 'entity' ? 'entity' : undefined)
+    : key === 'pos' ? 'position' : key === 'block' ? 'block' : key === 'entity' ? 'entity' : undefined;
+  const foreign = keys.filter((k) => k !== 'kind' && k !== 'pos' && k !== 'block' && k !== 'entity');
+  if (foreign.length || payload.length !== 1 || effective === undefined) {
+    return `target 必须且只能指定 pos、block 或 entity 之一，例如 {"pos":{"x":0,"y":64,"z":0}}；不要再套 kind`;
   }
-  return 'target 只接受 pos、block 或 entity';
+  if (effective === 'position' || effective === 'block') {
+    const p = point(t[key]);
+    if (!p) return `${key} 需要 {x,y,z} 三个有限数字`;
+    if (effective === 'block' && !['x', 'y', 'z'].every((k) => Number.isInteger(p[k as 'x' | 'y' | 'z']))) {
+      return 'block 需要整数方块坐标；站位坐标请用 pos';
+    }
+    return { kind: effective, pos: p };
+  }
+  return entityTarget(t.entity);
 }
 
 function outcomeOf(code: string | undefined, nested: SkillResult): Outcome {

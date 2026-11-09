@@ -950,7 +950,7 @@ function searchIntentOf(a: Activity): boolean {
 export function planCoverageGap(a: Activity): string | null {
   const travelIntent = /走远|走一段|远行|远走|探路|探索|找树|找.*(树|木|原木|菌柄|log|wood)|换.*(地方|方向)|过去|走到|前往|搜索|搜寻|search|explore|scout|wander/i.test(a.what);
   const changesPosition = a.steps.some((step) => {
-    if (['move_step', 'navigate_to', 'walk_path', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
+    if (['move_step', 'navigate_to', 'approach_visible', 'walk_path', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
     if (step.skill !== 'press_keys') return false;
     const keys = (step.args as { keys?: Record<string, unknown> } | undefined)?.keys ?? {};
     return ['forward', 'back', 'left', 'right', 'sprint'].some((key) => keys[key] === true);
