@@ -49,12 +49,23 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
     const partialLabel = `未完成的下界门框（axis=${args.axis}）`;
     // 这里已经摆过黑曜石（部分/完整门框）：无论这次缺不缺料都先记下位置，回来能补全；点着后清掉
     if (needed < frame.length) ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
-    if ((state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0) < needed) return fail('MISSING_MATERIALS', `还缺 ${needed} 块黑曜石用于门框（背包现有 ${state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0} 块；之前失败的门框上可能还摆着黑曜石，先用钻石镐挖回来凑数）`);
-    for (let y = 1; y <= 4; y++) for (let u = 0; u <= 3; u++) {
-      const name = adapter.blockAt(at(u, y));
-      const isFrame = frame.some((p) => dist3(p, at(u, y)) === 0);
-      if (!name || (!AIR.has(name) && !(isFrame && name === 'obsidian'))) return fail('BAD_ARGS', '门框或内部空间被占用，换一个已观察到的空地');
-    }
+    // 附近记得的其他未完成门框（位置 + 朝向），只作为事实回报，不替 Agent 改选门址。
+    const otherFrames = ctx.memory.landmarks()
+      .filter((l) => l.label.startsWith('未完成的下界门框') && l.dim === state.dim && dist3(l.pos, args.origin) > 0 && dist3(l.pos, state.pos) <= 32)
+      .map((l) => `(${l.pos.x},${l.pos.y},${l.pos.z}) ${l.label.match(/axis=[xz]/)?.[0] ?? ''}`);
+    const framesNote = otherFrames.length ? `；附近还记得未完成门框 origin ${otherFrames.slice(0, 3).join('、')}` : '';
+    const frameNote = `本处门框（origin ${args.origin.x},${args.origin.y},${args.origin.z} axis=${args.axis}）已有 ${frame.length - needed}/${frame.length} 块黑曜石`;
+    const have = state.inventory.find((i) => i.name === 'obsidian')?.count ?? 0;
+    if (have < needed) return fail('MISSING_MATERIALS', `${frameNote}，还需 ${needed} 块，背包现有 ${have} 块${framesNote}`, { needed, have, otherFrames });
+    // 门框格只能是空气或黑曜石，门内 2×3 只能是空气；四个角不属于门，放什么都不影响。
+    const occupied = [1, 2, 3, 4].flatMap((y) => [0, 1, 2, 3].flatMap((u) => {
+      if (y === 4 && (u === 0 || u === 3)) return [];
+      const pos = at(u, y), name = adapter.blockAt(pos);
+      const isFrame = frame.some((p) => dist3(p, pos) === 0);
+      if (name && (AIR.has(name) || (isFrame && name === 'obsidian'))) return [];
+      return [`${isFrame ? '门框' : '门内'} (${pos.x},${pos.y},${pos.z}) 是 ${name ?? '未加载'}`];
+    }));
+    if (occupied.length) return fail('BAD_ARGS', `${frameNote}；以下格子挡住了门：${occupied.join('、')}${framesNote}`, { occupied, otherFrames });
     // 这次要开始立框（新开工），也记下：中途失败/被中断都能回同一处补全
     ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
     let placed = 0;
@@ -112,9 +123,12 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
         if (adapter.blockAt(pos) !== 'obsidian') { await place(pos, 'obsidian'); placed++; }
         ctx.progress(placed / 11, '门框逐块验收');
       }
-      const material = scaffold();
-      if (!material) return fail('MISSING_MATERIALS', '门顶施工需要一块支撑材料', { placed });
-      await place(at(0, 4), material);
+      // 门顶第一块只能贴在角上的施工块上；上次留下的施工块仍在就直接复用。
+      if (AIR.has(adapter.blockAt(at(0, 4)) ?? '')) {
+        const material = scaffold();
+        if (!material) return fail('MISSING_MATERIALS', '门顶施工需要一块支撑材料', { placed });
+        await place(at(0, 4), material);
+      }
       for (const pos of frame.slice(8)) { if (adapter.blockAt(pos) !== 'obsidian') { await place(pos, 'obsidian'); placed++; } }
       if (frame.some((pos) => adapter.blockAt(pos) !== 'obsidian')) return fail('ERROR', '门框实际方块未通过验收', { placed });
       const ignited = await adapter.useBlockAt(at(1, 0), 'flint_and_steel', signal);
