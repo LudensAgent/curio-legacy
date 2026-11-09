@@ -143,10 +143,30 @@ export const observePortal: Skill<{}> = {
     const touching = [feet, { ...feet, y: feet.y + 1 }]
       .map((pos) => ({ pos, name: ctx.adapter.blockAt(pos) }))
       .filter((b): b is { pos: Vec3Like; name: string } => !!b.name && kinds.includes(b.name));
-    const portal = visiblePortal(ctx, around, kinds)
-      ?? visiblePortal(ctx, ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos), kinds)
-      ?? touching[0];
-    if (!portal) return fail('NOT_FOUND', '附近没有已观察并能核对的传送门');
+    const remembered = [
+      ...ctx.senses.knownBlocks(kinds, 8).map((block) => block.pos),
+      ...travelStore(ctx.memory).snapshot(state.worldId).endpoints
+        .filter((e) => e.dim === state.dim && e.portalObserved && dist3(e.pos, here) <= 8).map((e) => e.pos),
+    ];
+    let portal: { pos: Vec3Like; name: string } | undefined = visiblePortal(ctx, around, kinds) ?? visiblePortal(ctx, remembered, kinds) ?? touching[0];
+    // 记得附近有门、但它不在当前视锥里：朝记得的门方块转头再看（最多 3 处），仍由本次视野核对，不透视。
+    let turned = 0;
+    for (const pos of remembered.slice(0, 3)) {
+      if (portal) break;
+      const eye = ctx.adapter.eye();
+      if (!eye) break;
+      const dx = pos.x + 0.5 - eye.x, dy = pos.y + 0.5 - eye.y, dz = pos.z + 0.5 - eye.z;
+      await ctx.adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.hypot(dx, dz)));
+      turned++;
+      await sleep(200, ctx.signal);
+      ctx.senses.refresh();
+      portal = visiblePortal(ctx, [pos, { ...pos, y: pos.y - 1 }, { ...pos, y: pos.y + 1 }], kinds);
+    }
+    if (!portal) {
+      return fail('NOT_FOUND', remembered.length
+        ? `记得附近有门（${remembered.length} 处），转头看了 ${turned} 处，这次视野仍核对不到门方块（可能被挡住或已不在）`
+        : '附近没有已观察并能核对的传送门', { remembered: remembered.slice(0, 3), turned });
+    }
     // 身体 AABB 压着的门方块才是“我在门里”的触觉事实；优先用适配器按 AABB 算出的字段，
     // 拿不到时退回脚/头两格（end_gateway 不靠身体接触触发，不算）。
     const bodyPortal = state.bodyPortal ?? [feet, { ...feet, y: feet.y + 1 }]

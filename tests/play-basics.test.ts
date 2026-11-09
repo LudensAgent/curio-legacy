@@ -64,6 +64,17 @@ test('look 朝方向或坐标转头', async (t) => {
   await SKILLS.look.run(ctx, (v as any).args);
   assert.ok(w.pitch < -1.4);
   assert.ok(!SKILLS.look.validate({ dir: 'sideways' }, w).ok);
+  // 计划规范化会把 [x,y,z] 写成 {x,y,z}：两种写法都要接受，规范化输出再校验不变。
+  const fromArray = SKILLS.look.validate({ xyz: [3, 64, 0] }, w);
+  const fromObject = SKILLS.look.validate({ xyz: { x: 3, y: 64, z: 0 } }, w);
+  assert.ok(fromArray.ok && fromObject.ok);
+  assert.deepEqual(fromObject, fromArray);
+  assert.deepEqual(SKILLS.look.validate((fromObject as { args: unknown }).args, w), fromObject);
+  assert.ok(!SKILLS.look.validate({ xyz: { x: 3, y: 'up', z: 0 } }, w).ok);
+  const { dive: diveSkill } = await import('../src/skills/actions.ts');
+  const dive = diveSkill.validate({ xyz: [3, 60, 0] }, w);
+  assert.ok(dive.ok);
+  assert.deepEqual(diveSkill.validate((dive as { args: unknown }).args, w), dive, 'dive 规范化输出再校验不变');
 });
 
 test('心智看到的动作表：隐藏的填充动作不列给心智', async () => {

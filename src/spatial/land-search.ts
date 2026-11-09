@@ -209,6 +209,9 @@ function dangerousAt(map: VoxelMap, dim: string, pos: Vec3Like): string | null {
   return isDangerousBlock(name) ? name : null;
 }
 
+/** 站位四邻的脚部/支撑高度里，每有一格已观测的岩浆，路线代价加这么多（下界岩浆海边缘、被击退落入岩浆）。 */
+export const LAVA_EDGE_COST = 3;
+const LAVA = /^(minecraft:)?lava$/;
 /** walk 用同高判定器；step/drop 用库的 land transition 判定器。 */
 function checkTransition(
   map: VoxelMap,
@@ -490,6 +493,8 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
 
   const nodes = new Map<string, { cx: number; cy: number; cz: number; g: number; parent: string | null; via: LandSearchTransition | null; stance: Vec3Like }>();
   const best = new Map<string, number>();
+  /** 每个站位的岩浆邻格代价（本次搜索内缓存）。 */
+  const lavaEdge = new Map<string, number>();
   const open = new MinHeap();
   nodes.set(startKey, { cx: startCell.x, cy: start.y, cz: startCell.z, g: 0, parent: null, via: null, stance: { ...startStance } });
   best.set(startKey, 0);
@@ -626,7 +631,17 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
           continue;
         }
         const key = keyOf(nx, candidate.ny, nz);
-        const g = node.g + candidate.cost;
+        // 贴着已观测岩浆的站位只加代价、不禁止：有别的路就绕开，没别的路仍可走（是否冒险由回执里的路线自己体现）。
+        let edge = lavaEdge.get(key);
+        if (edge === undefined) {
+          const fy = Math.floor(candidate.ny + 0.05);
+          edge = [[1, 0], [-1, 0], [0, 1], [0, -1]].reduce((n, [dx, dz]) => n + [fy, fy - 1].filter((y) => {
+            const view = baseMap.cellAt(request.dim, nx + dx, y, nz + dz);
+            return view.observed && LAVA.test(view.evidence.observation.state.name);
+          }).length, 0) * LAVA_EDGE_COST;
+          lavaEdge.set(key, edge);
+        }
+        const g = node.g + candidate.cost + edge;
         if (g >= (best.get(key) ?? Infinity)) continue;
         best.set(key, g);
         const via: LandSearchTransition = { kind: candidate.kind, from: { ...node.stance }, to, drop: candidate.drop };

@@ -418,3 +418,32 @@ test('stale portal endpoint reports the actual block and record age, not a frame
   assert.match(missing.result.summary, /门方块曾实际观察到/);
   assert.match(missing.result.summary, /记录于/);
 });
+
+test('observe_portal 记得附近有门但不在视野里：朝它转头再用本次视野核对；看不到就如实报', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const portal = { x: 0, y: 64, z: -3 };
+  w.setBlock(portal, 'nether_portal');
+  // 只有转头面向北（门的方向）之后，视觉才看得见门方块。
+  const facingPortal = () => Math.abs(w.yaw) < 0.6;
+  const ctx = makeCtx(w, { senses: {
+    knownBlocks: (names) => names.includes('nether_portal') ? [{ name: 'nether_portal', pos: portal, dist: 3 }] : [],
+    observeBlocks: (positions) => facingPortal() ? positions
+      .filter((p) => p.x === portal.x && p.y === portal.y && p.z === portal.z)
+      .map((pos) => ({ name: 'nether_portal', pos, properties: {}, worldId: w.worldId, sessionId: w.sessionId,
+        dimension: w.dim, observationId: 1, observedAt: Date.now(), source: 'vision' as const })) : [] } });
+  ctx.memory.setWorld(w.worldId);
+  t.after(() => ctx.memory.close());
+  w.yaw = Math.PI; // 背对门
+  const r = await travelSkills.observe_portal.run(ctx, {});
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(travelStore(ctx.memory).get(r.data?.portalId as string, w.worldId)?.pos, portal);
+
+  const blind = makeCtx(w, { senses: { knownBlocks: () => [{ name: 'nether_portal', pos: portal, dist: 3 }], observeBlocks: () => [] } });
+  blind.memory.setWorld(w.worldId);
+  t.after(() => blind.memory.close());
+  const miss = await travelSkills.observe_portal.run(blind, {});
+  assert.equal(miss.failureCode, 'NOT_FOUND');
+  assert.equal(miss.data?.turned, 1);
+  assert.match(miss.summary, /转头看了 1 处/);
+});

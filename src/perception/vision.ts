@@ -200,8 +200,12 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
-/** 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。 */
-export const VISION_FEED_MAX_CELLS = 512;
+/**
+ * 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。刚出生/换维度时多数区块已存盘未驻留，
+ * 观测先进共享会话的待载队列（上限 MAX_PENDING_OBSERVATIONS=256，所有写入方共用）；每帧只占一半，
+ * 留出加载追上和其他写入方的余量。扫描约 150 ms 一次，仍是每秒数百格。
+ */
+export const VISION_FEED_MAX_CELLS = 128;
 /** 同一格名字没变时，隔这么久才重写一次（刷新新鲜度）。 */
 export const VISION_FEED_REFRESH_MS = 5000;
 /** 每条视线除命中格外，还写入命中前紧挨着的几格透明格（命中面上方的落脚/头部空间）。 */

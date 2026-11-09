@@ -108,3 +108,19 @@ test('go_near 没有可达相邻站立格时停下报事实', async (t) => {
   assert.ok(Array.isArray(r.data?.candidates));
   assert.deepEqual(adapter.actions, []);
 });
+
+test('go_near 按该列真实脚高接近：目标是门的上半格时，候选 y 解析到地面，到了就算到', async (t) => {
+  const map = flatAroundTarget();
+  const { adapter, ctx } = setup(map);
+  // 竖直 3 格高的门；Agent 给的是最上面一格。
+  adapter.blocks = adapter.blocks.filter((b) => b.name !== 'chest');
+  for (const y of [64, 65, 66]) adapter.blocks.push({ name: 'nether_portal', pos: { x: 2, y, z: 0 } });
+  fill(map, 'minecraft:air', [{ x: 1, y: 67, z: 0 }, { x: 3, y: 67, z: 0 }]);
+  t.after(() => ctx.memory.close());
+  const r = await goNear.run(ctx, {
+    target: { x: 2, y: 66, z: 0 }, allowed: ['walk', 'step', 'drop'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+  });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal((r.data?.chosen as { y: number }).y, 64, '交给导航的是解析后的脚高');
+  assert.ok(Math.abs(adapter.pos.y - 64) < 0.01);
+});
