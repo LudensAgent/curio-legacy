@@ -886,9 +886,11 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       since_last_thought: ctx.changes,
       ...(ctx.gameMessages?.length ? { game_messages: ctx.gameMessages } : {}),
       ...(ctx.userSuggestion && !ctx.operatorOrder ? { operator_suggestion: ctx.userSuggestion } : {}),
-      ...(audienceBlock(ctx.audience, glance ? 'light' : 'full') ?? {}),
     }],
   ];
+  // 弹幕单独成段、放在最前面：越靠近结尾的内容模型越当真，弹幕是最低优先级的外部意见，不和【此刻】的现场事实挤在一起。
+  const audience = audienceBlock(ctx.audience, glance ? 'light' : 'full');
+  if (audience) sections.unshift(['直播间', audience]);
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
