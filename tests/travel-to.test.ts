@@ -37,7 +37,7 @@ test('travel_to 注册为显式辅助；方向目标冻结起点且校验幂等�
   assert.ok(parsed.ok);
   assert.deepEqual(parsed.args.to, { heading: 'E', distance: 150, origin: { x: 0.5, y: 64, z: 0.5 } });
   assert.deepEqual(travelTo.validate(parsed.args, adapter), parsed, '规范化参数再校验不变');
-  assert.equal(parsed.args.allowDig, false); assert.equal(parsed.args.allowPlace, false); assert.equal(parsed.args.allowSwim, true);
+  assert.equal(parsed.args.allowDig, false); assert.equal(parsed.args.allowPlace, false); assert.equal(parsed.args.allowSwim, false, '默认不下水');
   const over = travelTo.validate({ to: 'N 300' }, adapter);
   assert.ok(!over.ok && /不会被缩短/.test(over.error));
   const tower = travelTo.validate({ to: '10,10', allowTower: true }, adapter);
@@ -59,6 +59,7 @@ test('travel_to 按 ≤24 格分跳执行并实测到达；默认不挖不放、
   const opts = calls[0].opts;
   assert.equal(opts.allowTerrainChanges, undefined); assert.equal(opts.allowPlace, false); assert.equal(opts.allowTower, false);
   assert.ok(opts.avoid?.includes('magma_block'));
+  assert.equal(opts.allowSwimming, false, '默认不下水，寻路器排除水格');
   assert.equal(result.data?.backend, 'pathfinder');
   assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
   assert.ok(Math.abs(at().x - 60.5) < 1);

@@ -34,8 +34,8 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块或生物名时，本次视野看见就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段几乎没挪动就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不挖不放不搭柱、可游泳；施工授权与副作用同 travel_to。',
-  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"<方块或生物名，看见就停>", "segment"?:16-48（默认 32）, "allowSwim"?:true, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
+  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块或生物名时，本次视野看见就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段几乎没挪动就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
+  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"<方块或生物名，看见就停>", "segment"?:16-48（默认 32）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -62,7 +62,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         direction: direction as Heading, distance: a.distance, origin,
         ...(typeof a.until === 'string' ? { until: a.until.trim().toLowerCase() } : {}),
         segment: a.segment ?? 32,
-        allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowSwim: a.allowSwim !== false,
+        allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowSwim: a.allowSwim === true,
         allowHazard: a.allowHazard === true, sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 300000,
       },
     };

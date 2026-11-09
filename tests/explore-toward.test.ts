@@ -46,6 +46,7 @@ test('explore_toward 注册；方向冻结起点、校验幂等，超限拒绝�
   const parsed = exploreToward.validate({ direction: 'e', distance: 300 }, adapter);
   assert.ok(parsed.ok);
   assert.deepEqual(parsed.args.origin, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(parsed.args.allowSwim, false, '默认不下水');
   assert.deepEqual(exploreToward.validate(parsed.args, adapter), parsed);
   const over = exploreToward.validate({ direction: 'E', distance: 600 }, adapter);
   assert.ok(!over.ok && /不会被缩短/.test(over.error));
