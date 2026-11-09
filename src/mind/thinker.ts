@@ -195,6 +195,20 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
       continue;
     }
     let args = v.args;
+    // “方向 + 距离”的起点要在这一步真正开始时冻结：计划录入时（尤其是排在后面的 next，可能几十秒、
+    // 几十格之后才轮到）冻结，会让“往西 96 格”从录入时的位置算起——实机东行 95 格后接着的 next 往西走，
+    // 目标按出发点算，一路走回原点再往西。Agent 自己写了 origin 的保留。
+    const rawArgs = (s?.args ?? {}) as Record<string, unknown>;
+    if (name === 'explore_toward' && rawArgs.origin === undefined) {
+      const { origin: _frozen, ...rest } = args as Record<string, unknown>;
+      args = rest as typeof args;
+    }
+    if (name === 'travel_to') {
+      const to = (args as { to?: Record<string, unknown> }).to;
+      const rawTo = rawArgs.to ?? rawArgs.target;
+      const rawOrigin = rawTo && typeof rawTo === 'object' ? (rawTo as Record<string, unknown>).origin : undefined;
+      if (to && 'heading' in to && rawOrigin === undefined) args = { ...args, to: { heading: to.heading, distance: to.distance } } as typeof args;
+    }
     if (['mine_cell', 'move_step', 'place_cell', 'place_support'].includes(name)) {
       // Primitive validation owns coordinate aliases and absolute-to-relative conversion.
       const cell = args as { at: [number, number, number]; facing: Facing; xyz?: object };
