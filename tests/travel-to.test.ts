@@ -93,3 +93,28 @@ test('travel_to 施工授权透传到寻路，回执逐项列出挖掉的方块�
   assert.equal(missing.failureCode, 'NOT_FOUND');
   assert.equal(none.calls.length, 0);
 });
+
+test('travel_to via:history 按自己走过的历史路线路点分跳；路点走不通就放弃剩余历史路点并列出', async () => {
+  const points = [{ x: 0.5, y: 64, z: 0.5 }, { x: 0.5, y: 64, z: 20.5 }, { x: 30.5, y: 64, z: 20.5 }, { x: 60.5, y: 64, z: 0.5 }];
+  const query = () => ({ status: 'ok', data: { kind: 'historyRoute', inspection: { status: 'FOUND', points, segments: points.slice(1).map(() => ({ evidence: { observedAt: Date.now() - 60_000 } })), message: '' } } });
+  const viaHistory = harness();
+  (viaHistory.ctx as { spatial?: unknown }).spatial = { query };
+  const r = await travelTo.run(viaHistory.ctx, argsOf({ to: '60,0', via: 'history' }, viaHistory.adapter));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(viaHistory.calls.some(({ target }) => target.kind === 'near' && target.pos.z === 20), '先朝历史路点走');
+  const history = r.data?.history as { found: boolean; waypoints: number; reached: number; oldestAgeMs: number };
+  assert.equal(history.found, true);
+  assert.ok(history.reached >= 2 && history.oldestAgeMs >= 60_000);
+
+  const stale = harness({ blocked: (goal) => goal.kind === 'near' && goal.pos.x === 30 });
+  (stale.ctx as { spatial?: unknown }).spatial = { query };
+  const s = await travelTo.run(stale.ctx, argsOf({ to: '60,0', via: 'history' }, stale.adapter));
+  assert.equal(s.status, 'succeeded', s.summary);
+  assert.deepEqual((s.data?.history as { abandonedAt: Vec3Like }).abandonedAt, { x: 30.5, y: 64, z: 20.5 });
+  assert.match(s.summary, /已放弃剩余历史路点/);
+
+  const none = harness();
+  const d = await travelTo.run(none.ctx, argsOf({ to: '30,0', via: 'history' }, none.adapter));
+  assert.equal(d.status, 'succeeded');
+  assert.match(d.summary, /没有可用的历史路线/);
+});

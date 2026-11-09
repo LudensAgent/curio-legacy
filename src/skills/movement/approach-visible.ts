@@ -14,6 +14,7 @@ import {
 import { fail, isAbort, obj, ok, runSkill, validateSkill, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 import { inspectBody, stateReader } from './facts.ts';
 import { navigateTo } from './navigate.ts';
+import { travelTo } from './travel-to.ts';
 import { blockerOf } from './route.ts';
 
 type Kind = 'walk' | 'step' | 'drop';
@@ -22,8 +23,11 @@ type Target =
   | { kind: 'block'; pos: Vec3Like }
   | { kind: 'entity'; id?: number; name?: string };
 type Args = {
-  target: Target;
+  /** landmark 在执行时按 Agent 记得的地标解析成位置目标；其余目标原样。 */
+  target: Target | { kind: 'landmark'; name: string };
   radius: number;
+  /** 执行后端：spatial = 共享 VoxelMap land-search + navigate_to（默认）；pathfinder = travel_to（已加载区块）。不互相回退。 */
+  backend: 'spatial' | 'pathfinder';
   allowed: Kind[];
   historical: boolean;
   /** 调用方显式给的总步数上限；省略时按选定路线推导，避免默认 16 段截断普通近距离接近。 */
@@ -55,9 +59,9 @@ interface Evaluation {
 
 const KINDS: readonly Kind[] = ['walk', 'step', 'drop'];
 const AIR = /^(air|cave_air|void_air)$/;
-const DEFAULT_RADIUS = 32;
-/** 局部接近的配置上限；视觉范围只能再把它调低。 */
-const MAX_RADIUS = 32;
+const DEFAULT_RADIUS = 64;
+/** 局部接近的配置上限（与视觉射线上限一致）；当前视觉范围只能再把它调低。 */
+const MAX_RADIUS = 64;
 /** 视觉范围读不到时的局部回退半径；不把“未知视距”当成大范围。 */
 const FALLBACK_VISUAL_RANGE = 12;
 /** navigate_to 自身的硬上限；不是默认值。 */
@@ -114,11 +118,17 @@ function entityTarget(e: unknown): Target | string {
   return { kind: 'entity', ...(r.id !== undefined ? { id: r.id as number } : {}), ...(r.name !== undefined ? { name: String(r.name) } : {}) };
 }
 
-function targetOf(raw: unknown): Target | string {
+function targetOf(raw: unknown): Args['target'] | string {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'target 必须是对象，例如 {"pos":{"x":0,"y":64,"z":0}}';
   const t = raw as Record<string, unknown>;
   const keys = Object.keys(t).filter((k) => t[k] !== undefined);
   const kind = typeof t.kind === 'string' ? t.kind.trim().toLowerCase() : undefined;
+  // 记得的地标（含 base）：执行时按当前维度的地标记忆解析成位置目标；规范化输出 {kind:"landmark", name} 也要接受。
+  if (keys.every((k) => k === 'kind' || k === 'landmark' || k === 'name')
+    && (typeof t.landmark === 'string' || (kind === 'landmark' && typeof t.name === 'string'))) {
+    const name = String(t.landmark ?? t.name).trim();
+    return name ? { kind: 'landmark', name } : 'landmark 需要非空地标名';
+  }
   // validate() 返回的是规范化 target，而 Arbiter 在执行前会再校验一次；必须接受自己的输出。
   // 实体规范化后是扁平的 {kind:"entity", id?, name?}，位置/方块是 {kind, pos}。
   if (kind === 'entity' && !('pos' in t) && !('block' in t) && !('entity' in t)
@@ -338,12 +348,12 @@ const modeRank = (mode: RouteMode) => mode === 'current' ? 0 : mode === 'histori
 /**
  * 接近一个已经由感知或空间记忆识别出的附近目标：位置/方块/实体。
  * 只做局部选点与一次有界接近，复用现有 land-search + navigate_to 执行；
- * 不改目标、不挖/放/建、不换维度、不调用旧 Pathfinder。
+ * 不改目标、不挖/放/建、不换维度、默认不调用 Pathfinder；只有显式 backend:"pathfinder" 才交给 travel_to。
  */
 export const approachVisible: Skill<Args> = {
   name: 'approach_visible',
-  description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度、不调用旧 Pathfinder。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
-  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；pos 只写已确认/待解析的站立脚位（y 可为近似值，按同列实际支撑解析），不是方向+距离的推算点；远处未知地形用 navigate_to 分段；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
+  description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度。方块目标认得出才接近（此刻看见、空间记忆里观察过或本会话亲眼见过）；也可写记得的地标。默认后端是共享空间记忆路线（几格外未观察就只走前缀）；显式 backend:"pathfinder" 时改由 travel_to 在已加载区块里走（目标仍须看见/记得，不挖不放、不下水），两者不互相回退。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
+  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}} 或 {"target":{"landmark":"base"}}（target 里只放 pos/block/entity/landmark 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；pos 只写已确认/待解析的站立脚位（y 可为近似值，按同列实际支撑解析），不是方向+距离的推算点；没看见过的远处地点用 travel_to / explore_toward；"radius"?:64（默认 64、上限 64，且不超过当前视觉有效范围；地标在 pathfinder 后端下不受此限）, "backend"?:"spatial"|"pathfinder"（默认 spatial）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
   timeoutMs: 45000,
   movement: true,
   outcomeBoundary: true,
@@ -362,10 +372,11 @@ export const approachVisible: Skill<Args> = {
       return { ok: false, error: `maxSteps 需要 1–${HARD_MAX_STEPS} 的整数` };
     }
     if (a.allowUnknownCorridor !== undefined && typeof a.allowUnknownCorridor !== 'boolean') return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
+    if (a.backend !== undefined && a.backend !== 'spatial' && a.backend !== 'pathfinder') return { ok: false, error: 'backend 只能是 spatial 或 pathfinder' };
     return {
       ok: true,
       args: {
-        target, radius: Math.round(radius * 100) / 100,
+        target, radius: Math.round(radius * 100) / 100, backend: a.backend ?? 'spatial',
         allowed: [...new Set(allowedRaw as Kind[])],
         historical: a.historical !== false,
         ...(a.maxSteps === undefined ? {} : { maxSteps: a.maxSteps as number }),
@@ -383,7 +394,18 @@ export const approachVisible: Skill<Args> = {
       return fail('NOT_CONNECTED', '共享空间会话已暂停/已关闭，不能做局部接近');
     }
     const start = { ...state.pos };
-    const target = args.target;
+    let target: Target;
+    let landmark: { label: string; pos: Vec3Like } | undefined;
+    if (args.target.kind === 'landmark') {
+      const found = ctx.memory.findLandmark(args.target.name, state.dim);
+      if (!found || found.dim !== state.dim) {
+        return fail('NOT_FOUND', `当前维度 ${state.dim} 里没有记得的地标 ${JSON.stringify(args.target.name)}；没有移动`, {
+          originalTarget: args.target, targetKind: 'landmark', outcome: 'UNKNOWN', position: start, displacement: 0, resolvedStance: null,
+        });
+      }
+      landmark = { label: found.label, pos: { ...found.pos } };
+      target = { kind: 'position', pos: { ...found.pos } };
+    } else target = args.target;
     const currentRange = ctx.senses.effectiveRange?.();
     const hasRange = currentRange !== undefined && Number.isFinite(currentRange) && currentRange > 0;
     const visualCap = Math.min(MAX_RADIUS, hasRange ? currentRange : FALLBACK_VISUAL_RANGE);
@@ -393,7 +415,8 @@ export const approachVisible: Skill<Args> = {
       return { position, displacement: round2(dist3(start, position)) };
     };
     const base = {
-      originalTarget: target, targetKind: target.kind,
+      originalTarget: args.target, targetKind: target.kind, backend: args.backend,
+      ...(landmark === undefined ? {} : { landmark }),
       radius, requestedRadius: args.radius,
       visualRange: { value: visualCap, source: hasRange ? 'effectiveRange' : 'fallback' },
     };
@@ -447,11 +470,80 @@ export const approachVisible: Skill<Args> = {
       return { attempted: true, requested, acquired, stopped: null };
     };
 
+    // 目标方块的识别：此刻看得见 > VoxelMap 里合法观察过 > 本会话亲眼见过、未过期（recognizedAt）。
+    // 不拿“区块已加载”当作看见：三者都没有就是未观察。
+    const recognizeBlock = (cell: Vec3Like) => {
+      const fresh = ctx.senses.observeBlocks?.([cell]).find((block) => block.pos.x === cell.x && block.pos.y === cell.y && block.pos.z === cell.z);
+      const view = voxel.cellAt(state.dim, cell.x, cell.y, cell.z);
+      const remembered = view.observed ? view.evidence.observation.state.name : null;
+      const recognized = fresh === undefined && remembered === null ? ctx.senses.recognizedAt?.(cell) ?? null : null;
+      return {
+        name: fresh?.name ?? remembered ?? recognized,
+        evidence: fresh !== undefined ? 'current_perception' as const : remembered !== null ? 'voxel' as const
+          : recognized !== null ? 'recognized' as const : 'unobserved' as const,
+        fresh: fresh !== undefined,
+        freshness: fresh !== undefined ? undefined : view.observed ? view.evidence.freshness : undefined,
+      };
+    };
+    // 空气格当方块目标：给出下方支撑格与可用写法，不替 Agent 改选目标。
+    const airTarget = (cell: Vec3Like, evidenceSource: string) => {
+      const below = { x: cell.x, y: cell.y - 1, z: cell.z };
+      const support = at(below);
+      const solidBelow = support !== null && !AIR.test(stem(support.name));
+      const hint = solidBelow
+        ? `（它下方 (${below.x},${below.y},${below.z}) 是 ${stem(support.name)}：要站到这格写 {"target":{"pos":{"x":${cell.x},"y":${cell.y},"z":${cell.z}}}}，要接近下方方块写 {"target":{"block":{"x":${below.x},"y":${below.y},"z":${below.z}}}}）`
+        : '';
+      return fail('BAD_ARGS', `目标格 (${cell.x},${cell.y},${cell.z}) 是空气；方块接近要指定方块坐标，位置接近用 pos${hint}`, {
+        ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null, evidenceSource,
+        ...(support === null ? {} : { supportBelow: { pos: below, name: stem(support.name) } }),
+      });
+    };
+
+    // ---- 0. 显式选择 pathfinder 后端：目标仍须由感知/记忆把关，路线交给 travel_to（已加载区块）。 ----
+    if (args.backend === 'pathfinder') {
+      let goal: Vec3Like, range: number, evidence: string;
+      if (target.kind === 'position') {
+        goal = target.pos; range = 1; evidence = landmark === undefined ? 'requested_stance' : 'landmark';
+      } else if (target.kind === 'block') {
+        const recognized = recognizeBlock(target.pos);
+        if (recognized.name === null) {
+          return fail('NOT_FOUND', `目标方块 (${target.pos.x},${target.pos.y},${target.pos.z}) 未加载/未观察`, {
+            ...base, outcome: 'UNKNOWN', evidenceState: 'UNKNOWN', position: start, displacement: 0, resolvedStance: null, evidenceSource: recognized.evidence,
+          });
+        }
+        if (AIR.test(stem(recognized.name))) return airTarget(target.pos, recognized.evidence);
+        goal = target.pos; range = 2; evidence = recognized.evidence;
+      } else {
+        const wanted = target;
+        const seen = ctx.senses.perceivedEntities(radius)
+          .filter((e) => e.perception !== 'heard' && (wanted.id === undefined || e.id === wanted.id) && (wanted.name === undefined || stem(e.name) === stem(wanted.name)))
+          .sort((a, b) => a.dist - b.dist)[0];
+        if (seen === undefined) {
+          return fail('NOT_FOUND', `半径 ${radius} 格内没有看见/记得匹配的实体 ${JSON.stringify(target)}`, { ...base, outcome: 'UNKNOWN', position: start, displacement: 0, resolvedStance: null });
+        }
+        goal = { x: Math.floor(seen.pos.x), y: Math.floor(seen.pos.y), z: Math.floor(seen.pos.z) }; range = 2; evidence = 'current_perception';
+      }
+      // 看得见的目标受视觉半径约束；地标是 Agent 记得的位置，远近由 travel_to 自己的上限管。
+      const distance = dist3(start, goal);
+      if (landmark === undefined && distance > radius + 1) {
+        return fail('BAD_ARGS', `目标距当前 ${distance.toFixed(1)} 格，超出局部接近范围 ${radius} 格；更远的地点用 travel_to`, {
+          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null,
+        });
+      }
+      const parsed = travelTo.validate({
+        to: { x: goal.x, y: goal.y, z: goal.z }, range, allowSwim: false,
+        timeoutMs: Math.max(10000, Math.min(600000, ctx.deadline - Date.now())),
+      }, ctx.adapter);
+      if (!parsed.ok) return fail('BAD_ARGS', `approach_visible 生成 travel_to 参数无效：${parsed.error}；没有移动`, { ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0 });
+      const moved = await travelTo.run(ctx, parsed.args);
+      return { ...moved, data: { ...moved.data, ...base, targetEvidence: evidence, resolvedTarget: goal } };
+    }
+
     // ---- 1. 目标解析：位置直接是站位；方块/实体先找合法旁侧站位。 ----
     let targetName: string | null = null;
     let targetCell: Vec3Like | undefined;
     let entity: EntityInfo | undefined;
-    let targetEvidence: 'current_perception' | 'voxel' | 'unobserved' | 'requested_stance' = 'unobserved';
+    let targetEvidence: 'current_perception' | 'voxel' | 'recognized' | 'unobserved' | 'requested_stance' = 'unobserved';
     let targetFreshness: 'FRESH' | 'STALE' | undefined;
     let targetFreshlyObserved = false;
     let structure = new Set<string>();
@@ -643,24 +735,18 @@ export const approachVisible: Skill<Args> = {
       }
       // 当前感知优先；看不见时只接受 VoxelMap 里合法观察过的空间证据。
       // 不拿“区块已加载”当作看见：看着目标接近，但目标本身仍须有观察证据。
-      const fresh = ctx.senses.observeBlocks?.([cell]).find((block) => block.pos.x === cell.x && block.pos.y === cell.y && block.pos.z === cell.z);
-      const view = voxel.cellAt(state.dim, cell.x, cell.y, cell.z);
-      const remembered = view.observed ? view.evidence.observation.state.name : null;
-      targetName = fresh?.name ?? remembered;
-      targetEvidence = fresh !== undefined ? 'current_perception' : remembered !== null ? 'voxel' : 'unobserved';
-      targetFreshlyObserved = fresh !== undefined;
-      targetFreshness = fresh !== undefined ? undefined : view.observed ? view.evidence.freshness : undefined;
+      const recognized = recognizeBlock(cell);
+      targetName = recognized.name;
+      targetEvidence = recognized.evidence;
+      targetFreshlyObserved = recognized.fresh;
+      targetFreshness = recognized.freshness;
       if (targetName === null) {
         return fail('NOT_FOUND', `目标方块 (${cell.x},${cell.y},${cell.z}) 未加载/未观察`, {
           ...base, outcome: 'UNKNOWN', evidenceState: 'UNKNOWN', position: start, displacement: 0, resolvedStance: null,
           evidenceSource: targetEvidence,
         });
       }
-      if (AIR.test(stem(targetName))) {
-        return fail('BAD_ARGS', `目标格 (${cell.x},${cell.y},${cell.z}) 是空气；方块接近要指定方块坐标，位置接近用 pos`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null, evidenceSource: targetEvidence,
-        });
-      }
+      if (AIR.test(stem(targetName))) return airTarget(cell, targetEvidence);
       structure = structureCells(at, cell, targetName);
       stanceCenter = center;
       stanceReach = BLOCK_REACH;
