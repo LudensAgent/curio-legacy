@@ -120,7 +120,7 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   };
 }
 
-const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'go_near', 'walk_path']);
+const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'go_near', 'walk_path']);
 
 export class Mind {
   activity: Activity | null = null;

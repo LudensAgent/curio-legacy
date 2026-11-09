@@ -6,6 +6,7 @@ export { planRoute, consumeRoutePlan, releaseRoutePlan, clearRouteRecords, noteR
 export { walkPath } from './walk.ts';
 export { navigateTo } from './navigate.ts';
 export { advance } from './advance.ts';
+export { travelTo } from './travel-to.ts';
 export {
   clearMovementSessions, createMovementSession, findMovementSession, activeMovementSession,
   intentKeyOf, MOVEMENT_SESSION_CAPACITY, MOVEMENT_SESSION_TTL_MS,
