@@ -112,25 +112,33 @@ export interface MindContext {
  * - 用户消息末尾按情境追加 2–4 条“此刻要留意”的提醒，只说和眼下有关的。
  */
 
-/** 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数 */
-export const COMMON_MOVES = ['navigate_to', 'go_near', 'move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'defend', 'gather', 'look', 'look_around', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'collect_furnace', 'eat', 'hunt', 'forage', 'fish', 'farm', 'collect_seeds',
-  'pickup_items', 'store_items', 'take_items', 'find_item', 'place_torch', 'shelter', 'sleep', 'wait', 'press_keys', 'build', 'inspect_block', 'interact_block', 'use_item', 'use_skill', 'merge_tools'];
+/**
+ * 常用动作：给完整参数；其余只列名字和一句用途，需要时用 {"kind":"moves"} 查完整参数。
+ * 只保留高频且参数易错、或静态说明直接依赖的动作（移动原语、导航、合成/建筑、容器存取）。
+ * 参数简单、看名字和用途就能正确调用的动作（吃、睡、打猎、等待、查方块等）降到按需列表；
+ * 它们正在被使用时，完整参数仍会作为 user 提醒送达，不依赖模型自己想起来查。
+ */
+export const COMMON_MOVES = ['navigate_to', 'go_near', 'move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
 
 /**
  * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
  * 归到“其余动作”按需可查，不能因为还没进下界就整类消失。
+ * 只按动作名匹配：`descend_to` 曾因名字里含 "end_" 被误判为进阶动作，导致基础下行辅助在
+ * 非下界/末地情境下既不在静态目录、也不在进阶提醒里。
  */
-const ADVANCED = /portal|end_|dragon|stronghold|search_structure/;
+const ADVANCED = /portal|dragon|stronghold|search_structure|end_gateway/;
 
 /** 空间记忆查询/回程规划：不进静态 system 目录（预算不够且不是每念都用），按情境作为 user 提醒出现。 */
 
-/** 描述取第一句话，太长就在逗号处截断（不截在半个词上） */
+/** 描述取第一句话，太长就在标点处截断（不截进半个括号或半个英文词） */
 function briefOf(d: string, n: number): string {
   const first = d.replace(/\s+/g, ' ').split(/[。；;：:]/)[0];
   if (first.length <= n) return first;
   const cut = first.slice(0, n);
-  const at = Math.max(cut.lastIndexOf('，'), cut.lastIndexOf('、'), cut.lastIndexOf(','), cut.lastIndexOf('（'));
-  return at > n / 2 ? cut.slice(0, at) : `${cut}…`;
+  const open = cut.lastIndexOf('（');
+  if (open > cut.lastIndexOf('）') && open > n / 2) return `${cut.slice(0, open)}…`;
+  const at = Math.max(cut.lastIndexOf('，'), cut.lastIndexOf('、'), cut.lastIndexOf(','), cut.lastIndexOf(' '));
+  return `${at > n / 2 ? cut.slice(0, at) : cut}…`;
 }
 
 /** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
@@ -146,7 +154,12 @@ function descOf(s: { name: string; description: string }, chars: number): string
  */
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
   const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
-  const detailed = visible.filter((s) => core.has(s.name)).map((s) => `- ${s.name} ${s.argsDoc}${descOf(s, chars) ? `：${descOf(s, chars)}` : ''}`);
+  const detailed = visible.filter((s) => core.has(s.name)).map((s) => {
+    // argsDoc 常以句号收尾，直接接“：用途”会出现“。：”，读起来像参数的一部分。
+    const args = s.argsDoc.trim().replace(/[。；;]$/, '');
+    const desc = descOf(s, chars);
+    return `- ${s.name}${args ? ` ${args}` : ''}${desc ? `：${desc}` : ''}`;
+  });
   const onDemand = visible.filter((s) => !core.has(s.name)).map((s) => `${s.name}（${briefOf(s.description, 14)}）`);
   const demandLine = onDemand.length ? `\n其他动作（用 {"kind":"moves","names":["…"]} 查完整参数；不写 names 列出全部动作，含进阶动作）：${onDemand.join('、')}` : '';
   return `${detailed.join('\n')}${demandLine}\n缺工具、熔炉、船、火把等默认报告缺口；加 "make":true 才允许顺手制造/准备并消耗材料，加 "make":false 则禁止本动作及嵌套准备`;
@@ -211,7 +224,7 @@ operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","n
 const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
-const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。背包数量、计划和窍门的成败次数不能证明某次行动的具体工具或经过；讲自己的经历要有实际观察依据。`;
+const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
 
 /** 专注：主目标 + 清单，插曲用 detour */
 const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；久没推进就改清单，有【阶段回顾】时可换目标（写 switch_reason）。`;
@@ -230,9 +243,10 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
   ? `\n\n【技能书】每份一行：名字（自写＝你自己写的）［状态］一句用途。状态：文字＝只能读、不能 use_skill；可执行＝能调用（use_skill 或直接写成一步，自动/动作失败时先试/手动是触发方式）；候选可试＝use_skill trial:true 试用；不可执行、定义无效、候选不可用/未确认＝用 {"kind":"skill","name":"…"} 看原因。\n${skills.map((x) => `- ${brief ? x.replace(/］.*$/, '］') : x}`).join('\n')}` : '';
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
-const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；容器/门/床/传送门是方块目标，先用 go_near {"target":{x,y,z}} 走到相邻站立格，再用 take_items/sleep/travel_portal，不要把这些方块坐标直接给 navigate_to/plan_route。要真的走到站立格：先 resolve_target/看清目的地站立格，优先用 navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]} 让宿主执行 3D 路线（不挖不放、无路/施工缺口会停）；也可以 plan_route 规划并按结果执行：memory 返回路点/过渡（walk 段可再 plan_route search 得 routeId 后 walk_path，或 move_step；step 用 move_step；drop 先 assess_landings 再 descend_to；climb/swim/portal 用对应现有动作或停下），spatial 返回的 steps 按步骤执行；带 historical 标记时是历史体素候选路线，当前可通行性未知，按现场事实逐步核实，失败再重新规划；search 才返回 routeId 交给 walk_path，而且 search 只走当前脚高、不处理换层（目标 y 不同时用 spatial 的 steps 或 move_step/assess_landings+descend_to）；plan_route 失败/gaps 时不要调用 walk_path。别自己算坐标；[前,上,右] 按指定 facing 换算。
+const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
+【走到哪】容器/门/床/传送门是方块目标：先用 go_near {"target":{x,y,z}} 走到相邻站立格，再用 take_items/sleep/travel_portal，不要把这些方块坐标直接给 navigate_to/plan_route。站立格优先用 navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]}（宿主执行 3D 路线，不挖不放、无路/施工缺口会停）；需要先看路线依据时用 plan_route 只读规划：memory/spatial 返回路点或 steps，按现有动作执行，search 返回 routeId 才交给 walk_path；带 historical 标记的是历史体素候选，当前可通行性未知，按现场逐步核实。plan_route 失败/gaps 时不要调用 walk_path。远目标/未知区域分段推进，段后按实测位置重新观察。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。相邻一格的上/下台阶用 move_step [1,1,0]/[1,-1,0]；move_step [1,0,0] 只接受同层，半格/一格落差用 [1,-1,0] 明确下；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格（头和头上一格）都空：两格高的隧道/矿道里跳不起来，别反复垫高，改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
+【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。上下台阶用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格都空：两格高的隧道/矿道里改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const ROUTINE_OF_THINKING = `【每次这样想】
@@ -242,26 +256,27 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去记得的地方或坐标 → resolve_target 算点 → plan_route 规划 → 按结果执行（memory 的 legs 按 transition 用现有动作，spatial 的 steps 逐步执行，search 的 routeId 交给 walk_path）；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：navigate_to 的 maxSteps 或 plan_route 的 steps 一次走一段（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去记得的地方或坐标 → resolve_target 算点 → navigate_to 走到站立格；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：navigate_to 的 maxSteps 或 plan_route 的 steps 一次走一段（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；分段只限本次执行步数，不缩短原目标；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
-- 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补这一格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
+- 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补它下方的支撑格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- plan_route 只读：source:"memory"/"spatial"/"auto" 返回路点/过渡或现有动作 steps（move_step/descend_to），按 steps 执行；source:"search" 返回 routeId，才交给 walk_path。plan_route 失败/gaps 时不要调用 walk_path；远目标/未知区域用有界分段：navigate_to 的 maxSteps 或 plan_route 的 steps 每次只推进一段，段后重新观察；分段只限本次执行步数，不缩短原目标；navigate_to 分段执行后的摘要会给出实测位移、新区块数和新观测格数；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算（新区块不算观测覆盖）；climb 由你决定梯子/垫高
-- plan_route/walk_path 不挖墙、不垫路、不搭柱；需要改变地形时显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
+- 上不去的高处由你决定用梯子、垫高或另找路；plan_route/walk_path 不挖墙、不垫路、不搭柱，改变地形要显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。内部思考有预算：最多比较两套可行方案，同一事实/同一权衡只评估一次；已有足够信息就停止推理并直接给出能执行的 JSON。不要重算已经给出的背包/箱子/目标，也不要列举用不上的配方、去不了的远处选项或已经排除的方案；卡住时先选一个可验证的下一步，做完再看结果。
 - 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
 - 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
-- 你既会被风景吸引、想把一路的见闻记下来，也总惦记着把进度往前推——升级装备、进下界、找要塞、打败末影龙。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
+- 你既会被风景吸引、想把见闻记下来，也想把日子过扎实、去更远的地方看看；要做什么、先做什么都由你定。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
+- 背包数量、计划和窍门的成败次数不能证明某次行动的具体工具或经过；讲自己的经历要有实际观察依据。
 - 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
 
-const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。move_step 的 to 是目标列/脚部格：[1,0,0] 只接受同层；[1,1,0]/[1,-1,0] 明确指定上/下一格，支持半砖等分数脚高；绝对 xyz 的 x/z 必须是整数方块列，只有 y 是实测脚高（半砖可写 63.5），输出前不要给 x/z 加 0.5；move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试 move_step；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。place_cell 指方块占据格，place_support 补脚部目标下面一格。
-- [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格。pillar_one 原地垫高（item 必填：方块名或 any；需头顶上方两格全空，两格高的隧道改用 mine_cell+move_step 阶梯）；梯子、火把可放进身体格（需有附着面）。挖空 [0,-1,0] 会下落，无需 move_step。
-- place_support [1,-1,0] 会在 [1,0,0] 脚部目标格正下方补支撑；上下范围 -2..3，可以补下一级 [1,-1,0] 的支撑格 [1,-2,0]。
+const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。
+- [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格；挖空 [0,-1,0] 会下落，无需 move_step。
+- move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。
+- place_cell 指方块占据格；place_support 的参数是补上的支撑格：[1,-1,0] 补 [1,0,0] 脚部目标格下方，上下范围 -2..3，可补下一级 [1,-2,0]。梯子、火把可放进身体格（需有附着面）。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 
 /**
@@ -298,7 +313,6 @@ const GLANCE_GUIDE = `这次只是抬头看一眼，不必把每个细节重新�
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
-- 盖新房子先 design 拿图纸，再 build {"draft":"图纸ID"}；不要自己画图纸。
 - 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust。做完清单一项写 "plan":{"done":[序号]}。
 - 技能书在文末：需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。`;
@@ -841,10 +855,9 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     const line = advancedMovesLine();
     if (line) reminders.push(line);
   }
-  if (glance) {
-    const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
-    if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
-  }
+  // 目录只给核心动作完整参数；其他动作正在被使用时，把参数贴在 user 消息里，免得每次都得先查 moves。
+  const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
+  if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
   // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
   const order = ctx.operatorOrder;
   if (order && order.kind === 'suggestion') {
