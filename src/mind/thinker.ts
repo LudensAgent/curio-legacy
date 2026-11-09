@@ -601,12 +601,19 @@ export class Thinker {
         const q = String(raw.query ?? '').slice(0, 300);
         if (!q.trim()) return '想回忆什么？写 {"kind":"recall","query":"关键词"}';
         const found = recallLocal(q, { self: ctx.self, memory: this.memory, book: this.book, ledger: this.ledger }, { n: 8 });
-        this.bus.publish('recall_local', 'P3', `回想：${q.slice(0, 60)}（${found.length} 条）`);
+        this.bus.publish('recall_local', 'P3', `回想：${q.slice(0, 60)}（${found.length} 条）`, {
+          backend: 'local', hits: found.length, injectedIds: found.flatMap((r) => r.ref ? [r.ref] : []), degraded: false });
         return found.length ? found.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`).join('\n') : '想不起和这些关键词有关的事';
       }
       const res = await recall.recall({ percept: { self: { dim: ctx.percept.self.dim, pos: ctx.percept.self.pos }, objective: null, nearby: ctx.percept.nearby },
         lastFailure: null, userSuggestion: ctx.userSuggestion }, String(raw.query ?? '').slice(0, 400));
-      return boundedJson(res.memories, 1500);
+      const output = boundedJson(res.memories, 1500);
+      // 注入的是裁剪后的 tool 结果：以实际输出的 ID 为准，才能区分“检索恢复”和“命中却因预算没进上下文”。
+      const injected = JSON.parse(output) as { id?: unknown }[];
+      this.bus.publish('memory_inject', 'P3', `长期记忆注入 ${injected.length}/${res.memories.length} 条（${res.source}）`, {
+        backend: res.source, hits: res.memories.length, injectedIds: injected.flatMap((m) => typeof m.id === 'string' ? [m.id] : []),
+        dropped: injected.length < res.memories.length ? ['output_budget'] : [] });
+      return output;
     } catch (e) {
       return `查询失败：${e instanceof Error ? e.message : String(e)}`;
     }

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { EpisodicMemory } from '../src/memory/episodic.ts';
+import { MemoryRequestError } from '../src/memory/hindsight.ts';
 import { readMemoryRegistry, registerMemoryBackend, unregisterMemoryBackend } from '../src/memory/registry.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import type { MemoryBackend, MemoryEntry, MemoryEpisode, MemorySettings, RecallRequest } from '../src/memory/types.ts';
@@ -131,6 +132,73 @@ test('episodic: an unavailable or uncooperative backend times out and recalls lo
   assert.ok(results.every((r) => r.source === 'local' && r.memories.some((e) => e.text.includes('lava'))));
   await x.service.recall(context());
   assert.equal(x.backend.recalled.length, 1);
+});
+
+test('episodic: degraded recall logs backend, elapsed, error type/status, hits and selected IDs without response bodies', async (t) => {
+  const x = setup(t);
+  x.memory.addNote('fact', 'the portal was blocked by lava near home');
+  x.backend.recallImpl = async () => { throw new MemoryRequestError('Hindsight recall failed (HTTP 503)', 'HindsightError', 503); };
+  x.service.start();
+  const result = await x.service.recall(context());
+  assert.equal(result.source, 'local');
+  assert.ok(result.memories.some((e) => e.text.includes('blocked by lava')));
+  const recall = x.bus.recent().filter((e) => e.type === 'memory_recall').at(-1);
+  assert.ok(recall);
+  assert.equal(recall.data?.backend, 'local');
+  assert.equal(recall.data?.degraded, true);
+  assert.equal(recall.data?.errorType, 'HindsightError');
+  assert.equal(recall.data?.status, 503);
+  assert.equal(recall.data?.requestId, null);
+  assert.equal(typeof recall.data?.durationMs, 'number');
+  assert.equal(recall.data?.hits, result.memories.length);
+  assert.deepEqual(recall.data?.selectedIds, result.memories.map((e) => e.id));
+  assert.ok(Array.isArray(recall.data?.dropped));
+  const warning = x.bus.recent().filter((e) => e.type === 'memory_status').at(-1);
+  assert.ok(warning);
+  assert.match(warning.msg, /记忆检索暂不可用；使用当前情境相关的本地回忆/);
+  assert.match(warning.msg, /backend=local/);
+  assert.match(warning.msg, /requestId=missing/);
+  assert.match(warning.msg, /error=HindsightError status=503/);
+  assert.ok(!JSON.stringify([recall, warning]).includes(x.config.apiKey));
+  assert.ok(!JSON.stringify([recall, warning]).includes('sensitive-server-value'));
+});
+
+test('episodic: successful recall diagnostics keep hits, selected IDs and trim reasons but never memory text', async (t) => {
+  const x = setup(t, settings({ maxContextBytes: 2000 }));
+  x.backend.recallImpl = async (request) => {
+    request.onRequestId?.('req-42');
+    return [
+      { id: 'portal-note', text: 'portal lava evidence', source: 'experience' },
+      { id: 7 as unknown as string, text: 'invalid id', source: 'experience' },
+      { id: 'gate-note', text: 'gate evidence', source: 'experience' },
+    ];
+  };
+  x.service.start();
+  const result = await x.service.recall(context());
+  assert.equal(result.source, 'hindsight');
+  assert.deepEqual(result.memories.map((e) => e.id), ['portal-note', 'gate-note']);
+  const recall = x.bus.recent().filter((e) => e.type === 'memory_recall').at(-1);
+  assert.ok(recall);
+  assert.equal(recall.data?.backend, 'hindsight');
+  assert.equal(recall.data?.degraded, false);
+  assert.equal(recall.data?.requestId, 'req-42');
+  assert.equal(recall.data?.hits, 3);
+  assert.deepEqual(recall.data?.selectedIds, ['portal-note', 'gate-note']);
+  assert.ok((recall.data?.dropped as string[]).includes('invalid'));
+  assert.ok(!JSON.stringify(recall.data).includes('portal lava evidence'));
+});
+
+test('episodic: a timed-out recall is classified as a timeout in diagnostics', async (t) => {
+  const x = setup(t);
+  x.backend.recallImpl = () => new Promise(() => {});
+  x.service.start();
+  const result = await x.service.recall(context());
+  assert.equal(result.source, 'local');
+  const recall = x.bus.recent().filter((e) => e.type === 'memory_recall').at(-1);
+  assert.ok(recall);
+  assert.equal(recall.data?.degraded, true);
+  assert.equal(recall.data?.errorType, 'Timeout');
+  assert.equal(recall.data?.status, null);
 });
 
 test('episodic: a successful contextual recall does not suppress an immediate different explicit question', async (t) => {

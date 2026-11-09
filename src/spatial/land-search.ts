@@ -23,12 +23,47 @@ export interface LandSearchTransition {
   drop: number;
 }
 
+export type LandBoundaryDirection = 'N' | 'E' | 'S' | 'W' | 'UP' | 'DOWN' | 'HERE';
+
 export interface LandSearchBoundary {
   from: Vec3Like;
   to: Vec3Like;
   kind: LandSearchKind;
   status: string;
   reason?: string;
+  /** 从 from 指向 to 的格子方向；水平优先，纯垂直时为 UP/DOWN。 */
+  direction: LandBoundaryDirection;
+}
+
+/**
+ * 失败搜索仍可执行的最远 approach：从起点出发、只经由当前证据 OPEN 的边可达。
+ * 这是“已知可通行前缀”，不是到达；endpoint 之外的可通行性仍为 UNKNOWN。
+ */
+export interface LandSearchPrefix {
+  endpoint: Vec3Like;
+  points: Vec3Like[];
+  transitions: LandSearchTransition[];
+  /** endpoint 到 resolvedTarget 的曼哈顿格距；>0 表示没有走到目标。 */
+  distanceToTarget: number;
+  /** endpoint 恰好落在解析目标格；仍不代表执行层已到达。 */
+  atTarget: boolean;
+  /** endpoint 就是请求起点：没有任何可走前缀。 */
+  atStart: boolean;
+  /**
+   * 端点朝目标方向最近的边界若是 BLOCKED/UNSUPPORTED，如实标出该已知阻挡；
+   * 此时自动前进不会带来新证据，调用方应先交回 blocker 事实。
+   */
+  knownBlockerAhead?: LandSearchBoundary;
+}
+
+/** 边界证据缺口分类；只给事实，不替调用方选择观察/挖/建动作。 */
+export interface LandSearchBoundarySummary {
+  total: number;
+  counts: Record<string, number>;
+  /** UNKNOWN/STALE/INCOMPLETE：额外观察或靠近可能刷新证据。 */
+  observationMayResolve: boolean;
+  /** BLOCKED/UNSUPPORTED：需要显式动作、其他移动能力或换路线。 */
+  needsExplicitActionOrOtherRoute: boolean;
 }
 
 export interface LandSearchRequest {
@@ -64,6 +99,8 @@ export interface LandSearchResult {
   points: Vec3Like[];
   transitions: LandSearchTransition[];
   boundaries: LandSearchBoundary[];
+  /** 非 FOUND 时给出的最远可达 approach；FOUND 时完整路线就是前缀，不需要重复。 */
+  prefix?: LandSearchPrefix;
   cost: number;
   resolvedTarget: Vec3Like;
   /** 历史模式下用严格当前证据复验已选路线；OPEN/STALE/BLOCKED 逐段保留。 */
@@ -122,6 +159,30 @@ const DANGER = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 
 const cell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
 const pointEqual = (a: Vec3Like, b: Vec3Like) => Math.abs(a.x - b.x) <= EPS && Math.abs(a.y - b.y) <= EPS && Math.abs(a.z - b.z) <= EPS;
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
+
+/** 边界方向：水平优先（drop 也先报水平侧），纯垂直时才报 UP/DOWN。 */
+function directionOf(from: Vec3Like, to: Vec3Like): LandBoundaryDirection {
+  const dx = to.x - from.x, dz = to.z - from.z;
+  if (Math.abs(dx) >= Math.abs(dz) && Math.abs(dx) > EPS) return dx > 0 ? 'E' : 'W';
+  if (Math.abs(dz) > EPS) return dz > 0 ? 'S' : 'N';
+  const dy = to.y - from.y;
+  return dy > EPS ? 'UP' : dy < -EPS ? 'DOWN' : 'HERE';
+}
+
+const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
+const BEYOND_WALK = new Set(['BLOCKED', 'UNSUPPORTED']);
+
+/** 边界证据缺口汇总；route.ts 与 navigate.ts 共用同一份状态/原因分类。 */
+export function summarizeBoundaries(boundaries: readonly LandSearchBoundary[]): LandSearchBoundarySummary {
+  const counts: Record<string, number> = {};
+  for (const boundary of boundaries) counts[boundary.status] = (counts[boundary.status] ?? 0) + 1;
+  return {
+    total: boundaries.length,
+    counts,
+    observationMayResolve: boundaries.some((boundary) => OBSERVATION_RESOLVABLE.has(boundary.status)),
+    needsExplicitActionOrOtherRoute: boundaries.some((boundary) => BEYOND_WALK.has(boundary.status)),
+  };
+}
 
 interface Check {
   status: string;
@@ -406,6 +467,58 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
   let found: string | null = null;
   let budget = false;
 
+  // 失败/取消时的 approach：nodes 里的每个节点都只经由 OPEN 边加入，所以都可从起点到达。
+  // 取 heuristic 最小（离解析目标最近、即朝目标推进最远）的节点，附带 parent 链过渡。
+  const prefixOf = (key: string): LandSearchPrefix | undefined => {
+    const endpoint = nodes.get(key);
+    if (endpoint === undefined) return undefined;
+    const points: Vec3Like[] = [];
+    const transitions: LandSearchTransition[] = [];
+    let cursor: typeof endpoint | undefined = endpoint;
+    while (cursor !== undefined) {
+      points.unshift({ ...cursor.stance });
+      if (cursor.via !== null) transitions.unshift(cursor.via);
+      cursor = cursor.parent === null ? undefined : nodes.get(cursor.parent);
+    }
+    const cellDistance = Math.abs(endpoint.cx - targetCell.x) + Math.abs(endpoint.cz - targetCell.z);
+    const vertical = Math.abs(endpoint.cy - targetY);
+    // 朝目标方向（曼哈顿距离更近）的已观测阻挡/不支持边界；侧向边界不计。
+    const closeness = (p: Vec3Like) => Math.abs(Math.floor(p.x) - targetCell.x) + Math.abs(Math.floor(p.z) - targetCell.z) + Math.abs(p.y - targetY) * 2;
+    const endpointCloseness = closeness(endpoint.stance);
+    const knownBlockerAhead = boundaries.find((boundary) =>
+      pointEqual(boundary.from, endpoint.stance)
+      && (boundary.status === 'BLOCKED' || boundary.status === 'UNSUPPORTED')
+      && closeness(boundary.to) < endpointCloseness
+    );
+    return {
+      endpoint: { ...endpoint.stance },
+      points,
+      transitions,
+      distanceToTarget: Math.round((cellDistance + vertical) * 1000) / 1000,
+      atTarget: cellDistance === 0 && vertical <= EPS,
+      atStart: key === startKey,
+      ...(knownBlockerAhead === undefined ? {} : { knownBlockerAhead }),
+    };
+  };
+  const closestToTarget = (): string => {
+    let chosen = startKey;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    let bestCost = Number.POSITIVE_INFINITY;
+    for (const [key, node] of nodes) {
+      const distance = heuristic(node.cx, node.cy, node.cz);
+      if (distance < bestDistance || (distance === bestDistance && node.g < bestCost)) {
+        chosen = key;
+        bestDistance = distance;
+        bestCost = node.g;
+      }
+    }
+    return chosen;
+  };
+  const prefixFacts = (): { prefix?: LandSearchPrefix } => {
+    const prefix = prefixOf(closestToTarget());
+    return prefix === undefined ? {} : { prefix };
+  };
+
   while (open.size > 0) {
     const stopped = stopReason();
     if (stopped !== null) {
@@ -417,7 +530,7 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
       }
       if (stopped === 'signal') {
         finishStats();
-        return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+        return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, ...prefixFacts(), cost: 0, resolvedTarget, stats };
       }
       break;
     }
@@ -444,10 +557,13 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
       // 让上层区分“需要观察/靠近”和“已观察地形明确阻塞”。
       if (candidates.length === 0) {
         stats.unknownEdges += 1;
-        if (boundaries.length < 64) boundaries.push({
-          from: { ...node.stance }, to: stanceFor(nx, node.cy, nz), kind: 'walk',
-          status: 'UNKNOWN', reason: 'no observed standable surface in this column',
-        });
+        if (boundaries.length < 64) {
+          const to = stanceFor(nx, node.cy, nz);
+          boundaries.push({
+            from: { ...node.stance }, to, kind: 'walk', direction: directionOf(node.stance, to),
+            status: 'UNKNOWN', reason: 'no observed standable surface in this column',
+          });
+        }
       }
       for (const candidate of candidates) {
         if (stats.edgesEvaluated >= maxEdges) { budget = true; stats.cancelReason = 'edges'; break; }
@@ -456,7 +572,7 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
           if (edgeStop === 'signal') {
             stats.cancelReason = 'signal';
             finishStats();
-            return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+            return { status: 'CANCELLED', assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, ...prefixFacts(), cost: 0, resolvedTarget, stats };
           }
           budget = true; stats.cancelReason = 'time'; break;
         }
@@ -471,7 +587,7 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
         else if (check.status === 'STALE') stats.staleEdges += 1;
         else stats.unsupportedEdges += 1;
         if (!safe(check, baseMap, request.dim, to)) {
-          if (boundaries.length < 64) boundaries.push({ from: { ...node.stance }, to, kind: candidate.kind, status: check.status, ...(check.reason === undefined ? {} : { reason: check.reason }) });
+          if (boundaries.length < 64) boundaries.push({ from: { ...node.stance }, to, kind: candidate.kind, direction: directionOf(node.stance, to), status: check.status, ...(check.reason === undefined ? {} : { reason: check.reason }) });
           continue;
         }
         const key = keyOf(nx, candidate.ny, nz);
@@ -497,7 +613,7 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
     // NO_PATH 会让上层误报“没有路”，其实只需要重新观察刷新证据。
     const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : (stats.unknownEdges > 0 || stats.staleEdges > 0) ? 'UNKNOWN' : 'NO_PATH';
     finishStats();
-    return { status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, cost: 0, resolvedTarget, stats };
+    return { status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, ...prefixFacts(), cost: 0, resolvedTarget, stats };
   }
 
   const points: Vec3Like[] = [];

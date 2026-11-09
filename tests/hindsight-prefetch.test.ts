@@ -65,3 +65,30 @@ test('后台预取：只取 hindsight 结果并缓存，失败静默；30 秒内
   assert.equal(any.hindsightMemories.items[0].text, '在旧通道附近找铁矿');
   memory.close();
 });
+
+test('回想工具：记录实际进入 tool 结果的记忆 ID，并标出输出预算裁剪', async () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const cfg = { ...config, llm: { ...config.llm, provider: 'openai' as const, maxCallsPerHour: 1000, maxPromptTokens: 60000, timeoutMs: 60000 } };
+  const fakeRecall: MemoryRecall = {
+    recall: async (): Promise<MemoryContext> => ({ source: 'hindsight', query: '', memories: [
+      { id: 'first', text: 'x'.repeat(1200), source: 'hindsight:consolidation', kind: 'experience' },
+      { id: 'second', text: 'y'.repeat(1200), source: 'hindsight:consolidation', kind: 'experience' },
+    ] }),
+  };
+  const provider = { name: 'recall-tool-test', complete: (): Promise<Completion> => new Promise(() => {}) };
+  const planner = new Planner(cfg, provider, adapter, memory, bus, null, null, fakeRecall);
+  const thinker = new Thinker(planner, adapter, memory, bus, null);
+  try {
+    const output = await (thinker as unknown as { query: (kind: string, raw: unknown, ctx: unknown) => Promise<string> })
+      .query('recall', { query: 'iron' }, { percept: perception.update(), userSuggestion: null });
+    assert.deepEqual((JSON.parse(output) as { id: string }[]).map((m) => m.id), ['first']);
+    const event = bus.recent().filter((e) => e.type === 'memory_inject').at(-1);
+    assert.ok(event);
+    assert.deepEqual(event.data?.injectedIds, ['first']);
+    assert.equal(event.data?.hits, 2);
+    assert.deepEqual(event.data?.dropped, ['output_budget']);
+  } finally {
+    memory.close();
+  }
+});

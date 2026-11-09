@@ -40,6 +40,46 @@ export interface ActivityEnd {
   at: number;
 }
 
+/** 导航目标的概念阶段；只是当前委托的状态模型，不是新的任务存储。 */
+export type NavigationPhase = 'planning' | 'executing' | 'segment_completed' | 'observing' | 'replanning' | 'waiting_for_agent_decision' | 'arrived' | 'failed' | 'cancelled';
+
+/**
+ * 放在当前 Activity 里的导航目标：只保留现在这一段委托的目标、进度、失败、来源与策略。
+ * 空间历史仍由 SharedSpatialSession/VoxelMap/TraversalStore 承担，这里不复制路点历史或体素。
+ */
+export interface NavigationProgress {
+  /** 稳定的委托 ID（Activity.id）。Arbiter 的派发任务 ID 每次自动续跑都会变；预算按这份委托共享。 */
+  delegationId: string;
+  /** Agent 最初选择的目的地；不会被最近一段的 waypoint 替换。 */
+  destination?: { x: number; y: number; z: number };
+  /** Agent 为这段委托声明的到达条件（done_when 快照）；精确目标格由 destination 表示。 */
+  arrivalCondition?: Condition;
+  /** 目标所在世界/维度；从实测位置重新规划时更新为新作用域，保留原目的地。 */
+  worldId: string;
+  dim: string;
+  /** 最近一次实测位置；下一段从这里复核，不复用旧相对目标。 */
+  measured: { pos: { x: number; y: number; z: number }; at: number };
+  /** 当前段的实测起点。 */
+  segmentStart?: { x: number; y: number; z: number };
+  /** 已确认完成的段数（跨执行累计，只留计数）。 */
+  completedSegments: number;
+  /** 当前计划的剩余目标；只保留这一条路线，不保留已走历史。 */
+  remaining: { x: number; y: number; z: number }[];
+  /** 父委托的期限快照，来自现有 beginStep/stepExpiry 账本；这里只读展示，不另设预算。 */
+  parentDeadlineMs?: number;
+  /** 最近一次 route handle 与来源；失效后 valid=false，旧 handle 不可复用。 */
+  lastRoute?: { id: string; source: string; valid: boolean; confirmed: number };
+  /** 最后确认经过的位置。 */
+  lastConfirmed?: { pos: { x: number; y: number; z: number }; at: number };
+  /** 最近一次失效/失败，只留最新一条。 */
+  lastInvalidation?: { at: number; reason: string };
+  lastFailure?: { at: number; code?: string; summary: string };
+  /** 最近一段导航的做法/来源（技能 + route source），不是理由或历史。 */
+  strategy?: string;
+  phase: NavigationPhase;
+  updatedAt: number;
+}
+
 /** 一段活：模型给出 routine，身体负责连续执行、重复和小范围的应变 */
 export interface Activity {
   id: string;
@@ -107,6 +147,8 @@ export interface Activity {
   };
   /** 这段活里已确认的物理效果；attempt_end 据此汇总，不把已放置/支撑 + 位移误报成“无变化”。 */
   effects?: { placements: string[]; removed: number; moved: boolean };
+  /** 当前导航委托的目标/进度/失败/来源；只存在于这段 Activity 内，不新建导航任务库。 */
+  navigation?: NavigationProgress;
 }
 
 export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';

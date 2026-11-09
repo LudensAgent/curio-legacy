@@ -13,11 +13,29 @@ function bounded(value: unknown, max: number): string {
   return typeof value === 'string' ? value.slice(0, max) : '';
 }
 
+/** The opt-in recall trace is an untyped debug dict; accept only a short, safe request/trace identifier (never the body). */
+const REQUEST_ID = /^[A-Za-z0-9._:-]{1,80}$/;
+function requestIdentity(trace: Record<string, unknown> | null | undefined): string | undefined {
+  if (!trace) return undefined;
+  return ['request_id', 'requestId', 'trace_id', 'traceId']
+    .map((key) => trace[key])
+    .find((value): value is string => typeof value === 'string' && REQUEST_ID.test(value));
+}
+
+/** A memory request failure that keeps only the error type and HTTP status; the response body is never retained. */
+export class MemoryRequestError extends Error {
+  constructor(message: string, readonly errorType: string, readonly status?: number) {
+    super(message);
+    this.name = 'MemoryRequestError';
+  }
+}
+
 /** Keep SDK response bodies (which may contain server configuration) out of logs. */
 function requestError(operation: string, error: unknown, signal: AbortSignal): never {
   signal.throwIfAborted();
   const status = error instanceof HindsightError ? error.statusCode : undefined;
-  throw new Error(`Hindsight ${operation} failed${status ? ` (HTTP ${status})` : ''}`);
+  const type = error instanceof HindsightError ? 'HindsightError' : error instanceof Error ? error.name : 'Error';
+  throw new MemoryRequestError(`Hindsight ${operation} failed${status ? ` (HTTP ${status})` : ''}`, type, status);
 }
 
 /** Hindsight stores the long history; only a bounded, scoped recollection leaves this adapter. */
@@ -90,8 +108,11 @@ export class HindsightBackend implements MemoryBackend {
         includeEntities: false,
         includeChunks: false,
         includeSourceFacts: false,
+        // Opt-in debug trace only; it affects neither retrieval nor scoring. We keep just a bounded id from it.
+        trace: true,
       });
       signal.throwIfAborted();
+      request.onRequestId?.(requestIdentity(response.trace));
       if (!Array.isArray(response.results)) throw new Error('Invalid memory response');
       const seen = new Set<string>();
       return response.results
