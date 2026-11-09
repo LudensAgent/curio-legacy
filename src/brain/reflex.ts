@@ -98,7 +98,8 @@ export class Reflex {
       this.bus.publish('reflex_gaveup', 'P1', `连跑了几次都甩不掉（${why}），身体不再自己乱跑：想个办法——垫高、挖坑封顶、堵住路，或者打`, { why });
       return;
     }
-    this.fire({ skill: 'flee', args: { distance } }, sev, why);
+    // 反射逃离是身体的保护反应：明确跑（原来由 away_from 隐式跑）。
+    this.fire({ skill: 'flee', args: { distance, sprint: true } }, sev, why);
   }
 
   private fire(step: Step, sev: Severity, why: string, gentle = false) {
@@ -137,7 +138,7 @@ export class Reflex {
     if (legacy) {
     if (creeper && instinct('creeper') && cover !== 'sealed') {
       // 正在跟它打：后撤几步躲开爆炸就行，不跑远；没在打：跑开
-      if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12 } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
+      if (cur?.skill !== 'flee' && this.ready('creeper', 1500)) this.fire({ skill: 'flee', args: { distance: fighting ? 6 : 12, sprint: true } }, 'P0', `苦力怕${creeper.fusing ? '在嘶嘶作响，' : ''}距离 ${creeper.dist.toFixed(1)}`);
       return;
     }
     // 判断正在做什么，而不是谁发起的：主动战斗、换气和撤离同样不需要重启。

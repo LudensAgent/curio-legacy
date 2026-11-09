@@ -1032,8 +1032,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         // blocksToAvoid 只拦身体所在格；岩浆块、营火这类实心/可站的方块还要拦“站在上面”：落脚格的支撑是它就不走。
         movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => avoidIds.has(movements.getBlock(block.position, 0, -1, 0)?.type) ? 100 : 0];
       }
-      // 平时走路，只有说了要跑（赶路、逃命）才跑：冲刺每格都在消耗饥饿值，走路几乎不耗
-      movements.allowSprinting = opts.sprint ?? target.kind === 'away_from';
+      // 默认走路，调用方明确 sprint:true 才跑（逃离也不例外）：冲刺每格都在消耗饥饿值，走路几乎不耗；跑不跑由委托方定
+      movements.allowSprinting = opts.sprint === true;
       if (opts.maxDropDown !== undefined) {
         if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
         // 节点 = 「脚下那块 +1」：整块脚高 63 → 节点 63，半砖脚高 63.5 → 节点 64。过滤候选用节点，与目标映射（ceil(y-0.001)）一致。
