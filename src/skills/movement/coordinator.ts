@@ -3,6 +3,7 @@ import { shortId } from '../../util.ts';
 import { fail, isAbort, ok, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
+import type { LandSearchBoundary } from '../../spatial/land-search.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -118,6 +119,39 @@ function continuationOf(session: MovementSession) {
 
 function stopOf(reason: StopReason, detail: string, extra: Partial<StopReceipt> = {}): StopReceipt {
   return { reason, at: Date.now(), detail, ...extra };
+}
+
+/** advance 的横向授权走廊；navigate 意图没有。 */
+function corridorOf(session: MovementSession) {
+  return session.intent.kind === 'advance' && session.bearing !== undefined
+    ? { origin: session.frozenOrigin, bearing: session.bearing, maxLateral: session.intent.maxLateralDrift }
+    : undefined;
+}
+
+function boundaryDirectionOf(from: Vec3Like, to: Vec3Like): LandSearchBoundary['direction'] {
+  const dx = to.x - from.x, dz = to.z - from.z;
+  if (Math.abs(dx) >= Math.abs(dz) && Math.abs(dx) > 1e-9) return dx > 0 ? 'E' : 'W';
+  if (Math.abs(dz) > 1e-9) return dz > 0 ? 'S' : 'N';
+  return to.y > from.y ? 'UP' : to.y < from.y ? 'DOWN' : 'HERE';
+}
+
+/** 执行级 blocker（move_step 的 TARGET_BLOCKED/HEAD_BLOCKED）也转成边界事实，供侧向观察。 */
+function blockerBoundaryOf(segment: SegmentReceipt): LandSearchBoundary | undefined {
+  if (segment.blockerAhead !== undefined) return segment.blockerAhead;
+  const blocker = segment.blocker;
+  if (blocker === undefined) return undefined;
+  return {
+    from: { ...blocker.transition.from },
+    to: { ...blocker.transition.to },
+    kind: blocker.transition.kind,
+    status: 'BLOCKED',
+    ...(blocker.reason === undefined ? {} : { reason: blocker.reason }),
+    direction: boundaryDirectionOf(blocker.transition.from, blocker.transition.to),
+  };
+}
+
+function boundaryKeyOf(boundary: LandSearchBoundary): string {
+  return `${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}|${boundary.status}`;
 }
 
 function renderSummary(session: MovementSession, stop: StopReceipt, segments: readonly SegmentReceipt[]): string {
@@ -275,6 +309,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         to: waypoint,
         allowed: session.intent.allowed,
         historical: session.intent.historical,
+        ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
         maxTransitions: perSegment,
         allowUnknownCorridor: request.allowUnknownCorridor,
         deadline,
@@ -299,13 +334,24 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         onGround: after.onGround, inWater: after.inWater,
       };
       session.progress = progressOf(session, after.pos, Date.now());
-      const progressed = segment.confirmed.length > 0;
+      // 部分位移也是真实进展：动作失败/未确认但身体确实移动了，不能当成 NO_PROGRESS；
+      // 下一段始终从实测位置重新规划，不重放旧起点动作。
+      const measuredMove = Math.hypot(after.pos.x - segment.measuredStart.x, after.pos.z - segment.measuredStart.z)
+        + Math.abs(after.pos.y - segment.measuredStart.y);
+      const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
       session.progress.stagnationSegments = progressed ? 0 : session.progress.stagnationSegments + 1;
       if (progressed) session.progress.lastProgressAt = Date.now();
       ctx.progress(Math.min(1, segments.length / request.maxSegments), `${session.intent.kind} ${segments.length}/${request.maxSegments}`);
 
       if (segment.outcome === 'cancelled') {
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
+        break;
+      }
+      // 段内的实测位置已经达到冻结意图时，先按实测收工；剩余边界只说明“再往后未知”，
+      // 不能推翻已经真实完成的沿方向/到达条件。横向超授权仍由 closeReasonOf 先拦。
+      const closeAfterSegment = closeReasonOf(session, after.pos, Date.now());
+      if (closeAfterSegment !== null) {
+        stop = stopOf(closeAfterSegment.reason, closeAfterSegment.detail);
         break;
       }
       if (segment.outcome === 'timeout') {
@@ -322,7 +368,46 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         });
         break;
       }
+      if (segment.outcome === 'corridor_exhausted') {
+        stop = stopOf('DETOUR_TOO_LARGE', segment.detail ?? '授权横向走廊内没有可走路线；外侧绕行未授权');
+        break;
+      }
+      if (segment.outcome === 'lateral_authorization') {
+        stop = stopOf('LATERAL_DRIFT', segment.detail ?? 'transition 超出横向授权；没有执行');
+        break;
+      }
       if (segment.outcome === 'blocked') {
+        // 横向授权 >0 时，先观察阻挡两侧的必要空间；相关证据变化才允许重搜，
+        // 不把“正前方有阻挡”直接当成整条走廊无路。观察预算与去重沿用同一 session。
+        const blockedBoundary = blockerBoundaryOf(segment);
+        const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary);
+        const canObserveSides = session.intent.kind === 'advance' && session.intent.maxLateralDrift > 0
+          && blockedBoundary !== undefined && boundaryKey !== undefined
+          && session.counters.observations < session.budget.maxObservations
+          && session.counters.newObservedCells < session.budget.maxObservedCells
+          && session.observedBoundaries?.includes(boundaryKey) !== true;
+        if (canObserveSides) {
+          session.phase = 'observing';
+          ctx.setStationaryWait?.(true);
+          try {
+            observation = await observeBoundary(ctx, {
+              boundary: blockedBoundary!,
+              maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
+              ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+            });
+          } finally {
+            ctx.setStationaryWait?.(false);
+          }
+          session.counters.observations += 1;
+          session.counters.newObservedCells += observation.newObservedCells;
+          session.lastObservation = observation;
+          session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey!];
+          session.updatedAt = Date.now();
+          if (observation.relatedChanged) {
+            session.phase = 'replanning';
+            continue;
+          }
+        }
         stop = stopOf('BLOCKED', segment.detail ?? '已观测到物理阻挡；未自动挖/放', {
           ...(segment.blocker === undefined ? {} : { blocker: segment.blocker }),
           ...(segment.blockerAhead === undefined ? {} : { boundaries: [segment.blockerAhead] }),
@@ -349,7 +434,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           });
           break;
         }
-        const boundaryKey = `${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}|${boundary.status}`;
+        const boundaryKey = boundaryKeyOf(boundary);
         if (session.observedBoundaries?.includes(boundaryKey) === true) {
           stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已观察过这个边界；没有新的相关证据时不重复观察/搜索', { boundaries: [boundary] });
           break;
@@ -361,7 +446,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.phase = 'observing';
         ctx.setStationaryWait?.(true);
         try {
-          observation = await observeBoundary(ctx, { boundary, maxCells: session.budget.maxObservedCells - session.counters.newObservedCells });
+          observation = await observeBoundary(ctx, {
+            boundary,
+            maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
+            ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+          });
         } finally {
           ctx.setStationaryWait?.(false);
         }
@@ -376,12 +465,6 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         session.phase = 'replanning';
         continue;
-      }
-      // reached_waypoint / partial_prefix：先用实测复核关闭条件，再决定是否继续下一段。
-      const closeAfter = closeReasonOf(session, after.pos, Date.now());
-      if (closeAfter !== null) {
-        stop = stopOf(closeAfter.reason, closeAfter.detail);
-        break;
       }
       if (session.progress.stagnationSegments >= Math.min(request.maxNoProgressSegments, session.budget.maxNoProgressSegments)) {
         stop = stopOf('NO_PROGRESS', `连续 ${session.progress.stagnationSegments} 段没有确认位移或相关新证据；不自动脱困/改方向`);
@@ -451,6 +534,11 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
       prefix: last.search.prefix,
       ...(last.chosen?.verification === undefined ? {} : { verification: last.chosen.verification }),
       plannedTransitions: last.planned.length,
+      ...(last.partialDisplacement === undefined ? {} : { partialDisplacement: last.partialDisplacement }),
+      measuredDisplacement: {
+        horizontal: Math.hypot(last.measuredEnd.x - last.measuredStart.x, last.measuredEnd.z - last.measuredStart.z),
+        vertical: Math.abs(last.measuredEnd.y - last.measuredStart.y),
+      },
       backend: last.directDrop ? 'direct-drop' : last.planned.length > 0 ? 'land-search' : 'none',
       arrived: outcome.status === 'succeeded' && (outcome.stop.reason === 'ARRIVED' || outcome.stop.reason === 'DISTANCE_MET'),
     }),

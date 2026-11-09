@@ -5,7 +5,7 @@ import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { advance } from '../src/skills/movement/index.ts';
 import { acquireSessionLease, clearMovementSessions, findMovementSession, releaseSessionLease } from '../src/skills/movement/session.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
-import type { Vec3Like } from '../src/adapter/types.ts';
+import type { MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -149,6 +149,137 @@ test('A4 两格高墙：停在墙前报 BLOCKED，不挖、不改目标', async 
   assert.equal(adapter.actions.length, 0, '没有代挖/代放');
   assert.equal(JSON.stringify(adapter.state().inventory), inventory);
   assert.equal((r.data?.continuation as { canContinue: boolean }).canContinue, true, '清障后可用同一 session 续接');
+});
+
+test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕行', async (t) => {
+  // 只堵住 z=0 的直行车道，z=±1 仍可走；air/ground 在同一格不能先记空气再记石头。
+  const wall = (x: number, _y: number, z: number) => x >= 6 && x <= 8 && z === 0;
+  const map = corridor(30, -1, [-1, 1], wall);
+  fill(map, 'minecraft:stone', [6, 7, 8].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x, y, z: 0 }))));
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 20, maxLateralDrift: 1 }));
+
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal((r.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
+  const progress = r.data?.progress as { along: number; lateral: number };
+  assert.ok(progress.along >= 19.99, `along=${progress.along}`);
+  assert.ok(progress.lateral <= 1.01, `final lateral=${progress.lateral}`);
+  const counters = r.data?.counters as { confirmedRouteLength: number };
+  assert.ok(counters.confirmedRouteLength > 21, `detour path=${counters.confirmedRouteLength}`);
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '绕行也只迈步，不挖/不放');
+});
+
+test('A4c 阻挡两侧先观察：侧向证据变化后选择已验证绕行', async (t) => {
+  // 直行 z=0 有墙；z=±1 两侧未观察，但边界观察能看到并补进共享 VoxelMap。
+  const skip = (x: number, _y: number, z: number) => (x >= 6 && x <= 8 && z === 0) || (x >= 5 && x <= 10 && z !== 0);
+  const map = corridor(30, -1, [-1, 1], skip);
+  fill(map, 'minecraft:stone', [6, 7, 8].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x, y, z: 0 }))));
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  let observations = 0;
+  ctx.senses.observeBlocks = (positions) => {
+    // 只响应边界探针（同一 x/z 上同时有 y 与 y-1），不把 move_step 的局部反馈当成世界观察。
+    if (!isBoundaryProbe(positions) || !positions.some((p) => p.z !== 0 && p.x >= 4 && p.x <= 11)) return [];
+    observations += 1;
+    const air: Vec3Like[] = [], ground: Vec3Like[] = [];
+    for (let x = 4; x <= 12; x++) for (const z of [-1, 1]) {
+      for (let y = 64; y <= 66; y++) air.push({ x, y, z });
+      ground.push({ x, y: 63, z });
+    }
+    fill(map, 'minecraft:air', air);
+    fill(map, 'minecraft:grass_block', ground);
+    return positions.map((pos) => ({ pos, name: 'minecraft:air', properties: {}, worldId: WORLD, sessionId: SESSION, dimension: DIM, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
+  };
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 20, maxLateralDrift: 1 }));
+
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal((r.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
+  assert.ok(observations >= 1, '应先做边界侧向观察');
+  assert.equal((r.data?.lastObservation as { relatedChanged: boolean }).relatedChanged, true);
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '绕行也只迈步，不挖/不放');
+});
+
+test('A4d 边界观察发现 3D 落点，沿已验证落差继续推进', async (t) => {
+  // 上层脚高 64 到 x=5；下层地面 y=60（脚高 61）从 x=6 开始；共享地图尚未观察下层。
+  const map = corridor(5, -1, [-1, 1]);
+  class TwoLevelWorld extends FakeAdapter {
+    override blockAt(pos: Vec3Like) {
+      if (pos.x >= 6) return pos.y === 60 ? 'grass_block' : pos.y < 60 ? 'stone' : 'air';
+      return pos.y === 63 ? 'grass_block' : pos.y < 63 ? 'stone' : 'air';
+    }
+    // descend_to 的 target 是连续站位；move_step 的 xyz 是方块格（FakeAdapter 会补到格心）。
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      if (target.kind === 'xyz' && (!Number.isInteger(target.x) || !Number.isInteger(target.z))) {
+        this.actions.push('moveTo:xyz');
+        this.pos = { x: target.x, y: target.y, z: target.z };
+        return;
+      }
+      return super.moveTo(target, opts);
+    }
+  }
+  const adapter = new TwoLevelWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx: SkillCtx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+  ctx.senses.landingOptions = () => [{
+    target: { x: 6.5, y: 61, z: 0.5 }, support: { pos: { x: 6, y: 60, z: 0 }, name: 'grass_block' },
+    surface: 'ground', surfaceY: 61, horizontalDistance: 1, drop: 3, clearance: 'clear', corridor: 'clear',
+    approach: 'adjacent', waterDepth: 'unknown', unknowns: [],
+    receipt: { worldId: WORLD, sessionId: SESSION, dimension: DIM, observationId: adapter.state().observationId, at: Date.now(), from: { ...adapter.pos }, onGround: true },
+  }];
+  let revealed = false;
+  ctx.senses.observeBlocks = (positions) => {
+    if (!isBoundaryProbe(positions) || revealed) return [];
+    revealed = true;
+    const air: Vec3Like[] = [], ground: Vec3Like[] = [];
+    for (let x = 6; x <= 20; x++) for (let z = -1; z <= 1; z++) {
+      for (let y = 61; y <= 66; y++) air.push({ x, y, z });
+      ground.push({ x, y: 60, z });
+    }
+    fill(map, 'minecraft:air', air);
+    fill(map, 'minecraft:grass_block', ground);
+    return positions.map((pos) => ({ pos, name: 'minecraft:air', properties: {}, worldId: WORLD, sessionId: SESSION, dimension: DIM, observationId: 1, observedAt: Date.now(), source: 'vision' as const }));
+  };
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 12 }));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal((r.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
+  assert.ok(Math.abs(adapter.pos.y - 61) <= 0.01, `final y=${adapter.pos.y}`);
+  const observation = r.data?.lastObservation as { landingCandidates?: unknown[] } | undefined;
+  assert.ok(observation?.landingCandidates?.length, '边界观察应带可见落点候选');
+});
+
+class PartialMoveWorld extends FakeAdapter {
+  failed = false;
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    if (target.kind === 'xyz' && !this.failed) {
+      this.failed = true;
+      this.pos = { ...this.pos, x: this.pos.x + 0.5 };
+      throw Object.assign(new Error('partial move timeout'), { name: 'TimeoutError' });
+    }
+    return super.moveTo(target, opts);
+  }
+}
+
+test('A19 move_step 部分位移：保留实测位置，续接从新位置开始', async (t) => {
+  const map = corridor(30);
+  const adapter = new PartialMoveWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx: SkillCtx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+  const first = await advance.run(ctx, args({ direction: 'E', distance: 20 }));
+
+  assert.equal(first.status, 'failed', first.summary);
+  assert.equal((first.data?.stop as { reason: string }).reason, 'PHYSICAL_FAILURE');
+  assert.deepEqual(first.data?.position, { x: 1, y: 64, z: 0.5 });
+  const partial = first.data?.partialDisplacement as { horizontal: number; vertical: number; atTarget: boolean } | undefined;
+  assert.ok(partial && partial.horizontal > 0.4, JSON.stringify(partial));
+  const sessionId = (first.data?.continuation as { sessionId?: string }).sessionId;
+  assert.ok(sessionId, '部分位移后仍可续接');
+
+  const second = await advance.run(ctx, args({ direction: 'E', distance: 20, sessionId }));
+  assert.equal(second.status, 'succeeded', second.summary);
+  assert.ok(Math.floor(adapter.pos.x) >= 20);
 });
 
 test('A5 UNKNOWN 边界链：定向观察、相关证据变化、重搜并继续', async (t) => {
