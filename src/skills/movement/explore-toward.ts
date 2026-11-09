@@ -101,9 +101,18 @@ export const exploreToward: Skill<ExploreArgs> = {
     let lastFailure: SkillResult | undefined;
     const factsNow = () => {
       const end = { ...adapter.state().pos }, progress = project(end);
+      const newChunks = ctx.memory.visitedChunkCount - startChunks;
+      // 一个新区块都没进时，说明本段全在去过的范围里；给出这个方向上访问记录到哪为止（历史事实，不替它选方向）。
+      const extent = newChunks === 0 ? ctx.memory.visitedExtent(s0.dim) : null;
+      const reach = extent === null || extent.bounds === null ? '' : `（本段全在去过的区块里；${s0.dim} 区块访问外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}${
+        extent.farthest === null ? '' : (['N', 'S', 'E', 'W'] as const).filter((d) => args.direction.includes(d)).map((d) => {
+          const f = extent.farthest![d].pos;
+          return `，记录路径最${{ N: '北', S: '南', E: '东', W: '西' }[d]}脚点 (${f.x},${f.y},${f.z}) 离这里 ${Math.round(Math.hypot(f.x - end.x, f.z - end.z))} 格`;
+        }).join('')
+      }；只是历史记录，不代表现在还通）`;
       return {
         end, progress,
-        measured: `实测 ${at(end)}，沿 ${args.direction} 推进 ${progress.along}/${args.distance} 格、横向偏离 ${progress.lateral} 格，${segments.length} 段，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块`,
+        measured: `实测 ${at(end)}，沿 ${args.direction} 推进 ${progress.along}/${args.distance} 格、横向偏离 ${progress.lateral} 格，${segments.length} 段，新进入 ${newChunks} 个区块${reach}`,
       };
     };
 

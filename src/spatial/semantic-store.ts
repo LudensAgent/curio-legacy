@@ -1096,6 +1096,27 @@ export class SpatialSemanticStore {
     return this.session.ledger.chunkVisits().length;
   }
 
+  /**
+   * 本维度去过的历史范围：区块访问数与外框，以及记录路径（亲历的 traversal 片段）在东南西北四向
+   * 最远的脚点和那段路最后记录的时间。只是历史记录，不代表现在还通、也不代表那片看全了。
+   */
+  visitedExtent(dim: string) {
+    const visits = this.session.ledger.chunkVisits(dim);
+    const bounds = visits.length === 0 ? null : {
+      minX: Math.min(...visits.map((v) => v.cx)) * 16, maxX: Math.max(...visits.map((v) => v.cx)) * 16 + 15,
+      minZ: Math.min(...visits.map((v) => v.cz)) * 16, maxZ: Math.max(...visits.map((v) => v.cz)) * 16 + 15,
+    };
+    const points = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal')
+      .flatMap((f) => f.polyline.map((p) => ({ pos: point(p), at: f.lastUsedAt })));
+    const pick = (better: (a: Vec3Like, b: Vec3Like) => boolean) =>
+      points.reduce<(typeof points)[number] | null>((best, p) => best === null || better(p.pos, best.pos) ? p : best, null);
+    const farthest = points.length === 0 ? null : {
+      N: pick((a, b) => a.z < b.z)!, S: pick((a, b) => a.z > b.z)!,
+      E: pick((a, b) => a.x > b.x)!, W: pick((a, b) => a.x < b.x)!,
+    };
+    return { chunks: visits.length, bounds, farthest };
+  }
+
   novelty(dim: string, x: number, z: number): number {
     return this.session.ledger.novelty(dim, Math.floor(x / 16), Math.floor(z / 16));
   }

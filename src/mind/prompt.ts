@@ -788,6 +788,16 @@ function worldKnowledge(ctx: MindContext) {
         ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
       };
     });
+  // 本维度去过多远：explored_around 只抽样身边 32–128 格，看不到更远处走过的路；这里只给历史事实，不选方向。
+  const extent = ctx.tier === 'deliberate' ? m.visitedExtent(p.self.dim) : null;
+  const visitedExtent = extent === null || extent.bounds === null ? null : [
+    `访问过 ${extent.chunks} 个区块，外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}`,
+    ...(extent.farthest === null ? [] : [`记录路径四向最远脚点：${(['N', 'S', 'E', 'W'] as const).map((d) => {
+      const f = extent.farthest![d];
+      return `${d} (${f.pos.x},${f.pos.y},${f.pos.z}) ${bearing(f.pos)}（这段路${portalAgeText(f.at)}记录）`;
+    }).join('；')}`]),
+    '只是走过的历史记录，不代表现在还通，也不代表那片看全了',
+  ].join('；');
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
@@ -811,7 +821,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(remember.length ? { resources_seen_before: remember } : {}),
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
     ...(lastDeaths.length ? { last_deaths: lastDeaths } : {}),
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子

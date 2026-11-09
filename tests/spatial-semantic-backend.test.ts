@@ -69,3 +69,25 @@ test('WorldMemory JSON keeps only non-spatial facts', (t) => {
   assert.equal(memoryFrom(stores, containers, W).memory.chests(D)[0]?.contents?.items[0]?.count, 2);
   assert.equal(memoryFrom(stores, containers, W).memory.getPlaced(at(5, 64, 5)), 'torch');
 });
+
+test('visitedExtent 报本维度区块外框和记录路径四向最远脚点，别的维度与非亲历几何不算', () => {
+  const { memory, stores } = semanticMemory(W);
+  memory.visit(D, at(0, 64, 0));
+  memory.visit(D, at(40, 64, -400));
+  memory.visit('the_nether', at(900, 64, 900));
+  const fragment = (id: string, dim: string, polyline: { x: number; y: number; z: number }[], lastUsedAt: number, geometrySource: 'traversal' | 'legacy' = 'traversal') =>
+    stores.history.saveFragment({ id, worldId: W, dim, kind: 'walked', entrances: [], polyline, geometrySource, deepestY: 0, createdAt: lastUsedAt, lastUsedAt, uses: 1 });
+  fragment('near', D, [at(0.4, 64, 0.6), at(-5, 64, 3)], 10);
+  fragment('far', D, [at(7.2, 44, -420.3), at(30, 44, -380)], 20);
+  fragment('other', 'the_nether', [at(900, 64, 900)], 30);
+  fragment('legacy', D, [at(5000, 64, 0)], 40, 'legacy');
+
+  const extent = memory.visitedExtent(D);
+  assert.equal(extent.chunks, 2);
+  assert.deepEqual(extent.bounds, { minX: 0, maxX: 47, minZ: -400, maxZ: 15 });
+  assert.deepEqual(extent.farthest?.N, { pos: at(7, 44, -420), at: 20 });
+  assert.deepEqual(extent.farthest?.S.pos, at(-5, 64, 3));
+  assert.deepEqual(extent.farthest?.E.pos, at(30, 44, -380), '非亲历的 legacy 几何不算走过');
+  assert.deepEqual(extent.farthest?.W.pos, at(-5, 64, 3));
+  assert.deepEqual(memory.visitedExtent('the_end'), { chunks: 0, bounds: null, farthest: null });
+});
