@@ -23,6 +23,8 @@ export const DIRS: Record<string, [number, number]> = {
   S: [0, 1], SW: [-0.707, 0.707], W: [-1, 0], NW: [-0.707, -0.707],
 };
 
+/** 一次感知更新里最多记多少处地标（资源/危险，按同类同片去重后）。 */
+const LANDMARK_NOTES_PER_UPDATE = 12;
 const supportKey = (pos: Vec3Like) => `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
 const DANGER = new Set(['lava', 'spawner']);
 const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnace']);
@@ -596,20 +598,30 @@ export class Perception {
         this.memory.markSeen('items', it.name);
         this.onNewItem?.(it.name, heldBefore);
       }
+      // 视野里同一片矿/岩浆往往有几十上百格：每格都去记地标，每次都要全量查一遍语义节点，
+      // 地标满额时还会写入/淘汰（下界实测主线程一卡 3–5 秒）。同一帧里同类同片（16 格一块）只记一次，
+      // 每帧最多记这么多次；没记到的下一帧还在视野里，会接着记。
+      const noted = new Set<string>();
+      const note = (kind: 'danger' | 'resource', name: string, pos: Vec3Like) => {
+        const key = `${kind}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
+        if (noted.has(key) || noted.size >= LANDMARK_NOTES_PER_UPDATE) return;
+        noted.add(key);
+        this.memory.addLandmark(kind, name, s.dim, pos);
+      };
       for (const b of v.visibleNow.values()) {
         if (!NOTABLE.has(b.name)) continue;
         if (this.memory.markSeen('blocks', b.name)) {
           this.bus.publish('discovery', 'P2', `首次看见方块：${b.name}（${Math.round(b.dist)} 格外）`, { category: 'block', name: b.name, pos: b.pos });
         }
         // 岩浆既危险又是资源（浇水成黑曜石、当燃料）：两样都记
-        if (DANGER.has(b.name)) this.memory.addLandmark('danger', b.name, s.dim, b.pos);
+        if (DANGER.has(b.name)) note('danger', b.name, b.pos);
         // 岩浆只把源头记成资源（浇水能变黑曜石、能舀）；流动的岩浆只算危险
         const level = b.name === 'lava' ? this.adapter.blockStateAt?.(b.pos)?.properties.level : undefined;
         if (b.name === 'lava' && level !== undefined && Number(level) !== 0) {
           for (const l of this.memory.landmarks().filter((l) => l.kind === 'resource' && l.label === 'lava' && l.dim === s.dim
             && l.pos.x === b.pos.x && l.pos.y === b.pos.y && l.pos.z === b.pos.z)) this.memory.removeLandmark(l.id);
         }
-        if (isResourceBlock(b.name) && (b.name !== 'lava' || level !== undefined && Number(level) === 0)) this.memory.addLandmark('resource', b.name, s.dim, b.pos);
+        if (isResourceBlock(b.name) && (b.name !== 'lava' || level !== undefined && Number(level) === 0)) note('resource', b.name, b.pos);
         if (DANGER.has(b.name) || isResourceBlock(b.name)) continue;
         if (interactiveName(b.name)) {
           // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）

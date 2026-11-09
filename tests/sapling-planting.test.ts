@@ -142,3 +142,24 @@ test('use_item 把适配器的 BAD_SUPPORT 反馈成 BAD_ARGS 而不是泛化执
   assert.match(r.summary, /BAD_SUPPORT/);
   assert.match(r.summary, /stone/);
 });
+
+test('use_item 种树苗 on:"grass_block" 不挑自己脚下那块：改种在旁边上方是空气的草方块；只剩脚下那块时如实说明', async (t) => {
+  const w = new TestWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('birch_sapling', 1);
+  const used: Vec3Like[] = [];
+  w.useItemOn = (async (_item: string, target: { kind: string; pos?: Vec3Like }) => { if (target.pos) used.push(target.pos); return { ok: true, placed: target.pos }; }) as typeof w.useItemOn;
+  const underFeet = { name: 'grass_block', pos: { x: 0, y: 63, z: 0 }, dist: 1 };
+  const beside = { name: 'grass_block', pos: { x: 2, y: 63, z: 0 }, dist: 2 };
+  const ctx = makeCtx(w, { senses: { knownBlocks: () => [underFeet, beside], observeBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  await useItem.run(ctx, { item: 'birch_sapling', on: 'grass_block' });
+  assert.deepEqual(used, [beside.pos], '跳过脚下那块，种在旁边');
+
+  const only = makeCtx(w, { senses: { knownBlocks: () => [underFeet], observeBlocks: () => [] } });
+  t.after(() => only.memory.close());
+  const r = await useItem.run(only, { item: 'birch_sapling', on: 'grass_block' });
+  assert.equal(r.failureCode, 'NOT_FOUND');
+  assert.match(r.summary, /自己脚下站着的/);
+  assert.equal(used.length, 1, '没有对脚下那块发放置');
+});
