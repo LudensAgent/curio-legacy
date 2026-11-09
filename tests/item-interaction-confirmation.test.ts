@@ -246,3 +246,16 @@ test('placing a full block into a cell the body hitbox overlaps first steps back
   assert.match(refused.reason ?? '', /^BODY_IN_TARGET/);
   assert.equal(own.placements(), 0);
 });
+
+test('helper moves refuse a precise stance inside a portal block; only travel_portal may enter it', async () => {
+  // 补支撑换站位“退后一格”正对身后的下界门：不能把身体送进门格，被动传送不是这次委托。
+  const w = fixture();
+  w.put('nether_portal', new Vec3(0, 64, -1));
+  w.put('nether_portal', new Vec3(0, 65, -1));
+  let pathed = 0;
+  w.bot.pathfinder = { stop() {}, setGoal() {}, goto: async () => { pathed++; } };
+  const real = Object.getPrototypeOf(w.adapter).moveTo.bind(w.adapter);
+  await assert.rejects(real({ kind: 'near', pos: { x: 0.5, y: 64, z: -0.5 }, range: 0.3 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /PORTAL_CELL/);
+  await assert.rejects(real({ kind: 'xyz', x: 0.5, y: 64, z: -0.5 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /PORTAL_CELL/);
+  assert.equal(pathed, 0, '没有发起移动');
+});

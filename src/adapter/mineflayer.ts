@@ -1014,6 +1014,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 boat_path 操控它前进`);
+    // 传送门方块没有碰撞箱，按几何算是“能站”的空格；可身体在里面待满几秒就会换维度。
+    // 换站位、补支撑、贴近目标这类辅助移动把精确落点选进门格，会让 Agent 没选穿门就被送走
+    // （2026-11-10 两次：补支撑的退后站位正对身后的下界门，思考还没回来人已回到主世界）。
+    // 只有 travel_portal（enterPortalAt）自己能把身体送进门格；其余精确落点一律拒绝，交回事实。
+    if (!this.inPortalTransition) {
+      const cell = target.kind === 'xyz' ? { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) }
+        : target.kind === 'near' && target.range < 1 ? { x: Math.floor(target.pos.x), y: Math.floor(target.pos.y), z: Math.floor(target.pos.z) } : null;
+      const portal = cell && [0, 1].map((dy) => this.blockAt({ ...cell, y: cell.y + dy })).find((n): n is string => !!n && PORTAL_KINDS.has(n));
+      if (cell && portal) throw new Error(`PORTAL_CELL: 目标站位 (${cell.x},${cell.y},${cell.z}) 是 ${portal} 方块，进去会被传送；没有移动。要穿门用 travel_portal`);
+    }
     this.pathDigTool = opts.digTool ?? null;
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
