@@ -313,3 +313,30 @@ test('技能完成后记录统计与结果', async () => {
   assert.equal(adapter.inv.get('oak_log'), 2);
   assert.equal(memory.skillStats().gather.ok, 1);
 });
+
+test('取消时技能附带的 progressNote 进入取消回执摘要，partial 原样保留在 data', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_progress_note = {
+    name: 'test_progress_note', description: '', argsDoc: '{}', timeoutMs: 5000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      try { await sleep(5000, ctx.signal); } catch (e) {
+        (e as { partial?: unknown }).partial = { progressNote: '被打断时实测 (3,64,0)，沿 E 推进 3/96 格', progress: { along: 3 } };
+        throw e;
+      }
+      return { status: 'succeeded', summary: 'should not reach' };
+    },
+  };
+  try {
+    arbiter.start({ skill: 'test_progress_note' }, 'llm');
+    const done = next();
+    await sleep(20);
+    arbiter.cancel('挨打了');
+    const o = await done;
+    assert.equal(o.result.status, 'cancelled');
+    assert.match(o.result.summary, /^挨打了；被打断时实测 \(3,64,0\)/);
+    assert.deepEqual((o.result.data as { progress: unknown }).progress, { along: 3 });
+  } finally {
+    delete SKILLS.test_progress_note;
+  }
+});
