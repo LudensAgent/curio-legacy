@@ -36,8 +36,8 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块或生物名时，本次视野看见就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
-  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"<方块或生物名，看见就停>", "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
+  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
+  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -48,7 +48,7 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (!Number.isInteger(a.distance) || a.distance < 16 || a.distance > MAX_EXPLORE_DISTANCE) {
       return { ok: false, error: `distance 需要 16–${MAX_EXPLORE_DISTANCE} 的整数格数；原目标不会被缩短，更远请分次续走` };
     }
-    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要一个方块或生物名（≤40 字）' };
+    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要方块/生物名、类别（log、stem）或 "a|b"（≤40 字）' };
     if (a.segment !== undefined && (!Number.isInteger(a.segment) || a.segment < 16 || a.segment > 48)) return { ok: false, error: 'segment 需要 16–48 的整数' };
     if (a.maxLateralDrift !== undefined && (!Number.isInteger(a.maxLateralDrift) || a.maxLateralDrift < 4 || a.maxLateralDrift > 64)) return { ok: false, error: 'maxLateralDrift 需要 4–64 的整数' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
