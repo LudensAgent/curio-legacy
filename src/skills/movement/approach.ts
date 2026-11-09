@@ -74,7 +74,7 @@ export const goNear: Skill<ApproachArgs> = {
     const target = { x: args.target.x, y: args.target.y, z: args.target.z };
     const targetName = ctx.adapter.blockAt(target);
     if (targetName !== null && AIR.test(targetName)) {
-      return fail('BAD_ARGS', `target (${target.x},${target.y},${target.z}) 是空气/站立格；go_near 只用于容器/门/床/传送门方块，走到站立格请用 navigate_to`, { target });
+      return fail('BAD_ARGS', `target (${target.x},${target.y},${target.z}) 是空气/站立格；go_near 只用于容器/门/床/传送门方块；走到这个位置用 travel_to {"to":{"x":${target.x},"y":${target.y},"z":${target.z}}} 或 approach_visible {"target":{"pos":…}}，需要逐格核实的精确站位才用 navigate_to`, { target });
     }
     // One deadline for every candidate and the historical fallback: a single
     // go_near call must not multiply the per-search wall-clock budget by 12.
@@ -144,25 +144,28 @@ export const goNear: Skill<ApproachArgs> = {
         budgetMs: GO_NEAR_SEARCH_MS, budgetHit, timeBudgetHit, insufficientEvidence, position: { ...state.pos },
       });
     }
+    // 候选站位的 y 只是 target.y±1 的猜测；land-search 已按该列真实支撑解析出脚高（台阶、半砖、
+    // 灵魂沙等不是整数）。交给 navigate_to 的必须是解析后的脚高，否则身体已到旁边仍按原 y 判“未到达”。
+    const stance = { x: chosen.to.x, y: chosen.result.resolvedTarget.y, z: chosen.to.z };
     const nested = validateSkill(navigateTo, {
-      to: chosen.to,
+      to: stance,
       allowed: args.allowed,
       historical: args.historical,
       maxSteps: args.maxSteps,
       allowUnknownCorridor: args.allowUnknownCorridor,
     }, ctx.adapter);
-    if (!nested.ok) return fail('BAD_ARGS', `go_near 生成 navigate_to 参数无效：${nested.error}；没有移动`, { target, chosen: chosen.to });
+    if (!nested.ok) return fail('BAD_ARGS', `go_near 生成 navigate_to 参数无效：${nested.error}；没有移动`, { target, chosen: stance });
     const moved: SkillResult = await runSkill(ctx, navigateTo, nested.args);
     if (moved.status !== 'succeeded') {
       const { local: _local, around: _around, ...data } = (moved.data ?? {}) as Record<string, unknown>;
       return fail(moved.failureCode ?? 'ERROR', `go_near 没能走到 ${targetName ?? '目标方块'} 旁：${moved.summary}`, {
-        target, targetName, chosen: chosen.to, navigation: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data },
+        target, targetName, chosen: stance, navigation: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data },
       });
     }
     // 把原目标的精确坐标回显进摘要：模型只看到摘要，写“指向原目标”时经常丢掉 target。
     const targetArg = JSON.stringify({ x: target.x, y: target.y, z: target.z });
-    return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${chosen.to.x},${chosen.to.y},${chosen.to.z})；后续动作的 target 写 ${targetArg}（容器用 take_items/store_items，床用 sleep，门/工作站用 interact_block/use_gui，传送门用 observe_portal/travel_portal）`, {
-      target, targetName, chosen: chosen.to, evidenceMode: chosen.result.evidenceMode,
+    return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${stance.x},${stance.y},${stance.z})；后续动作的 target 写 ${targetArg}（容器用 take_items/store_items，床用 sleep，门/工作站用 interact_block/use_gui，传送门用 observe_portal/travel_portal）`, {
+      target, targetName, chosen: stance, evidenceMode: chosen.result.evidenceMode,
       candidateCount: strictResults.length, budgetMs: GO_NEAR_SEARCH_MS,
       maxSyncSliceMs: Math.max(...strictResults.map(({ result }) => result.stats.maxSyncSliceMs)),
       navigation: moved.data, position: { ...ctx.adapter.state().pos },
