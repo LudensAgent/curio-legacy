@@ -137,6 +137,8 @@ export class TraversalRecorder {
     private readonly sink: Pick<SharedSpatialSession, 'recordWalkCorridor'> | undefined,
     private readonly now: () => number = Date.now,
     private readonly onFailure?: (message: string) => void,
+    /** 写满腾位时实际忘掉了哪些旧路径记录（事实，不是失败）。 */
+    private readonly onForgotten?: (message: string) => void,
   ) {}
 
   observe(observation: TraversalObservation): void {
@@ -331,6 +333,10 @@ export class TraversalRecorder {
       this.receiptsLog.splice(0, this.receiptsLog.length - MAX_TRAVERSAL_RECEIPTS);
     }
     // 回执先定稿入日志，再通知失败；回调抛错不得改写已记录的证据。
+    const f = 'forgotten' in outcome ? outcome.forgotten : undefined;
+    if (f !== undefined) {
+      this.onForgotten?.(`路径记录已满，忘掉 ${f.fragments} 段旧路径（其中 ${f.redundant} 段的每一格别的记录里也有、已无路线边引用；其余按最久未用），连带 ${f.edges} 条路线边、${f.nodes} 个通道节点`);
+    }
     if (exceptionMessage !== null) this.onFailure?.(exceptionMessage);
     else if (outcome.status === 'failed') this.onFailure?.(`空间记忆写入失败：${outcome.stage} ${outcome.message}`);
     return receipt;

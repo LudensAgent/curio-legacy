@@ -67,6 +67,12 @@ export const MAX_FRAGMENT_LINKS = 16_384;
 /** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
 export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
+/** 路径片段上限（整个世界、各维度合计）。不往上调：travel_to via:"history"、spatial_extrema 每次最多扫 1000 片，
+ *  调大只会让它们看不全；写满时由 recordCorridor 腾位。 */
+export const MAX_PATH_FRAGMENTS = 1000;
+/** 写满时一次腾出的片数：腾位要整表扫描片段和边，按批摊薄。 */
+const FRAGMENT_PRUNE_BATCH = 50;
+
 /** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
 const MAX_WALK_TOPOLOGY_NODES = 8;
 const MAX_WALK_TOPOLOGY_EDGES = 8;
@@ -251,7 +257,10 @@ export interface WalkMemoryTopology {
  * `stage` 只来自库/共享会话实际返回的结构化拒绝；调用方 sink 抛出不是本类型，
  * 由 recorder 侧另行如实表达（不得把异常改写成这里的阶段）。
  */
-export type WalkMemoryOutcome =
+/** 写满腾位时实际忘掉的路径记录；redundant 是其中“每格别处也记着、且已无边指向”的片数。 */
+export interface PathRetention { fragments: number; redundant: number; edges: number; nodes: number }
+
+export type WalkMemoryOutcome = (
   | {
       status: 'written';
       fragmentId: string;
@@ -267,7 +276,8 @@ export type WalkMemoryOutcome =
       fragmentId: string;
       traversalIds: string[];
       topology: WalkMemoryTopology;
-    };
+    }
+) & { forgotten?: PathRetention };
 
 /** 结构化缺口类别；只描述宿主实际拒绝/未完成的事实。 */
 export type SharedSpatialGapKind =
@@ -752,7 +762,7 @@ export class SharedSpatialSession {
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
-      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS, maxFragments: MAX_PATH_FRAGMENTS },
     });
     return new SharedSpatialSession(
       session,
@@ -1015,7 +1025,7 @@ export class SharedSpatialSession {
   }
 
   private recordCorridor(input: WalkCorridorEvidence, opts: CorridorWriteOptions): WalkMemoryOutcome {
-    const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
+    const base: { fragmentId: string; traversalIds: string[]; forgotten?: PathRetention } = { fragmentId: input.fragment.id, traversalIds: [] };
     const emptyTopology: WalkMemoryTopology = { nodes: 0, edges: 0, written: false };
     // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
     // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
@@ -1035,6 +1045,8 @@ export class SharedSpatialSession {
     if (sessionId === undefined) {
       return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base, topology: emptyTopology };
     }
+    const forgotten = this.makeRoomForFragment();
+    if (forgotten !== null) base.forgotten = forgotten;
 
     const traversals = input.segments.map((segment) => ({ ...segment, fragmentId: segment.fragmentId }));
     const topology = input.segments.length === 0
@@ -1124,6 +1136,65 @@ export class SharedSpatialSession {
       status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError,
       topology: { ...topologyCounts, written: topology !== null },
     };
+  }
+
+  /**
+   * 路径片段写满时腾出一批位置；不腾的话此后亲历的路径全被库拒写（线上约 4 小时写满）。
+   * 先忘重复片段：已没有拓扑边指向它（同一对格子被后来的行走改写过），且它记的每一格
+   * 别的片段也记着——忘掉它不丢几何覆盖，也不断拓扑。重复片段不够时，再按 lastUsedAt
+   * 忘最旧的，连同指向它的边和因此成孤点的 walk: 通道节点。只动 traversal 来源的片段；
+   * 地标、资源、区块访问、传送门记录不碰。没写满时返回 null。
+   */
+  private makeRoomForFragment(): PathRetention | null {
+    const { history, topology } = this.session;
+    const total = history.fragments({ limit: 1 }).total;
+    if (total < MAX_PATH_FRAGMENTS) return null;
+    const fragments: PathFragment[] = [];
+    for (let after: string | undefined; ;) {
+      const page = history.fragments({ limit: 100, ...(after === undefined ? {} : { after }) });
+      fragments.push(...page.items);
+      if (page.nextAfter === undefined) break;
+      after = page.nextAfter;
+    }
+    const edges: { id: string; from: string; to: string; fragmentId?: string }[] = [];
+    for (let after: string | undefined; ;) {
+      const page = topology.edges({ limit: 100, ...(after === undefined ? {} : { after }) });
+      edges.push(...page.items);
+      if (page.nextAfter === undefined) break;
+      after = page.nextAfter;
+    }
+    const referenced = new Set(edges.flatMap((edge) => edge.fragmentId === undefined ? [] : [edge.fragmentId]));
+    const cellsOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`))];
+    const coverage = new Map<string, number>();
+    for (const cell of fragments.flatMap(cellsOf)) coverage.set(cell, (coverage.get(cell) ?? 0) + 1);
+    const oldestFirst = fragments.filter((f) => f.geometrySource === 'traversal').sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    const need = total - (MAX_PATH_FRAGMENTS - FRAGMENT_PRUNE_BATCH);
+    const chosen = new Set<string>();
+    for (const f of oldestFirst) {
+      if (chosen.size >= need) break;
+      const cells = cellsOf(f);
+      if (referenced.has(f.id) || cells.some((cell) => coverage.get(cell)! < 2)) continue;
+      for (const cell of cells) coverage.set(cell, coverage.get(cell)! - 1);
+      chosen.add(f.id);
+    }
+    const redundant = chosen.size;
+    for (const f of oldestFirst) {
+      if (chosen.size >= need) break;
+      chosen.add(f.id);
+    }
+    const doomedEdges = edges.filter((edge) => edge.fragmentId !== undefined && chosen.has(edge.fragmentId));
+    const endpoints = new Set(doomedEdges.flatMap((edge) => [edge.from, edge.to]).filter((id) => id.startsWith('walk:')));
+    let nodes = 0;
+    history.runAtomic(() => topology.runAtomic(() => {
+      for (const edge of doomedEdges) topology.forgetEdge(edge.id);
+      for (const id of chosen) history.forgetFragment(id);
+      for (const id of endpoints) {
+        if (topology.incidentEdgeIds(id).length > 0 || topology.incidentPortalEdgeIds(id).length > 0) continue;
+        topology.forgetNode(id);
+        nodes += 1;
+      }
+    }));
+    return { fragments: chosen.size, redundant, edges: doomedEdges.length, nodes };
   }
 
   /**
