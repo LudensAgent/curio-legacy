@@ -394,3 +394,15 @@ test('其它技能数据里的 transition 不会被当成穿门失败', () => {
   }), 100, adapter.state());
   assert.equal(verdict.kind, 'continue', '没有 portalReason 的 transition 不触发穿门规则');
 });
+
+test('explore_toward / travel_to 失败后不自动原样重放：冻结请求只会得到同一停止原因', () => {
+  for (const skill of ['explore_toward', 'travel_to']) {
+    const { adapter, activity } = activityOf([{ skill, args: { direction: 'S', distance: 96 } }]);
+    const step = nextStep(activity)!;
+    activity.stepStart = { pos: { x: 0.5, y: 64, z: -90 } }; // 身体确实走了很远
+    const verdict = afterStep(activity, step, fail('STUCK', '往 S 探索停下：连续 2 段几乎没挪动', { stopReason: 'NO_ALONG_PROGRESS' }), 40000, adapter.state());
+    assert.equal(verdict.kind, 'stuck', skill);
+    assert.match(verdict.why, /内部已重试过/);
+    assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
+  }
+});

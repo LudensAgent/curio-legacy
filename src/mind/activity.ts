@@ -925,6 +925,11 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (data?.portalReason === 'PORTAL_TRANSITION_TIMEOUT' && portalInsideMs >= 1000) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；这次失败没有新的身体事实可复验，自动续跑不再原样重放，交回心智` };
   }
+  // 显式移动辅助（travel_to / explore_toward）内部已有偏转跳、分段与停止判定，请求又是冻结的
+  // （目标/方向/起点不变）：原样重放只会得到同一停止原因，落水时还会白耗氧气。交回心智按回执决定。
+  if (step.skill === 'travel_to' || step.skill === 'explore_toward') {
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；${step.skill} 内部已重试过，原样重放会得到同一结果，交回心智` };
+  }
   if (RETRYABLE.has(code) && !(step.skill === 'walk_path' && code === 'PATH_NOT_FOUND')
     && !a.adaptations.includes(retryMark) && retries < autoRetryLimit(code, data) && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);
