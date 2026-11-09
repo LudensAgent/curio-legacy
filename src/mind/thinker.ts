@@ -492,6 +492,8 @@ export class Thinker {
       if (fixable.length && !repaired && Date.now() - requestedAt < 40_000) {
         repaired = true;
         firstDraft = parsed;
+        // 这一轮会多一次模型调用：记下来，日志里能看出是哪类写错在反复触发返工
+        this.bus.publish('decision_repair', 'P3', `决定有几处写错，退回去让它改一次：${fixable.join('；').slice(0, 300)}`, { reason: ctx.reason, notes: fixable });
         messages.push({ role: 'assistant', content: c.text.slice(0, 2500) },
           { role: 'user', content: `这个决定有几处写错了，执行时会被丢掉：${fixable.join('；').slice(0, 600)}。\n要这些就改正后重新输出整个 JSON 对象；觉得丢掉也无所谓，就输出 {"keep":true}。` });
         continue;

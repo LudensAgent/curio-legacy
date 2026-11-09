@@ -210,7 +210,7 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near，可以用 exploration 写有界探索（min_distance / find）；没把握就省略 done_when，做完再看结果。`;
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near；exploration 的 min_distance（1–256 的整数）只能用在这段 steps 里有会移动身体的动作时，只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when，做完再看结果。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
