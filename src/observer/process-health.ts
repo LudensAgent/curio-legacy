@@ -16,6 +16,12 @@ export function readMemory(): MemoryReading {
 
 const mb = (n: number) => `${Math.round(n / 1048576)} MB`;
 
+/** 快照目录里 withinMs 内写过的堆快照（读不了目录按没有处理） */
+function recentSnapshot(dir: string, now: number, withinMs: number): boolean {
+  if (!fs.existsSync(dir)) return false;
+  return fs.readdirSync(dir).some((name) => /^heap-.*\.heapsnapshot$/.test(name) && now - fs.statSync(path.join(dir, name)).mtimeMs < withinMs);
+}
+
 /**
  * 进程健康：
  * - 在守护进程下运行时（有 IPC），每 10 秒发一次心跳（带内存），守护靠它判断卡死；守护发来 shutdown 就正常存档退出。
@@ -39,6 +45,11 @@ export function installProcessHealth(bus: EventBus, opts: {
    */
   snapshotAtBytes?: number;
   snapshotDir?: string;
+  /**
+   * 目录里这么近的时间内已经有快照就不再写（跨重启）。堆的冲高常在启动后不久出现、随后回落：
+   * 每次重启都写一份，会每次都停顿几十秒、每份占几百 MB 磁盘，却只是同一种冲高的重复样本。
+   */
+  snapshotCooldownMs?: number;
   writeSnapshot?: (file: string) => string;
 }): { check(): void; dispose(): void } {
   const read = opts.read ?? readMemory;
@@ -61,9 +72,13 @@ export function installProcessHealth(bus: EventBus, opts: {
       bus.publish('process_memory', 'P3', `内存：rss ${mb(m.rss)}，堆 ${mb(m.heapUsed)} / ${mb(m.heapLimit)}（${Math.round(m.ratio * 100)}%）${off}${more ? `｜${more}` : ''}`, { ...m, ...x });
     }
     const snapAt = opts.snapshotAtBytes ?? 0;
+    const dir = opts.snapshotDir ?? '.';
+    if (snapAt > 0 && !snapshotted && m.heapUsed >= snapAt && recentSnapshot(dir, now, opts.snapshotCooldownMs ?? 24 * 3600_000)) {
+      snapshotted = true;
+      bus.publish('memory_snapshot', 'P2', `堆已用 ${mb(m.heapUsed)}，但 ${dir} 里 ${Math.round((opts.snapshotCooldownMs ?? 24 * 3600_000) / 3600_000)} 小时内已有堆快照，这次不再写（避免进程停顿）`, { ...m, ...extra() });
+    }
     if (snapAt > 0 && !snapshotted && m.heapUsed >= snapAt) {
       snapshotted = true;
-      const dir = opts.snapshotDir ?? '.';
       const file = path.join(dir, `heap-${new Date(now).toISOString().replace(/[:.]/g, '-')}.heapsnapshot`);
       bus.publish('memory_snapshot', 'P1', `堆已用 ${mb(m.heapUsed)}（远高于平时），写一份堆快照留着查是谁占的：${file}（进程会停顿一会儿）`, { ...m, ...extra(), file });
       // 写快照会停住事件循环几十秒：先告诉守护进程，免得被当成卡死杀掉
