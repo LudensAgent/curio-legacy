@@ -194,6 +194,14 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       // 船身碰撞箱伸进相邻列：贴岸/贴墙那一格水面服务器必拒，先筛掉，并记下被筛掉几格好如实回报。
       const tooTight = fluid && boat ? hits.filter((h) => !boatFits(ctx, h.pos)).length : 0;
       if (tooTight) hits = hits.filter((h) => boatFits(ctx, h.pos));
+      // 树苗种在方块顶上：上面那格必须是空气、且不是自己身体占着的格（站在这块草上就种不到脚下）。
+      const sapling = isTreeSaplingItem(args.item);
+      const feet = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y + 0.05), z: Math.floor(s.pos.z) };
+      const underBody = (h: { pos: Vec3Like }) => h.pos.x === feet.x && h.pos.z === feet.z && (h.pos.y === feet.y - 1 || h.pos.y === feet.y);
+      const coveredTop = (h: { pos: Vec3Like }) => !AIRISH.has(adapter.blockAt({ x: h.pos.x, y: h.pos.y + 1, z: h.pos.z }) ?? 'air');
+      const ownStand = sapling ? hits.filter(underBody).length : 0;
+      const covered = sapling ? hits.filter((h) => !underBody(h) && coveredTop(h)).length : 0;
+      if (sapling) hits = hits.filter((h) => !underBody(h) && !coveredTop(h));
       const hadSurface = hits.length > 0;
       if (collectSource && hadSurface) {
         const levels = new Map((senses.observeBlocks?.(hits.map((h) => h.pos)) ?? [])
@@ -213,6 +221,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
           return fail('NOT_FOUND', `记得的 ${args.on} 已经不是当前方块了（记忆过期）：${at}${stale.length > 3 ? ` 等 ${stale.length} 处` : ''}；没有对着旧位置使用，先重新看见或换一处`, { stale: stale.slice(0, 8).map((h) => ({ ...h.pos })) });
         }
         if (tooTight) return fail('NOT_FOUND', `看得见的 ${tooTight} 格水面都贴着岸/堤/墙：船身约 1.375 格宽，四周 3×3（水面层和上一层）有实心方块的水面服务器不让放船；没有放。离岸再远一格的开阔水面才放得下（要不要挪、往哪挪由你定）`, { tooTight });
+        if (ownStand || covered) {
+          return fail('NOT_FOUND', `看得见的 ${args.on} 里没有能种 ${args.item} 的：${ownStand ? '最近那块就是自己脚下站着的（身体占着它上面那格）' : ''}${ownStand && covered ? '，' : ''}${covered ? `${covered} 块上面那格不是空气` : ''}；没有种。站到旁边一格、让要种的那块上面空出来再试（往哪站由你定）`, { ownStand, covered });
+        }
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
       if (dist3(adapter.state().pos, target.pos) > 4.2) {
