@@ -667,7 +667,7 @@ adapter.on('chat', (user: string, message: string) => {
 });
 
 // ------------------------------------------------------------ 启动
-/** 仪表盘快照里变化慢、构建又贵的部分：设施描述会为每条通道跑 passageRoute，记忆/学习/统计也都要遍历。
+/** 仪表盘快照里变化慢、构建又贵的部分：传送门记录、记忆/学习/统计都要遍历。
  *  这些字段每 10 秒重建一次；现场（位置、感知、任务、表达）仍然每秒重建，避免把同步计算压到主线程。 */
 let heavyAt = 0;
 let heavyCache: ReturnType<typeof heavySnapshot> | null = null;
