@@ -49,14 +49,15 @@ test('travel_to 注册为显式辅助；方向目标冻结起点且校验幂等�
   assert.ok(!travelTo.validate({ to: 'x', avoid: ['Bad Name'] }, adapter).ok);
 });
 
-test('travel_to 按 ≤24 格分跳执行并实测到达；默认不挖不放、绕开伤身方块，回执不含路径格', async () => {
+test('travel_to 超出直接寻路范围时按 ≤24 格分跳执行并实测到达；默认不挖不放、绕开伤身方块，回执不含路径格', async () => {
   const { ctx, calls, at } = harness();
-  const result = await travelTo.run(ctx, argsOf({ to: { x: 60, z: 0 } }, ctx.adapter));
+  const result = await travelTo.run(ctx, argsOf({ to: { x: 150, z: 0 } }, ctx.adapter));
   assert.equal(result.status, 'succeeded', result.summary);
-  assert.ok(calls.length >= 3, `60 格至少分 3 跳，实际 ${calls.length}`);
+  assert.ok(calls.length >= 4, `150 格先分跳、进入 64 格后直达，实际 ${calls.length}`);
   for (const { target, from } of calls) {
     const x = target.kind === 'xz' ? target.x : target.kind === 'near' ? target.pos.x : NaN;
-    assert.ok(Math.abs(x - from.x) <= 24.5, '每跳不超过 24 格');
+    // 中间跳不超过 24 格；进入 64 格后最后一跳直接以真实终点为目标
+    assert.ok(x === 150 ? 150 - from.x <= 64 : Math.abs(x - from.x) <= 24.5, `跳长超限：${from.x} → ${x}`);
   }
   const opts = calls[0].opts;
   assert.equal(opts.allowTerrainChanges, undefined); assert.equal(opts.allowPlace, false); assert.equal(opts.allowTower, false);
@@ -66,8 +67,28 @@ test('travel_to 按 ≤24 格分跳执行并实测到达；默认不挖不放、
   assert.equal(opts.lavaEdgeCost, 10, '默认离岩浆边远一点');
   assert.equal(result.data?.backend, 'pathfinder');
   assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
-  assert.ok(Math.abs(at().x - 60.5) < 1);
+  assert.ok(Math.abs(at().x - 150.5) < 1);
   assert.equal(JSON.stringify(result.data).includes('"path"'), false, '不回报规划路径');
+});
+
+test('travel_to 64 格内直接以真实目标寻路；来回绕回之前到过的位置就停下并说明', async () => {
+  const direct = harness();
+  await travelTo.run(direct.ctx, argsOf({ to: { x: 60, z: 0 } }, direct.adapter));
+  assert.deepEqual(direct.calls[0]!.target, { kind: 'xz', x: 60, z: 0, range: 2 }, '不先走一个随身体漂移的中间点');
+
+  // 两条洞道之间来回：每一跳都真的走了 10 格，但总在 A、B 两处之间摆。
+  let flip = 1;
+  const sway = harness();
+  const move = sway.adapter.moveTo.bind(sway.adapter);
+  sway.adapter.moveTo = (async (_target: MoveTarget, opts: MoveOpts) => {
+    flip = -flip;
+    return move({ kind: 'xz', x: 0, z: flip * 5, range: 1 }, opts);
+  }) as typeof sway.adapter.moveTo;
+  const r = await travelTo.run(sway.ctx, argsOf({ to: { x: 60, z: 0 } }, sway.adapter));
+  assert.equal(r.data?.stopReason, 'NO_PROGRESS');
+  assert.ok(r.data?.revisited, '回执标出回到的位置');
+  assert.match(r.summary, /又回到之前到过的/);
+  assert.ok(sway.calls.length <= 3, `识别到回访就停，不再绕满 ${sway.calls.length}`);
 });
 
 test('travel_to 正前方走不通时偏转绕行；都走不通时只报辅助没找到，不描述未见地形', async () => {
@@ -156,6 +177,26 @@ test('travel_to via:history 拓扑没有路线时沿记录过的路径片段（�
   assert.equal(travelTo.validate({ to: '1,2', via: { fragment: '' } }, h.adapter).ok, false);
 });
 
+test('travel_to 直走没到时回报记录里有没有沿走过的路通往目标，不自动改走历史路线', async () => {
+  const cells = Array.from({ length: 30 }, (_, i) => ({ x: i, y: 64, z: 0 }));
+  const links = cells.slice(1).map((b, i) => ({ a: cells[i]!, b }));
+  const fragment = { id: 'psg_walk', worldId: 'w', dim: 'overworld', kind: 'walked', entrances: [], polyline: [cells[0]!, cells.at(-1)!], geometrySource: 'legacy', links, deepestY: 64, createdAt: 1, lastUsedAt: 1, uses: 1 };
+  const query = (q: { kind: string }) => q.kind === 'fragments' ? { status: 'ok', data: { kind: 'fragments', items: [fragment] } } : { status: 'ok', data: null };
+  const h = harness({ blocked: () => true });
+  (h.ctx as { spatial?: unknown }).spatial = { query };
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 29, z: 0 } }, h.adapter));
+  assert.equal(r.status, 'failed');
+  assert.ok(h.calls.every(({ target }) => target.kind !== 'near'), '没有擅自沿历史路点走');
+  assert.deepEqual((r.data?.recordedRoute as { fragments: string[] }).fragments, ['psg_walk']);
+  assert.match(r.summary, /记录里有从你附近出发.*via:"history" 会沿它走/);
+
+  const none = harness({ blocked: () => true });
+  (none.ctx as { spatial?: unknown }).spatial = { query: () => ({ status: 'ok', data: { kind: 'fragments', items: [] } }) };
+  const n = await travelTo.run(none.ctx, argsOf({ to: { x: 29, z: 0 } }, none.adapter));
+  assert.equal(n.data?.recordedRoute, undefined);
+  assert.doesNotMatch(n.summary, /记录里有从你附近/);
+});
+
 test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目标在下方多少格', async () => {
   const h = harness({ blocked: () => true });
   const r = await travelTo.run(h.ctx, argsOf({ to: { x: 3, y: 10, z: 0 } }, h.adapter));
@@ -163,6 +204,25 @@ test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目�
   assert.equal(r.data?.stopReason, 'VERTICAL_GAP');
   assert.equal(h.calls.length, 1, '只试正前方一跳，不按水平坐标偏转');
   assert.match(r.summary, /目标在下方 54 格/);
+});
+
+test('travel_to 已加载范围内的三维目标直接以真实目标寻路，不先走一个只按水平方向定的中间点', async () => {
+  const h = harness();
+  await travelTo.run(h.ctx, argsOf({ to: { x: 40, y: 87, z: 0 }, range: 3 }, h.adapter));
+  assert.deepEqual(h.calls[0]!.target, { kind: 'near', pos: { x: 40, y: 87, z: 0 }, range: 3 });
+});
+
+test('travel_to 超出直接寻路范围的三维目标：中间跳限制终点高度，不让一跳带着下到矿道', async () => {
+  const h = harness();
+  await travelTo.run(h.ctx, argsOf({ to: { x: 100, y: 87, z: 0 }, range: 3 }, h.adapter));
+  const hop = h.calls[0]!.target;
+  assert.equal(hop.kind, 'xz');
+  // 出发 y64、目标 y87：高差 23，允许最多再多一次行走下落（4 格）
+  assert.deepEqual(hop.kind === 'xz' ? hop.footY : null, [87 - 27, 87 + 27]);
+  const flat = harness();
+  await travelTo.run(flat.ctx, argsOf({ to: { x: 40, z: 0 } }, flat.adapter));
+  const free = flat.calls[0]!.target;
+  assert.equal(free.kind === 'xz' ? free.footY : 'not-xz', undefined, '只给水平坐标的目标不约束高度');
 });
 
 test('travel_to 沿历史片段遇到竖井走不通时，放弃路点并说明是多少格的直上直下段', async () => {

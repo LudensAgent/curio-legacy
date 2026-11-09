@@ -165,7 +165,8 @@ export interface AgentState {
 
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
-  | { kind: 'xz'; x: number; z: number; range: number }
+  /** footY：可选的终点脚格高度范围 [min,max]（含端点）；不写则任何高度都算到达。 */
+  | { kind: 'xz'; x: number; z: number; range: number; footY?: [number, number] }
   /** 站到这一格；y 是脚高，可为分数（半砖/雪层等薄层，如 64.5）。普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
   | { kind: 'xyz'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
@@ -185,6 +186,8 @@ export interface MoveOpts {
   allowPlace?: boolean;
   /** 是否允许寻路原地搭柱；未指定时沿用 allowPlace。 */
   allowTower?: boolean;
+  /** 寻路垫脚/搭桥不得往这些格子放方块（例如门框格与门内空间）；只限制放置，不限制行走。 */
+  noPlaceAt?: Vec3Like[];
   /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
   allowSwimming?: boolean;
   /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路（逃离也一样，要跑就写 true） */

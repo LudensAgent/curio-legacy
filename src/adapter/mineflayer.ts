@@ -1023,6 +1023,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.scafoldingBlocks = allowPlace ? [...this.normalMovements.scafoldingBlocks] : [];
         movements.allow1by1towers = allowTower && this.normalMovements.allow1by1towers;
       }
+      if (opts.noPlaceAt?.length) {
+        const banned = new Set(opts.noPlaceAt.map((p) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`));
+        // 权重远超 pathfinder 的 100「不能走」阈值：带这个放置的候选步直接被丢弃。
+        movements.exclusionAreasPlace = [...movements.exclusionAreasPlace, (block: any) =>
+          banned.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 1000 : 0];
+      }
       movements.allowParkour = false;
       // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
       if (opts.avoid?.length) {
@@ -1162,9 +1168,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       case 'near':
         goal = new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, target.range);
         break;
-      case 'xz':
+      case 'xz': {
         goal = new goals.GoalNearXZ(target.x, target.z, target.range);
+        const band = target.footY;
+        if (band) {
+          // 只约束终点节点的脚高，路上照常起伏；节点 y 即脚所在格。
+          const nominalEnd = goal.isEnd.bind(goal);
+          goal.isEnd = (node: any) => nominalEnd(node) && node.y >= band[0] && node.y <= band[1];
+        }
         break;
+      }
       case 'xyz':
         // y 是脚高（可为分数）。pathfinder 的节点是“脚下那块 +1”：整块脚高 64 → 节点 64，
         // 半砖脚高 64.5 → 节点 65（见 pathfinder getPathFromTo 的 offset）。

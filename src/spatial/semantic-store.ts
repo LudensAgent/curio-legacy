@@ -262,23 +262,37 @@ export class SpatialSemanticStore {
    */
   private semanticIds: Set<string> | null = null;
   private semanticIdsAt = 0;
+  /**
+   * 按拓扑 revision 缓存的语义节点拷贝。getNode 每次都深拷贝 metadata；感知一帧里会按视野方块逐格
+   * 调 landmarks()/addLandmark()，不缓存就是「视野方块数 × 语义节点数」次深拷贝（下界岩浆多时
+   * 每次感知 100–200ms，画面周期性顿一下）。任何写入都会推进 revision，缓存随之失效。
+   * 缓存的节点只在本类内部只读使用，对外一律经 landmarkView/typedRecord 等再复制。
+   */
+  private nodesCache: { revision: number; nodes: SpatialNode[] } | null = null;
   private allNodes(): SpatialNode[] {
+    const topology = this.session.topology;
     if (this.semanticIds === null || Date.now() - this.semanticIdsAt > SEMANTIC_RESCAN_MS) {
-      this.semanticIds = new Set(allNodes(this.session.topology).filter((node) => node.tag !== undefined || metaOf(node) !== undefined).map((node) => node.id));
+      this.semanticIds = new Set(allNodes(topology).filter((node) => node.tag !== undefined || metaOf(node) !== undefined).map((node) => node.id));
       this.semanticIdsAt = Date.now();
+      this.nodesCache = null;
     }
-    const ids = this.semanticIds;
-    return [...ids].sort().flatMap((id) => {
-      const node = this.session.topology.getNode(id);
-      if (!node) { ids.delete(id); return []; }
-      return [node];
-    });
+    if (this.nodesCache?.revision !== topology.revision) {
+      const ids = this.semanticIds;
+      const nodes = [...ids].sort().flatMap((id) => {
+        const node = topology.getNode(id);
+        if (!node) { ids.delete(id); return []; }
+        return [node];
+      });
+      this.nodesCache = { revision: topology.revision, nodes };
+    }
+    return [...this.nodesCache.nodes];
   }
 
   /** 写入语义节点并登记 id；所有 saveNode 都经过这里，查询才不会漏掉刚写的节点。 */
   private saveTracked(node: SpatialNode) {
     this.session.topology.saveNode(node);
     this.semanticIds?.add(node.id);
+    this.nodesCache = null;
   }
   private allFragments(): PathFragment[] { return allFragments(this.session.history); }
 

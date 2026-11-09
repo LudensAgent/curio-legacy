@@ -34,6 +34,15 @@ type TravelToArgs = {
 
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
 const HOP = 24;
+/**
+ * 目标在这个水平距离内（通常仍在已加载区块里）时，正前方一跳直接以真实目标为寻路终点：
+ * pathfinder 在可达路线里找最短的那条，不必先朝「从当前位置往目标方向 HOP 格」的中间点走——
+ * 那个点随身体位置漂移、不在去目标的路上：三维目标会被带下矿道/坡底；下界岩洞里会在两条洞道间
+ * 来回（在 A 时中间点只能经 B 到，到了 B 新的中间点又只能经 A 到）。
+ */
+const DIRECT_REACH = 64;
+/** 一轮走完落在本次之前某轮停过的位置这么近、且没更接近目标：判为来回打转，不再继续绕。 */
+const REVISIT_RADIUS = 3;
 /** 正前方一跳走不通时依次试的偏转角（度）；偏转跳更短，只用于绕开眼前的阻挡。 */
 const DETOURS = [45, -45, 90, -90];
 const DETOUR_HOP = 16;
@@ -103,7 +112,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块），回执逐项列出。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）。',
+  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。目标在 64 格内时直接以目标为寻路终点（找已加载区块里最短的可达路线），更远时按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、绕回之前到过的位置、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块），回执逐项列出。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）；默认 direct 没走到时，回执会说明记录里有没有从你附近通往目标的走过的路（recordedRoute），不会自动改走。',
   argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base"（首选基地，不一定是最近的那个） | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"|{"fragment":"<片段 id>"}（默认 direct；history 先查拓扑历史路线，没有就在记录过的路径片段〔含旧矿道〕里找从你附近 8 格内到目标附近的连续记录，目标不在同一片记录里就沿记录走到离目标最近处再直线分跳；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
   timeoutMs: 600000,
   movement: true,
@@ -243,17 +252,25 @@ export const travelTo: Skill<TravelToArgs> = {
       if (next !== undefined) {
         return { kind: 'near', pos: { x: Math.floor(next.x), y: Math.floor(next.y), z: Math.floor(next.z) }, range: 2 };
       }
-      if (turn === null && left <= HOP) {
+      if (turn === null && left <= DIRECT_REACH) {
         return target.y === undefined
           ? { kind: 'xz', x: target.x, z: target.z, range: args.range }
           : { kind: 'near', pos: { x: target.x, y: target.y, z: target.z }, range: args.range };
       }
       const angle = Math.atan2(target.z - from.z, target.x - from.x) + (turn ?? 0) * Math.PI / 180;
       const len = turn === null ? HOP : DETOUR_HOP;
-      return { kind: 'xz', x: Math.round(from.x + Math.cos(angle) * len), z: Math.round(from.z + Math.sin(angle) * len), range: 3 };
+      const x = Math.round(from.x + Math.cos(angle) * len), z = Math.round(from.z + Math.sin(angle) * len);
+      if (target.y === undefined) return { kind: 'xz', x, z, range: 3 };
+      // 三维目标的中间跳（偏转跳、或目标超出直接寻路范围时）：终点与目标的高差最多比出发时多一次行走下落
+      // （WALK_MAX_DROP），否则只按水平坐标找最省的路，会顺着矿道/坡一路下到远离目标高度的地方。
+      const allowed = Math.abs(Math.floor(target.y) - Math.floor(from.y)) + WALK_MAX_DROP;
+      return { kind: 'xz', x, z, range: 3, footY: [Math.floor(target.y) - allowed, Math.floor(target.y) + allowed] };
     };
 
     let best = gap(start), staleRounds = 0, hops = 0, failedHops = 0, detours = 0, lastError = '';
+    // 每轮结束时的实测位置：判断是否回到了之前停过的地方（来回打转）。
+    const roundEnds: Vec3Like[] = [{ ...start }];
+    let revisited: Vec3Like | undefined;
     let stop: 'ARRIVED' | 'NO_ROUTE' | 'VERTICAL_GAP' | 'NO_PROGRESS' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
     // 剩余主要是高差：偏转跳只按水平坐标走，绕一圈也不会更接近上下方的目标
     const verticalGap = (p: Vec3Like) => target.y === undefined ? 0 : Math.floor(target.y) - Math.floor(p.y);
@@ -316,7 +333,12 @@ export const travelTo: Skill<TravelToArgs> = {
         if (!moved && abandonedNow) continue;
         if (!moved) { stop = deadline - Date.now() < 1000 ? 'TIMEOUT' : verticalDominant(adapter.state().pos) ? 'VERTICAL_GAP' : 'NO_ROUTE'; if (arrived(adapter.state().pos)) stop = 'ARRIVED'; break; }
         // 沿历史路点前进时离目标可能先变远（历史路线本来会绕）：这一轮算进展，不累计“没更近”。
-        if (now < best - 1) { best = now; staleRounds = 0; } else if (alongHistory) staleRounds = 0; else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(adapter.state().pos) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
+        const here = adapter.state().pos;
+        const back = roundEnds.find((p) => Math.hypot(p.x - here.x, p.y - here.y, p.z - here.z) <= REVISIT_RADIUS);
+        roundEnds.push({ ...here });
+        if (now < best - 1) { best = now; staleRounds = 0; } else if (alongHistory) staleRounds = 0;
+        else if (back) { revisited = { x: Math.floor(back.x), y: Math.floor(back.y), z: Math.floor(back.z) }; stop = arrived(here) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
+        else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(here) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
       }
     } catch (e) {
       if (isAbort(e)) throw cancelledNav(e, { backend, originalRequest: request, resolvedTarget, position: trace.at(-1) ?? null, trace });
@@ -332,7 +354,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const closer = round1(gap(start) - gap(end));
     const facts = {
       target: resolvedTarget, label: target.label, stopReason: stop, arrived: stop === 'ARRIVED',
-      displacement, remaining, closer, hops, failedHops, detours,
+      displacement, remaining, closer, hops, failedHops, detours, ...(revisited ? { revisited } : {}),
       newChunks: ctx.memory.visitedChunkCount - startChunks,
       authorized: { allowDig: args.allowDig, allowPlace: args.allowPlace, allowTower: args.allowTower, allowSwim: args.allowSwim, allowHazard: args.allowHazard, sprint: args.sprint },
       avoided: avoid,
@@ -357,7 +379,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const why = {
       NO_ROUTE: '辅助在已加载区块里没找到能让身体前进的下一跳（正前方与偏转都试过）',
       VERTICAL_GAP: `目标在${verticalGap(end) < 0 ? '下' : '上'}方 ${Math.abs(verticalGap(end))} 格、水平只差 ${round1(flat(end))} 格，辅助找不到${verticalGap(end) < 0 ? '下行' : '上行'}的路；水平偏转绕行帮不上高差，没有再绕（行走辅助一次最多下落 ${WALK_MAX_DROP} 格${args.allowDig ? '' : '，没授权挖'}${args.allowTower ? '' : '、没授权搭柱'}）`,
-      NO_PROGRESS: `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
+      NO_PROGRESS: revisited ? `绕了一圈又回到之前到过的 (${revisited.x},${revisited.y},${revisited.z}) 附近，没有更接近目标，不再来回绕` : `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
       NOT_ALIVE: '途中死亡',
@@ -365,6 +387,17 @@ export const travelTo: Skill<TravelToArgs> = {
     }[stop];
     const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'NO_ROUTE' || stop === 'VERTICAL_GAP' ? 'PATH_NOT_FOUND' : stop === 'NO_PROGRESS' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
     const permissions = `当前授权 allowDig:${args.allowDig} allowPlace:${args.allowPlace} allowSwim:${args.allowSwim}`;
-    return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
+    // 直走没到：查一下记录里有没有从现在位置附近通往目标附近的走过的路，只作为事实回报，换不换走法由 Agent 定。
+    let recordedNote = '';
+    if (args.via === 'direct' && ctx.spatial !== undefined && stop !== 'NOT_ALIVE' && stop !== 'DIMENSION_CHANGED') {
+      const scan = pageFragments(ctx.spatial, { dim: s0.dim, maxFragments: 1000, signal, deadline: Date.now() + 1500 });
+      const route = routeOnPathGraph(buildPathGraph(scan.items), end, { x: target.x, y: target.y ?? end.y, z: target.z }, HISTORY_NEAR, Date.now() + 1000);
+      if (route.status !== 'START_NOT_RECORDED' && route.points.length > 1) {
+        const recorded = { fragments: route.fragments.slice(0, 8), points: route.points.length, endDistance: route.endDistance, status: route.status };
+        Object.assign(facts, { recordedRoute: recorded });
+        recordedNote = `；记录里有从你附近出发、沿自己走过的路（片段 ${recorded.fragments.join('、')}，${recorded.points} 格）${route.status === 'PARTIAL' ? `到离目标 ${route.endDistance} 格处` : '到目标附近'}的连续路径，via:"history" 会沿它走（历史记录，现在是否还通未确认）`;
+      }
+    }
+    return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}${recordedNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
   },
 };

@@ -46,6 +46,65 @@ test('build_portal places exactly ten obsidian and records only the activated po
   assert.deepEqual(snapshot.routes, []);
 });
 
+test('build_portal allowTower 授权寻路垫脚，且禁止往门框与门内放方块', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 4);
+  const calls: { pos: { x: number; y: number; z: number }; opts: Parameters<FakeAdapter['moveTo']>[1] }[] = [];
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'place_block') calls.push({ pos: target.pos, opts });
+    return moveTo(target, opts);
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.ok(calls.length > 0 && calls.every((c) => c.opts.allowPlace === true && c.opts.allowTower === true));
+  const banned = new Set(calls[0].opts.noPlaceAt!.map((p) => `${p.x},${p.y},${p.z}`));
+  for (const key of ['4,64,0', '5,66,0', '3,67,0', '4,67,0', '6,65,0']) assert.ok(banned.has(key), `门框/门内 ${key} 禁止垫脚`);
+});
+
+test('build_portal 未授权垫脚时不替 Agent 搭柱，够不到就报出那一格离脚多高', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 4);
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    assert.notEqual(opts.allowTower, true);
+    if (target.kind === 'place_block' && target.pos.y >= 66) throw new Error('PLACEMENT_NOT_REACHABLE');
+    return moveTo(target, opts);
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
+  assert.equal(outcome.result.status, 'failed');
+  assert.match(outcome.result.summary, /PLACEMENT_NOT_REACHABLE.*比脚高 \d+ 格.*allowTower/);
+});
+
+test('build_portal 补全上次的残框：角上留下的施工块不算占用，已摆的黑曜石原样复用', async () => {
+  const { adapter, run } = setup();
+  // 上次做到一半：底座、两根侧柱已摆，角上留着一块施工圆石
+  for (const pos of [{ x: 4, y: 63, z: 0 }, { x: 5, y: 63, z: 0 }, ...[64, 65, 66].flatMap((y) => [{ x: 3, y, z: 0 }, { x: 6, y, z: 0 }])]) adapter.blocks.push({ name: 'obsidian', pos });
+  adapter.blocks.push({ name: 'cobblestone', pos: { x: 3, y: 67, z: 0 } });
+  adapter.inv.set('obsidian', 2);
+  adapter.inv.set('flint_and_steel', 1);
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.equal(adapter.inv.get('obsidian'), 0, '只补缺的 2 块');
+});
+
+test('build_portal 门内被挡：列出具体格子与已有黑曜石数，不叫 Agent 换地方或拆门框', async () => {
+  const { adapter, run } = setup();
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 4, y: 63, z: 0 } });
+  adapter.blocks.push({ name: 'netherrack', pos: { x: 5, y: 65, z: 0 } });
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
+  assert.equal(outcome.result.status, 'failed');
+  assert.match(outcome.result.summary, /已有 1\/10 块黑曜石/);
+  assert.match(outcome.result.summary, /门内 \(5,65,0\) 是 netherrack/);
+  assert.doesNotMatch(outcome.result.summary, /换一个|挖回来/);
+});
+
 test('a refused ignition cannot produce a successful portal record', async () => {
   const { adapter, memory, run } = setup();
   adapter.inv.set('obsidian', 10);

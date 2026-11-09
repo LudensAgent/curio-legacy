@@ -455,11 +455,12 @@ export function decisionReminders(ctx: MindContext): string[] {
       out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；粗矿块 ${rawBlocks} 个（背包+记得的箱子合计）按块计，未折算成粗铁` : ''}`);
     }
   }
-  // 自己挖过的通道：下矿时把附近记得的几条摆出来（含旧运行时迁移来的记录）；旧几何不代表现在还通，用不用由它定。
-  if (ctx.tier === 'deliberate' && MINING_INTENT.test(intent)) {
+  // 自己挖过/走过的通道：附近记得的几条摆出来（含旧运行时迁移来的记录）；旧几何不代表现在还通，用不用由它定。
+  // 不按打算的措辞（下矿/找矿……）决定给不给：去门、回基地、找要塞时同样可能沿旧巷道走。
+  if (ctx.tier === 'deliberate') {
     const dist = (a: { x: number; y: number; z: number }) => Math.hypot(a.x - here.x, a.y - here.y, a.z - here.z);
     const tunnels = ctx.memory.allPassages(p.self.dim)
-      .filter((r) => (r.worldId ?? s.worldId) === s.worldId && (r.kind ?? 'dug') === 'dug')
+      .filter((r) => (r.worldId ?? s.worldId) === s.worldId)
       .flatMap((r) => {
         const cells = [...r.path, ...(r.links ?? []).flatMap((l) => [l.a, l.b])];
         if (!cells.length) return [];
@@ -469,7 +470,8 @@ export function decisionReminders(ctx: MindContext): string[] {
       .sort((a, b) => a.d - b.d).slice(0, 2);
     if (tunnels.length) {
       const fmt = (v: { x: number; y: number; z: number }) => `(${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)})`;
-      out.push(`记得自己挖过的通道：${tunnels.map(({ r, nearest, d }) => `${r.id} 离你最近处 ${fmt(nearest)} 约 ${Math.round(d)} 格、记录最深 y=${r.deepestY}${r.archivedAt === undefined ? '' : '（旧记录）'}`).join('；')}——历史记录，现在是否还通没确认；沿它走可用 travel_to 的 via:{"fragment":"<id>"}`);
+      const kindName = { dug: '挖的', walked: '走的', bridge: '搭的' } as const;
+      out.push(`记得自己走过/挖过的路：${tunnels.map(({ r, nearest, d }) => `${r.id}（${kindName[r.kind ?? 'dug']}）离你最近处 ${fmt(nearest)} 约 ${Math.round(d)} 格、记录最深 y=${r.deepestY}${r.archivedAt === undefined ? '' : '（旧记录）'}`).join('；')}——历史记录，现在是否还通没确认；沿它走可用 travel_to 的 via:{"fragment":"<id>"}`);
     }
   }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
