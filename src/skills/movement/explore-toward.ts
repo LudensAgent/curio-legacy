@@ -176,6 +176,8 @@ export const exploreToward: Skill<ExploreArgs> = {
       IN_WATER: `没授权下水却进了水，已停下（没有再走、没有扫视），氧气 ${adapter.state().oxygen}/20；换气、上岸怎么做由你定`,
     }[stop];
     const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
-    return fail(code, `往 ${args.direction} 探索停下：${why}；${measured}${effects}。这只说明辅助走不通，不描述没看见的地形；继续、换方向或换手段由你决定`, facts);
+    // 授权是 Agent 给的：说清这次有没有允许挖、放（搭桥/垫脚要 allowPlace）、下水，换不换手段由它定。
+    const permissions = `当前授权 allowDig:${args.allowDig} allowPlace:${args.allowPlace}（搭桥/垫脚需要它） allowSwim:${args.allowSwim}`;
+    return fail(code, `往 ${args.direction} 探索停下：${why}；${measured}${effects}。${permissions}；这只说明辅助走不通，不描述没看见的地形；继续、换方向或换手段由你决定`, facts);
   },
 };
