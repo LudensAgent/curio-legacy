@@ -62,6 +62,8 @@ export interface Senses {
   observeBlocks?(positions: Vec3Like[]): BlockObservation[];
   /** Bounded landing geometry from freshly visible surfaces, never hidden map queries. */
   landingOptions?(maxHorizontal?: number): LandingOption[];
+  /** 当前视觉有效范围（格）：只作为局部搜索/观察边界，不是通行证明。 */
+  effectiveRange?(): number;
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
   markSweep(): void;
