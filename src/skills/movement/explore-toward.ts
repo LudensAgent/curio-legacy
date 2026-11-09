@@ -139,7 +139,8 @@ export const exploreToward: Skill<ExploreArgs> = {
         // 这一段 travel_to 没走到段终点（正前方与偏转都试过）也算卡住，哪怕顺带往前蹭了几格：
         // 实机下界两段都 NO_PROGRESS、各往前蹭 9 格和 3 格，按“推进 ≥2 格”一直不停，在原地附近绕圈。
         if (gained && hop.status === 'succeeded') stuck = 0;
-        else if (++stuck >= MAX_STUCK_SEGMENTS) { stop = Math.hypot(end.x - segStart.x, end.z - segStart.z) >= 2 ? 'NO_ALONG_PROGRESS' : 'BLOCKED'; break; }
+        // travel_to 报回到了之前到过的位置：身体在动、只是来回绕，起止点重合也不算「没挪动」。
+        else if (++stuck >= MAX_STUCK_SEGMENTS) { stop = Math.hypot(end.x - segStart.x, end.z - segStart.z) >= 2 || hop.data?.revisited ? 'NO_ALONG_PROGRESS' : 'BLOCKED'; break; }
       }
     } catch (e) {
       // 被打断（挨打、改主意、操作者指令）时也把已走出的事实交回去：取消回执里能看到推进与偏离。

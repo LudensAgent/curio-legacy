@@ -35,11 +35,14 @@ type TravelToArgs = {
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
 const HOP = 24;
 /**
- * 三维目标在这个水平距离内（通常仍在已加载区块里）时，正前方一跳直接以真实目标为寻路终点：
- * pathfinder 在可达路线里找最短的那条，不必先朝一个只按水平方向定出的中间点走——那个点不在去目标的路上，
- * 会把身体带下矿道/坡底后再也上不去。搜不完时它走的部分路径也按到真实目标的三维距离挑。
+ * 目标在这个水平距离内（通常仍在已加载区块里）时，正前方一跳直接以真实目标为寻路终点：
+ * pathfinder 在可达路线里找最短的那条，不必先朝「从当前位置往目标方向 HOP 格」的中间点走——
+ * 那个点随身体位置漂移、不在去目标的路上：三维目标会被带下矿道/坡底；下界岩洞里会在两条洞道间
+ * 来回（在 A 时中间点只能经 B 到，到了 B 新的中间点又只能经 A 到）。
  */
-const DIRECT_3D_REACH = 64;
+const DIRECT_REACH = 64;
+/** 一轮走完落在本次之前某轮停过的位置这么近、且没更接近目标：判为来回打转，不再继续绕。 */
+const REVISIT_RADIUS = 3;
 /** 正前方一跳走不通时依次试的偏转角（度）；偏转跳更短，只用于绕开眼前的阻挡。 */
 const DETOURS = [45, -45, 90, -90];
 const DETOUR_HOP = 16;
@@ -249,7 +252,7 @@ export const travelTo: Skill<TravelToArgs> = {
       if (next !== undefined) {
         return { kind: 'near', pos: { x: Math.floor(next.x), y: Math.floor(next.y), z: Math.floor(next.z) }, range: 2 };
       }
-      if (turn === null && (left <= HOP || (target.y !== undefined && left <= DIRECT_3D_REACH))) {
+      if (turn === null && left <= DIRECT_REACH) {
         return target.y === undefined
           ? { kind: 'xz', x: target.x, z: target.z, range: args.range }
           : { kind: 'near', pos: { x: target.x, y: target.y, z: target.z }, range: args.range };
@@ -265,6 +268,9 @@ export const travelTo: Skill<TravelToArgs> = {
     };
 
     let best = gap(start), staleRounds = 0, hops = 0, failedHops = 0, detours = 0, lastError = '';
+    // 每轮结束时的实测位置：判断是否回到了之前停过的地方（来回打转）。
+    const roundEnds: Vec3Like[] = [{ ...start }];
+    let revisited: Vec3Like | undefined;
     let stop: 'ARRIVED' | 'NO_ROUTE' | 'VERTICAL_GAP' | 'NO_PROGRESS' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
     // 剩余主要是高差：偏转跳只按水平坐标走，绕一圈也不会更接近上下方的目标
     const verticalGap = (p: Vec3Like) => target.y === undefined ? 0 : Math.floor(target.y) - Math.floor(p.y);
@@ -327,7 +333,12 @@ export const travelTo: Skill<TravelToArgs> = {
         if (!moved && abandonedNow) continue;
         if (!moved) { stop = deadline - Date.now() < 1000 ? 'TIMEOUT' : verticalDominant(adapter.state().pos) ? 'VERTICAL_GAP' : 'NO_ROUTE'; if (arrived(adapter.state().pos)) stop = 'ARRIVED'; break; }
         // 沿历史路点前进时离目标可能先变远（历史路线本来会绕）：这一轮算进展，不累计“没更近”。
-        if (now < best - 1) { best = now; staleRounds = 0; } else if (alongHistory) staleRounds = 0; else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(adapter.state().pos) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
+        const here = adapter.state().pos;
+        const back = roundEnds.find((p) => Math.hypot(p.x - here.x, p.y - here.y, p.z - here.z) <= REVISIT_RADIUS);
+        roundEnds.push({ ...here });
+        if (now < best - 1) { best = now; staleRounds = 0; } else if (alongHistory) staleRounds = 0;
+        else if (back) { revisited = { x: Math.floor(back.x), y: Math.floor(back.y), z: Math.floor(back.z) }; stop = arrived(here) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
+        else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(here) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
       }
     } catch (e) {
       if (isAbort(e)) throw cancelledNav(e, { backend, originalRequest: request, resolvedTarget, position: trace.at(-1) ?? null, trace });
@@ -343,7 +354,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const closer = round1(gap(start) - gap(end));
     const facts = {
       target: resolvedTarget, label: target.label, stopReason: stop, arrived: stop === 'ARRIVED',
-      displacement, remaining, closer, hops, failedHops, detours,
+      displacement, remaining, closer, hops, failedHops, detours, ...(revisited ? { revisited } : {}),
       newChunks: ctx.memory.visitedChunkCount - startChunks,
       authorized: { allowDig: args.allowDig, allowPlace: args.allowPlace, allowTower: args.allowTower, allowSwim: args.allowSwim, allowHazard: args.allowHazard, sprint: args.sprint },
       avoided: avoid,
@@ -368,7 +379,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const why = {
       NO_ROUTE: '辅助在已加载区块里没找到能让身体前进的下一跳（正前方与偏转都试过）',
       VERTICAL_GAP: `目标在${verticalGap(end) < 0 ? '下' : '上'}方 ${Math.abs(verticalGap(end))} 格、水平只差 ${round1(flat(end))} 格，辅助找不到${verticalGap(end) < 0 ? '下行' : '上行'}的路；水平偏转绕行帮不上高差，没有再绕（行走辅助一次最多下落 ${WALK_MAX_DROP} 格${args.allowDig ? '' : '，没授权挖'}${args.allowTower ? '' : '、没授权搭柱'}）`,
-      NO_PROGRESS: `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
+      NO_PROGRESS: revisited ? `绕了一圈又回到之前到过的 (${revisited.x},${revisited.y},${revisited.z}) 附近，没有更接近目标，不再来回绕` : `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
       NOT_ALIVE: '途中死亡',
