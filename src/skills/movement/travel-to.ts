@@ -32,6 +32,8 @@ const HOP = 24;
 /** 正前方一跳走不通时依次试的偏转角（度）；偏转跳更短，只用于绕开眼前的阻挡。 */
 const DETOURS = [45, -45, 90, -90];
 const DETOUR_HOP = 16;
+/** 单跳寻路的绕路余量（mineflayer-pathfinder searchRadius：路线代价最多比直线估计多这么多）：绕太远就算这跳不通，换偏转跳或停下，不让一跳在岩洞里绕出反方向的长路。 */
+const HOP_SEARCH_RADIUS = 48;
 /** 连续这么多轮没有更接近目标就停，不在原地反复试。 */
 const MAX_STALE_ROUNDS = 3;
 /** 历史路线路点的最小间距（格）：太密的节点合并，每跳仍由 pathfinder 实测。 */
@@ -153,7 +155,7 @@ export const travelTo: Skill<TravelToArgs> = {
       ...(args.allowDig ? { allowTerrainChanges: true } : {}),
       allowPlace: args.allowPlace, allowTower: args.allowTower,
       ...(args.allowSwim ? {} : { allowSwimming: false }),
-      sprint: args.sprint, avoid,
+      sprint: args.sprint, avoid, searchRadius: HOP_SEARCH_RADIUS,
     };
     // via:history：查自己走过的历史路线（共享空间记忆拓扑），把节点按间距抽成路点。历史只是路点提示，
     // 每跳仍按实测验收；某个路点走不通就放弃剩余历史路点并在回执里列出，不写回记忆。
