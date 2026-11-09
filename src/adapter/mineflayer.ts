@@ -4353,8 +4353,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       let speed = Math.hypot(v.x, v.z), dir = { x: v.x, z: v.z };
       // 刚起步时速度还很小：按按下的方向键和朝向推算要去的方向，不等身体已经迈出去才看
       if (speed < 0.02) {
-        const yaw = b.entity.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw);
         const f = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0), r = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        if (!f && !r) return null; // 只跳/潜行：没有水平去向
+        const yaw = b.entity.yaw ?? 0, fx = -Math.sin(yaw), fz = -Math.cos(yaw);
         dir = { x: fx * f - fz * r, z: fz * f + fx * r };
         speed = Math.hypot(dir.x, dir.z);
         if (speed < 0.01) return null;
