@@ -1142,6 +1142,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       b.pathfinder.setMovements(movements);
     }
+    // 每次寻路都按这一趟的委托设定绕路余量（searchRadius：代价 ≤ 直线估计 + 余量；-1 不限）：分跳行走用它
+    // 不让一个 xz 目标在下界岩洞里绕出几十格反方向的路。每次都重设，不残留到下一趟。
+    if (b.pathfinder) b.pathfinder.searchRadius = opts.searchRadius ?? -1;
     const goals = goalsLib();
     let goal: any;
     switch (target.kind) {

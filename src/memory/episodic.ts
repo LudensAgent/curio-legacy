@@ -392,7 +392,12 @@ export class EpisodicMemory implements MemoryRecall {
           if (generation === this.generation) {
             remoteFailure = { elapsedMs: Date.now() - started, error };
             this.recallFailures++;
-            this.nextRecallAt = Date.now() + Math.min(60_000, 1000 * 2 ** Math.min(6, this.recallFailures - 1));
+            // 超时说明服务很可能没起来：每次重试都会让想事情多等满一个超时，退避要长得多（30 s 起翻倍，最长 10 min）；
+            // 其他错误（4xx/5xx）仍按 1 s 起、最长 60 s 退避。
+            const timedOut = this.failure(error).type === 'Timeout';
+            this.nextRecallAt = Date.now() + (timedOut
+              ? Math.min(600_000, 30_000 * 2 ** Math.min(5, this.recallFailures - 1))
+              : Math.min(60_000, 1000 * 2 ** Math.min(6, this.recallFailures - 1)));
           }
         } finally { if (this.recallGeneration === generation) this.recallGeneration = null; }
       } else if (this.started && this.remoteEnabled()) {

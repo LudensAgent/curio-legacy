@@ -60,6 +60,7 @@ test('travel_to 按 ≤24 格分跳执行并实测到达；默认不挖不放、
   assert.equal(opts.allowTerrainChanges, undefined); assert.equal(opts.allowPlace, false); assert.equal(opts.allowTower, false);
   assert.ok(opts.avoid?.includes('magma_block'));
   assert.equal(opts.allowSwimming, false, '默认不下水，寻路器排除水格');
+  assert.equal(opts.searchRadius, 48, '单跳绕路有上限');
   assert.equal(result.data?.backend, 'pathfinder');
   assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
   assert.ok(Math.abs(at().x - 60.5) < 1);

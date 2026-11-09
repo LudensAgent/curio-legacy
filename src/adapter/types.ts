@@ -193,6 +193,8 @@ export interface MoveOpts {
   maxDropDown?: number;
   /** 这一趟寻路要绕开的方块名（不踩进去、不穿过） */
   avoid?: string[];
+  /** 寻路绕路余量：路线代价最多比起点到目标的直线估计多这么多（pathfinder searchRadius）；不写不限。 */
+  searchRadius?: number;
 }
 
 export interface EffectEvidence {
