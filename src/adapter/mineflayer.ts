@@ -3951,9 +3951,32 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 一批的上限由料决定：每格最多放一组（大多 64，鸡蛋/雪球 16，桶 1），背包放不下的产物服务器会停在那里。
    * 返回这一批实际做出了几次（按背包变化算）；仅无法执行批量操作时返回 null，由调用方退回逐个合成。
    */
+  /**
+   * 合成产物要进背包：按配方先扣掉材料（整叠用光的槽会空出来），再看产物能不能叠进已有的同类堆或空槽。
+   * 放不下时 mineflayer 会一直等产物入包、20 秒后才报 “updateSlot:0 did not fire”，回执只像界面卡了。
+   * 2026-11-09/10 四次合成超时都是背包 0 空槽。放不下就在点格子前如实报出，返回 null 表示放得下。
+   */
+  private craftResultShort(recipe: any, times: number): string | null {
+    const inv = this.bot.inventory;
+    // 没有槽位模型就判断不了，交给合成本身
+    if (!Array.isArray(inv?.slots) || !recipe.result) return null;
+    const start = inv.inventoryStart ?? 9, end = inv.inventoryEnd ?? 45;
+    const slots = Array.from({ length: end - start }, (_, k) => inv.slots[start + k]).map((it) => it ? { type: it.type, count: it.count } : null);
+    for (const d of (recipe.delta ?? []).filter((x: any) => x.count < 0)) {
+      let need = -d.count * times;
+      for (const it of slots) { if (need <= 0) break; if (it && it.type === d.id) { const take = Math.min(need, it.count); it.count -= take; need -= take; } }
+    }
+    const id = recipe.result.id, max = this.mcData.items[id]?.stackSize ?? 64;
+    const total = recipe.result.count * times;
+    const room = slots.reduce((n, it) => n + (!it || it.count <= 0 ? max : it.type === id ? Math.max(0, max - it.count) : 0), 0);
+    return room >= total ? null : `INVENTORY_FULL: 背包放不下合成产物 ${this.mcData.items[id]?.name ?? id}×${total}（用掉材料后最多还能放 ${room} 个）；没有点合成格，材料没动。先腾出一格再合成`;
+  }
+
   private async craftBatch(recipe: any, times: number, table: any, signal: AbortSignal): Promise<number | null> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
+    const short = this.craftResultShort(recipe, times);
+    if (short) throw new Error(short);
     if (typeof b._syncWindow !== 'function' || typeof b.transfer !== 'function') return null;
     const w = table ? 3 : 2;
     const cells: { slot: number; id: number }[] = [];
@@ -4009,6 +4032,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private async craftOnce(recipe: any, table: any, signal: AbortSignal, times = 1) {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
+    const short = this.craftResultShort(recipe, times);
+    if (short) throw new Error(short);
     const pace = this.cfg.ui?.pacingMs ?? 0;
     const timeout = 10000 + (this.cfg.ui?.openHoldMs ?? 0) + (this.cfg.ui?.closeHoldMs ?? 0) + (pace > 0 ? 3000 + pace * 12 * times : 0);
     const attempt = new AbortController();
@@ -4092,13 +4117,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const afford = (r: any) => Math.min(...(r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => Math.floor(this.invCount(d.id) / -d.count)));
       const recipe = bulk ?? any;
       const want = Math.max(1, Math.min(times, afford(recipe) || 1));
-      const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check);
-      if (batched === null) {
-        if (bulk) {
-          await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
-        } else {
-          await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+      try {
+        const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check);
+        if (batched === null) {
+          if (bulk) {
+            await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
+          } else {
+            await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+          }
         }
+      } catch (e) {
+        // 已经做出一部分、剩下的放不进背包：保留已做成的数量，由 craft 回执说明“背包满了”
+        if (made > 0 && /^INVENTORY_FULL/.test(String((e as Error)?.message))) break;
+        throw e;
       }
       const produced = this.invCount(id) - before;
       if (produced <= 0) break;

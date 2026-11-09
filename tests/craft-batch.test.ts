@@ -223,3 +223,20 @@ test('fallback crafting also honors the selected recipe batch size', async () =>
   assert.equal(await a.craftUpTo(id('stick'), 40, null, new AbortController().signal, 4), 40);
   assert.deepEqual(calls, [4, 4, 2]);
 });
+
+test('背包放不下产物时在点格子前如实报出，不等 20 秒界面超时；用光整叠材料空出的槽照算', async () => {
+  // 36 格全满：8 块木板做箱子，木板只用掉半叠，空不出槽，箱子放不下
+  const full: Record<string, number> = { oak_planks: 40 };
+  for (const n of ['stone', 'dirt', 'cobblestone', 'gravel', 'sand', 'andesite', 'diorite', 'granite', 'netherrack', 'deepslate', 'tuff', 'calcite',
+    'basalt', 'blackstone', 'end_stone', 'clay', 'moss_block', 'mud', 'snow_block', 'soul_sand', 'soul_soil', 'terracotta', 'packed_ice', 'obsidian',
+    'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'crimson_stem', 'warped_stem', 'cobbled_deepslate']) full[n] = 64;
+  const chest = { ...recipe([['oak_planks', 'oak_planks', 'oak_planks'], ['oak_planks', null as any, 'oak_planks'], ['oak_planks', 'oak_planks', 'oak_planks']], 'chest', 1), delta: [{ id: id('oak_planks'), count: -8 }, { id: id('chest'), count: 1 }] };
+  const { a, clicks } = rig(full, { name: 'chest', count: 1 }, 0);
+  assert.equal(a.bot.inventory.emptySlotCount(), 0);
+  await assert.rejects(a.craftBatch(chest, 1, {}, new AbortController().signal), /^Error: INVENTORY_FULL/);
+  assert.equal(clicks.length, 0, '没有点任何格子');
+  // 正好用光一整叠的材料会空出一格：这时放得下，不拦
+  const exact = { ...chest, delta: [{ id: id('oak_planks'), count: -8 }, { id: id('chest'), count: 1 }] };
+  const { a: b } = rig({ ...full, oak_planks: 8 }, { name: 'chest', count: 1 }, 0);
+  assert.equal(b.craftResultShort(exact, 1), null);
+});
