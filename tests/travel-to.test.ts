@@ -124,6 +124,38 @@ test('travel_to via:history 按自己走过的历史路线路点分跳；路点�
   assert.match(d.summary, /没有可用的历史路线/);
 });
 
+test('travel_to via:history 拓扑没有路线时沿记录过的路径片段（旧矿道 links）走，竖直阶梯的路点不被水平距离吞掉', async () => {
+  // 旧 passage：从 (0,64,0) 往东 4 格，再沿 x=4 螺旋下到 y=40
+  const cells = [...Array.from({ length: 5 }, (_, i) => ({ x: i, y: 64, z: 0 })), ...Array.from({ length: 24 }, (_, i) => ({ x: 4, y: 63 - i, z: i % 2 }))];
+  const links = cells.slice(1).map((b, i) => ({ a: cells[i]!, b }));
+  const fragment = { id: 'psg_old', worldId: 'w', dim: 'overworld', kind: 'dug', entrances: [], polyline: [cells[0]!, cells.at(-1)!], geometrySource: 'legacy', links, deepestY: 40, createdAt: 1, lastUsedAt: 1, uses: 1 };
+  const query = (q: { kind: string }) => q.kind === 'fragments'
+    ? { status: 'ok', data: { kind: 'fragments', items: [fragment] } }
+    : { status: 'ok', data: { kind: 'historyRoute', inspection: { status: 'ENDPOINT_NOT_RECORDED', points: [], segments: [], message: '' } } };
+  const h = harness();
+  (h.ctx as { spatial?: unknown }).spatial = { query };
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 4, y: 40, z: 1 }, via: 'history' }, h.adapter));
+  assert.equal(r.status, 'succeeded', r.summary);
+  const history = r.data?.history as { found: boolean; source: string; fragments: string[]; waypoints: number };
+  assert.equal(history.source, 'path_fragments');
+  assert.deepEqual(history.fragments, ['psg_old']);
+  assert.ok(history.waypoints >= 3, `竖直段也有路点：${history.waypoints}`);
+  assert.ok(h.calls.filter(({ target }) => target.kind === 'near' && target.pos.x === 4 && target.pos.y < 64).length >= 2, '沿阶梯逐段下行');
+  assert.match(r.summary, /记录过的路径片段/);
+
+  const pick = harness();
+  (pick.ctx as { spatial?: unknown }).spatial = { query };
+  const f = await travelTo.run(pick.ctx, argsOf({ to: { x: 4, y: 40, z: 1 }, via: { fragment: 'psg_old' } }, pick.adapter));
+  assert.equal((f.data?.history as { source: string }).source, 'path_fragments');
+
+  const missing = harness();
+  (missing.ctx as { spatial?: unknown }).spatial = { query };
+  const m = await travelTo.run(missing.ctx, argsOf({ to: { x: 4, y: 40, z: 1 }, via: { fragment: 'nope' } }, missing.adapter));
+  assert.equal(m.status, 'failed');
+  assert.equal(missing.calls.length, 0, '指定的片段不存在就不移动');
+  assert.equal(travelTo.validate({ to: '1,2', via: { fragment: '' } }, h.adapter).ok, false);
+});
+
 test('travel_to 不下水时限制单跳绕路；授权游泳时不加上限（水格代价高，加了等于不让游）', async () => {
   const dry = harness();
   await travelTo.run(dry.ctx, argsOf({ to: '30,0' }, dry.adapter));

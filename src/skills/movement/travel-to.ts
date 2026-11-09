@@ -3,6 +3,8 @@ import { DIRS } from '../../perception/perception.ts';
 import { travelStore } from '../../travel/store.ts';
 import { cancelledNav, fail, isAbort, navReceipt, obj, ok, type NavOutcome, type Skill, type SkillResult } from '../types.ts';
 import { HEADING_TARGET, MAX_HEADING_DISTANCE } from '../overland.ts';
+import { pageFragments } from '../../spatial/fragments.ts';
+import { buildPathGraph, routeOnPathGraph } from '../../spatial/path-graph.ts';
 
 type Heading = keyof typeof DIRS;
 type TravelTarget =
@@ -23,8 +25,11 @@ type TravelToArgs = {
   avoid: string[];
   sprint: boolean;
   timeoutMs: number;
-  /** direct = 朝目标直线分跳；history = 先查自己走过的历史路线，按其路点分跳（仍由 pathfinder 逐跳实测）。 */
-  via: 'direct' | 'history';
+  /**
+   * direct = 朝目标直线分跳；history = 先查自己走过的历史路线（拓扑没有就用记录过的路径片段），
+   * 按其路点分跳；{fragment} = 只沿 Agent 指定的那条片段走。都仍由 pathfinder 逐跳实测。
+   */
+  via: 'direct' | 'history' | { fragment: string };
 };
 
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
@@ -36,8 +41,10 @@ const DETOUR_HOP = 16;
 const HOP_SEARCH_RADIUS = 48;
 /** 连续这么多轮没有更接近目标就停，不在原地反复试。 */
 const MAX_STALE_ROUNDS = 3;
-/** 历史路线路点的最小间距（格）：太密的节点合并，每跳仍由 pathfinder 实测。 */
-const HISTORY_SPACING = 12;
+/** 历史路线路点的间距（沿路线累计的格数）：太密的点合并，每跳仍由 pathfinder 实测。按三维路程算，竖井/螺旋阶梯的路点不会被水平距离吞掉。 */
+const HISTORY_SPACING = 8;
+/** 起点/目标吸附到记录路径格的半径（格） */
+const HISTORY_NEAR = 8;
 /** 默认绕开会伤身的方块（含“站在上面”）；岩浆与火由寻路器始终绕开，不受 allowHazard 影响。 */
 const HAZARD_AVOID = ['magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'wither_rose', 'soul_fire'];
 const BLOCK_NAME = /^[a-z0-9_]+$/;
@@ -93,7 +100,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
   description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块），回执逐项列出。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）。',
-  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"（默认 direct）}',
+  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"|{"fragment":"<片段 id>"}（默认 direct；history 先查拓扑历史路线，没有就在记录过的路径片段〔含旧矿道〕里找从你附近 8 格内到目标附近的连续记录，目标不在同一片记录里就沿记录走到离目标最近处再直线分跳；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -110,7 +117,10 @@ export const travelTo: Skill<TravelToArgs> = {
     if (a.avoid !== undefined && (!Array.isArray(a.avoid) || a.avoid.length > 32 || a.avoid.some((n) => typeof n !== 'string' || !BLOCK_NAME.test(n)))) {
       return { ok: false, error: 'avoid 需要方块名数组（小写 snake_case，最多 32 个）' };
     }
-    if (a.via !== undefined && a.via !== 'direct' && a.via !== 'history') return { ok: false, error: 'via 只能是 direct 或 history' };
+    const viaFragment = obj(a.via).fragment;
+    if (a.via !== undefined && a.via !== 'direct' && a.via !== 'history' && !(typeof viaFragment === 'string' && viaFragment.trim())) {
+      return { ok: false, error: 'via 只能是 "direct"、"history" 或 {"fragment":"<片段 id>"}（id 来自 spatial_query fragments / spatial_extrema 回执）' };
+    }
     return {
       ok: true,
       args: {
@@ -118,7 +128,7 @@ export const travelTo: Skill<TravelToArgs> = {
         allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowTower: a.allowTower === true,
         allowSwim: a.allowSwim === true, allowHazard: a.allowHazard === true,
         avoid: [...new Set((a.avoid ?? []) as string[])], sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 180000,
-        via: a.via ?? 'direct',
+        via: typeof viaFragment === 'string' ? { fragment: viaFragment.trim() } : (a.via as 'direct' | 'history' | undefined) ?? 'direct',
       },
     };
   },
@@ -162,21 +172,55 @@ export const travelTo: Skill<TravelToArgs> = {
       // 加了上限等于不让游。
       ...(args.allowSwim ? {} : { searchRadius: HOP_SEARCH_RADIUS }),
     };
-    // via:history：查自己走过的历史路线（共享空间记忆拓扑），把节点按间距抽成路点。历史只是路点提示，
+    // via:history / {fragment}：查自己走过的路线，把路点按三维路程间距抽稀。历史只是路点提示，
     // 每跳仍按实测验收；某个路点走不通就放弃剩余历史路点并在回执里列出，不写回记忆。
+    // 先查库的拓扑路线；没有时用记录过的路径片段现建路径图（旧 passage 迁移进来只有片段、没有拓扑）。
     const waypoints: Vec3Like[] = [];
     let waypoint = 0;
     let history: Record<string, unknown> | undefined;
-    if (args.via === 'history') {
-      const query = ctx.spatial?.query({ kind: 'historyRoute', dim: s0.dim, from: start, to: { x: target.x, y: target.y ?? start.y, z: target.z }, near: 5 });
-      const inspection = query?.status === 'ok' && query.data?.kind === 'historyRoute' ? query.data.inspection : undefined;
-      if (inspection?.status === 'FOUND') {
-        let last = start;
-        for (const p of inspection.points) if (Math.hypot(p.x - last.x, p.z - last.z) >= HISTORY_SPACING) { waypoints.push({ ...p }); last = p; }
-        const observed = inspection.segments.map((segment) => segment.evidence.observedAt).filter((t): t is number => typeof t === 'number');
-        history = { found: true, points: inspection.points.length, waypoints: waypoints.length, ...(observed.length ? { oldestAgeMs: startedAt - Math.min(...observed) } : {}) };
+    if (args.via !== 'direct') {
+      const goalPoint = { x: target.x, y: target.y ?? start.y, z: target.z };
+      let points: Vec3Like[] = [];
+      const reasons: string[] = [];
+      if (args.via === 'history') {
+        const query = ctx.spatial?.query({ kind: 'historyRoute', dim: s0.dim, from: start, to: goalPoint, near: 5 });
+        const inspection = query?.status === 'ok' && query.data?.kind === 'historyRoute' ? query.data.inspection : undefined;
+        if (inspection?.status === 'FOUND') {
+          points = inspection.points;
+          const observed = inspection.segments.map((segment) => segment.evidence.observedAt).filter((t): t is number => typeof t === 'number');
+          history = { found: true, source: 'topology', points: points.length, ...(observed.length ? { oldestAgeMs: startedAt - Math.min(...observed) } : {}) };
+        } else {
+          reasons.push(ctx.spatial === undefined ? '没有接线共享空间记忆' : inspection ? `拓扑 ${inspection.status}` : `拓扑查询 ${query?.status ?? '失败'}`);
+        }
+      }
+      if (history === undefined && ctx.spatial !== undefined) {
+        const scan = pageFragments(ctx.spatial, { dim: s0.dim, maxFragments: 1000, signal, deadline: Math.min(deadline, Date.now() + 3000) });
+        const wanted = typeof args.via === 'object' ? args.via.fragment : null;
+        const fragments = wanted === null ? scan.items : scan.items.filter((f) => f.id === wanted);
+        if (wanted !== null && fragments.length === 0) {
+          return fail('NOT_FOUND', `${s0.dim} 里没有片段 ${wanted}${scan.partial || scan.truncated ? '（片段列表没读全）' : ''}；没有移动`, { originalRequest: request, backend });
+        }
+        const route = routeOnPathGraph(buildPathGraph(fragments), start, goalPoint, HISTORY_NEAR, Date.now() + 1500);
+        if (route.status !== 'START_NOT_RECORDED' && route.points.length > 1) {
+          points = route.points.map((p) => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 }));
+          history = {
+            found: true, source: 'path_fragments', status: route.status, points: points.length, fragments: route.fragments.slice(0, 8),
+            joinsUsed: route.joinsUsed, startSnap: route.startSnap, endDistance: route.endDistance,
+            ...(scan.partial || scan.truncated ? { fragmentsIncomplete: true } : {}),
+          };
+        } else {
+          reasons.push(route.status === 'START_NOT_RECORDED' ? `片段：${route.message}` : '片段：记录路径没有比起点更接近目标的部分');
+        }
+      }
+      if (history === undefined) {
+        history = { found: false, reason: reasons.join('；') || '没有接线共享空间记忆' };
       } else {
-        history = { found: false, reason: ctx.spatial === undefined ? '没有接线共享空间记忆' : inspection ? `${inspection.status}：${inspection.message}` : `查询 ${query?.status ?? '失败'}` };
+        let last = start, travelled = 0;
+        for (const [i, p] of points.entries()) {
+          travelled += Math.hypot(p.x - (points[i - 1] ?? start).x, p.y - (points[i - 1] ?? start).y, p.z - (points[i - 1] ?? start).z);
+          if (travelled >= HISTORY_SPACING || i === points.length - 1) { if (Math.hypot(p.x - last.x, p.y - last.y, p.z - last.z) >= 2) waypoints.push({ ...p }); last = p; travelled = 0; }
+        }
+        history.waypoints = waypoints.length;
       }
     }
     const routePoints = [...waypoints];
@@ -186,7 +230,7 @@ export const travelTo: Skill<TravelToArgs> = {
       const left = Math.hypot(target.x - from.x, target.z - from.z);
       // 历史路点按顺序走（历史路线本来就可能绕路）：跳过已走到的，身体已更靠近后一个路点时也跳过前一个；
       // 绕行跳仍按目标方向偏转。
-      const near = (p: Vec3Like) => Math.hypot(p.x - from.x, p.z - from.z);
+      const near = (p: Vec3Like) => Math.hypot(p.x - from.x, p.y - from.y, p.z - from.z);
       while (waypoint < waypoints.length && (near(waypoints[waypoint]) <= 3
         || (waypoint + 1 < waypoints.length && near(waypoints[waypoint + 1]) < near(waypoints[waypoint])))) waypoint++;
       const next = turn === null ? waypoints[waypoint] : undefined;
@@ -232,7 +276,7 @@ export const travelTo: Skill<TravelToArgs> = {
           record();
           if (turn !== null) detours++;
           const after = adapter.state().pos;
-          if (routePoints.length) offRoute = Math.max(offRoute, Math.min(...routePoints.map((p) => Math.hypot(p.x - after.x, p.z - after.z))));
+          if (routePoints.length) offRoute = Math.max(offRoute, Math.min(...routePoints.map((p) => Math.hypot(p.x - after.x, p.y - after.y, p.z - after.z))));
           if (Math.hypot(after.x - before.x, after.z - before.z) >= 2 || Math.abs(after.y - before.y) >= 2 || arrived(after)) { moved = true; alongHistory = turn === null && goal.kind === 'near' && waypoint < waypoints.length; break; }
           // 朝历史路点的一跳没动起来：这段历史路线当前走不通，放弃剩余历史路点（只在回执里列出，不写回记忆）。
           if (turn === null && goal.kind === 'near' && waypoint < waypoints.length) { abandonedAt = { ...waypoints[waypoint] }; waypoints.length = waypoint; }
@@ -271,7 +315,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const effects = dug.length || placed.length ? `；挖掉 ${dug.length} 块、放下 ${placed.length} 块（见 sideEffects）` : '';
     const historyNote = history === undefined ? ''
       : history.found !== true ? `；没有可用的历史路线（${String(history.reason)}），按直线分跳`
-        : `；按历史路线走到 ${Math.min(waypoint, routePoints.length)}/${routePoints.length} 个路点、最大偏离 ${round1(offRoute)} 格${abandonedAt === undefined ? '' : `，路点 ${at(abandonedAt)} 当前走不通，已放弃剩余历史路点`}`;
+        : `；按${history.source === 'path_fragments' ? `记录过的路径片段（${(history.fragments as string[]).length} 条${history.status === 'PARTIAL' ? `，记录只到离目标 ${String(history.endDistance)} 格处` : ''}）` : '历史路线'}走到 ${Math.min(waypoint, routePoints.length)}/${routePoints.length} 个路点、最大偏离 ${round1(offRoute)} 格${abandonedAt === undefined ? '' : `，路点 ${at(abandonedAt)} 当前走不通，已放弃剩余历史路点`}`;
     const measured = `实测 ${at(end)}，水平位移 ${displacement.horizontal} 格、垂直 ${displacement.vertical} 格，${hops} 跳`;
     const outcome: NavOutcome = stop === 'ARRIVED' ? 'ARRIVED' : stop === 'TIMEOUT' ? 'TIMEOUT' : closer >= 2 ? 'PARTIAL' : stop === 'NO_ROUTE' ? 'NO_PATH' : stop === 'NO_PROGRESS' ? 'BLOCKED' : 'FAILED';
     const arrival = {
