@@ -32,7 +32,7 @@ import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
 export { noteGoneSpots } from '../memory/recollection.ts';
 
-const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'go_near', 'walk_path']);
+const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'go_near', 'walk_path']);
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -118,7 +118,7 @@ export interface MindContext {
  * 参数简单、看名字和用途就能正确调用的动作（吃、睡、打猎、等待、查方块等）降到按需列表；
  * 它们正在被使用时，完整参数仍会作为 user 提醒送达，不依赖模型自己想起来查。
  */
-export const COMMON_MOVES = ['navigate_to', 'approach_visible', 'go_near', 'move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
+export const COMMON_MOVES = ['navigate_to', 'advance', 'approach_visible', 'go_near', 'move_step', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'walk_path', 'plan_route', 'resolve_target', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
 
 /**
  * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
@@ -244,7 +244,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
-【走到哪】容器/门/床/传送门是方块目标：先用 go_near {"target":{x,y,z}} 走到相邻站立格，再用 take_items/sleep/travel_portal，不要把这些方块坐标直接给 navigate_to/plan_route。站立格优先用 navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]}（宿主执行 3D 路线，不挖不放、无路/施工缺口会停）；需要先看路线依据时用 plan_route 只读规划：memory/spatial 返回路点或 steps，按现有动作执行，search 返回 routeId 才交给 walk_path；带 historical 标记的是历史体素候选，当前可通行性未知，按现场逐步核实。plan_route 失败/gaps 时不要调用 walk_path。靠近已看见/记得的实体或方块、不想自己算站位 → approach_visible（target 三选一：{"pos":{x,y,z}}、{"block":{x,y,z}}、{"entity":{"id":123}}，不要再套 kind；实体用 look_around 回执里的 id/foundRef/visibleEntities，方块坐标用回执里的“位置”；方向+距离不是坐标，不要自己推算，resolve_target 的方向点不是方块本身；pos 只写已确认的站立脚位，“朝某方向走 N 格”或远处未知地形用 navigate_to 分段/先观察，不要写成 pos；approach_visible 活动不要用 exploration.min_distance/find 当收工条件（它只保证到达站位），用 location_near 或省略；局部半径默认 32，不施工）；已经明确是某个站立格就用 navigate_to。远目标/未知区域分段推进，段后按实测位置重新观察。
+【走到哪】容器/门/床/传送门是方块目标：先用 go_near {"target":{x,y,z}} 走到相邻站立格，再用 take_items/sleep/travel_portal，不要把这些方块坐标直接给 navigate_to/plan_route。明确知道要站哪一格 → navigate_to {"to":{x,y,z},"allowed":["walk","step","drop"]}（宿主执行 3D 路线，不挖不放、无路/施工缺口会停；默认只跑一段，跨多个未知边界的精确目标显式设 maxSegments>1）。只知道“朝某方向走 N 格” → advance {"direction":"N|E|S|W","distance":20}（方向与距离冻结，宿主派生中间 waypoint 分段推进；不挖不放、不自动切游泳/船/攀爬，横向绕行超 maxLateralDrift 就停）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时，必须原样传回 sessionId；目标/方向/距离/授权改变时新建意图，不复用旧 session。需要先看路线依据时用 plan_route 只读规划：memory/spatial 返回路点或 steps，按现有动作执行，search 返回 routeId 才交给 walk_path；带 historical 标记的是历史体素候选，当前可通行性未知，按现场逐步核实。plan_route 失败/gaps 时不要调用 walk_path。UNKNOWN/STALE 不可进入；移动动作只做有限边界观察，不做全向扫描。靠近已看见/记得的实体或方块、不想自己算站位 → approach_visible（target 三选一：{"pos":{x,y,z}}、{"block":{x,y,z}}、{"entity":{"id":123}}，不要再套 kind；实体用 look_around 回执里的 id/foundRef/visibleEntities，方块坐标用回执里的“位置”；方向+距离不是坐标，不要自己推算，resolve_target 的方向点不是方块本身；pos 只写已确认的站立脚位；approach_visible 活动不要用 exploration.min_distance/find 当收工条件（它只保证到达站位），用 location_near 或省略；局部半径默认 32，不施工）。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置、新区块/新观测重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。上下台阶用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格都空：两格高的隧道/矿道里改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -256,7 +256,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去记得的地方或坐标 → resolve_target 算点 → navigate_to 走到站立格；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：navigate_to 的 maxSteps 或 plan_route 的 steps 一次走一段（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；分段只限本次执行步数，不缩短原目标；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去记得的地方或坐标 → resolve_target 算点 → navigate_to 走到站立格；只朝某方向推进/走一段 → advance（冻结方向与距离，回执用 along/lateral 报告实测进展）；找没见过的东西 → look_around 只看当前视野，没看到就用有界分段移动：advance、navigate_to 的 maxSegments 或 plan_route 的 steps（必要时 move_step/descend_to），每段结束重看实测位置、新区块/新观测再决定下一段；分段只限本次执行步数，不缩短原目标；进入新区块算探索进展但不算观测覆盖，不等于已看清那片区域；原地重复 look_around 或没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补它下方的支撑格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
