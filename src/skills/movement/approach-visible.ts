@@ -335,7 +335,7 @@ const modeRank = (mode: RouteMode) => mode === 'current' ? 0 : mode === 'histori
 export const approachVisible: Skill<Args> = {
   name: 'approach_visible',
   description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度、不调用旧 Pathfinder。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
-  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}|{"block":{"x":0,"y":64,"z":0}}|{"entity":{"id":123}}|{"entity":{"name":"cow"}}, "radius"?:32, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:24, "allowUnknownCorridor"?:false}；target 三选一；block 是整数方块坐标，不是站立格；radius 默认 32、上限 32 且不超过当前视觉有效范围；entity 需已看见/记得；maxSteps 省略时按选定路线推导（不超过 64），给定时作为总步数上限。',
+  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得）；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
   timeoutMs: 45000,
   movement: true,
   outcomeBoundary: true,
