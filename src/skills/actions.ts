@@ -558,13 +558,16 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
 export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number } }> = {
   name: 'look',
   description: '转头看向一个方向（N…NW、up 抬头、down 低头）或一格坐标；只转头不走。之后用 use_item（扔雪球、末影珍珠、鸡蛋）或 toss_item 就朝这边',
-  argsDoc: '{"dir"?: "N|NE|E|SE|S|SW|W|NW|up|down", "xyz"?: [x,y,z]}',
+  argsDoc: '{"dir"?: "N|NE|E|SE|S|SW|W|NW|up|down", "xyz"?: [x,y,z] 或 {"x":0,"y":64,"z":0}}',
   timeoutMs: 3000,
   movement: false,
   validate(raw) {
     const a = obj(raw);
     const v = a.xyz ?? a.at;
-    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number) : null;
+    // 规范化输出是 {x,y,z}，Arbiter 执行前会再校验一次（计划规范化也会这样改写）：三种写法都接受。
+    const o = obj(v);
+    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number)
+      : v !== undefined && 'x' in o ? [o.x, o.y, o.z].map(Number) : null;
     if (arr && arr.length === 3 && arr.every(Number.isFinite)) return { ok: true, args: { xyz: { x: arr[0], y: arr[1], z: arr[2] } } };
     const dir = String(a.dir ?? a.direction ?? '').trim();
     if (/^(up|down)$/i.test(dir) || DIRS[dir.toUpperCase()]) return { ok: true, args: { dir: /^(up|down)$/i.test(dir) ? dir.toLowerCase() : dir.toUpperCase() } };
@@ -595,7 +598,10 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   validate(raw) {
     const a = obj(raw);
     const v = a.xyz ?? a.at ?? a.to;
-    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number) : null;
+    // 规范化输出是 {x,y,z}，Arbiter 执行前会再校验一次：对象写法也必须接受。
+    const o = obj(v);
+    const arr = typeof v === 'string' ? v.split(/[,\s]+/).filter(Boolean).map(Number) : Array.isArray(v) ? v.map(Number)
+      : v !== undefined && 'x' in o ? [o.x, o.y, o.z].map(Number) : null;
     if (!arr || arr.length !== 3 || !arr.every(Number.isFinite)) return { ok: false, error: '写 "xyz":[x,y,z]（要游到的那一格）' };
     return { ok: true, args: { xyz: { x: Math.floor(arr[0]), y: Math.floor(arr[1]), z: Math.floor(arr[2]) }, min_oxygen: clampInt(a.min_oxygen, 2, 18, 8) } };
   },
