@@ -373,7 +373,9 @@ export class Arbiter extends EventEmitter {
       .catch((e: any): SkillResult => {
         if (e?.name === 'AbortedError') {
           const partial = e?.partial && typeof e.partial === 'object' ? e.partial : undefined;
-          return { status: 'cancelled', summary: String(controller.signal.reason ?? '已取消'), ...(partial ? { data: partial } : {}) };
+          // 技能可在取消时附一句已发生的实测事实（progressNote），让心智不用翻 data 就知道被打断时走到了哪。
+          const note = typeof partial?.progressNote === 'string' ? `；${partial.progressNote}` : '';
+          return { status: 'cancelled', summary: `${String(controller.signal.reason ?? '已取消')}${note}`, ...(partial ? { data: partial } : {}) };
         }
         return { status: 'failed', failureCode: 'ERROR', summary: String(e?.message ?? e) };
       })

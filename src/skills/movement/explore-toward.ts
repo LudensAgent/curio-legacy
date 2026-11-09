@@ -23,6 +23,8 @@ type ExploreArgs = {
 
 /** 单次探索的方向距离上限（格）；更远由 Agent 分次续走。 */
 export const MAX_EXPLORE_DISTANCE = 512;
+/** 每段交给 travel_to 的到达半径（格）；走完全程的判定与它一致，否则每段都“到了”却永远差几格算不上走完。 */
+const SEGMENT_RANGE = 3;
 /** 连续这么多段沿方向推进不足 2 格就停（没挪动，或只是横着/往回走），不在原地或侧向反复试。 */
 const MAX_STUCK_SEGMENTS = 2;
 
@@ -36,8 +38,8 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块或生物名时，本次视野看见就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
-  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"<方块或生物名，看见就停>", "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
+  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
+  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -48,7 +50,7 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (!Number.isInteger(a.distance) || a.distance < 16 || a.distance > MAX_EXPLORE_DISTANCE) {
       return { ok: false, error: `distance 需要 16–${MAX_EXPLORE_DISTANCE} 的整数格数；原目标不会被缩短，更远请分次续走` };
     }
-    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要一个方块或生物名（≤40 字）' };
+    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要方块/生物名、类别（log、stem）或 "a|b"（≤40 字）' };
     if (a.segment !== undefined && (!Number.isInteger(a.segment) || a.segment < 16 || a.segment > 48)) return { ok: false, error: 'segment 需要 16–48 的整数' };
     if (a.maxLateralDrift !== undefined && (!Number.isInteger(a.maxLateralDrift) || a.maxLateralDrift < 4 || a.maxLateralDrift > 64)) return { ok: false, error: 'maxLateralDrift 需要 4–64 的整数' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
@@ -86,7 +88,7 @@ export const exploreToward: Skill<ExploreArgs> = {
     const startChunks = ctx.memory.visitedChunkCount;
     const segments: { target: { x: number; z: number }; stopReason: string; end: Vec3Like; closer: number }[] = [];
     let stuck = 0, bestAlong = project(s0.pos).along;
-    let stop: 'DISTANCE_MET' | 'UNTIL_SEEN' | 'BLOCKED' | 'NO_ALONG_PROGRESS' | 'LATERAL_DRIFT' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
+    let stop: 'DISTANCE_MET' | 'UNTIL_SEEN' | 'BLOCKED' | 'NO_ALONG_PROGRESS' | 'LATERAL_DRIFT' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
     let sighting: Record<string, unknown> | undefined;
     let lastFailure: SkillResult | undefined;
     const factsNow = () => {
@@ -103,7 +105,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         if (!s.alive) { stop = 'NOT_ALIVE'; break; }
         if (s.dim !== s0.dim) { stop = 'DIMENSION_CHANGED'; break; }
         const { along } = project(s.pos);
-        if (along >= args.distance - 2) { stop = 'DISTANCE_MET'; break; }
+        if (along >= args.distance - SEGMENT_RANGE) { stop = 'DISTANCE_MET'; break; }
         const left = deadline - Date.now();
         if (left < 10000) { stop = 'TIMEOUT'; break; }
         ctx.progress(Math.max(0, along) / args.distance, `往 ${args.direction} 已推进 ${Math.round(along)}/${args.distance} 格`);
@@ -111,7 +113,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         const reach = Math.min(args.distance, Math.max(0, along) + args.segment);
         const target = { x: Math.round(args.origin.x + ux * reach), z: Math.round(args.origin.z + uz * reach) };
         const parsed = travelTo.validate({
-          to: target, range: 3, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
+          to: target, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
           allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left),
         }, adapter);
         if (!parsed.ok) return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；没有移动`, { backend });
@@ -121,11 +123,13 @@ export const exploreToward: Skill<ExploreArgs> = {
         const hopStop = String(hop.data?.stopReason ?? hop.status);
         const closer = Number(hop.data?.closer ?? 0);
         segments.push({ target, stopReason: hopStop, end, closer });
-        if (hopStop === 'NOT_ALIVE' || hopStop === 'DIMENSION_CHANGED') { stop = hopStop; break; }
+        if (hopStop === 'NOT_ALIVE' || hopStop === 'DIMENSION_CHANGED' || hopStop === 'IN_WATER') { stop = hopStop; break; }
         if (hop.status !== 'succeeded') lastFailure = hop;
         // 每段结束朝探索方向扫视一次：新看到的地形同时进入空间记忆；until 只认本次视野里看见的。
         const glance = await lookAround.run(ctx, { seconds: 2, direction: args.direction, ...(args.until ? { for: args.until } : {}) });
         if (args.until && glance.status === 'succeeded') { stop = 'UNTIL_SEEN'; sighting = glance.data; break; }
+        // 最后一段的目标就是全程终点：travel_to 按同一到达半径确认到了，就是走完全程。
+        if (reach >= args.distance && hop.status === 'succeeded') { stop = 'DISTANCE_MET'; break; }
         if (hopStop === 'TIMEOUT' && deadline - Date.now() < 10000) { stop = 'TIMEOUT'; break; }
         // 进展按沿冻结方向的实测推进算：横着走或往回绕不算前进（下界岩洞里 pathfinder 可能绕出反方向的路）。
         const now = project(end);
@@ -169,8 +173,9 @@ export const exploreToward: Skill<ExploreArgs> = {
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
       NOT_ALIVE: '途中死亡',
+      IN_WATER: `没授权下水却进了水，已停下（没有再走、没有扫视），氧气 ${adapter.state().oxygen}/20；换气、上岸怎么做由你定`,
     }[stop];
-    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
+    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
     return fail(code, `往 ${args.direction} 探索停下：${why}；${measured}${effects}。这只说明辅助走不通，不描述没看见的地形；继续、换方向或换手段由你决定`, facts);
   },
 };
