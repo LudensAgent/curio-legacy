@@ -2181,6 +2181,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
     const at = `(${target.x},${target.y},${target.z})`;
     if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL', detail: `${at} 四周没有已加载的实心方块面`, attemptedFaces: [] };
+    // 整块方块不能放进和自己身体碰撞箱重叠的格子：服务器会直接拒绝，只回一句“仍是空气”。
+    // 身体中心离格边不到 0.3 时碰撞箱会压进相邻格（2026-11-10 x=-50.71 压进 x=-52..-51 那列 0.008 格，连拒 4 次）。
+    // 目标不是自己脚下这一列时，先潜行回到脚下格中心再放；仍重叠就如实报出，不再盲目点。
+    if (!attach && this.mcData?.blocksByName?.[item.name]?.boundingBox === 'block') {
+      const overlaps = () => {
+        const q = b.entity.position;
+        return q.x + 0.3 > target.x && q.x - 0.3 < target.x + 1 && q.z + 0.3 > target.z && q.z - 0.3 < target.z + 1
+          && q.y + 1.8 > target.y && q.y < target.y + 1;
+      };
+      const feet = b.entity.position.floored();
+      if (overlaps() && (feet.x !== target.x || feet.z !== target.z)) await this.steady({ x: feet.x, z: feet.z }, signal, check);
+      if (overlaps()) return { ok: false, reason: `BODY_IN_TARGET:身体碰撞箱和目标格 ${at} 重叠，服务器不允许把方块放进自己身体所在的格`, attemptedFaces: [] };
+    }
     // 实际尝试过的参照方块/面：失败回执要给结构化事实，不能只给一句文本。
     const attemptedFaces: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] = [];
     for (const { f, ref } of refs) {
