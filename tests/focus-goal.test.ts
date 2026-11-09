@@ -119,6 +119,11 @@ test('清单在停滞前不随眼前的事改；认真想写了理由可改；�
   self.data.plan!.stalledOnlineMs = PLAN_REVISION_MIN * 60_000;
   self.data.plan!.stalledObservedSince = Date.now() - PLAN_REVISION_MIN * 60_000;
   self.data.plan!.stalledHistoryUnknown = false;
+  // 刚才那次带理由的改写也要过同样久，才能不写理由自主删项
+  d = apply({ steps: ['拿到石镐走出矿道', '回地面冶炼'] });
+  assert.match(d.notes.join(), /新清单还没试满/);
+  assert.equal(self.plan()!.steps[0].text, '在 y-10 深板岩层推平巷', '刚改过的清单不随下一念删项');
+  self.data.plan!.revisedAt = [Date.now() - PLAN_REVISION_MIN * 60_000];
   const refusedBefore = events.filter((e) => e === 'plan_rewrite_refused').length;
   d = apply({ steps: ['拿到石镐走出矿道', '回地面冶炼'] }, 'glance');
   assert.deepEqual(self.plan()!.steps.map((s) => s.text), ['拿到石镐走出矿道', '回地面冶炼'], '停滞后瞥一眼也能按实际结果改清单');

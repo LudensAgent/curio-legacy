@@ -2036,9 +2036,17 @@ export class Mind {
           const stalledMin = this.d.self.planStalledMin();
           const withReason = decision.tier === 'deliberate' && !!p.switchReason;
           // 停滞时间是保护门；不按 tier 再拦：瞥一眼也可以按实际结果改，改清单提示只在认真想时出现。
-          const canRevise = stalledMin >= PLAN_REVISION_MIN;
+          // 改写清单不算推进，停滞计时不会因改写清零：只看停滞的话，过了阈值之后每一念都能随手删项，
+          // 清单就跟着眼前一念来回改（2026-11-10 半小时 28 次，回主世界补给这项被反复删了又加）。
+          // 不写理由的自主删项还要求离上次改写也过了同样久，让新清单先按它试一段；写 switch_reason 随时可改。
+          const lastRevised = cur.revisedAt?.at(-1);
+          const sinceRevisionMin = lastRevised === undefined ? Infinity : (Date.now() - lastRevised) / 60_000;
+          const canRevise = stalledMin >= PLAN_REVISION_MIN && sinceRevisionMin >= PLAN_REVISION_MIN;
           if (!withReason && !canRevise) {
-            const why = decision.tier === 'glance' ? '瞥一眼时不改清单' : `要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）；清单观察停滞 ${PLAN_REVISION_MIN} 分钟后可以直接按实际结果改`;
+            const why = decision.tier === 'glance' ? '瞥一眼时不改清单'
+              : stalledMin >= PLAN_REVISION_MIN
+                ? `上次改清单在 ${Math.round(sinceRevisionMin)} 分钟前（现实时间），新清单还没试满 ${PLAN_REVISION_MIN} 分钟；真要删改就在 plan 里写 "switch_reason" 说为什么`
+                : `要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）；清单观察停滞 ${PLAN_REVISION_MIN} 分钟后可以直接按实际结果改`;
             decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的`);
             this.d.bus.publish('plan_rewrite_refused', 'P3', `主目标「${cur.goal}」的清单没改：没做完的「${dropped.slice(0, 3).join('」「')}」不随眼前的事删掉`, { dropped, tier: decision.tier });
             return this.applyPlanDone(decision);
