@@ -85,7 +85,10 @@ export const tossItem: Skill<{ item: string; count: number | null; sourceSlot?: 
       const r = await adapter.tossItem(args.item, args.count, signal, face, { gift: !!toName, ...(args.sourceSlot !== undefined ? { sourceSlot: args.sourceSlot } : {}) });
       if (!r.ok) return fail(r.reason === 'NO_ITEM' ? 'MISSING_MATERIALS' : 'ERROR', `扔 ${args.item} 失败：${r.reason}`);
       const left = adapter.state().inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
-      return ok(`扔出了 ${r.tossed} 个 ${args.item}${toName ? `（朝 ${toName}）` : where}，背包还剩 ${left} 个；掉在地上的东西过一会儿才会被捡走或消失`, { item: args.item, tossed: r.tossed, left, ...(toName ? {} : { expect: { discarded: [args.item], forMs: 180_000, what: `扔掉了 ${args.item}×${r.tossed}${where}` } }), ...(toName ? { to: toName } : {}) });
+      // 落点方向如实写出：扔出去的东西约 2 秒后就能被捡起，身体之后往那边走（迈步、开挖、寻路）会把它自动捡回来
+      const yaw = adapter.eye()?.yaw;
+      const heading = toName || where || yaw === undefined ? '' : `（朝 ${['北', '西北', '西', '西南', '南', '东南', '东', '东北'][Math.round((((yaw * 180 / Math.PI) % 360) + 360) % 360 / 45) % 8]}）`;
+      return ok(`扔出了 ${r.tossed} 个 ${args.item}${toName ? `（朝 ${toName}）` : where || heading}，背包还剩 ${left} 个；落在扔出方向身前一两格，约 2 秒后身体走到它 1 格内（背包放得下时）会自动捡回`, { item: args.item, tossed: r.tossed, left, ...(toName ? {} : { expect: { discarded: [args.item], forMs: 180_000, what: `扔掉了 ${args.item}×${r.tossed}${where}` } }), ...(toName ? { to: toName } : {}) });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `扔 ${args.item} 出错：${(e as Error).message}`);
