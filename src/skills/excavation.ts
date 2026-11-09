@@ -442,9 +442,14 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
           }
         }
       }
-      // Agent 显式给了 fill：在挖掘前把支撑补实；只替换空气/液体/可替换植物，
+      // 危险/未知/不能承重在挖前就停；只有“支撑格是空的”留到挖开下一格身体空间之后处理：
+      // 下一格还是实心时，支撑格的侧面和底面全被它挡住，从当前站位根本看不到可贴的面，
+      // 先补支撑必然 NO_REFERENCE（交回的 place_support 建议也同样执行不了）。
+      if (supportProblemNow && supportProblemNow.kind !== 'missing_support') throw supportProblemNow;
+      // Agent 显式给了 fill：补支撑只替换空气/液体/可替换植物，
       // 不拿 fill 硬盖半砖、火把、沙子/沙砾这类不该当支撑的方块。
-      if (supportProblemNow && args.fill) {
+      const fillSupport = async () => {
+        if (!supportProblemNow || !args.fill) return;
         const fillItem = args.fill;
         const supportCell = { x: next.x, y: next.y - 1, z: next.z };
         const supportState = stateAt(ctx.adapter)(supportCell);
@@ -482,8 +487,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
             throw stop;
           }
         }
-      }
-      if (supportProblemNow) throw supportProblemNow;
+      };
+      // 指定的 fill 材料背包里根本没有：挖开也补不上，照旧在挖前按能力缺口停下，不白挖。
+      if (supportProblemNow && args.fill && args.fill !== 'any' && !adapter.state().inventory.some((i) => i.name === args.fill && i.count > 0)) await fillSupport();
       const height = args.mode === 'stairs' ? 3 : 2;
       const cells = preflightColumn(ctx, next, height, ledger, args).reverse();
       // A one-block jump needs extra clearance above the current head before
@@ -524,6 +530,17 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         markSelfModified(ctx.spatial, origin.dim, pos, ctx.taskId);
         excavated++;
         assertSession(ctx, origin);
+      }
+      // 下一格身体空间已挖开，支撑格的面现在露出来了：有 fill 就补，没有就停下交回缺口，不迈步。
+      if (supportProblemNow) {
+        if (args.fill) {
+          await fillSupport();
+          const still = supportProblemNow as ExcavationStop | null;
+          if (still) throw still;
+        } else {
+          supportProblemNow.message += '（下一格的身体空间已挖开，支撑格周围的面现在可见；本步未迈出）';
+          throw supportProblemNow;
+        }
       }
       workCheck();
       standingCell(ctx, next, ledger, args);
@@ -603,7 +620,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就在挖前停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
   argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe（不掉落也会挖开并回报 noDrop）","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;

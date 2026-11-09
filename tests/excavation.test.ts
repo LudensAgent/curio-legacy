@@ -122,14 +122,15 @@ test('a shallow missing support is followed down to the actual floor without spe
   assert.deepEqual(world.pos, { x: 1.5, y: 62, z: 0.5 });
 });
 
-test('a deep missing support returns the gap before digging and never spends blocks', async () => {
+test('a deep missing support opens the next work face, returns the gap without stepping and never spends blocks', async () => {
   const world = new ExcavationWorld();
   for (const y of [62, 61, 60, 59, 58]) world.setBlock({ x: 1, y, z: 0 }, 'air'); // 第一处楼面 y57，落差 5
   world.inv.set('cobblestone', 3);
   const result = await excavationSkill.run(context(world), args({ steps: 1 }));
   assert.equal(result.status, 'failed', result.summary);
-  assert.equal(world.digs.length, 0, '报缺口之前没有开挖');
+  assert.ok(world.digs.every((d) => d.x === 1 && d.y >= 63), '只挖下一格的身体空间，不挖支撑格或别处');
   assert.equal(world.moves.length, 0, '报缺口之前没有移动');
+  assert.match(result.summary, /身体空间已挖开/);
   assert.equal(world.inv.get('cobblestone'), 3, '纯开挖不擅自消耗材料垫块');
   assert.ok(!world.actions.some((action) => action.startsWith('place:')), '没有隐式放置');
   const cavity = result.data?.cavity as { reason: string; nextLanding: Vec3Like; supportCell: Vec3Like; visibleLandings: unknown[]; handoff: string };
@@ -156,6 +157,22 @@ test('tunnel with explicit fill places the missing support before digging and ad
   assert.deepEqual(result.data?.fillFacts, [{ at: { x: 1, y: 63, z: 0 }, item: 'netherrack' }]);
   assert.equal(world.blockAt({ x: 1, y: 63, z: 0 }), 'netherrack');
   assert.equal(world.inv.get('netherrack'), 4, '补支撑消耗 1 块');
+  assert.deepEqual(world.pos, { x: 1.5, y: 64, z: 0.5 });
+});
+
+test('tunnel with fill digs the solid work face before placing its support, so the support faces are reachable', async () => {
+  const world = new ExcavationWorld();
+  for (const y of [64, 65]) world.setBlock({ x: 1, y, z: 0 }, 'netherrack'); // 下一格身体空间还是实心
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air'); // 它下面是空腔
+  world.inv.set('netherrack', 5);
+  const place = world.placeBlockAt.bind(world);
+  // 工作面没挖开时，支撑格四周可贴的面都被挡住：真实客户端在这里只会 NO_REFERENCE
+  world.placeBlockAt = async (pos, itemNames, signal) => world.blockAt({ x: 1, y: 64, z: 0 }) !== 'air'
+    ? { ok: false as const, reason: 'NO_REFERENCE' }
+    : place(pos, itemNames, signal);
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(world.blockAt({ x: 1, y: 63, z: 0 }), 'netherrack');
   assert.deepEqual(world.pos, { x: 1.5, y: 64, z: 0.5 });
 });
 
