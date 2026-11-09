@@ -4339,16 +4339,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const danger = (): DriveResult['stopped'] | null => {
       if (opts.guard === false) return null;
       const v = b.entity.velocity ?? { x: 0, z: 0 };
-      const speed = Math.hypot(v.x, v.z);
-      if (speed < 0.02) return null;
-      const ahead = b.entity.position.offset((v.x / speed) * 0.7, 0, (v.z / speed) * 0.7);
+      let speed = Math.hypot(v.x, v.z), dir = { x: v.x, z: v.z };
+      // 刚起步时速度还很小：按按下的方向键和朝向推算要去的方向，不等身体已经迈出去才看
+      if (speed < 0.02) {
+        const yaw = b.entity.yaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+        const f = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0), r = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        dir = { x: fx * f - fz * r, z: fz * f + fx * r };
+        speed = Math.hypot(dir.x, dir.z);
+        if (speed < 0.01) return null;
+      }
+      const ahead = b.entity.position.offset((dir.x / speed) * 0.7, 0, (dir.z / speed) * 0.7);
       const at = (dy: number) => b.blockAt(ahead.offset(0, dy, 0))?.name ?? null;
       // 走进传送门（下界门/末地门/折跃门）不算地形危险：门会接住人并传送。
       // 是否允许非预期传送是调用方的显式委托（allowPortal），guard 本身不保证避开传送门。
       if (/^(nether_portal|end_portal|end_gateway)$/.test(at(0) ?? '')) return opts.allowPortal === false ? 'portal' : null;
-      if ([0, -1].some((dy) => /^(lava|fire|soul_fire|magma_block|campfire|soul_campfire)$/.test(at(dy) ?? ''))) return 'lava';
+      const hazard = (n: string | null) => /^(lava|fire|soul_fire|magma_block|campfire|soul_campfire)$/.test(n ?? '');
+      if ([0, -1].some((dy) => hazard(at(dy)))) return 'lava';
       if (!b.entity.onGround) return null;
       const open = (n: string | null) => n === null || AIR_BLOCKS.has(n);
+      // 前方脚下是空的：顺着往下找第一格非空气，是岩浆/火就是要掉进去（实机：举盾后撤从一格台阶退进下面的岩浆）
+      if (open(at(-1))) for (let dy = -2; dy >= -5; dy--) { const n = at(dy); if (open(n)) continue; if (hazard(n)) return 'lava'; break; }
       if (open(at(-1)) && open(at(-2)) && open(at(-3)) && open(at(-4))) return 'cliff';
       return null;
     };
