@@ -87,6 +87,8 @@ function allFragments(history: FragmentStore): PathFragment[] {
   return out;
 }
 
+/** 语义节点 id 集合的全量重扫间隔：只用来补上其他写入方新增的语义节点。 */
+const SEMANTIC_RESCAN_MS = 30_000;
 /** 重复看见已记地标时，至少隔这么久才刷新一次它的观察时间。 */
 const LANDMARK_REFRESH_MS = 60_000;
 
@@ -252,12 +254,31 @@ export class SpatialSemanticStore {
   get containers(): ContainerLedger { return this.containerLedgerStore; }
   get world(): string { return this.worldId; }
 
-  /** 按 topology 修订号缓存的全量节点（只读快照）：同一修订号内反复查地标不再每次分页克隆全部节点、重建列表索引。 */
-  private nodeCache: { revision: number; nodes: SpatialNode[] } | null = null;
+  /**
+   * 自己的语义节点 id（地标、herd、gone、容器……）：查询只按 id 逐个 getNode（O(1)、读的是实时内容），
+   * 不再分页列出整张拓扑。拓扑里大部分是走路记下的路线节点，每走一步都会写；列表接口每次写后都要重建
+   * 全量索引并克隆全部节点，下界实测感知每帧都触发，主线程一卡 3–6 秒。
+   * 自己写入时立即登记；其他写入方新增的语义节点由定期全量扫描补上。
+   */
+  private semanticIds: Set<string> | null = null;
+  private semanticIdsAt = 0;
   private allNodes(): SpatialNode[] {
-    const revision = this.session.topology.revision;
-    if (this.nodeCache?.revision !== revision) this.nodeCache = { revision, nodes: allNodes(this.session.topology) };
-    return [...this.nodeCache.nodes];
+    if (this.semanticIds === null || Date.now() - this.semanticIdsAt > SEMANTIC_RESCAN_MS) {
+      this.semanticIds = new Set(allNodes(this.session.topology).filter((node) => node.tag !== undefined || metaOf(node) !== undefined).map((node) => node.id));
+      this.semanticIdsAt = Date.now();
+    }
+    const ids = this.semanticIds;
+    return [...ids].sort().flatMap((id) => {
+      const node = this.session.topology.getNode(id);
+      if (!node) { ids.delete(id); return []; }
+      return [node];
+    });
+  }
+
+  /** 写入语义节点并登记 id；所有 saveNode 都经过这里，查询才不会漏掉刚写的节点。 */
+  private saveTracked(node: SpatialNode) {
+    this.session.topology.saveNode(node);
+    this.semanticIds?.add(node.id);
   }
   private allFragments(): PathFragment[] { return allFragments(this.session.history); }
 
@@ -309,10 +330,10 @@ export class SpatialSemanticStore {
 
   private saveNode(node: SpatialNode) {
     const existing = this.session.topology.getNode(node.id);
-    if (!existing) { this.session.topology.saveNode(node); return; }
+    if (!existing) { this.saveTracked(node); return; }
     if (existing.source !== node.source) {
       this.session.topology.forgetNode(node.id);
-      this.session.topology.saveNode(node);
+      this.saveTracked(node);
       return;
     }
     this.session.topology.updateNode(node.id, {
@@ -495,7 +516,7 @@ export class SpatialSemanticStore {
       if (!existing.gone) this.session.topology.markGone(id, { sessionId: this.sessionId, observedAt: Math.max(observedAt, existing.observedAt ?? 0), source: 'program', reason: now });
       return;
     }
-    this.session.topology.saveNode({
+    this.saveTracked({
       id,
       kind: 'place',
       source: 'program',
@@ -571,7 +592,7 @@ export class SpatialSemanticStore {
     const herds = this.allNodes().filter((node) => !node.gone && node.tag === 'herd').sort((a, b) => (a.observedAt ?? 0) - (b.observedAt ?? 0));
     if (herds.length >= HERD_CAP) this.session.topology.forgetNode(herds[0]!.id);
     const id = shortId('herd_');
-    this.session.topology.saveNode({
+    this.saveTracked({
       id, kind: 'place', source: 'program', tag: 'herd', label, worldId: this.worldId, dim,
       location: { kind: 'exact', pos: at }, observedAt: Date.now(), externalRef: id,
       metadata: metadata({ v: 2, type: 'landmark', view: 'landmark', record: jsonRecord(record) }),
@@ -608,7 +629,7 @@ export class SpatialSemanticStore {
     }
     const id = shortId('base_');
     const finalLabel = label?.trim() ?? `基地 ${bases.length + 1}`;
-    this.session.topology.saveNode({
+    this.saveTracked({
       id, kind: 'place', source: 'agent', tag: 'base', label: finalLabel, worldId: this.worldId, dim,
       location: { kind: 'exact', pos: basePos }, observedAt: Date.now(), externalRef: id, durable: true,
       metadata: metadata({ v: 2, type: 'landmark', view: 'landmark', record: jsonRecord({ kind: 'base', label: finalLabel, dim, pos: basePos, ts: Date.now(), worldId: this.worldId }) }),
@@ -690,7 +711,7 @@ export class SpatialSemanticStore {
       worldId: this.worldId, dim, location: { kind: 'exact', pos: at }, observedAt: now, externalRef: chestKey(this.worldId, dim, at),
       metadata: metadata({ v: 2, type: 'container', block, record: jsonRecord({ ts: now, uses: 0, block, ...(note ? { note } : {}) }) }),
     };
-    this.session.topology.saveNode(node);
+    this.saveTracked(node);
     return node;
   }
 
@@ -792,7 +813,7 @@ export class SpatialSemanticStore {
       return;
     }
     const id = `furnace:${chestKey(this.worldId, rec.dim, at)}`;
-    this.session.topology.saveNode({
+    this.saveTracked({
       id, kind: 'place', source: 'program', tag: 'resource', label: `furnace${rec.burning ? ' (burning)' : ''}`,
       worldId: this.worldId, dim: rec.dim, location: { kind: 'exact', pos: at }, observedAt: rec.ts ?? Date.now(),
       externalRef: chestKey(this.worldId, rec.dim, at),
@@ -886,7 +907,7 @@ export class SpatialSemanticStore {
       id, worldId: this.worldId, dim: h.dim, pos, radius: 6, kind: h.kind, count: 1,
       ...(h.during ? { during: h.during.slice(0, 120) } : {}), ...(h.note ? { note: h.note.slice(0, 200) } : {}), firstTs: now, ts: now,
     };
-    this.session.topology.saveNode({
+    this.saveTracked({
       id, kind: 'place', source: 'program', tag: 'danger',
       label: `danger: ${h.kind}${h.note ? ` (${h.note})` : ''}`,
       worldId: this.worldId, dim: h.dim, location: { kind: 'region', center: pos, radius: 6 },
