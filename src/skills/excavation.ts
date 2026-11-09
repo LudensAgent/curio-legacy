@@ -344,6 +344,13 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     ? `（按 fill 补了 ${filled} 处支撑：${fillFacts.map((f) => `${f.item} 在 (${f.at.x},${f.at.y},${f.at.z})`).join('、')}）`
     : '';
   const noDropNote = () => noDropBlocks ? `（其中 ${noDropBlocks} 格没有掉落）` : '';
+  const startChunks = ctx.memory.visitedChunkCount;
+  // 一个新区块都没进时说清楚：挖出来的是新通道，但这一带以前就来过（历史事实，不替它选方向）。
+  const visitedNote = () => {
+    if (ctx.memory.visitedChunkCount > startChunks) return `，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块`;
+    const bounds = ctx.memory.visitedExtent(origin.dim).bounds;
+    return bounds === null ? '，没进新区块' : `，没进新区块（这段全在去过的区块里；${origin.dim} 区块访问外框 x ${bounds.minX}..${bounds.maxX}、z ${bounds.minZ}..${bounds.maxZ}，只是历史记录）`;
+  };
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
@@ -572,7 +579,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
       }
     }
-    return ok(`实际探索 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}${noDropNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
