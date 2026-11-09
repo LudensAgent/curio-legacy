@@ -585,8 +585,8 @@ test('approach_visible 位置请求允许半砖脚高差在到达容差内', asy
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.outcome, 'ARRIVED');
   assert.equal(adapter.pos.y, 63.5);
-  const distance = (r.data?.interaction as { distance: { vertical: number } }).distance;
-  assert.equal(distance.vertical, 0.5);
+  const offset = (r.data?.interaction as { requestedOffset: { vertical: number } }).requestedOffset;
+  assert.equal(offset.vertical, 0.5);
 });
 
 test('approach_visible 不会把目标实体换成另一只同名实体', async (t) => {
@@ -752,6 +752,151 @@ test('approach_visible 证据已新鲜时不做额外局部观察', async (t) =>
   const local = (r.data?.evidence as { localObservation: { attempted: boolean; requested: number } }).localObservation;
   assert.equal(local.attempted, false);
   assert.ok(local.requested > 0);
+});
+
+/** 模拟“现场读不到尚未观察的格”：只有被合法观察过的格才返回 blockstate。 */
+class BlindWorld extends Fake {
+  revealed = new Set<string>();
+  override blockAt(pos: Vec3Like): string {
+    // FakeAdapter 的返回类型比 GameAdapter 窄；这里故意模拟“现场读不到未观察格”，
+    // 技能按 null → UNKNOWN 处理，不能把未知当空气。
+    return this.revealed.has(`${pos.x},${pos.y},${pos.z}`) ? super.blockAt(pos) : (null as unknown as string);
+  }
+}
+
+function observeIntoMap(adapter: BlindWorld, map: VoxelMap) {
+  return (positions: Vec3Like[]) => {
+    const seen = positions.map((pos) => {
+      adapter.revealed.add(`${pos.x},${pos.y},${pos.z}`);
+      const raw = adapter.nameAt(pos.x, pos.y, pos.z);
+      const name = raw.includes(':') ? raw : `minecraft:${raw}`;
+      const properties = adapter.blockStateAt?.(pos)?.properties ?? {};
+      return {
+        pos: { ...pos }, name, properties, worldId: WORLD, sessionId: SESSION, dimension: DIM,
+        observationId: 1, observedAt: Date.now(), source: 'vision' as const, stateComplete: true,
+      };
+    });
+    for (const block of seen) {
+      sequence += 1;
+      map.observe({
+        worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: block.observedAt, sequence,
+        source: 'vision', evidence: 'seen', stateComplete: true,
+        state: { name: block.name, properties: Object.fromEntries(Object.entries(block.properties).map(([key, value]) => [key, String(value)])) },
+        pos: block.pos,
+      });
+    }
+    return seen;
+  };
+}
+
+test('approach_visible 未知候选先补观察，不会在观察前因没有可用站位提前退出', async (t) => {
+  const map = worldMap([
+    { name: 'minecraft:air', cells: airCells(0) },
+    { name: 'minecraft:grass_block', cells: floorCells(0) },
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
+  ]);
+  const adapter = new BlindWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
+  // 身体只知道脚下和紧邻一圈；目标周边的候选站位要等观察才可读。
+  for (let z = -1; z <= 1; z++) for (let y = 63; y <= 66; y++) adapter.revealed.add(`0,${y},${z}`);
+  const ctx = context(adapter, map, { observeBlocks: observeIntoMap(adapter, map) });
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  const stanceObservation = (r.data?.evidence as { stanceObservation: { attempted: boolean; requested: number; acquired: number } }).stanceObservation;
+  assert.equal(stanceObservation.attempted, true);
+  assert.ok(stanceObservation.requested > 0);
+  assert.ok(stanceObservation.acquired > 0);
+  assertNoTerrainChange(adapter);
+});
+
+test('approach_visible 观察后仍未知的候选返回 UNKNOWN，并如实报告观察次数', async (t) => {
+  const map = worldMap([
+    { name: 'minecraft:air', cells: airCells(0) },
+    { name: 'minecraft:grass_block', cells: floorCells(0) },
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
+  ]);
+  const adapter = new BlindWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
+  for (let z = -1; z <= 1; z++) for (let y = 63; y <= 66; y++) adapter.revealed.add(`0,${y},${z}`);
+  const ctx = context(adapter, map, { observeBlocks: () => [] });
+  const before = { ...adapter.pos };
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } });
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.outcome, 'UNKNOWN');
+  const stanceObservation = r.data?.stanceObservation as { attempted: boolean; acquired: number };
+  assert.equal(stanceObservation.attempted, true);
+  assert.equal(stanceObservation.acquired, 0);
+  assert.ok((r.data?.rejectedKinds as Record<string, number>).UNKNOWN > 0);
+  assert.deepEqual(adapter.pos, before);
+});
+
+test('approach_visible 位置请求在格边+半砖时按解析 stance 验收，不因 0.78 格偏移失败', async (t) => {
+  const map = worldMap([
+    { name: 'minecraft:air', cells: airCells(5) },
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5), [{ x: 1, y: 63, z: 0 }]) },
+    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
+  ]);
+  const { adapter, ctx } = setup(map);
+  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  adapter.blockProperties.set('1,63,0', { type: 'bottom' });
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 1.9, y: 64, z: 0.9 } }, { allowed: ['walk', 'step', 'drop'] });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  const stance = r.data?.resolvedStance as Vec3Like;
+  assert.deepEqual(stance, { x: 1.5, y: 63.5, z: 0.5 });
+  const offset = (r.data?.interaction as { requestedOffset: { horizontal: number; vertical: number } }).requestedOffset;
+  assert.ok(offset.horizontal > 0.5, JSON.stringify(offset));
+  assert.equal(offset.vertical, 0.5);
+});
+
+/** 落在目标格边缘而不是格心的身体（move_step 只按脚格验收，仍应视为到达）。 */
+class EdgeLandingWorld extends Fake {
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    if (target.kind === 'xyz') {
+      this.actions.push('moveTo:xyz');
+      this.pos = { x: target.x + 0.02, y: target.y, z: target.z + 0.02 };
+      return;
+    }
+    return super.moveTo(target, opts);
+  }
+}
+
+test('approach_visible 地图证据带 minecraft: 名字时仍能解析站位（只靠 VoxelMap）', async (t) => {
+  const map = worldMap([
+    { name: 'minecraft:air', cells: airCells(3) },
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(3), [{ x: 1, y: 63, z: 0 }]) },
+    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
+  ]);
+  const adapter = new BlindWorld();
+  adapter.pos = { x: 1.5, y: 63.5, z: 0.5 };
+  // 不提供 observeBlocks：现场读不到时只能靠 VoxelMap 的 FRESH 证据。
+  const ctx = context(adapter, map, { observeBlocks: undefined, effectiveRange: () => 32 });
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 1.9, y: 64, z: 0.9 } }, { allowed: ['walk', 'step', 'drop'] });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal((r.data?.resolvedStance as Vec3Like).y, 63.5);
+  assert.equal((r.data?.evidence as { stanceGeometry: string }).stanceGeometry, 'live_adapter_blocks+fresh_voxel_fallback');
+});
+
+test('approach_visible 按解析 stance 验收落在格边的到达，不因测量位置远离请求点而失败', async (t) => {
+  const map = flatMap();
+  const adapter = new EdgeLandingWorld();
+  adapter.pos = { x: 0.3, y: 64, z: 0.2 };
+  const ctx = context(adapter, map);
+  t.after(() => ctx.memory.close());
+  const r = await call(ctx, { pos: { x: 1.98, y: 64, z: 0.98 } });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.outcome, 'ARRIVED');
+  const offset = (r.data?.interaction as { requestedOffset: { horizontal: number } }).requestedOffset;
+  assert.ok(offset.horizontal > 0.75, JSON.stringify(offset));
+  assert.deepEqual(r.data?.resolvedStance, { x: 1.5, y: 64, z: 0.5 });
 });
 
 test('approach_visible 拒绝超过累计位移预算的绕行路线', async (t) => {

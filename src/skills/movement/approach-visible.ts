@@ -335,7 +335,7 @@ const modeRank = (mode: RouteMode) => mode === 'current' ? 0 : mode === 'histori
 export const approachVisible: Skill<Args> = {
   name: 'approach_visible',
   description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度、不调用旧 Pathfinder。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
-  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得）；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
+  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
   timeoutMs: 45000,
   movement: true,
   outcomeBoundary: true,
@@ -399,10 +399,45 @@ export const approachVisible: Skill<Args> = {
         ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position: start, displacement: 0, resolvedStance: null,
       });
     }
-    // 站位几何用当前已加载 blockstate（与 move_step 执行前检查同一来源）；路线用 VoxelMap 证据；
-    // 目标附近的证据缺口再由下面的有界观察补进同一张共享地图。
+    // 站位几何先读当前已加载 blockstate（与 move_step 执行前检查同一来源）；读不到的格再用
+    // 共享 VoxelMap 里仍然新鲜、状态完整的观察证据补一次。路线仍只用 VoxelMap。
     const at = stateReader(ctx.adapter);
     const voxel = spatial.session.voxel;
+    const freshMapAt: StateAt = (pos) => {
+      const view = voxel.cellAt(state.dim, Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+      if (!view.observed) return null;
+      const evidence = view.evidence;
+      if (evidence.freshness !== 'FRESH' || evidence.validUntil < Date.now() || !evidence.observation.stateComplete
+        || evidence.observation.sessionId !== state.sessionId) return null;
+      // geometry.ts 的 block 名表不带命名空间；VoxelMap 允许 'minecraft:' 前缀，必须归一。
+      return { name: stem(evidence.observation.state.name), properties: evidence.observation.state.properties ?? {} };
+    };
+    // 现场读到的名字优先；现场没有完整 blockstate 时用地图里的完整状态补属性，
+    // 两者都没有才算未知。
+    let usedFreshMapFallback = false;
+    const combinedAt: StateAt = (pos) => {
+      const live = at(pos);
+      if (live !== null && live.properties !== undefined) return live;
+      const mapped = freshMapAt(pos);
+      if (mapped !== null) usedFreshMapFallback = true;
+      return mapped ?? live;
+    };
+    // 有界局部观察：只走现有 Perception/Vision，写回同一张共享 VoxelMap；每批最多 32 格。
+    const observeCells = async (cells: Vec3Like[]) => {
+      const positions = [...new Map(cells.map((cell) => [cellKey(cell), { ...cell }])).values()];
+      const observeBlocks = ctx.senses.observeBlocks;
+      const requested = positions.length;
+      if (observeBlocks === undefined || requested === 0) {
+        return { attempted: false, requested, acquired: 0, stopped: null as 'cancelled' | 'timeout' | null };
+      }
+      let acquired = 0;
+      for (let index = 0; index < positions.length; index += 32) {
+        if (ctx.signal.aborted) return { attempted: true, requested, acquired, stopped: 'cancelled' as const };
+        if (Date.now() >= ctx.deadline) return { attempted: true, requested, acquired, stopped: 'timeout' as const };
+        acquired += observeBlocks.call(ctx.senses, positions.slice(index, index + 32)).length;
+      }
+      return { attempted: true, requested, acquired, stopped: null };
+    };
 
     // ---- 1. 目标解析：位置直接是站位；方块/实体先找合法旁侧站位。 ----
     let targetName: string | null = null;
@@ -414,6 +449,9 @@ export const approachVisible: Skill<Args> = {
     let structure = new Set<string>();
     let valid: Candidate[];
     let rejected: Rejected[];
+    let stanceCenter: Vec3Like | undefined;
+    let stanceReach = BLOCK_REACH;
+    let stanceObservation = { attempted: false, requested: 0, acquired: 0, newObservedCells: 0 };
 
     if (target.kind === 'position') {
       const distance = dist3(start, target.pos);
@@ -423,11 +461,31 @@ export const approachVisible: Skill<Args> = {
         });
       }
       targetCell = feetCell(target.pos);
-      const check = inspectStance(at, targetCell);
+      let check = inspectStance(at, targetCell);
+      if (check.status === 'UNKNOWN') {
+        const cells = [targetCell,
+          { x: targetCell.x, y: targetCell.y - 1, z: targetCell.z },
+          { x: targetCell.x, y: targetCell.y + 1, z: targetCell.z },
+          ...check.missing];
+        const observedCellsBefore = voxel.checkpointFullCounts().observedCells;
+        const observed = await observeCells(cells);
+        stanceObservation = {
+          attempted: observed.attempted, requested: observed.requested, acquired: observed.acquired,
+          newObservedCells: voxel.checkpointFullCounts().observedCells - observedCellsBefore,
+        };
+        if (observed.stopped === 'cancelled') return cancelled('目标站位观察期间收到取消。', { stanceObservation });
+        if (observed.stopped === 'timeout') {
+          const { position, displacement } = snapshot();
+          return fail('TIMEOUT', '父委托期限在目标站位观察期间耗尽，没有移动', {
+            ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement, resolvedStance: null, stanceObservation,
+          });
+        }
+        check = inspectStance(combinedAt, targetCell);
+      }
       if (check.status === 'UNKNOWN') {
         return fail('NOT_FOUND', `目标位置所在的列 (${targetCell.x},${targetCell.y},${targetCell.z}) 支撑/净空未观察，不能把未知当作可达`, {
           ...base, outcome: 'UNKNOWN', evidenceState: 'UNKNOWN', position: start, displacement: 0,
-          unknown: check.missing, resolvedStance: null,
+          unknown: check.missing, resolvedStance: null, stanceObservation,
         });
       }
       if (check.status === 'NO_SUPPORT') {
@@ -490,6 +548,8 @@ export const approachVisible: Skill<Args> = {
         });
       }
       structure = structureCells(at, cell, targetName);
+      stanceCenter = center;
+      stanceReach = BLOCK_REACH;
       ({ valid, rejected } = stanceCandidates(at, cell, center, structure, start, radius, BLOCK_REACH));
     } else {
       entity = ctx.senses.perceivedEntities(radius)
@@ -511,7 +571,38 @@ export const approachVisible: Skill<Args> = {
           ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null, entity: { ...entity },
         });
       }
+      stanceCenter = center;
+      stanceReach = ENTITY_REACH;
       ({ valid, rejected } = stanceCandidates(at, targetCell, center, new Set(), start, radius, ENTITY_REACH));
+    }
+    // ---- 1b. 未知候选先补观察，再按同一份证据重算可站立性 ----
+    // 不能因为候选全是 UNKNOWN 就提前退出：共享 VoxelMap 可能已有合法观察，现场也能补看。
+    const unknownCandidates = rejected.filter((entry) => entry.status === 'UNKNOWN');
+    if (unknownCandidates.length > 0 && targetCell !== undefined && stanceCenter !== undefined) {
+      const cells: Vec3Like[] = targetFreshlyObserved ? [] : [targetCell];
+      for (const entry of unknownCandidates.slice(0, OBSERVATION_STANCES)) {
+        cells.push(entry.cell,
+          { x: entry.cell.x, y: entry.cell.y - 1, z: entry.cell.z },
+          { x: entry.cell.x, y: entry.cell.y + 1, z: entry.cell.z },
+          ...(entry.cellBlockers ?? []));
+      }
+      const stanceCellsBefore = voxel.checkpointFullCounts().observedCells;
+      const observed = await observeCells(cells);
+      stanceObservation = {
+        attempted: observed.attempted, requested: observed.requested, acquired: observed.acquired,
+        newObservedCells: voxel.checkpointFullCounts().observedCells - stanceCellsBefore,
+      };
+      if (observed.stopped === 'cancelled') return cancelled('候选站位观察期间收到取消。', { stanceObservation });
+      if (observed.stopped === 'timeout') {
+        const { position, displacement } = snapshot();
+        return fail('TIMEOUT', '父委托期限在候选站位观察期间耗尽，没有移动', {
+          ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement, resolvedStance: null, stanceObservation,
+        });
+      }
+      // 即使没有可用的观察接口，也要用现有 FRESH 地图证据重算一次；
+      // 未知候选不能因为“没补到新观察”就直接判死。
+      structure = target.kind === 'block' && targetName !== null ? structureCells(combinedAt, targetCell, targetName) : new Set();
+      ({ valid, rejected } = stanceCandidates(combinedAt, targetCell, stanceCenter, structure, start, radius, stanceReach));
     }
     if (!valid.length) {
       const unknown = rejected.filter((r) => r.status === 'UNKNOWN').length;
@@ -519,7 +610,7 @@ export const approachVisible: Skill<Args> = {
       const { position, displacement } = snapshot();
       return fail(failureCodeOf(outcome), `目标 ${target.kind} 周围没有已验证可用的站立格：${valid.length} 个可用、${rejected.length} 个被拒（${[...new Set(rejected.map((r) => r.kind))].join('、') || '无候选'}）`, {
         ...base, outcome, ...(outcome === 'UNKNOWN' ? { evidenceState: 'UNKNOWN' } : {}),
-        position, displacement, resolvedStance: null,
+        position, displacement, resolvedStance: null, stanceObservation,
         ...(targetCell === undefined ? {} : { targetCell }),
         ...(entity === undefined ? {} : { entity: { ...entity } }),
         rejected,
@@ -548,24 +639,22 @@ export const approachVisible: Skill<Args> = {
       return !view.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < Date.now();
     };
     const observationPositions = [...observationCells.values()];
-    const missingBefore = observationPositions.filter(staleInMap).length;
+    // 只请求仍然缺证据的格；1b 已经补过的目标/站位不再重复观察。
+    const missingPositions = observationPositions.filter(staleInMap);
+    const missingBefore = missingPositions.length;
     const observedCellsBefore = voxel.checkpointFullCounts().observedCells;
-    let observedCells = 0;
-    let observationAttempted = false;
-    const observeBlocks = ctx.senses.observeBlocks;
-    if (observeBlocks !== undefined && missingBefore > 0) {
-      observationAttempted = true;
-      for (let index = 0; index < observationPositions.length; index += 32) {
-        if (ctx.signal.aborted) return cancelled('局部观察期间收到取消。', { evidenceSource: targetEvidence, missingBefore });
-        if (Date.now() >= ctx.deadline) {
-          const { position, displacement } = snapshot();
-          return fail('TIMEOUT', '父委托期限在局部观察期间耗尽，没有移动', {
-            ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement, resolvedStance: null,
-          });
-        }
-        observedCells += observeBlocks.call(ctx.senses, observationPositions.slice(index, index + 32)).length;
-      }
+    const neighbourhood = missingBefore > 0
+      ? await observeCells(missingPositions)
+      : { attempted: false, requested: missingPositions.length, acquired: 0, stopped: null };
+    if (neighbourhood.stopped === 'cancelled') return cancelled('局部观察期间收到取消。', { evidenceSource: targetEvidence, missingBefore, stanceObservation });
+    if (neighbourhood.stopped === 'timeout') {
+      const { position, displacement } = snapshot();
+      return fail('TIMEOUT', '父委托期限在局部观察期间耗尽，没有移动', {
+        ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement, resolvedStance: null, stanceObservation,
+      });
     }
+    const observedCells = neighbourhood.acquired;
+    const observationAttempted = neighbourhood.attempted;
     const newObservedCells = voxel.checkpointFullCounts().observedCells - observedCellsBefore;
     const evidenceFacts = {
       target: {
@@ -574,7 +663,8 @@ export const approachVisible: Skill<Args> = {
         ...(targetName === null ? {} : { name: stem(targetName) }),
         ...(targetFreshness === undefined ? {} : { freshness: targetFreshness }),
       },
-      stanceGeometry: 'live_adapter_blocks',
+      stanceGeometry: usedFreshMapFallback ? 'live_adapter_blocks+fresh_voxel_fallback' : 'live_adapter_blocks',
+      stanceObservation,
       localObservation: {
         attempted: observationAttempted, requested: observationPositions.length, acquired: observedCells, missingBefore,
         /** 共享 VoxelMap 中新增的已观察格数：实际写入覆盖信号，不只是接口返回条数。 */
@@ -710,7 +800,8 @@ export const approachVisible: Skill<Args> = {
         ...base, ...routeFacts, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement,
       });
     }
-    const recheck = inspectStance(at, selected.candidate.cell);
+    // 执行前复核也用同一份 live + FRESH 地图证据；只读现场会把地图仍有效的落脚点误判失效。
+    const recheck = inspectStance(combinedAt, selected.candidate.cell);
     if (recheck.status !== 'OK' || Math.abs(recheck.foot - selected.candidate.stance.y) > STANCE_TOLERANCE) {
       const { position, displacement } = snapshot();
       return fail('PATH_NOT_FOUND', `选中的站位 (${selected.candidate.stance.x.toFixed(2)},${selected.candidate.stance.y},${selected.candidate.stance.z.toFixed(2)}) 在搜索后已不再可用（${recheck.status}）；没有移动`, {
@@ -718,7 +809,7 @@ export const approachVisible: Skill<Args> = {
       });
     }
     if (target.kind === 'block' && targetCell !== undefined && targetName !== null) {
-      const now = ctx.adapter.blockAt(targetCell);
+      const now = ctx.adapter.blockAt(targetCell) ?? freshMapAt(targetCell)?.name ?? null;
       if (now === null || stem(now) !== stem(targetName)) {
         const { position, displacement } = snapshot();
         return fail('TARGET_GONE', `目标方块在搜索后已不可用（${now === null ? '未加载' : stem(now)}，原为 ${stem(targetName)}）；没有移动`, {
@@ -881,30 +972,29 @@ export const approachVisible: Skill<Args> = {
     );
 
     if (target.kind === 'position') {
-      // 水平与垂直分开验收：半砖/雪层的脚高吸附不应把同一格内的到达判成失败。
-      const horizontal = Math.hypot(after.position.x - target.pos.x, after.position.z - target.pos.z);
-      const vertical = Math.abs(after.position.y - target.pos.y);
-      const distance = { horizontal: round2(horizontal), vertical: round2(vertical) };
-      const tolerance = { horizontal: POSITION_TOLERANCE, vertical: POSITION_HEIGHT_TOLERANCE };
-      if (horizontal > POSITION_TOLERANCE || vertical > POSITION_HEIGHT_TOLERANCE) {
-        return fail('EFFECT_NOT_CONFIRMED', `已站到解析站位，但实测位置与原目标点相差 水平 ${horizontal.toFixed(2)} / 垂直 ${vertical.toFixed(2)} 格，超出到达容差；不按到达处理`, {
-          ...base, ...routeFacts, outcome: 'NOT_CONFIRMED', stop: 'NOT_CONFIRMED',
-          position: after.position, displacement: after.displacement,
-          confirmedSegments: typeof moved.data?.executed === 'number' ? moved.data.executed : 0,
-          interaction: { kind: 'position', distance, tolerance },
-          budget, navigation: moved.data,
-        });
-      }
-      return confirm(`已接近位置 (${target.pos.x},${target.pos.y},${target.pos.z})`, {
-        kind: 'position', distance, tolerance,
-      });
+      // 精确坐标先按该列真实支撑解析成物理 stance；到达验收以解析后的 stance 为准
+      // （stanceConfirmed 已用实测位置核对过）。请求点与 stance 中心的偏移只作为事实报告，
+      // 不因为 0.78 格的格边/半砖吸附把合法落脚判成未到达。
+      const requestedOffset = {
+        horizontal: round2(Math.hypot(after.position.x - target.pos.x, after.position.z - target.pos.z)),
+        vertical: round2(Math.abs(after.position.y - target.pos.y)),
+      };
+      return confirm(`已接近位置 (${target.pos.x},${target.pos.y},${target.pos.z})（解析站位 (${arrival.x.toFixed(2)},${arrival.y},${arrival.z.toFixed(2)})）`, {
+        kind: 'position',
+        requestedPos: { ...target.pos },
+        resolvedStance: { ...arrival },
+        requestedOffset,
+        tolerance: { stance: STANCE_TOLERANCE },
+      }, { requestedOffset });
     }
 
     if (target.kind === 'block' && targetCell !== undefined && targetName !== null) {
       // 到达后优先用一次当前感知复核目标身份；看不见时退回已加载状态。
       const observedNow = ctx.senses.observeBlocks?.([targetCell]).find((block) => block.pos.x === targetCell.x && block.pos.y === targetCell.y && block.pos.z === targetCell.z);
-      const now = observedNow?.name ?? ctx.adapter.blockAt(targetCell);
-      const confirmationSource = observedNow !== undefined ? 'current_perception' : 'loaded';
+      const liveNow = ctx.adapter.blockAt(targetCell);
+      const rememberedNow = freshMapAt(targetCell)?.name ?? null;
+      const now = observedNow?.name ?? liveNow ?? rememberedNow;
+      const confirmationSource = observedNow !== undefined ? 'current_perception' : liveNow !== null ? 'loaded' : rememberedNow !== null ? 'voxel' : 'none';
       if (now === null) {
         return fail('NOT_FOUND', `到达站位后目标方块 (${targetCell.x},${targetCell.y},${targetCell.z}) 已不可观察（未加载），不能确认接近`, {
           ...base, ...routeFacts, outcome: 'UNKNOWN', stop: 'UNKNOWN', evidenceState: 'UNKNOWN',

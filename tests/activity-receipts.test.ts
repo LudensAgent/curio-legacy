@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createActivity, describeActivity, planCoverageGap, recordOf } from '../src/mind/activity.ts';
+import { afterStep, createActivity, describeActivity, nextStep, planCoverageGap, recordOf } from '../src/mind/activity.ts';
 
 const pos = { x: 0.5, y: 64, z: 0.5 };
 const state = (inventory: { name: string; count: number }[] = []) => ({ pos: { ...pos }, inventory, worldId: 'w', dim: 'overworld' }) as any;
@@ -29,6 +29,36 @@ test('计划声称走远/换地方，却只有观察或采集：报告计划覆�
     { skill: 'approach_visible', args: { target: { pos: { x: 1, y: 64, z: 0 } } } },
   ]);
   assert.equal(planCoverageGap(approached), null, 'approach_visible 会移动身体，不算覆盖缺口');
+});
+
+test('approach_visible 已实测抵达后，不再因 exploration.min_distance 重复执行', () => {
+  const args = { target: { pos: { x: 2, y: 64, z: 0 } } };
+  const a = make('接近北边两格的方块', [{ skill: 'approach_visible', args }], {
+    repeat: 3,
+    doneWhen: { type: 'exploration', min_distance: 16 },
+  });
+  const step = nextStep(a)!;
+  const verdict = afterStep(a, step, {
+    status: 'succeeded', summary: '已接近目标', data: { outcome: 'ARRIVED', displacement: 2 },
+  }, 10, state());
+  assert.equal(verdict.kind, 'done');
+  if (verdict.kind === 'done') {
+    assert.equal(verdict.met, false, 'exploration 距离未满足仍如实记 false');
+    assert.match(verdict.why, /不会产生新的探索距离/);
+  }
+});
+
+test('没有实测 ARRIVED 时不按“已抵达”收工，仍交给原活动流程', () => {
+  const args = { target: { pos: { x: 2, y: 64, z: 0 } } };
+  const a = make('接近北边两格的方块', [{ skill: 'approach_visible', args }], {
+    repeat: 3,
+    doneWhen: { type: 'exploration', min_distance: 16 },
+  });
+  const step = nextStep(a)!;
+  const verdict = afterStep(a, step, {
+    status: 'succeeded', summary: '只完成部分接近', data: { outcome: 'PARTIAL' },
+  }, 10, state());
+  assert.notEqual(verdict.kind, 'done');
 });
 
 test('收工条件不能验收目标时记为有界尝试，资源目标未完成', () => {
