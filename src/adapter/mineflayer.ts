@@ -1968,9 +1968,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.digStart = started;
     // 取消/异常时清掉，免得下一次挖掘把这次的开始时间当成自己的（被中途打断的挖掘没有实测耗时）
     try {
-      // forceLook 'ignore'：挖掘不夺视线。以前传 true 会让 mineflayer 在每格挖前 lookAt 方块中心，
-      // 连续开挖/先垫后挖时镜头被底层动作来回抢；1.20.1 服务端只校验距离和命中面，不校验朝向。
-      await this.afterAction(() => raceAbort(b.dig(block, 'ignore'), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
+      // 挖哪格就看着哪格：服务端虽不校验朝向，但不转头时视线停在走路方向，旁观看到的是背对方块在挖，
+      // 视野也看不到正在挖的东西。
+      await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
         try { b.stopDigging(); } catch { /* ignore */ }
       }), check);
     } finally {
@@ -2088,7 +2088,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!item) return { ok: false, reason: 'NO_ITEM', attemptedFaces: tried };
     const epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
-    const gaze = { yaw: b.entity.yaw ?? 0, pitch: b.entity.pitch ?? 0 };
     const cx = feet.x + 0.5 + dx * 0.6, cz = feet.z + 0.5 + dz * 0.6;
     b.clearControlStates?.();
     b.setControlState('sneak', true);
@@ -2117,8 +2116,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const ref = b.blockAt(refAt);
       if (!ref || ref.boundingBox !== 'block') return { ok: false, reason: 'EDGE_LOST_SUPPORT:挪到边缘后脚下支撑或参照方块不见了', stance, attemptedFaces: tried };
       await this.afterAction(() => b.equip(item, 'hand'), check);
-      // 放置本身不需要再低头看参照面：forceLook 'ignore' 不夺视线，朝向由收尾那次恢复负责。
-      await this.afterAction(() => raceAbort(b._placeBlockWithOptions(ref, new Vec3(dx, 0, dz), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+      // b.placeBlock 会看向被点的参照面：和挖掘一样朝向自己正在操作的方块。
+      await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(dx, 0, dz)), signal, 5000, () => {}), check);
       const now = b.blockAt(tgt);
       if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的', stance, attemptedFaces: tried };
       // 目标格出现了碰撞方块不等于请求材料已放下；核对实际方块名再给 confirmed。
@@ -2143,8 +2142,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (ownsControls()) {
         b.setControlState('forward', false);
         b.setControlState('sneak', false);
-        // 走位借用了视线，收尾把它还给调用方；取消/换主后不再动身体。
-        if (!signal.aborted) { try { await b.look(gaze.yaw, gaze.pitch, true); } catch { /* 收尾失败不覆盖原始结果 */ } }
       }
     }
   }
@@ -2198,10 +2195,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => b.equip(item, 'hand'), check);
         if (sneak) { b.setControlState('sneak', true); await this.afterAction(() => sleep(120, signal), check); }
         try {
-          // forceLook 'ignore'：放置不夺视线。b.placeBlock 内部会 lookAt 被点面中心，
-          // 每垫一块镜头就转一次；与 placeBlockStateAt 走同一条可指定朝向的放置路径。
-          // 面是否看得见仍由上面的 canClickPlacementFace 射线预检保证。
-          await this.afterAction(() => raceAbort(b._placeBlockWithOptions(ref, f.scaled(-1), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+          // 放置时看着被点的面（面是否看得见由上面的 canClickPlacementFace 射线预检保证）。
+          await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
         } finally { if (sneak) b.setControlState('sneak', false); }
         // 动作回执成功不等于请求材料已经放下：读一次目标格再标 attempted/confirmed。
         const evidence = this.placementEvidence(pos, itemNames, item.name);
@@ -2221,7 +2216,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (floor && floor.boundingBox === 'block') {
           try {
             await this.afterAction(() => b.equip(item, 'hand'), check);
-            await this.afterAction(() => raceAbort(b._placeBlockWithOptions(floor, new Vec3(0, 1, 0), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+            await this.afterAction(() => raceAbort(b.placeBlock(floor, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
             const evidence = this.placementEvidence(pos, itemNames, item.name);
             this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
             return { ok: true, ...evidence };
@@ -2456,6 +2451,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), signal, 2000, () => {}), check);
       else await this.afterAction(() => sleep(60, signal), check);
     }
+    // 这里不再转头：方块朝向（楼梯/门/箱子）取决于上面按 facing 设好的 yaw，再看向参照面会改掉它。
     await this.afterAction(() => raceAbort(b._placeBlockWithOptions(reference.block, face, { forceLook: 'ignore', swingArm: 'right', half, delta }), signal, 5000, () => {}), check);
     // Paired block updates may arrive one packet after the foot/lower block.
     for (let retry = 0; paired && !matches() && retry < 5; retry++) await this.afterAction(() => sleep(50, signal), check);
