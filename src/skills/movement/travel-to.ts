@@ -9,7 +9,8 @@ import { buildPathGraph, routeOnPathGraph } from '../../spatial/path-graph.ts';
 type Heading = keyof typeof DIRS;
 type TravelTarget =
   | { x: number; y?: number; z: number }
-  | { heading: Heading; distance: number; origin: Vec3Like }
+  /** corridor：沿方向推进到 distance、横向偏离 ≤ corridor 的任意站位都算到达，不要求射线上那个点。 */
+  | { heading: Heading; distance: number; origin: Vec3Like; corridor?: number }
   | { landmark: string }
   | { portal: string }
   | { death: true };
@@ -96,12 +97,16 @@ function parseTarget(raw: unknown, origin: () => Vec3Like): TravelTarget | strin
     // 首次校验冻结起点；重试/续接沿用冻结的起点，不按新位置重新解释方向。
     const o = obj(t.origin);
     if (t.origin !== undefined && ![o.x, o.y, o.z].every(finite)) return 'heading 的 origin 需要 {x,y,z} 有限数字';
-    return { heading: heading as Heading, distance: t.distance, origin: t.origin === undefined ? { ...origin() } : { x: o.x, y: o.y, z: o.z } };
+    if (t.corridor !== undefined && (!Number.isInteger(t.corridor) || t.corridor < 1 || t.corridor > 64)) return 'heading 的 corridor 需要 1–64 的整数';
+    return {
+      heading: heading as Heading, distance: t.distance, origin: t.origin === undefined ? { ...origin() } : { x: o.x, y: o.y, z: o.z },
+      ...(t.corridor === undefined ? {} : { corridor: t.corridor }),
+    };
   }
   if (typeof t.landmark === 'string' && t.landmark.trim()) return { landmark: t.landmark.trim() };
   if (typeof t.portal === 'string' && t.portal.trim()) return { portal: t.portal.trim() };
   if (t.death === true) return { death: true };
-  return 'to 需要坐标 {x,z}/{x,y,z}/"x,z"、方向如 "E 150"、记得的地标名/base、"death" 或 "portal:<id>"';
+  return 'to 需要坐标 {x,z}/{x,y,z}/"x,z"、方向如 "E 150" 或 {"heading":"E","distance":150}、记得的地标名/base、"death" 或 "portal:<id>"';
 }
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -115,7 +120,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
   description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。目标在 64 格内时直接以目标为寻路终点（找已加载区块里最短的可达路线），更远时按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、绕回之前到过的位置、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块与工具耐久），回执逐项列出；寻路挖掘默认用手上能挖的工具、其次你挑过的那类，tool 指定后只用那件。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）；默认 direct 没走到时，回执会说明记录里有没有从你附近通往目标的走过的路（recordedRoute），不会自动改走。',
-  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base"（首选基地，不一定是最近的那个） | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"|{"fragment":"<片段 id>"}（默认 direct；history 先查拓扑历史路线，没有就在记录过的路径片段〔含旧矿道〕里找从你附近 8 格内到目标附近的连续记录，目标不在同一片记录里就沿记录走到离目标最近处再直线分跳；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
+  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短；到达看射线终点附近） | {"heading":"E","distance":150,"corridor"?:16}（同上；写 corridor 时沿方向推进够距离、横向偏离 ≤ corridor 的任意站位都算到，不要求射线上那个点；寻路也按推进找路） | "地标名" | "base"（首选基地，不一定是最近的那个） | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"|{"fragment":"<片段 id>"}（默认 direct；history 先查拓扑历史路线，没有就在记录过的路径片段〔含旧矿道〕里找从你附近 8 格内到目标附近的连续记录，目标不在同一片记录里就沿记录走到离目标最近处再直线分跳；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -176,8 +181,16 @@ export const travelTo: Skill<TravelToArgs> = {
     const startChunks = ctx.memory.visitedChunkCount;
     const trace: Vec3Like[] = [start];
     const record = () => { trace.push({ ...adapter.state().pos }); if (trace.length > 24) trace.splice(0, trace.length - 24); };
+    // 方向 + corridor：按沿方向推进验收，剩余 = 还差的推进 + 超出 corridor 的横向偏离（格心口径，与适配器 advance 目标一致）。
+    const lane = 'heading' in t && t.corridor !== undefined
+      ? { origin: t.origin, dir: { x: DIRS[t.heading][0] / Math.hypot(...DIRS[t.heading]), z: DIRS[t.heading][1] / Math.hypot(...DIRS[t.heading]) }, distance: t.distance, corridor: t.corridor }
+      : null;
+    const alongOf = (p: Vec3Like) => lane === null ? 0 : (Math.floor(p.x) + 0.5 - lane.origin.x) * lane.dir.x + (Math.floor(p.z) + 0.5 - lane.origin.z) * lane.dir.z;
+    const lateralOf = (p: Vec3Like) => lane === null ? 0 : Math.abs((Math.floor(p.z) + 0.5 - lane.origin.z) * lane.dir.x - (Math.floor(p.x) + 0.5 - lane.origin.x) * lane.dir.z);
     // 按 pathfinder 的节点口径验收：脚下所在格到目标格的距离。
-    const flat = (p: Vec3Like) => Math.hypot(Math.floor(p.x) - Math.floor(target.x), Math.floor(p.z) - Math.floor(target.z));
+    const flat = (p: Vec3Like) => lane !== null
+      ? Math.max(0, lane.distance - alongOf(p)) + Math.max(0, lateralOf(p) - lane.corridor)
+      : Math.hypot(Math.floor(p.x) - Math.floor(target.x), Math.floor(p.z) - Math.floor(target.z));
     const gap = (p: Vec3Like) => target.y === undefined ? flat(p) : Math.hypot(flat(p), Math.floor(p.y) - Math.floor(target.y));
     const arrived = (p: Vec3Like) => gap(p) <= args.range;
     const avoid = [...new Set([...args.avoid, ...(args.allowHazard ? [] : HAZARD_AVOID)])];
@@ -262,6 +275,11 @@ export const travelTo: Skill<TravelToArgs> = {
       const next = turn === null ? waypoints[waypoint] : undefined;
       if (next !== undefined) {
         return { kind: 'near', pos: { x: Math.floor(next.x), y: Math.floor(next.y), z: Math.floor(next.z) }, range: 2 };
+      }
+      if (turn === null && lane !== null) {
+        // 正前方一跳按推进找路：够到这一跳的推进量、横向不出 corridor 的任意站位都行，不追射线上的某个点。
+        const minAlong = left <= DIRECT_REACH ? lane.distance - args.range : alongOf(from) + HOP;
+        return { kind: 'advance', origin: { x: lane.origin.x, z: lane.origin.z }, dir: lane.dir, minAlong, maxLateral: lane.corridor };
       }
       if (turn === null && left <= DIRECT_REACH) {
         return target.y === undefined

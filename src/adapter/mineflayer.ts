@@ -1245,6 +1245,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         goal = new goals.GoalFollow(ent, target.range);
         break;
       }
+      case 'advance': {
+        // 节点是脚所在格，按格心算沿方向推进与横向偏离；启发值 = 还差的推进 + 超出的横向偏离（都按格数，不高估）。
+        const { origin, dir, minAlong, maxLateral } = target;
+        const along = (n: any) => (n.x + 0.5 - origin.x) * dir.x + (n.z + 0.5 - origin.z) * dir.z;
+        const lateral = (n: any) => Math.abs((n.z + 0.5 - origin.z) * dir.x - (n.x + 0.5 - origin.x) * dir.z);
+        goal = Object.assign(new goals.Goal(), {
+          heuristic: (n: any) => Math.max(0, minAlong - along(n)) + Math.max(0, lateral(n) - maxLateral),
+          isEnd: (n: any) => along(n) >= minAlong && lateral(n) <= maxLateral,
+        });
+        break;
+      }
       case 'away_from': {
         const me = b.entity.position;
         let dx = me.x - target.pos.x;

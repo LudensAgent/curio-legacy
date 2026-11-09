@@ -172,7 +172,9 @@ export type MoveTarget =
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }
-  | { kind: 'away_from'; pos: Vec3Like; distance: number };
+  | { kind: 'away_from'; pos: Vec3Like; distance: number }
+  /** 沿方向推进：从 origin 沿单位向量 dir 推进到至少 minAlong 格、横向偏离不超过 maxLateral 的任意站位都算到达（不要求某个具体点）。 */
+  | { kind: 'advance'; origin: { x: number; z: number }; dir: { x: number; z: number }; minAlong: number; maxLateral: number };
 
 export interface MoveOpts {
   /** 只执行一个相邻格：绕过 pathfinder 的整段搜索，直接用身体控制走/跳/下；仅 move_step 使用。 */

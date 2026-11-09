@@ -19,6 +19,7 @@ function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => bool
       if (options.blocked?.(target, pos)) throw new Error('No path');
       if (options.walk) pos = options.walk(target, pos);
       else if (target.kind === 'xz') pos = { x: target.x + 0.5, y: pos.y, z: target.z + 0.5 };
+      else if (target.kind === 'advance') pos = { x: target.origin.x + target.dir.x * target.minAlong, y: pos.y, z: target.origin.z + target.dir.z * target.minAlong };
     },
     recentDug: () => [], recentPlaced: () => [],
   } as unknown as GameAdapter;
@@ -59,11 +60,12 @@ test('explore_toward 沿冻结方向分段走完并每段朝该方向扫视；�
   const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 64 }, h.adapter));
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.stopReason, 'DISTANCE_MET');
-  assert.ok(h.goals.every((g) => g.kind === 'xz' && Math.abs(g.z) <= 1), '目标都在冻结射线上');
+  assert.ok(h.goals.length > 0 && h.goals.every((g) => g.kind === 'advance' && g.dir.x === 1 && g.dir.z === 0 && g.origin.z === 0.5 && g.maxLateral === 16),
+    '每段按冻结方向的推进委托，不追射线上的某个点');
   assert.ok((r.data?.segmentCount as number) >= 2);
   assert.ok(h.looks.length >= 2 * 5, '每段结束朝探索方向扫视');
   assert.equal(r.data?.backend, 'pathfinder');
-  assert.ok((r.data?.progress as { along: number }).along >= 62);
+  assert.ok((r.data?.progress as { along: number }).along >= 61, '到达半径 3 以内就算走完');
   assert.ok(typeof r.data?.newChunks === 'number');
 });
 
@@ -104,8 +106,8 @@ test('explore_toward 按沿方向的实测推进验收：被绕到侧面超出 m
 test('explore_toward 被打断时把已走出的推进与偏离挂在取消回执上', async () => {
   const controller = new AbortController();
   const h = harness({ signal: controller.signal, walk: (goal, from) => {
-    if (goal.kind === 'xz' && goal.x > 40) controller.abort();
-    return goal.kind === 'xz' ? { x: goal.x + 0.5, y: from.y, z: goal.z + 0.5 } : from;
+    if (goal.kind === 'advance' && goal.minAlong > 40) controller.abort();
+    return goal.kind === 'advance' ? { x: goal.origin.x + goal.minAlong, y: from.y, z: from.z } : from;
   } });
   const error = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 200 }, h.adapter)).then(() => null, (e: unknown) => e);
   const partial = (error as { partial?: Record<string, unknown> }).partial;
@@ -116,8 +118,8 @@ test('explore_toward 被打断时把已走出的推进与偏离挂在取消回�
 });
 
 test('explore_toward 末段按 travel_to 的到达半径算走完：停在 93/96 也算走完，不再报“没挪动”', async () => {
-  // 模拟寻路在到达半径（3 格）边缘就收手：每跳停在目标前 3 格。
-  const h = harness({ walk: (goal, from) => goal.kind === 'xz' ? { x: Math.max(from.x, goal.x - 2.9), y: from.y, z: goal.z + 0.5 } : from });
+  // 模拟寻路一满足推进量就收手：末段 minAlong = 96 − 到达半径 3。
+  const h = harness({ walk: (goal, from) => goal.kind === 'advance' ? { x: Math.max(from.x, goal.origin.x + goal.minAlong), y: from.y, z: from.z } : from });
   const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 96 }, h.adapter));
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.stopReason, 'DISTANCE_MET');
