@@ -20,6 +20,8 @@ export type SegmentOutcome =
   | 'partial_prefix'
   | 'unknown_boundary'
   | 'blocked'
+  | 'corridor_exhausted'
+  | 'lateral_authorization'
   | 'unsupported'
   | 'physical_failure'
   | 'disallowed'
@@ -39,6 +41,8 @@ export type SegmentRequest = {
   deadline: number;
   /** 本段还可发起的搜索次数（0 表示不再搜索）。 */
   searchBudget: number;
+  /** advance 的横向授权走廊；搜索与每个 transition 都按它检查。 */
+  corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
   /** 搜索/执行阶段切换；调用方据此只在“静止规划”阶段抑制卡死反射。 */
   onPhase?: (phase: 'searching' | 'executing') => void;
 };
@@ -47,6 +51,9 @@ export interface TransitionReceipt {
   transition: LandSearchTransition;
   measuredFrom: Vec3Like;
   measuredTo: Vec3Like;
+  /** 水平与垂直实测分量，分别验收；pathLength 是两者之和。 */
+  measuredHorizontal: number;
+  measuredVertical: number;
   pathLength: number;
 }
 
@@ -89,6 +96,8 @@ export interface SegmentReceipt {
   stopCode?: string;
   /** 子动作的真实失败与证据，原样交给上层，不把执行完毕当成目标达成。 */
   nested?: { code: FailureCode; summary: string; data?: Record<string, unknown> };
+  /** 动作失败/未确认时身体实际走过的部分位移；水平与垂直分开，位置必须来自实测。 */
+  partialDisplacement?: { from: Vec3Like; to: Vec3Like; horizontal: number; vertical: number; atTarget: boolean };
   stepIndex?: number;
   transition?: LandSearchTransition;
   detail?: string;
@@ -153,7 +162,12 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
     to: request.to, maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
+    ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
   };
+  const lateralOf = (p: Vec3Like): number => request.corridor === undefined
+    ? 0
+    : Math.abs((p.x - request.corridor.origin.x) * request.corridor.bearing.z - (p.z - request.corridor.origin.z) * request.corridor.bearing.x);
+  const corridorLimit = request.corridor === undefined ? Infinity : request.corridor.maxLateral + 0.01;
   const searchDeadline = () => Math.min(request.deadline, Date.now() + SEARCH_CAP_MS);
   let searches = 0;
 
@@ -186,7 +200,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     const dropTo = { x: Math.floor(request.to.x), y: request.to.y, z: Math.floor(request.to.z) };
     const drop = from.y - dropTo.y;
     if (request.allowed.includes('drop') && Math.abs(dropTo.x - from.x) + Math.abs(dropTo.z - from.z) === 1
-      && drop > 0.25 && drop <= 4.01) {
+      && drop > 0.25 && drop <= 4.01 && lateralOf({ x: dropTo.x + 0.5, y: dropTo.y, z: dropTo.z + 0.5 }) <= corridorLimit) {
       const validated = validateSkill(descendTo, {
         target: { x: dropTo.x, y: dropTo.y, z: dropTo.z },
         ...(request.allowUnknownCorridor ? { allowUnknownCorridor: true } : {}),
@@ -205,7 +219,11 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
           return {
             waypoint: { ...request.to }, outcome: 'reached_waypoint', measuredStart: start, measuredEnd: end,
             chosen: null, search: strict, evidenceMode: 'current', searches,
-            planned: [transition], confirmed: [{ transition, measuredFrom: start, measuredTo: end, pathLength: drop }],
+            planned: [transition], confirmed: [{
+              transition, measuredFrom: start, measuredTo: end,
+              measuredHorizontal: Math.hypot(end.x - start.x, end.z - start.z),
+              measuredVertical: Math.abs(end.y - start.y), pathLength: drop,
+            }],
             remaining: [], pathLength: drop, arrived: true, directDrop: true, boundarySummary,
           };
         }
@@ -228,9 +246,12 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   const reachable = strict.prefix;
   const blockerAhead = reachable?.knownBlockerAhead;
   if (chosen === null && (reachable === undefined || reachable.transitions.length === 0 || blockerAhead !== undefined)) {
+    // 直接阻挡（朝目标方向的边界已 BLOCKED）与“整个授权走廊内没有路”分开：
+    // 后者可能是绕行超出横向授权，不是前方地形没有替代路线。
     const outcome: SegmentOutcome = blockerAhead !== undefined ? 'blocked'
       : strict.status === 'UNKNOWN' ? 'unknown_boundary'
-        : strict.status === 'BUDGET_EXHAUSTED' ? 'search_budget' : 'unsupported';
+        : strict.status === 'BUDGET_EXHAUSTED' ? 'search_budget'
+          : strict.corridorLimited === true ? 'corridor_exhausted' : 'unsupported';
     const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? start, request.to);
     return {
       waypoint: { ...request.to }, outcome, stopCode: blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
@@ -241,8 +262,10 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       ...(outcome === 'unknown_boundary' && blockedBoundary !== undefined ? { boundary: blockedBoundary } : {}),
       detail: blockerAhead !== undefined
         ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
-        : strict.status === 'UNKNOWN' ? '当前证据不足（UNKNOWN/STALE）'
-          : strict.status === 'BUDGET_EXHAUSTED' ? '搜索预算耗尽' : '已观测地形里没有 walk/step/drop 路线',
+        : strict.corridorLimited === true
+          ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
+          : strict.status === 'UNKNOWN' ? '当前证据不足（UNKNOWN/STALE）'
+            : strict.status === 'BUDGET_EXHAUSTED' ? '搜索预算耗尽' : '已观测地形里没有 walk/step/drop 路线',
     };
   }
 
@@ -285,6 +308,14 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     }
     const current = ctx.adapter.state();
     const from = cell(transition.from);
+    // 每个 transition 都复核横向授权；搜索已过滤，这里是执行前的最后一道闸。
+    if (lateralOf(transition.from) > corridorLimit || lateralOf(transition.to) > corridorLimit) {
+      return receipt('lateral_authorization', {
+        stopCode: 'lateral_authorization',
+        detail: `第 ${index + 1} 段 ${transition.kind} 会横向偏移 ${Math.max(lateralOf(transition.from), lateralOf(transition.to)).toFixed(2)} 格，超出授权 ${request.corridor?.maxLateral ?? 0} 格；没有执行这段`,
+        failureCode: 'PATH_NOT_FOUND', stepIndex: index, transition,
+      });
+    }
     if (!sameCell(cell(feetCell(current.pos)), cell({ ...transition.from, y: current.pos.y }))) {
       return receipt('physical_failure', {
         stopCode: 'start_drift',
@@ -324,9 +355,26 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     }
     if (step.status !== 'succeeded') {
       const stopped = { ...ctx.adapter.state().pos };
+      const partial = {
+        from: { ...current.pos }, to: stopped,
+        horizontal: Math.hypot(stopped.x - current.pos.x, stopped.z - current.pos.z),
+        vertical: Math.abs(stopped.y - current.pos.y),
+        atTarget: sameCell(cell(feetCell(stopped)), to) && Math.abs(stopped.y - transition.to.y) <= 0.01,
+      };
+      if (partial.atTarget) {
+        // 动作报失败但实测身体已经在目标格/脚高：按实测确认这段，保留进展；
+        // 段仍以失败结束，下一段从真实位置重新规划，不重放旧的起点动作。
+        executed += 1;
+        const path = partial.horizontal + partial.vertical;
+        confirmed.push({
+          transition, measuredFrom: partial.from, measuredTo: partial.to,
+          measuredHorizontal: partial.horizontal, measuredVertical: partial.vertical, pathLength: path,
+        });
+        pathLength += path;
+      }
       if (step.status === 'cancelled') {
         return {
-          ...receipt('cancelled', { stopCode: 'step_failed', detail: step.summary, stepIndex: index, transition }),
+          ...receipt('cancelled', { stopCode: 'step_failed', detail: step.summary, stepIndex: index, transition, partialDisplacement: partial }),
           measuredEnd: stopped,
         };
       }
@@ -337,7 +385,8 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       return {
         ...receipt(outcome, {
           stopCode: 'step_failed',
-          detail: `第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}`,
+          partialDisplacement: partial,
+          detail: `第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}${partial.horizontal > 0.05 || partial.vertical > 0.05 ? `；实测已发生水平 ${partial.horizontal.toFixed(2)} / 垂直 ${partial.vertical.toFixed(2)} 格位移，位置保留` : ''}`,
           nested: { code: step.failureCode ?? 'ERROR', summary: step.summary, data: nestedData },
           stepIndex: index, transition,
           ...(step.failureCode === undefined ? {} : { failureCode: step.failureCode }),
@@ -360,6 +409,11 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       return {
         ...receipt('physical_failure', {
           stopCode: 'effect_not_confirmed',
+          partialDisplacement: {
+            from: { ...current.pos }, to: { ...arrived.pos },
+            horizontal: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z),
+            vertical: Math.abs(arrived.pos.y - current.pos.y), atTarget: false,
+          },
           detail: `第 ${index + 1} 段动作报成功，但实际脚下 ${JSON.stringify(feetCell(arrived.pos))} 不是 ${JSON.stringify(to)}（Promise/计划点不能代替实测）`,
           failureCode: 'EFFECT_NOT_CONFIRMED', stepIndex: index, transition,
         }),
@@ -371,6 +425,8 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       transition,
       measuredFrom: { ...current.pos },
       measuredTo: { ...arrived.pos },
+      measuredHorizontal: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z),
+      measuredVertical: Math.abs(arrived.pos.y - current.pos.y),
       pathLength: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z) + Math.abs(arrived.pos.y - current.pos.y),
     });
     pathLength += confirmed.at(-1)!.pathLength;
@@ -416,7 +472,7 @@ function emptySearch(to: Vec3Like): LandSearchResult {
     stats: {
       nodesExpanded: 0, edgesEvaluated: 0, openEdges: 0, blockedEdges: 0, unknownEdges: 0,
       staleEdges: 0, unsupportedEdges: 0, maxNodes: 0, maxEdges: 0, maxSearchMs: 0, durationMs: 0,
-      cancelReason: null, visitedSections: 0, sectionReads: 0, snapshotCount: 0, cloneCount: 0,
+      cancelReason: null, corridorSkipped: 0, visitedSections: 0, sectionReads: 0, snapshotCount: 0, cloneCount: 0,
       yieldCount: 0, maxSyncSliceMs: 0,
     },
   };

@@ -88,6 +88,11 @@ export interface LandSearchRequest {
   rules: LandRules;
   /** true 时用历史体素（含过期证据）做几何推导；输出必须标记为历史路线。 */
   allowStale?: boolean;
+  /**
+   * 可选横向授权走廊：相对冻结起点/方向的横向偏移超过 maxLateral 的格不展开。
+   * 只约束搜索（不挖/不放/不建），起点格本身始终允许。
+   */
+  corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
   signal?: AbortSignal;
 }
 
@@ -105,6 +110,8 @@ export interface LandSearchResult {
   resolvedTarget: Vec3Like;
   /** 历史模式下用严格当前证据复验已选路线；OPEN/STALE/BLOCKED 逐段保留。 */
   verification?: LandRouteVerification;
+  /** 搜索因横向授权走廊跳过了格且没有找到完整路线；调用方据此区分“走廊内无路”和直接阻挡。 */
+  corridorLimited?: boolean;
   stats: {
     nodesExpanded: number;
     edgesEvaluated: number;
@@ -119,6 +126,8 @@ export interface LandSearchResult {
     durationMs: number;
     /** Why the search stopped at a bound; null when it finished on its own. */
     cancelReason: 'signal' | 'time' | 'nodes' | 'edges' | null;
+    /** 因横向授权走廊被跳过的邻居格数。 */
+    corridorSkipped: number;
     /** Distinct Sections read during this pass. */
     visitedSections: number;
     /** Calls that returned a Section view (live or snapshot). */
@@ -410,6 +419,10 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
   const deadlineMs = request.deadlineMs ?? startedAt + maxSearchMs;
   const maxDrop = request.maxDrop ?? 4;
   const limits = resolveLandLimits();
+  const corridor = request.corridor;
+  const lateralAt = (x: number, z: number) => corridor === undefined
+    ? 0
+    : Math.abs((x + 0.5 - corridor.origin.x) * corridor.bearing.z - (z + 0.5 - corridor.origin.z) * corridor.bearing.x);
   const start = request.body.feet;
   const startCell = { x: Math.floor(start.x), z: Math.floor(start.z) };
   // 规划节点按格心摆放，而不是沿用身体在格内的实际偏移。身体宽 0.6，站在格边
@@ -425,6 +438,7 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
     nodesExpanded: 0, edgesEvaluated: 0, openEdges: 0, blockedEdges: 0, unknownEdges: 0,
     staleEdges: 0, unsupportedEdges: 0, maxNodes, maxEdges, maxSearchMs, durationMs: 0,
     cancelReason: null as 'signal' | 'time' | 'nodes' | 'edges' | null,
+    corridorSkipped: 0,
     visitedSections: 0, sectionReads: 0, snapshotCount: 0, cloneCount: 0,
     yieldCount: 0, maxSyncSliceMs: 0,
   };
@@ -545,6 +559,11 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
     if (stats.nodesExpanded >= maxNodes) { budget = true; stats.cancelReason = 'nodes'; break; }
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
       const nx = node.cx + dx, nz = node.cz + dz;
+      // 横向授权走廊：只展开授权范围内的格；跳过不计为地形 BLOCKED/UNKNOWN。
+      if (corridor !== undefined && lateralAt(nx, nz) > corridor.maxLateral + 0.01) {
+        stats.corridorSkipped += 1;
+        continue;
+      }
       // 候选高度来自这一列真实可站立面，而不是 node.cy ± 整数：
       // 这样半砖 0.5、雪层 0.875、台阶/箱子顶、0<drop<1 都能成为边。
       const surfaces = standableSurfaces(baseMap, request.dim, nx, nz, node.cy, maxDrop, 1.01);
@@ -615,7 +634,10 @@ function* searchLandRouteChunks(map: VoxelMap, request: LandSearchRequest, now =
     // NO_PATH 会让上层误报“没有路”，其实只需要重新观察刷新证据。
     const status: LandSearchStatus = budget ? 'BUDGET_EXHAUSTED' : (stats.unknownEdges > 0 || stats.staleEdges > 0) ? 'UNKNOWN' : 'NO_PATH';
     finishStats();
-    return { status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, ...prefixFacts(), cost: 0, resolvedTarget, stats };
+    return {
+      status, assurance, evidenceMode, executable: false, points: [], transitions: [], boundaries, ...prefixFacts(), cost: 0, resolvedTarget, stats,
+      ...(corridor !== undefined && stats.corridorSkipped > 0 ? { corridorLimited: true } : {}),
+    };
   }
 
   const points: Vec3Like[] = [];
