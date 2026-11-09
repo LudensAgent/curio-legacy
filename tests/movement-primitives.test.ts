@@ -497,36 +497,44 @@ test('move_step 绝对脚高与真实支撑不符时拒绝，不悄悄改落点'
   assert.deepEqual(w.pos, before);
 });
 
-test('move_step 预检给出同一相邻格的准确修正，不自动改目标', async (t) => {
-  // 同层请求，但目标实际高一格：返回 [1,1,0]，而不是笼统的“下落用 [1,-1,0]”。
+test('move_step 相对写法锁定同一相邻列，±1 内按实际脚高执行并在回执写明', async (t) => {
+  // 同层请求，但目标实际高一格：按上一级执行。
   const up = flat();
   up.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
   const upCtx = makeCtx(up);
   t.after(() => upCtx.memory.close());
   const rise = await moveStep.run(upCtx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(rise.status, 'failed');
-  assert.equal(rise.failureCode, 'BAD_ARGS');
-  assert.equal(rise.data?.movementNotAttempted, true);
-  assert.match(rise.summary, /\[1,1,0\]/);
-  assert.deepEqual((rise.data as any)?.remediation?.at, [1, 1, 0]);
-  assert.deepEqual(up.pos, { x: 0.5, y: 64, z: 0.5 }, '未执行迈步');
+  assert.equal(rise.status, 'succeeded', rise.summary);
+  assert.deepEqual(rise.data?.requestedAt, [1, 0, 0]);
+  assert.deepEqual(rise.data?.resolvedAt, [1, 1, 0]);
+  assert.deepEqual(up.pos, { x: 1.5, y: 65, z: 0.5 });
 
-  // 同层请求，但目标实际低一格：返回 [1,-1,0]。
+  // 同层请求，但目标实际低一格：按下一级执行。
   const down = flat();
   down.removed.add('1,63,0');
   const downCtx = makeCtx(down);
   t.after(() => downCtx.memory.close());
   const drop = await moveStep.run(downCtx, { at: [1, 0, 0], facing: 'E' });
-  assert.match(drop.summary, /\[1,-1,0\]/);
-  assert.deepEqual((drop.data as any)?.remediation?.at, [1, -1, 0]);
+  assert.equal(drop.status, 'succeeded', drop.summary);
+  assert.deepEqual(drop.data?.resolvedAt, [1, -1, 0]);
+  assert.equal(down.pos.y, 63);
 
-  // 上一级请求，但目标其实是同层：返回 [1,0,0]。
+  // 上一级请求，但目标其实是同层：按同层执行。
   const level = flat();
   const levelCtx = makeCtx(level);
   t.after(() => levelCtx.memory.close());
   const flatStep = await moveStep.run(levelCtx, { at: [1, 1, 0], facing: 'E' });
-  assert.match(flatStep.summary, /\[1,0,0\]/);
-  assert.deepEqual((flatStep.data as any)?.remediation?.at, [1, 0, 0]);
+  assert.equal(flatStep.status, 'succeeded', flatStep.summary);
+  assert.deepEqual(flatStep.data?.resolvedAt, [1, 0, 0]);
+  assert.equal(level.pos.y, 64);
+
+  // 写对了就没有 requestedAt/resolvedAt。
+  const exact = flat();
+  const exactCtx = makeCtx(exact);
+  t.after(() => exactCtx.memory.close());
+  const same = await moveStep.run(exactCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(same.status, 'succeeded', same.summary);
+  assert.equal(same.data?.resolvedAt, undefined);
 });
 
 test('move_step 文档与实际半格/落差规则一致', async (t) => {
@@ -560,7 +568,17 @@ test('move_step 文档与实际半格/落差规则一致', async (t) => {
   const sameCtx = makeCtx(same);
   t.after(() => sameCtx.memory.close());
   const level = await moveStep.run(sameCtx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(level.status, 'failed', '同层脚高必须一致');
+  assert.equal(level.status, 'succeeded', '相对写法在同列解析实际脚高');
+  assert.equal(same.pos.y, 63.5);
+  assert.deepEqual(level.data?.resolvedAt, [1, -1, 0]);
+
+  const absoluteSame = flat();
+  absoluteSame.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  absoluteSame.blockProperties.set('1,63,0', { type: 'bottom' });
+  const absoluteCtx = makeCtx(absoluteSame);
+  t.after(() => absoluteCtx.memory.close());
+  const absolute = await moveStep.run(absoluteCtx, { at: [0, 0, 0], facing: 'E', xyz: { x: 1, y: 64, z: 0 } });
+  assert.equal(absolute.status, 'failed', '绝对 xyz 的脚高必须一致');
 
   const low = flat();
   low.blocks.push({ name: 'snow', pos: { x: 1, y: 64, z: 0 } });
@@ -581,7 +599,7 @@ test('move_step 文档与实际半格/落差规则一致', async (t) => {
   assert.equal(high.pos.y, 63.625);
 });
 
-test('move_step 能从雪层跨上高一整块（0.125 格），预检修正可执行', async (t) => {
+test('move_step 能从雪层跨上高一整块（0.125 格），同层写法按实际上一级执行', async (t) => {
   const w = new FlooringWorld();
   w.groundY = -100;
   w.pos = { x: 0.5, y: 63.875, z: 0.5 };
@@ -591,13 +609,10 @@ test('move_step 能从雪层跨上高一整块（0.125 格），预检修正可�
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
 
-  // 同层请求如实拒绝，但给出的 [1,1,0] 必须真的能执行。
-  const sameLevel = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(sameLevel.status, 'failed');
-  assert.deepEqual((sameLevel.data as { remediation?: { at?: [number, number, number] } } | undefined)?.remediation?.at, [1, 1, 0]);
-
-  const rise = await moveStep.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  // 同层写法也锁定这一列，按实际 0.125 格的上一级执行。
+  const rise = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
   assert.equal(rise.status, 'succeeded', rise.summary);
+  assert.deepEqual(rise.data?.resolvedAt, [1, 1, 0]);
   assert.equal(w.pos.y, 64, '实际脚高为整块顶面');
 });
 

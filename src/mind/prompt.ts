@@ -275,7 +275,7 @@ const PRINCIPLES = `【原则】
 
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格；挖空 [0,-1,0] 会下落，无需 move_step。
-- move_step 失败若给出同一目标列的“正确写法/实际脚高”，按这个写法改同一格再试，不要换方向重来；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。
+- move_step 相对写法只锁定相邻列，±1 内实际脚高由宿主解析（回执 resolvedAt）；绝对 xyz 失败若给出同一列的实际脚高，按它改 y 再试，不要换方向重来；落点有岩浆/火等危险时默认拒绝，allowHazard:true 由你决定；更大落差先 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报 2 格以上高差、或 assess_landings 说没有相邻落点时，不要反复换方向硬试；按回执用 excavate_run/place_support/pillar_one 或 assess_landings+descend_to（由你决定）。
 - place_cell 指方块占据格；place_support 的参数是补上的支撑格：[1,-1,0] 补 [1,0,0] 脚部目标格下方，上下范围 -2..3，可补下一级 [1,-2,0]。梯子、火把可放进身体格（需有附着面）。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 
