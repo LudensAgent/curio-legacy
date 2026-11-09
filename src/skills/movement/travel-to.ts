@@ -23,6 +23,8 @@ type TravelToArgs = {
   avoid: string[];
   sprint: boolean;
   timeoutMs: number;
+  /** direct = 朝目标直线分跳；history = 先查自己走过的历史路线，按其路点分跳（仍由 pathfinder 逐跳实测）。 */
+  via: 'direct' | 'history';
 };
 
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
@@ -32,6 +34,8 @@ const DETOURS = [45, -45, 90, -90];
 const DETOUR_HOP = 16;
 /** 连续这么多轮没有更接近目标就停，不在原地反复试。 */
 const MAX_STALE_ROUNDS = 3;
+/** 历史路线路点的最小间距（格）：太密的节点合并，每跳仍由 pathfinder 实测。 */
+const HISTORY_SPACING = 12;
 /** 默认绕开会伤身的方块（含“站在上面”）；岩浆与火由寻路器始终绕开，不受 allowHazard 影响。 */
 const HAZARD_AVOID = ['magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'wither_rose', 'soul_fire'];
 const BLOCK_NAME = /^[a-z0-9_]+$/;
@@ -86,8 +90,8 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认可游泳、不挖不放不搭柱、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块），回执逐项列出。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。',
-  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:true, "allowDig"?:false, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）}',
+  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认可游泳、不挖不放不搭柱、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块），回执逐项列出。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）。',
+  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短） | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:true, "allowDig"?:false, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"（默认 direct）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -104,6 +108,7 @@ export const travelTo: Skill<TravelToArgs> = {
     if (a.avoid !== undefined && (!Array.isArray(a.avoid) || a.avoid.length > 32 || a.avoid.some((n) => typeof n !== 'string' || !BLOCK_NAME.test(n)))) {
       return { ok: false, error: 'avoid 需要方块名数组（小写 snake_case，最多 32 个）' };
     }
+    if (a.via !== undefined && a.via !== 'direct' && a.via !== 'history') return { ok: false, error: 'via 只能是 direct 或 history' };
     return {
       ok: true,
       args: {
@@ -111,6 +116,7 @@ export const travelTo: Skill<TravelToArgs> = {
         allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowTower: a.allowTower === true,
         allowSwim: a.allowSwim !== false, allowHazard: a.allowHazard === true,
         avoid: [...new Set((a.avoid ?? []) as string[])], sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 180000,
+        via: a.via ?? 'direct',
       },
     };
   },
@@ -149,8 +155,37 @@ export const travelTo: Skill<TravelToArgs> = {
       ...(args.allowSwim ? {} : { allowSwimming: false }),
       sprint: args.sprint, avoid,
     };
+    // via:history：查自己走过的历史路线（共享空间记忆拓扑），把节点按间距抽成路点。历史只是路点提示，
+    // 每跳仍按实测验收；某个路点走不通就放弃剩余历史路点并在回执里列出，不写回记忆。
+    const waypoints: Vec3Like[] = [];
+    let waypoint = 0;
+    let history: Record<string, unknown> | undefined;
+    if (args.via === 'history') {
+      const query = ctx.spatial?.query({ kind: 'historyRoute', dim: s0.dim, from: start, to: { x: target.x, y: target.y ?? start.y, z: target.z }, near: 5 });
+      const inspection = query?.status === 'ok' && query.data?.kind === 'historyRoute' ? query.data.inspection : undefined;
+      if (inspection?.status === 'FOUND') {
+        let last = start;
+        for (const p of inspection.points) if (Math.hypot(p.x - last.x, p.z - last.z) >= HISTORY_SPACING) { waypoints.push({ ...p }); last = p; }
+        const observed = inspection.segments.map((segment) => segment.evidence.observedAt).filter((t): t is number => typeof t === 'number');
+        history = { found: true, points: inspection.points.length, waypoints: waypoints.length, ...(observed.length ? { oldestAgeMs: startedAt - Math.min(...observed) } : {}) };
+      } else {
+        history = { found: false, reason: ctx.spatial === undefined ? '没有接线共享空间记忆' : inspection ? `${inspection.status}：${inspection.message}` : `查询 ${query?.status ?? '失败'}` };
+      }
+    }
+    const routePoints = [...waypoints];
+    let offRoute = 0;
+    let abandonedAt: Vec3Like | undefined;
     const goalFor = (from: Vec3Like, turn: number | null): MoveTarget => {
       const left = Math.hypot(target.x - from.x, target.z - from.z);
+      // 历史路点按顺序走（历史路线本来就可能绕路）：跳过已走到的，身体已更靠近后一个路点时也跳过前一个；
+      // 绕行跳仍按目标方向偏转。
+      const near = (p: Vec3Like) => Math.hypot(p.x - from.x, p.z - from.z);
+      while (waypoint < waypoints.length && (near(waypoints[waypoint]) <= 3
+        || (waypoint + 1 < waypoints.length && near(waypoints[waypoint + 1]) < near(waypoints[waypoint])))) waypoint++;
+      const next = turn === null ? waypoints[waypoint] : undefined;
+      if (next !== undefined) {
+        return { kind: 'near', pos: { x: Math.floor(next.x), y: Math.floor(next.y), z: Math.floor(next.z) }, range: 2 };
+      }
       if (turn === null && left <= HOP) {
         return target.y === undefined
           ? { kind: 'xz', x: target.x, z: target.z, range: args.range }
@@ -172,11 +207,12 @@ export const travelTo: Skill<TravelToArgs> = {
         if (deadline - Date.now() < 1000) { stop = 'TIMEOUT'; break; }
         ctx.progress(1 - Math.min(1, gap(s.pos) / Math.max(1, gap(start))), `第 ${hops + 1} 跳，剩余约 ${Math.round(gap(s.pos))} 格`);
         // 先走正前方一跳；走不通（没动起来）再依次试偏转跳。任何一跳让身体实际挪动 ≥2 格即进入下一轮。
-        let moved = false;
+        let moved = false, alongHistory = false;
         for (const turn of [null, ...DETOURS]) {
           const before = { ...adapter.state().pos };
+          const goal = goalFor(before, turn);
           try {
-            await adapter.moveTo(goalFor(before, turn), { ...moveOpts, timeoutMs: Math.max(1000, Math.min(30000, deadline - Date.now())) });
+            await adapter.moveTo(goal, { ...moveOpts, timeoutMs: Math.max(1000, Math.min(30000, deadline - Date.now())) });
           } catch (e) {
             if (isAbort(e)) throw e;
             failedHops++;
@@ -186,12 +222,16 @@ export const travelTo: Skill<TravelToArgs> = {
           record();
           if (turn !== null) detours++;
           const after = adapter.state().pos;
-          if (Math.hypot(after.x - before.x, after.z - before.z) >= 2 || Math.abs(after.y - before.y) >= 2 || arrived(after)) { moved = true; break; }
+          if (routePoints.length) offRoute = Math.max(offRoute, Math.min(...routePoints.map((p) => Math.hypot(p.x - after.x, p.z - after.z))));
+          if (Math.hypot(after.x - before.x, after.z - before.z) >= 2 || Math.abs(after.y - before.y) >= 2 || arrived(after)) { moved = true; alongHistory = turn === null && goal.kind === 'near' && waypoint < waypoints.length; break; }
+          // 朝历史路点的一跳没动起来：这段历史路线当前走不通，放弃剩余历史路点（只在回执里列出，不写回记忆）。
+          if (turn === null && goal.kind === 'near' && waypoint < waypoints.length) { abandonedAt = { ...waypoints[waypoint] }; waypoints.length = waypoint; }
           if (deadline - Date.now() < 1000 || !adapter.state().alive) break;
         }
         const now = gap(adapter.state().pos);
         if (!moved) { stop = deadline - Date.now() < 1000 ? 'TIMEOUT' : 'NO_ROUTE'; if (arrived(adapter.state().pos)) stop = 'ARRIVED'; break; }
-        if (now < best - 1) { best = now; staleRounds = 0; } else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(adapter.state().pos) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
+        // 沿历史路点前进时离目标可能先变远（历史路线本来会绕）：这一轮算进展，不累计“没更近”。
+        if (now < best - 1) { best = now; staleRounds = 0; } else if (alongHistory) staleRounds = 0; else if (++staleRounds >= MAX_STALE_ROUNDS) { stop = arrived(adapter.state().pos) ? 'ARRIVED' : 'NO_PROGRESS'; break; }
       }
     } catch (e) {
       if (isAbort(e)) throw cancelledNav(e, { backend, originalRequest: request, resolvedTarget, position: trace.at(-1) ?? null, trace });
@@ -212,9 +252,15 @@ export const travelTo: Skill<TravelToArgs> = {
       authorized: { allowDig: args.allowDig, allowPlace: args.allowPlace, allowTower: args.allowTower, allowSwim: args.allowSwim, allowHazard: args.allowHazard, sprint: args.sprint },
       avoided: avoid,
       sideEffects: { dug: dug.slice(0, 24), dugCount: dug.length, placed: placed.slice(0, 24), placedCount: placed.length },
+      ...(history === undefined ? {} : {
+        history: { ...history, reached: Math.min(waypoint, routePoints.length), offRoute: round1(offRoute), ...(abandonedAt === undefined ? {} : { abandonedAt }) },
+      }),
       ...(lastError ? { lastError: lastError.slice(0, 200) } : {}),
     };
     const effects = dug.length || placed.length ? `；挖掉 ${dug.length} 块、放下 ${placed.length} 块（见 sideEffects）` : '';
+    const historyNote = history === undefined ? ''
+      : history.found !== true ? `；没有可用的历史路线（${String(history.reason)}），按直线分跳`
+        : `；按历史路线走到 ${Math.min(waypoint, routePoints.length)}/${routePoints.length} 个路点、最大偏离 ${round1(offRoute)} 格${abandonedAt === undefined ? '' : `，路点 ${at(abandonedAt)} 当前走不通，已放弃剩余历史路点`}`;
     const measured = `实测 ${at(end)}，水平位移 ${displacement.horizontal} 格、垂直 ${displacement.vertical} 格，${hops} 跳`;
     const outcome: NavOutcome = stop === 'ARRIVED' ? 'ARRIVED' : stop === 'TIMEOUT' ? 'TIMEOUT' : closer >= 2 ? 'PARTIAL' : stop === 'NO_ROUTE' ? 'NO_PATH' : stop === 'NO_PROGRESS' ? 'BLOCKED' : 'FAILED';
     const arrival = {
@@ -222,7 +268,7 @@ export const travelTo: Skill<TravelToArgs> = {
       measured: { position: end, distance: round1(gap(end)) }, satisfied: stop === 'ARRIVED',
     };
     const receipt = (r: SkillResult) => navReceipt(r, { backend, originalRequest: request, resolvedTarget, outcome, position: end, trace, arrival });
-    if (stop === 'ARRIVED') return receipt(ok(`到了 ${target.label} 附近：${measured}${effects}`, facts));
+    if (stop === 'ARRIVED') return receipt(ok(`到了 ${target.label} 附近：${measured}${effects}${historyNote}`, facts));
     const why = {
       NO_ROUTE: '辅助在已加载区块里没找到能让身体前进的下一跳（正前方与偏转都试过）',
       NO_PROGRESS: `连续 ${MAX_STALE_ROUNDS} 轮没有更接近目标`,
@@ -232,6 +278,6 @@ export const travelTo: Skill<TravelToArgs> = {
     }[stop];
     const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'NO_ROUTE' ? 'PATH_NOT_FOUND' : stop === 'NO_PROGRESS' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
     const permissions = `当前授权 allowDig:${args.allowDig} allowPlace:${args.allowPlace} allowSwim:${args.allowSwim}`;
-    return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
+    return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));
   },
 };
