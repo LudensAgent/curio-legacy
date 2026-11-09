@@ -316,6 +316,20 @@ function standableSurfaces(
 }
 
 /**
+ * (x,z) 这一列已观测的、离 aroundY 最近的站立脚高：支撑格完整观测、脚部格已观测且不是支撑面。
+ * 只读当前 VoxelMap，没观测过的列返回 null，不外推。用于给分段路点一个脚高提示。
+ */
+export function observedFootY(map: VoxelMap, dim: string, x: number, z: number, aroundY: number, down: number, up: number): number | null {
+  const open = (y: number) => {
+    const view = map.cellAt(dim, x, y, z);
+    return view.observed && supportTop(view.evidence.observation.state.name.replace(/^minecraft:/, ''), view.evidence.observation.state.properties) === null;
+  };
+  return standableSurfaces(map, dim, x, z, aroundY, down, up)
+    .filter((surface) => open(Math.floor(surface.y) + (surface.top >= 1 ? 0 : 1)))
+    .reduce<number | null>((best, surface) => best === null || Math.abs(surface.y - aroundY) < Math.abs(best - aroundY) ? surface.y : best, null);
+}
+
+/**
  * 历史体素视图：只读地把已记录但过期/旧会话的证据视为可供几何推导的观察。
  * 不写回 VoxelMap、不改 observedAt；结果必须由调用方标记为历史路线，并由真实
  * 当前证据复验后再执行。没有记录过的格子仍保持 unobserved，不做外推。
