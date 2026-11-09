@@ -71,7 +71,8 @@ const MAX_SEARCHED_STANCES = 8;
 const OBSERVATION_STANCES = 8;
 const STANCE_TOLERANCE = 0.05;
 const POSITION_TOLERANCE = 0.75;
-const POSITION_HEIGHT_TOLERANCE = POSITION_TOLERANCE;
+/** position 目标的 y 可能是近似值：在这一列上下各找这么多格的真实可站立面。 */
+const POSITION_SCAN_DEPTH = 3;
 const BODY_CENTER_HEIGHT = 0.9;
 /** 实测位移超过这个值就不能说“没有发生部分进展”。 */
 const MOVEMENT_EPS = 0.05;
@@ -161,6 +162,13 @@ function inspectStance(at: StateAt, cell: Vec3Like): StanceCheck {
   const hereName = stem(here.name);
   if (LIQUID_BLOCKS.has(hereName) || isDangerousBlock(hereName) || PORTAL.has(hereName)) return { status: 'HAZARD', hazard: hereName };
   const below = at({ x: cell.x, y: cell.y - 1, z: cell.z });
+  // 支撑/脚下一格是水/岩浆/伤害方块时先报危险；否则会先落到 NO_SUPPORT，被前缀回退当成“未知”继续靠近。
+  if (below !== null) {
+    const belowName = stem(below.name);
+    if (LIQUID_BLOCKS.has(belowName) || isDangerousBlock(belowName) || PORTAL.has(belowName)) {
+      return { status: 'HAZARD', hazard: belowName };
+    }
+  }
   const inCellSupport = supportTop(stem(here.name), here.properties ?? {}) !== null;
   if (!inCellSupport && below === null) return { status: 'UNKNOWN', missing: [{ x: cell.x, y: cell.y - 1, z: cell.z }] };
   const foot = footSurfaceY(cell, at);
@@ -335,7 +343,7 @@ const modeRank = (mode: RouteMode) => mode === 'current' ? 0 : mode === 'histori
 export const approachVisible: Skill<Args> = {
   name: 'approach_visible',
   description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度、不调用旧 Pathfinder。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
-  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
+  argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}}（target 里只放 pos/block/entity 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；pos 只写已确认/待解析的站立脚位（y 可为近似值，按同列实际支撑解析），不是方向+距离的推算点；远处未知地形用 navigate_to 分段；"radius"?:32（默认 32、上限 32，且不超过当前视觉有效范围）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
   timeoutMs: 45000,
   movement: true,
   outcomeBoundary: true,
@@ -460,13 +468,21 @@ export const approachVisible: Skill<Args> = {
           ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0,
         });
       }
-      targetCell = feetCell(target.pos);
-      let check = inspectStance(at, targetCell);
-      if (check.status === 'UNKNOWN') {
-        const cells = [targetCell,
-          { x: targetCell.x, y: targetCell.y - 1, z: targetCell.z },
-          { x: targetCell.x, y: targetCell.y + 1, z: targetCell.z },
-          ...check.missing];
+      const baseCell = feetCell(target.pos);
+      targetCell = baseCell;
+      const probeColumn = (reader: StateAt) => Array.from({ length: POSITION_SCAN_DEPTH * 2 + 1 }, (_, index) => {
+        const cell = { x: baseCell.x, y: baseCell.y - POSITION_SCAN_DEPTH + index, z: baseCell.z };
+        return { cell, check: inspectStance(reader, cell) };
+      });
+      let probes = probeColumn(at);
+      const unknownProbes = probes.filter((probe) => probe.check.status === 'UNKNOWN');
+      if (unknownProbes.length > 0) {
+        const cells = unknownProbes.flatMap((probe) => [
+          probe.cell,
+          { x: probe.cell.x, y: probe.cell.y - 1, z: probe.cell.z },
+          { x: probe.cell.x, y: probe.cell.y + 1, z: probe.cell.z },
+          ...(probe.check.status === 'UNKNOWN' ? probe.check.missing : []),
+        ]);
         const observedCellsBefore = voxel.checkpointFullCounts().observedCells;
         const observed = await observeCells(cells);
         stanceObservation = {
@@ -480,41 +496,139 @@ export const approachVisible: Skill<Args> = {
             ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement, resolvedStance: null, stanceObservation,
           });
         }
-        check = inspectStance(combinedAt, targetCell);
+        probes = probeColumn(combinedAt);
       }
-      if (check.status === 'UNKNOWN') {
-        return fail('NOT_FOUND', `目标位置所在的列 (${targetCell.x},${targetCell.y},${targetCell.z}) 支撑/净空未观察，不能把未知当作可达`, {
-          ...base, outcome: 'UNKNOWN', evidenceState: 'UNKNOWN', position: start, displacement: 0,
-          unknown: check.missing, resolvedStance: null, stanceObservation,
+      // 允许请求的 y 是近似值：在这一列 ±POSITION_SCAN_DEPTH 内找离请求脚高最近的真实可站立面，
+      // 并用现场 + FRESH 地图证据验证；解析出的脚高与请求点的差值如实写进回执。
+      const usable = probes.flatMap((probe) => probe.check.status === 'OK'
+        && Math.abs(probe.check.foot - target.pos.y) <= POSITION_SCAN_DEPTH
+        ? [{ cell: probe.cell, check: probe.check, delta: Math.abs(probe.check.foot - target.pos.y) }]
+        : [])
+        .sort((a, b) => a.delta - b.delta
+          || dist3(start, a.check.stance) - dist3(start, b.check.stance)
+          || a.check.foot - b.check.foot);
+      const best = usable[0];
+      if (best === undefined) {
+        const baseProbe = probes.find((probe) => probe.cell.y === baseCell.y);
+        if (baseProbe !== undefined && baseProbe.check.status === 'BLOCKED') {
+          const { position, displacement } = snapshot();
+          return fail('PATH_NOT_FOUND', `目标位置所在的列 (${baseCell.x},${baseCell.y},${baseCell.z}) 身体空间被方块占据 (${baseProbe.check.blocker.x},${baseProbe.check.blocker.y},${baseProbe.check.blocker.z})`, {
+            ...base, outcome: 'UNSUPPORTED', position, displacement, resolvedStance: null, stanceObservation,
+            blockedBy: baseProbe.check.blocker,
+          });
+        }
+        if (baseProbe !== undefined && baseProbe.check.status === 'HAZARD') {
+          const { position, displacement } = snapshot();
+          return fail('PATH_NOT_FOUND', `目标位置接触危险方块 ${baseProbe.check.hazard}，不按普通接近执行`, {
+            ...base, outcome: 'UNSUPPORTED', position, displacement, resolvedStance: null, stanceObservation,
+            hazard: baseProbe.check.hazard,
+          });
+        }
+        // 终点站位还无法验证时不提前判死：把已知空间里的可执行前缀交给 navigate_to，
+        // 走到最后一个已验证安全位置后停下；不声称到达，也不把 UNKNOWN 当 OPEN。
+        const to = { x: baseCell.x + 0.5, y: target.pos.y, z: baseCell.z + 0.5 };
+        const direct = dist3(start, to);
+        const travelLimit = Math.min(HARD_MAX_STEPS, Math.ceil(direct * MAX_DETOUR_FACTOR) + DETOUR_SLACK);
+        const maxSteps = Math.min(HARD_MAX_STEPS, travelLimit, args.maxSteps ?? travelLimit);
+        const prefixBudget = { maxSteps, travelLimit, plannedTransitions: null, basis: args.maxSteps === undefined ? 'prefix_fallback' : 'caller' };
+        const nested = validateSkill(navigateTo, {
+          to, allowed: args.allowed, historical: args.historical, maxSteps, allowUnknownCorridor: args.allowUnknownCorridor,
+        }, ctx.adapter);
+        if (!nested.ok) {
+          return fail('BAD_ARGS', `approach_visible 生成前缀导航参数无效：${nested.error}；没有移动`, {
+            ...base, outcome: 'UNSUPPORTED', stop: 'UNSUPPORTED', position: start, displacement: 0,
+            resolvedStance: null, stanceValidated: false, stanceObservation,
+          });
+        }
+        if (ctx.signal.aborted) return cancelled('前缀导航开始前收到取消。', { stanceValidated: false, stanceObservation });
+        if (Date.now() >= ctx.deadline) {
+          const { position, displacement } = snapshot();
+          return fail('TIMEOUT', '父委托期限在前缀导航开始前已耗尽，没有移动', {
+            ...base, outcome: 'TIMEOUT', stop: 'TIMEOUT', position, displacement,
+            resolvedStance: null, stanceValidated: false, stanceObservation,
+          });
+        }
+        let moved: SkillResult;
+        try {
+          moved = await runSkill(ctx, navigateTo, nested.args);
+        } catch (error) {
+          if (!isAbort(error)) throw error;
+          const { position, displacement } = snapshot();
+          const partial = (error as Error & { partial?: Record<string, unknown> }).partial;
+          return {
+            status: 'cancelled',
+            summary: `approach_visible 在接近前缀途中被取消；原目标未改变，实测在 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})，位移 ${displacement.toFixed(2)} 格`,
+            data: { ...base, outcome: 'CANCELLED', position, displacement, resolvedStance: null, stanceValidated: false, stanceObservation, ...(partial === undefined ? {} : { partial }) },
+          };
+        }
+        const after = snapshot();
+        if (moved.status === 'cancelled') {
+          return {
+            status: 'cancelled',
+            summary: `approach_visible 的前缀导航被取消；原目标未改变，实测在 (${after.position.x.toFixed(2)},${after.position.y.toFixed(2)},${after.position.z.toFixed(2)})，位移 ${after.displacement.toFixed(2)} 格`,
+            data: { ...base, outcome: 'CANCELLED', position: after.position, displacement: after.displacement, resolvedStance: null, stanceValidated: false, stanceObservation, navigation: moved.data },
+          };
+        }
+        const measuredCell = feetCell(after.position);
+        const measuredStance = inspectStance(combinedAt, measuredCell);
+        const atColumn = measuredCell.x === baseCell.x && measuredCell.z === baseCell.z;
+        const requestedOffset = {
+          horizontal: round2(Math.hypot(after.position.x - target.pos.x, after.position.z - target.pos.z)),
+          vertical: round2(Math.abs(after.position.y - target.pos.y)),
+        };
+        const executedSegments = typeof moved.data?.executed === 'number' ? moved.data.executed : 0;
+        const fallbackEvidence = {
+          target: { kind: 'position', source: 'requested_stance' },
+          stanceGeometry: usedFreshMapFallback ? 'live_adapter_blocks+fresh_voxel_fallback' : 'live_adapter_blocks',
+          stanceObservation,
+        };
+        const footConfirmed = measuredStance.status === 'OK'
+          && Math.abs(after.position.y - measuredStance.stance.y) <= STANCE_TOLERANCE;
+        if (moved.status === 'succeeded' && atColumn && footConfirmed) {
+          return ok(`已接近位置 (${target.pos.x},${target.pos.y},${target.pos.z})（最终站位已验证 (${measuredStance.stance.x.toFixed(2)},${measuredStance.stance.y},${measuredStance.stance.z.toFixed(2)})）`, {
+            ...base, outcome: 'ARRIVED', stanceValidated: false, finalStanceValidated: true, stanceObservation,
+            evidence: fallbackEvidence,
+            requestedPos: { ...target.pos }, resolvedStance: { ...measuredStance.stance }, requestedOffset,
+            position: after.position, displacement: after.displacement, confirmedSegments: executedSegments,
+            interaction: { kind: 'position', requestedPos: { ...target.pos }, resolvedStance: { ...measuredStance.stance }, requestedOffset },
+            budget: prefixBudget, navigation: moved.data,
+          });
+        }
+        if (moved.status === 'succeeded') {
+          return fail('EFFECT_NOT_CONFIRMED', `前缀导航报成功，但实测脚位 ${JSON.stringify(measuredCell)} 或脚高 ${after.position.y.toFixed(2)} 不是请求格 (${baseCell.x},${baseCell.z}) 的已验证站位；不按到达处理`, {
+            ...base, outcome: 'NOT_CONFIRMED', stop: 'NOT_CONFIRMED', stanceValidated: false, stanceObservation,
+            evidence: fallbackEvidence,
+            requestedPos: { ...target.pos }, requestedOffset, position: after.position, displacement: after.displacement,
+            confirmedSegments: executedSegments, budget: prefixBudget, navigation: moved.data,
+          });
+        }
+        const { cause, executed } = navigationOutcome(moved, 'UNKNOWN');
+        const progressed = executed > 0 || after.displacement > MOVEMENT_EPS;
+        const outcome: Outcome = progressed ? 'PARTIAL' : cause;
+        const stop = progressed ? cause : null;
+        const evidenceRelevant = outcome === 'UNKNOWN' || stop === 'UNKNOWN';
+        return fail(failureCodeOf(outcome), `approach_visible 的终点站位尚无可验证支撑，已执行 navigate_to 的可验证前缀：${moved.summary}`, {
+          ...base, outcome, ...(stop === null ? {} : { stop }), stanceValidated: false, stanceObservation,
+          evidence: {
+            target: { kind: 'position', source: 'requested_stance' },
+            stanceGeometry: usedFreshMapFallback ? 'live_adapter_blocks+fresh_voxel_fallback' : 'live_adapter_blocks',
+            stanceObservation,
+          },
+          ...(evidenceRelevant ? { evidenceState: 'UNKNOWN' } : {}),
+          requestedPos: { ...target.pos }, requestedOffset,
+          position: after.position, displacement: after.displacement, confirmedSegments: executed,
+          ...(typeof moved.data?.prefix === 'object' && moved.data.prefix !== null ? { prefix: moved.data.prefix } : {}),
+          budget: prefixBudget, navigation: moved.data,
         });
       }
-      if (check.status === 'NO_SUPPORT') {
-        return fail('PATH_NOT_FOUND', `目标位置所在的列 (${targetCell.x},${targetCell.y},${targetCell.z}) 没有已观察的可站立支撑面`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null,
-        });
-      }
-      if (check.status === 'BLOCKED') {
-        return fail('PATH_NOT_FOUND', `目标位置所在的身体空间被方块占据 (${check.blocker.x},${check.blocker.y},${check.blocker.z})`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null, blockedBy: check.blocker,
-        });
-      }
-      if (check.status === 'HAZARD') {
-        return fail('PATH_NOT_FOUND', `目标位置接触危险方块 ${check.hazard}，不按普通接近执行`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: null, hazard: check.hazard,
-        });
-      }
-      if (Math.abs(check.foot - target.pos.y) > POSITION_HEIGHT_TOLERANCE) {
-        return fail('BAD_ARGS', `目标位置写的是脚高 ${target.pos.y}，这一列实际可站立脚高是 ${check.foot}；相差超出 ${POSITION_HEIGHT_TOLERANCE} 格，不改写你的目标`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: check.stance, actualFoot: check.foot,
-        });
-      }
+      const check = best.check;
       // 半径按解析出的实际站位再核一次；请求点靠近格边时，站位可能略超出裸半径。
       if (dist3(start, check.stance) > radius + POSITION_TOLERANCE) {
         return fail('BAD_ARGS', `解析出的站位 ${JSON.stringify(check.stance)} 距当前 ${dist3(start, check.stance).toFixed(1)} 格，超出局部接近范围 ${radius} 格`, {
-          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: check.stance,
+          ...base, outcome: 'UNSUPPORTED', position: start, displacement: 0, resolvedStance: check.stance, stanceObservation,
         });
       }
-      valid = [{ cell: check.cell, stance: check.stance, foot: check.foot }];
+      valid = [{ cell: best.cell, stance: check.stance, foot: check.foot }];
       rejected = [];
       targetEvidence = 'requested_stance';
     } else if (target.kind === 'block') {
