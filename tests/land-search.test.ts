@@ -417,3 +417,23 @@ test('异步与同步入口对同一地图给出相同状态和节点/边计数'
   assert.equal(asyncResult.stats.edgesEvaluated, sync.stats.edgesEvaluated);
   assert.equal(asyncResult.stats.snapshotCount, 0);
 });
+
+test('贴着已观测岩浆的站位只加代价：有平行路时绕开岩浆边，没有别的路仍可走', () => {
+  // z=0 一排紧贴 z=-1 的岩浆，z=1 一排离岩浆一格；起点与终点都在 z=0。
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, 0), at(8, 2, 2));
+  fillBox(map, 'minecraft:stone', at(-1, -1, 0), at(8, -1, 2));
+  fillBox(map, 'minecraft:lava', at(-1, -1, -1), at(8, 0, -1));
+  const feet = at(0.5, 0, 0.5), goal = at(7.5, 0, 0.5);
+  const result = searchLandRoute(map, request(feet, goal), 2000);
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.stats));
+  const middle = result.transitions.slice(1, -1).map((t) => Math.floor(t.to.z));
+  assert.ok(middle.some((z) => z >= 1), `中段应离开岩浆边：${JSON.stringify(result.transitions.map((t) => t.to))}`);
+
+  const narrow = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(narrow, 'minecraft:air', at(-1, 0, 0), at(8, 2, 0));
+  fillBox(narrow, 'minecraft:stone', at(-1, -1, 0), at(8, -1, 0));
+  fillBox(narrow, 'minecraft:lava', at(-1, -1, -1), at(8, 0, -1));
+  const only = searchLandRoute(narrow, request(feet, goal), 2000);
+  assert.equal(only.status, 'FOUND', '唯一的路仍可走，不因岩浆邻格禁止');
+});
