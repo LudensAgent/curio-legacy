@@ -87,6 +87,9 @@ function allFragments(history: FragmentStore): PathFragment[] {
   return out;
 }
 
+/** 重复看见已记地标时，至少隔这么久才刷新一次它的观察时间。 */
+const LANDMARK_REFRESH_MS = 60_000;
+
 function allNodes(topology: TopologyStore): SpatialNode[] {
   const out: SpatialNode[] = [];
   let after: string | undefined;
@@ -249,7 +252,13 @@ export class SpatialSemanticStore {
   get containers(): ContainerLedger { return this.containerLedgerStore; }
   get world(): string { return this.worldId; }
 
-  private allNodes(): SpatialNode[] { return allNodes(this.session.topology); }
+  /** 按 topology 修订号缓存的全量节点（只读快照）：同一修订号内反复查地标不再每次分页克隆全部节点、重建列表索引。 */
+  private nodeCache: { revision: number; nodes: SpatialNode[] } | null = null;
+  private allNodes(): SpatialNode[] {
+    const revision = this.session.topology.revision;
+    if (this.nodeCache?.revision !== revision) this.nodeCache = { revision, nodes: allNodes(this.session.topology) };
+    return [...this.nodeCache.nodes];
+  }
   private allFragments(): PathFragment[] { return allFragments(this.session.history); }
 
   private viewOf(node: SpatialNode): 'landmark' | 'station' | undefined {
@@ -344,6 +353,8 @@ export class SpatialSemanticStore {
     const near = nodes.find((node) => !node.gone && node.dim === dim && node.tag === kind && node.label === label
       && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) < radius);
     if (near) {
+      // 每帧都会重复看见同一处资源/危险：最近刚确认过就不再写（每次写都会让整张拓扑的列表索引重建）。
+      if (Date.now() - (near.observedAt ?? 0) < LANDMARK_REFRESH_MS) return null;
       const meta = metaOf(near);
       if (meta && isRecord(meta.record)) {
         this.updateNode(near.id, { observedAt: Date.now(), metadata: metadata(this.mergeMeta(near, { record: { ...meta.record, ts: Date.now(), kind, label, dim, pos: at } })) });
@@ -358,7 +369,7 @@ export class SpatialSemanticStore {
         const own = nodes.find((node) => !node.gone && node.dim === dim && node.label === `我的${label}`
           && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) <= radius);
         if (own) {
-          this.updateNode(own.id, { observedAt: Date.now() });
+          if (Date.now() - (own.observedAt ?? 0) >= LANDMARK_REFRESH_MS) this.updateNode(own.id, { observedAt: Date.now() });
           return null;
         }
       } else {
