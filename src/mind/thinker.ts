@@ -170,7 +170,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (o.steps.length > 6) return { error: `${label}.steps 最多 6 个动作，请自行精简或分成多段` };
   const requestedFacing = typeof o.facing === 'string' ? o.facing.trim().toUpperCase() : undefined;
   const facing = FACINGS.find((value) => value === requestedFacing);
-  if (o.facing !== undefined && !facing) return { error: `${label}.facing 必须是 N/E/S/W，表示本段相对坐标的前方，不是镜头朝向` };
+  if (o.facing !== undefined && !facing) return { error: `${label}.facing 必须是 N/E/S/W，表示本段相对坐标的前方，不是镜头朝向；活动里没有水平相对坐标步骤就省略这个字段` };
   const steps: ActivityStep[] = [];
   const errors: string[] = [];
   const requiredErrors: string[] = [];
