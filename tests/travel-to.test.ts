@@ -156,6 +156,32 @@ test('travel_to via:history 拓扑没有路线时沿记录过的路径片段（�
   assert.equal(travelTo.validate({ to: '1,2', via: { fragment: '' } }, h.adapter).ok, false);
 });
 
+test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目标在下方多少格', async () => {
+  const h = harness({ blocked: () => true });
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 3, y: 10, z: 0 } }, h.adapter));
+  assert.equal(r.status, 'failed');
+  assert.equal(r.data?.stopReason, 'VERTICAL_GAP');
+  assert.equal(h.calls.length, 1, '只试正前方一跳，不按水平坐标偏转');
+  assert.match(r.summary, /目标在下方 54 格/);
+});
+
+test('travel_to 沿历史片段遇到竖井走不通时，放弃路点并说明是多少格的直上直下段', async () => {
+  const cells = [...Array.from({ length: 4 }, (_, i) => ({ x: i, y: 64, z: 0 })), ...Array.from({ length: 24 }, (_, i) => ({ x: 3, y: 63 - i, z: 0 }))];
+  const fragment = { id: 'shaft', worldId: 'w', dim: 'overworld', kind: 'dug', entrances: [], polyline: [cells[0]!], geometrySource: 'legacy',
+    links: cells.slice(1).map((b, i) => ({ a: cells[i]!, b })), deepestY: 40, createdAt: 1, lastUsedAt: 1, uses: 1 };
+  const query = (q: { kind: string }) => q.kind === 'fragments'
+    ? { status: 'ok', data: { kind: 'fragments', items: [fragment] } }
+    : { status: 'ok', data: { kind: 'historyRoute', inspection: { status: 'ENDPOINT_NOT_RECORDED', points: [], segments: [], message: '' } } };
+  const h = harness({ blocked: (goal) => goal.kind === 'near' && goal.pos.y < 60 });
+  (h.ctx as { spatial?: unknown }).spatial = { query };
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 3, y: 40, z: 0 }, via: { fragment: 'shaft' } }, h.adapter));
+  assert.equal(r.status, 'failed');
+  const history = r.data?.history as { abandonedAt: Vec3Like; verticalRun: number };
+  assert.ok(history.verticalRun > 4, JSON.stringify(history));
+  assert.match(r.summary, /直上直下的竖直段/);
+  assert.ok(h.calls.filter(({ target }) => target.kind === 'xz').length === 0, '高差为主，不做水平偏转');
+});
+
 test('travel_to 不下水时限制单跳绕路；授权游泳时不加上限（水格代价高，加了等于不让游）', async () => {
   const dry = harness();
   await travelTo.run(dry.ctx, argsOf({ to: '30,0' }, dry.adapter));

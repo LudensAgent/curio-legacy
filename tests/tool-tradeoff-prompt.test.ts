@@ -332,3 +332,16 @@ test('提示词：下矿时提附近自己挖过的通道（含归档旧记录�
   assert.equal(decisionReminders({ ...ctx, tier: 'glance' }).some((r) => r.startsWith('记得自己挖过的通道')), false, '瞥一眼不重复');
   memory.close();
 });
+
+test('提示词：记得好几个基地时说明移动目标 "base" 指哪一处、多远，不让它把最近的基地当成 base', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = perception.update();
+  memory.setBase('overworld', { x: 800, y: 64, z: 0 }, '远处小屋', { select: true });
+  memory.setBase('overworld', { x: 5, y: 64, z: 0 }, '门厅');
+  const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state: adapter.state(), self: new SelfModel(null),
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const user = buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
+  assert.match(user, /\\"base\\" 指 远处小屋（800 格外），另记得 1 处基地/);
+  memory.close();
+});
