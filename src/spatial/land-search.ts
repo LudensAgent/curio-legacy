@@ -156,6 +156,8 @@ export const DEFAULT_LAND_SEARCH_MS = 1500;
 /** Max synchronous compute between cooperative yields in the sliced (async) search. */
 const YIELD_SLICE_MS = 8;
 const DANGER = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'cobweb', 'pointed_dripstone']);
+/** 已观察方块名（可带命名空间）是否属于搜索层认定的危险方块；落点校验与搜索共用同一份清单。 */
+export const isDangerousBlock = (name: string): boolean => DANGER.has(name.replace(/^minecraft:/, ''));
 const cell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
 const pointEqual = (a: Vec3Like, b: Vec3Like) => Math.abs(a.x - b.x) <= EPS && Math.abs(a.y - b.y) <= EPS && Math.abs(a.z - b.z) <= EPS;
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
@@ -195,7 +197,7 @@ function dangerousAt(map: VoxelMap, dim: string, pos: Vec3Like): string | null {
   const view = map.cellAt(dim, p.x, p.y, p.z);
   if (!view.observed) return null;
   const name = view.evidence.observation.state.name.replace(/^minecraft:/, '');
-  return DANGER.has(name) ? name : null;
+  return isDangerousBlock(name) ? name : null;
 }
 
 /** walk 用同高判定器；step/drop 用库的 land transition 判定器。 */
