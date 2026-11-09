@@ -19,6 +19,8 @@ type ExploreArgs = {
   allowHazard: boolean;
   sprint: boolean;
   timeoutMs: number;
+  /** 寻路挖掘只用这件工具（原样交给每段 travel_to）。 */
+  tool?: string;
 };
 
 /** 单次探索的方向距离上限（格）；更远由 Agent 分次续走。 */
@@ -39,7 +41,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
   description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段没走到段终点、沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
-  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
+  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -57,6 +59,11 @@ export const exploreToward: Skill<ExploreArgs> = {
     for (const flag of ['allowDig', 'allowPlace', 'allowSwim', 'allowHazard', 'sprint'] as const) {
       if (a[flag] !== undefined && typeof a[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
     }
+    if (a.tool !== undefined) {
+      if (typeof a.tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(a.tool)) return { ok: false, error: 'tool 为物品注册名（如 stone_pickaxe）' };
+      if (a.allowDig !== true) return { ok: false, error: 'tool 指定寻路挖掘用哪件工具，需要同时写 allowDig:true' };
+      if (!adapter.state().inventory.some((i) => i.name === a.tool && i.count > 0)) return { ok: false, error: `TOOL_MISSING：背包里没有 ${a.tool}，没有移动` };
+    }
     // 首次校验冻结起点；续接/重试沿用同一条射线，不按新位置重新解释方向。
     const o = obj(a.origin);
     if (a.origin !== undefined && ![o.x, o.y, o.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'origin 需要 {x,y,z} 有限数字' };
@@ -69,6 +76,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         segment: a.segment ?? 32, maxLateralDrift: a.maxLateralDrift ?? 16,
         allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowSwim: a.allowSwim === true,
         allowHazard: a.allowHazard === true, sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 300000,
+        ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
       },
     };
   },
@@ -114,7 +122,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         const target = { x: Math.round(args.origin.x + ux * reach), z: Math.round(args.origin.z + uz * reach) };
         const parsed = travelTo.validate({
           to: target, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
-          allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left),
+          allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left), ...(args.tool ? { tool: args.tool } : {}),
         }, adapter);
         if (!parsed.ok) return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；没有移动`, { backend });
         const segStart = { ...adapter.state().pos };

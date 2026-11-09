@@ -135,3 +135,14 @@ test('explore_toward 段终点一直没走到、只顺带往前蹭几格：算�
   assert.match(r.summary, /没走到段终点/);
   assert.match(r.summary, /allowPlace/);
 });
+
+test('explore_toward 把 tool 原样交给每段 travel_to 的寻路挖掘', async () => {
+  const h = harness();
+  const opts: (string | undefined)[] = [];
+  const move = h.adapter.moveTo.bind(h.adapter);
+  (h.adapter as { state: () => unknown }).state = ((orig) => () => ({ ...(orig() as object), inventory: [{ name: 'stone_pickaxe', count: 1 }] }))(h.adapter.state.bind(h.adapter));
+  h.adapter.moveTo = (async (target: MoveTarget, o: { digTool?: string }) => { opts.push(o.digTool); return move(target, o as never); }) as typeof h.adapter.moveTo;
+  await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 64, allowDig: true, tool: 'stone_pickaxe' }, h.adapter));
+  assert.ok(opts.length > 0 && opts.every((t) => t === 'stone_pickaxe'), JSON.stringify(opts));
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 64, tool: 'stone_pickaxe' }, h.adapter).ok, false, 'tool 需要 allowDig');
+});
