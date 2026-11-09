@@ -10,7 +10,7 @@
 /** 会改变身体站位的步骤；失败后身体可能已有部分位移，不再位于原起点。
  *  放置/补支撑也可能为了让出参照面而轻推身体（哪怕不足 0.5 格），同样要计入。 */
 export const STANCE_MOVES = new Set([
-  'move_step', 'walk_path', 'navigate_to', 'go_near', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'pillar_one',
+  'move_step', 'walk_path', 'navigate_to', 'travel_to', 'go_near', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'pillar_one',
   'place_cell', 'place_support',
 ]);
 

@@ -1027,7 +1027,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
       if (opts.avoid?.length) {
         movements.blocksToAvoid = new Set(movements.blocksToAvoid);
-        for (const n of opts.avoid) { const id = this.mcData?.blocksByName?.[n]?.id; if (id !== undefined) movements.blocksToAvoid.add(id); }
+        const avoidIds = new Set<number>();
+        for (const n of opts.avoid) { const id = this.mcData?.blocksByName?.[n]?.id; if (id !== undefined) { movements.blocksToAvoid.add(id); avoidIds.add(id); } }
+        // blocksToAvoid 只拦身体所在格；岩浆块、营火这类实心/可站的方块还要拦“站在上面”：落脚格的支撑是它就不走。
+        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => avoidIds.has(movements.getBlock(block.position, 0, -1, 0)?.type) ? 100 : 0];
       }
       // 平时走路，只有说了要跑（赶路、逃命）才跑：冲刺每格都在消耗饥饿值，走路几乎不耗
       movements.allowSprinting = opts.sprint ?? target.kind === 'away_from';
