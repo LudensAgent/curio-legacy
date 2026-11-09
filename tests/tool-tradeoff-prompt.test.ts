@@ -307,3 +307,28 @@ test('mind：同一 key 的工具事实不每念重复，key 变化后再说', (
   assert.ok(captured[3]?.toolFact, '过了最小间隔后状态变化再给一次');
   memory.close();
 });
+
+test('提示词：下矿时提附近自己挖过的通道（含归档旧记录），只报位置/深度与当前未确认，远处的不提', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  // perception.update() 先把记忆切到身体所在的世界，再写通道
+  const percept = perception.update();
+  const state = adapter.state();
+  const passage = (id: string, x: number, deepestY: number) => ({
+    id, worldId: state.worldId, dim: state.dim, kind: 'dug' as const, entrances: [], path: [{ x, y: 60, z: 0 }],
+    links: [{ a: { x, y: 60, z: 0 }, b: { x, y: deepestY, z: 1 } }], deepestY, dug: 10, ores: {}, createdAt: 1, lastUsedAt: 1, uses: 1,
+  });
+  memory.savePassage(passage('psg_near', 20, -40));
+  memory.savePassage(passage('psg_far', 900, -60));
+  const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self: new SelfModel(null),
+    memory, activity: createActivity({ what: '下矿找钻石，下到 y=-50', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', state),
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+  const line = decisionReminders(ctx).find((r) => r.startsWith('记得自己挖过的通道'));
+  assert.ok(line, decisionReminders(ctx).join('\n'));
+  assert.match(line, /psg_near/);
+  assert.doesNotMatch(line, /psg_far/);
+  assert.match(line, /记录最深 y=-40/);
+  assert.match(line, /现在是否还通没确认/);
+  assert.equal(decisionReminders({ ...ctx, tier: 'glance' }).some((r) => r.startsWith('记得自己挖过的通道')), false, '瞥一眼不重复');
+  memory.close();
+});
