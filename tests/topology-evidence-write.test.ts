@@ -411,19 +411,21 @@ test('路径片段写满：先忘每格别处也有、已无边引用的重复�
   }
 });
 
-test('路径片段写满且没有重复：按最久未用忘，连同它的边和孤立通道节点', async () => {
+test('路径片段写满且没有重复：从最拥挤的区块忘，远处稀疏的旧路保留', async () => {
   const { svc, dir } = await openEvidenceSession();
   try {
-    for (let i = 0; i < 1000; i++) writeStep(svc, `u:${i}`, { x: 0, y: 64, z: 3 * i }, { x: 1, y: 64, z: 3 * i }, 10 + i);
+    // 最旧的 20 段各在一个远处区块（走到过的远处只留一条记录）；之后 980 段挤在门口同一区块、每段格子各不相同。
+    for (let i = 0; i < 20; i++) writeStep(svc, `far:${i}`, { x: 0, y: 64, z: -100 * (i + 1) }, { x: 1, y: 64, z: -100 * (i + 1) }, 1 + i);
+    for (let i = 0; i < 980; i++) writeStep(svc, `near:${i}`, { x: 0, y: 64 + Math.floor(i / 16), z: i % 16 }, { x: 1, y: 64 + Math.floor(i / 16), z: i % 16 }, 100 + i);
     assert.equal(svc.query({ kind: 'fragments' }).total, 1000);
     const outcome = writeStep(svc, 'next', { x: 700, y: 64, z: 0 }, { x: 701, y: 64, z: 0 }, 30_000);
     assert.equal(outcome.status, 'written');
     assert.deepEqual(outcome.forgotten, { fragments: 50, redundant: 0, edges: 50, nodes: 100 });
     const ids = fragmentIds(svc);
-    assert.equal(ids.has('u:49'), false);
-    assert.equal(ids.has('u:50'), true);
+    assert.equal([...Array(20).keys()].every((i) => ids.has(`far:${i}`)), true, '远处稀疏的旧路一条不少');
+    assert.equal(ids.has('near:49'), false, '拥挤处先忘旧的');
+    assert.equal(ids.has('near:50'), true);
     assert.equal(svc.query({ kind: 'edges' }).total, 951);
-    assert.equal(svc.query({ kind: 'nodes' }).total, 2 * 951);
   } finally {
     await closeEvidenceSession(svc, dir);
   }

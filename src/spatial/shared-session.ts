@@ -257,7 +257,7 @@ export interface WalkMemoryTopology {
  * `stage` 只来自库/共享会话实际返回的结构化拒绝；调用方 sink 抛出不是本类型，
  * 由 recorder 侧另行如实表达（不得把异常改写成这里的阶段）。
  */
-/** 写满腾位时实际忘掉的路径记录；redundant 是其中“每格别处也记着、且已无边指向”的片数。 */
+/** 写满腾位时实际忘掉的路径记录；redundant 是其中“每格别处也记着、且已无边指向”的片数，其余取自最拥挤的区块。 */
 export interface PathRetention { fragments: number; redundant: number; edges: number; nodes: number }
 
 export type WalkMemoryOutcome = (
@@ -1141,8 +1141,8 @@ export class SharedSpatialSession {
   /**
    * 路径片段写满时腾出一批位置；不腾的话此后亲历的路径全被库拒写（线上约 4 小时写满）。
    * 先忘重复片段：已没有拓扑边指向它（同一对格子被后来的行走改写过），且它记的每一格
-   * 别的片段也记着——忘掉它不丢几何覆盖，也不断拓扑。重复片段不够时，再按 lastUsedAt
-   * 忘最旧的，连同指向它的边和因此成孤点的 walk: 通道节点。只动 traversal 来源的片段；
+   * 别的片段也记着——忘掉它不丢几何覆盖，也不断拓扑。重复片段不够时，再从片段最拥挤的区块
+   * 忘（同等拥挤先忘旧的），连同指向它的边和因此成孤点的 walk: 通道节点。只动 traversal 来源的片段；
    * 地标、资源、区块访问、传送门记录不碰。没写满时返回 null。
    */
   private makeRoomForFragment(): PathRetention | null {
@@ -1178,8 +1178,18 @@ export class SharedSpatialSession {
       chosen.add(f.id);
     }
     const redundant = chosen.size;
-    for (const f of oldestFirst) {
-      if (chosen.size >= need) break;
+    // 不够时从最拥挤的地方忘：片段所经区块里“最稀疏那块”还有多少片段算它的拥挤度，挑最拥挤的、
+    // 同等拥挤先忘旧的。按“最旧”忘会先删最早走到的远处（下界门几百格外的那条路），而那里往往只有一条记录。
+    const chunksOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}`))];
+    const rest = oldestFirst.filter((f) => !chosen.has(f.id)).map((f) => ({ f, chunks: chunksOf(f) }));
+    const crowd = new Map<string, number>();
+    for (const chunk of rest.flatMap((entry) => entry.chunks)) crowd.set(chunk, (crowd.get(chunk) ?? 0) + 1);
+    while (chosen.size < need && rest.length > 0) {
+      const crowdOf = (chunks: string[]) => Math.min(...chunks.map((chunk) => crowd.get(chunk)!));
+      // rest 已按 lastUsedAt 升序；严格大于才换，所以同等拥挤时忘的是更旧的那个。
+      const best = rest.reduce((top, entry, index) => crowdOf(entry.chunks) > crowdOf(rest[top]!.chunks) ? index : top, 0);
+      const [{ f, chunks }] = rest.splice(best, 1);
+      for (const chunk of chunks) crowd.set(chunk, crowd.get(chunk)! - 1);
       chosen.add(f.id);
     }
     const doomedEdges = edges.filter((edge) => edge.fragmentId !== undefined && chosen.has(edge.fragmentId));
