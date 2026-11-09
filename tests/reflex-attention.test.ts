@@ -58,6 +58,7 @@ test('intentional eating, defending and escaping continue without duplicate refl
   assert.equal(w.starts.length, 0, 'keep the fight already in progress');
   w.state.hp = 6; w.tick();
   assert.equal(w.starts.at(-1)?.step.skill, 'flee', 'a worsening fight still escalates immediately');
+  assert.equal((w.starts.at(-1)?.step.args as { sprint?: boolean }).sprint, true, 'the reflex escape asks to sprint explicitly');
   const n = w.starts.length;
   w.hostile('creeper'); w.setTask('flee'); w.tick();
   assert.equal(w.starts.length, n, 'keep running away from the creeper');

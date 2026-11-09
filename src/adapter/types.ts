@@ -187,7 +187,7 @@ export interface MoveOpts {
   allowTower?: boolean;
   /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
   allowSwimming?: boolean;
-  /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路。逃离（away_from）默认跑 */
+  /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路（逃离也一样，要跑就写 true） */
   sprint?: boolean;
   /** 明确落点的单步下行上限，含支撑格；仅用于相邻 xyz 目标，禁止改地形和绕行。 */
   maxDropDown?: number;

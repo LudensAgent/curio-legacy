@@ -2,14 +2,16 @@ import { sleep } from '../util.ts';
 import { clampInt, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
 // ------------------------------------------------------------------ flee
-export const flee: Skill<{ distance: number }> = {
+export const flee: Skill<{ distance: number; sprint: boolean }> = {
   name: 'flee',
-  description: '远离附近的敌对生物，或撤离岩浆等环境危险',
-  argsDoc: '{"distance"?: 8-32}',
+  description: '远离附近的敌对生物，或撤离岩浆等环境危险；默认走路，sprint:true 才跑（快但耗饥饿）',
+  argsDoc: '{"distance"?: 8-32, "sprint"?: false}',
   timeoutMs: 15000,
   movement: true,
   validate(raw) {
-    return { ok: true, args: { distance: clampInt(obj(raw).distance, 8, 32, 18) } };
+    const a = obj(raw);
+    if (a.sprint !== undefined && typeof a.sprint !== 'boolean') return { ok: false, error: 'sprint 需要布尔值' };
+    return { ok: true, args: { distance: clampInt(a.distance, 8, 32, 18), sprint: a.sprint === true } };
   },
   async run(ctx, args) {
     const hostiles = ctx.senses.perceivedEntities(16).filter((e) => e.kind === 'hostile');
@@ -17,12 +19,12 @@ export const flee: Skill<{ distance: number }> = {
     if (!hostiles.length && state.inLava) {
       const land = ctx.senses.nearestLand?.(state.pos);
       try {
-        if (land) await ctx.adapter.moveTo({ kind: 'near', pos: { ...land.pos, y: land.pos.y + 1 }, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()) });
+        if (land) await ctx.adapter.moveTo({ kind: 'near', pos: { ...land.pos, y: land.pos.y + 1 }, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()), sprint: args.sprint });
         else {
           // With no remembered shore, actively try to climb out and move away
           // from the hazard origin. Returning success here would strand the bot.
           await ctx.adapter.jump(500, ctx.signal);
-          await ctx.adapter.moveTo({ kind: 'xz', x: state.pos.x + args.distance, z: state.pos.z, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()) });
+          await ctx.adapter.moveTo({ kind: 'xz', x: state.pos.x + args.distance, z: state.pos.z, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1000, ctx.deadline - Date.now()), sprint: args.sprint });
         }
       } catch (e) { if (isAbort(e)) throw e; }
       return ctx.adapter.state().inLava ? fail('STUCK', '仍在岩浆中，未能脱离环境危险') : ok('已撤离岩浆');
@@ -30,7 +32,7 @@ export const flee: Skill<{ distance: number }> = {
     if (!hostiles.length) return ok('附近没有威胁');
     const c = hostiles.reduce((a, e) => ({ x: a.x + e.pos.x / hostiles.length, y: a.y + e.pos.y / hostiles.length, z: a.z + e.pos.z / hostiles.length }), { x: 0, y: 0, z: 0 });
     try {
-      await ctx.adapter.moveTo({ kind: 'away_from', pos: c, distance: args.distance }, { signal: ctx.signal, timeoutMs: Math.max(3000, ctx.deadline - Date.now()) });
+      await ctx.adapter.moveTo({ kind: 'away_from', pos: c, distance: args.distance }, { signal: ctx.signal, timeoutMs: Math.max(3000, ctx.deadline - Date.now()), sprint: args.sprint });
     } catch (e) {
       if (isAbort(e)) throw e;
     }

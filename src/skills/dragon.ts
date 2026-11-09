@@ -63,7 +63,7 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
           // outside the current FOV. Use the last observed hazard, then fall
           // back to the observed entry position if no threat was ever seen.
           try {
-            if (dist3(state.pos, lastHazard) > 0.1 || attacker || dragon || breath) await adapter.moveTo({ kind: 'away_from', pos: lastHazard, distance: 20 }, { signal, timeoutMs: Math.max(1, Math.min(6000, end - Date.now())), constructionSafe: true });
+            if (dist3(state.pos, lastHazard) > 0.1 || attacker || dragon || breath) await adapter.moveTo({ kind: 'away_from', pos: lastHazard, distance: 20 }, { sprint: true, signal, timeoutMs: Math.max(1, Math.min(6000, end - Date.now())), constructionSafe: true });
             else await adapter.moveTo({ kind: 'near', pos: start.pos, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(4000, end - Date.now())), constructionSafe: true });
           } catch (error) { if (isAbort(error)) throw error; }
           if (adapter.hasFood() && state.food < 20) await adapter.eat(signal);
@@ -73,7 +73,7 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
         }
         if ((state.food <= 18 || state.hp < 16 && state.food < 20) && adapter.hasFood()) {
           change('feed');
-          if (dragon && dragon.dist < 12) await adapter.moveTo({ kind: 'away_from', pos: dragon.pos, distance: 14 }, { signal, timeoutMs: 6000 });
+          if (dragon && dragon.dist < 12) await adapter.moveTo({ kind: 'away_from', pos: dragon.pos, distance: 14 }, { sprint: true, signal, timeoutMs: 6000 });
           await adapter.eat(signal);
           continue;
         }
@@ -88,7 +88,7 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
         if (crystal) {
           change('crystals');
           lastHazard = { ...crystal.pos };
-          if (crystal.dist < 12) await adapter.moveTo({ kind: 'away_from', pos: crystal.pos, distance: 14 }, { signal, timeoutMs: 8000 });
+          if (crystal.dist < 12) await adapter.moveTo({ kind: 'away_from', pos: crystal.pos, distance: 14 }, { sprint: true, signal, timeoutMs: 8000 });
           if (crystal.dist > 48) {
             const dx = state.pos.x - crystal.pos.x, dz = state.pos.z - crystal.pos.z;
             const distance = Math.hypot(dx, dz) || 1;
@@ -125,7 +125,7 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
           change('perched');
           if (dragon.phase === 5 && dragon.dist < 10) {
             change('withdraw');
-            await adapter.moveTo({ kind: 'away_from', pos: dragon.pos, distance: 12 }, { signal, timeoutMs: 6000 });
+            await adapter.moveTo({ kind: 'away_from', pos: dragon.pos, distance: 12 }, { sprint: true, signal, timeoutMs: 6000 });
           } else {
             await adapter.equipWeapon();
             if (dragon.dist > 3) await adapter.moveTo({ kind: 'near', pos: dragon.pos, range: 2.5 }, { signal, timeoutMs: 8000 });
