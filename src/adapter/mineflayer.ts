@@ -14,7 +14,7 @@ import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError }
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
-import { feetCell, facingOfYaw } from '../perception/local.ts';
+import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
 
@@ -1372,7 +1372,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const p = e.position, cell = p.floored();
     const offX = Math.abs(p.x - (cell.x + 0.5)), offZ = Math.abs(p.z - (cell.z + 0.5));
     if (offX <= 0.2 + 1e-6 && offZ <= 0.2 + 1e-6) return null;
-    const below = b.blockAt(cell.offset(0, -1, 0));
+    // 中心列真正托着身体的方块：灵魂沙、半砖上脚高 x.875/x.5，支撑是 floor(脚高) 那格本身，不是它下面一格。
+    const below = b.blockAt(new Vec3(cell.x, supportCell(p).y, cell.z));
     if (!below || below.boundingBox !== 'block') return null;
     return { x: cell.x, z: cell.z };
   }
@@ -1402,7 +1403,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   /** Check the actual player's head sweep before jumping high enough to place a block underfoot. */
   private pillarClearance(): PillarClearance | null {
-    const b = this.bot, p = b.entity.position, feetY = Math.floor(p.y), epsilon = 1e-6;
+    // 跳到放置格之上才能放：放置格是支撑方块上面一格（不足一格的支撑上，它高于 floor(脚高)）。
+    const b = this.bot, p = b.entity.position, feetY = supportCell(p).y + 1, epsilon = 1e-6;
     const top = feetY + 1.02 + 1.8;
     const min = { x: Math.floor(p.x - 0.3 + epsilon), y: Math.floor(p.y + 1.8), z: Math.floor(p.z - 0.3 + epsilon) };
     const max = { x: Math.floor(p.x + 0.3 - epsilon), y: Math.floor(top - epsilon), z: Math.floor(p.z + 0.3 - epsilon) };
@@ -4335,7 +4337,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
-    const feet = b.entity.position.floored();
+    // 要放方块的是脚踩着的那块上面一格：站在灵魂沙、半砖这类不足一格的方块上时，floor(脚高)
+    // 是支撑方块自己（脚高 x.875 之类），不能拿它当放置格、拿它下面一格当贴面。
+    const support = supportCell(b.entity.position);
+    const feet = new Vec3(support.x, support.y + 1, support.z);
     const below = b.blockAt(feet.offset(0, -1, 0));
     const here = b.blockAt(feet);
     const inWater = !!here && here.name === 'water';
