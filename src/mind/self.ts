@@ -54,6 +54,8 @@ export interface ObservedProgress {
 export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean }[]; setAt: number; updatedAt: number;
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
   progressAt?: number;
+  /** 清单内容被改写的时刻（只记文字真的变了的那几次，保留最近 20 次）；不算推进 */
+  revisedAt?: number[];
   /** 已观察的在线停滞时长；历史数据不足时只表示下限。 */
   stalledOnlineMs?: number;
   stalledObservedSince?: number;
@@ -384,9 +386,12 @@ export class SelfModel {
     if (!old) this.feel({ type: 'goal_set' });
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
     const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
+    const rewritten = !!old && old.steps.map((st) => st.text).join('|') !== cleaned.map((c) => c.text).join('|');
+    const revisedAt = rewritten ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
     this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
       progressAt: old ? old.progressAt ?? old.setAt : Date.now(),
+      ...(revisedAt?.length ? { revisedAt } : {}),
       ...(old?.stalledObservedSince !== undefined ? { stalledOnlineMs: old.stalledOnlineMs, stalledObservedSince: old.stalledObservedSince, stalledHistoryUnknown: old.stalledHistoryUnknown } : {}),
       ...(old?.setDay !== undefined ? { setDay: old.setDay } : {}),
       reviewDays: old?.reviewDays ?? SelfModel.REVIEW_DAYS[0] + this.rand() * (SelfModel.REVIEW_DAYS[1] - SelfModel.REVIEW_DAYS[0]) };

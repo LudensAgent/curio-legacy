@@ -381,7 +381,9 @@ function planRevisionHint(ctx: MindContext): string | null {
   const since = plan.progressAt ?? plan.setAt;
   const acts = ctx.self.history(60).filter((r) => r.at > since);
   if (acts.length < 3) return null;
-  const stuck = acts.filter((r) => r.outcome === 'stuck' || r.outcome === 'unmet');
+  // 改过清单之后，要等新清单也卡住两段才再提：否则停滞期间每次认真想都收到“可以改清单”，一念一改
+  const revised = Math.max(since, plan.revisedAt?.at(-1) ?? 0);
+  const stuck = acts.filter((r) => r.at > revised && (r.outcome === 'stuck' || r.outcome === 'unmet'));
   if (stuck.length < 2) return null;
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
@@ -606,7 +608,12 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
     }), ...(next >= 0 ? { next_item: next } : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
-      activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length } : { checklist: '还没有：写 plan' }),
+      activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,
+      // 改写清单不算推进：把这段时间改了几次、上次改在多久前摆出来，改不改仍由它定
+      ...(() => {
+        const rewrites = (plan.revisedAt ?? []).filter((t) => t > (plan.progressAt ?? plan.setAt));
+        return rewrites.length ? { checklist_rewrites_since_progress: rewrites.length, last_rewrite_wall_clock_min_ago: Math.round((Date.now() - rewrites.at(-1)!) / 60000) } : {};
+      })() } : { checklist: '还没有：写 plan' }),
     ...(ctx.activity ? { current_activity_for_goal: ctx.activity.agendaId === (plan?.agendaId ?? item!.id) } : {}),
     ...(ctx.suspended.length ? { will_resume_after_detour: ctx.suspended.map((a) => a.what) } : {}),
   };
