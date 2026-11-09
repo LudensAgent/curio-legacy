@@ -200,6 +200,12 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
+/** 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。 */
+export const VISION_FEED_MAX_CELLS = 512;
+/** 同一格名字没变时，隔这么久才重写一次（刷新新鲜度）。 */
+export const VISION_FEED_REFRESH_MS = 5000;
+/** 每条视线除命中格外，还写入命中前紧挨着的几格透明格（命中面上方的落脚/头部空间）。 */
+const FEED_TRAIL = 3;
 
 /** Nearest opaque shape hit, rather than the boundary of a thin block's voxel. */
 function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: number, dy: number, dz: number,
@@ -260,6 +266,8 @@ export class Vision {
 
   /** 上一份已可信开始的作用域（world/dim/session）；未就绪时清空，避免用旧边界接纳新证据。 */
   private spatialScope: string | null = null;
+  /** 已写进共享空间记忆的视线格：名字没变且未到刷新时间就不重写。 */
+  private fed = new Map<string, { name: string; at: number }>();
 
   constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION, private spatial?: SpatialObservationSink) {}
 
@@ -278,6 +286,7 @@ export class Vision {
       this.openness = { left: 0, center: 0, right: 0 };
       this.lastScanAt = 0;
       this.lastSweepAt = 0;
+      this.fed.clear();
       if (scope !== this.scope) {
         this.scopes.set(this.scope, { known: this.known, perName: this.perName });
         const saved = this.scopes.get(scope);
@@ -383,12 +392,31 @@ export class Vision {
       this.remember(k, name, { x, y, z }, now);
     };
 
+    // 本帧视线实际看到的格：第一处看清的命中面，以及命中前紧挨着的透明格。只写这些，不读视线外的方块。
+    type FeedCell = { x: number; y: number; z: number; name: string; d: number };
+    const feed = new Map<string, FeedCell>();
+    const keep = (c: FeedCell) => {
+      const k = keyOf(c.x, c.y, c.z), old = feed.get(k);
+      if (!old || c.d < old.d) feed.set(k, c);
+    };
+
     /** 一条视线：返回第一眼看到的表面类别与距离；沿途记录值得注意的方块 */
     const cast = (dx: number, dy: number, dz: number): { cat: Cat; dist: number } => {
       let hitCat: Cat | null = null;
       let hitDist = range;
       let water = 0, leaves = 0;
       let lx = ex, ly = ey, lz = ez;
+      const trail: FeedCell[] = [];
+      const pass = (x: number, y: number, z: number, name: string, d: number) => {
+        if (hitCat) return;
+        trail.push({ x, y, z, name, d });
+        if (trail.length > FEED_TRAIL) trail.shift();
+      };
+      const surface = (x: number, y: number, z: number, name: string, d: number) => {
+        if (hitCat) return;
+        keep({ x, y, z, name, d });
+        for (const c of trail) if (c.d <= seeRange(light(c.x, c.y, c.z))) keep(c);
+      };
       raycast(eye.x, eye.y, eye.z, dx, dy, dz, range, (x, y, z, d) => {
         if (y > 320 || y < -64) return true; // 出了世界高度
         if (sectionEmpty(x, y, z)) {
@@ -402,24 +430,28 @@ export class Vision {
         if (o.kind === 'clear') {
           if ((NOTABLE.has(o.name) || GROUND.has(o.name)) && d <= seeRange(light(x, y, z))) note(o.name, x, y, z, d); // 透明物体同样需要看清，之后仍可透过它看向别处
           lx = x; ly = y; lz = z;
+          pass(x, y, z, o.name, d);
           return false;
         }
         if (o.kind === 'solid' && o.shapes) {
           const hit = shapeHitDistance(o.shapes, eye, dx, dy, dz, x, y, z, range);
-          if (hit === null) { lx = x; ly = y; lz = z; return false; }
+          if (hit === null) { lx = x; ly = y; lz = z; pass(x, y, z, o.name, d); return false; }
           d = hit;
         }
         if (d > seeRange(light(lx, ly, lz))) { if (!hitCat) { hitCat = 'dark'; hitDist = d; } return true; }
         if (o.kind === 'water') {
+          surface(x, y, z, o.name, d);
           if (!hitCat) { hitCat = 'water'; hitDist = d; if (o.name === 'water') note('water', x, y, z, d); }
           return ++water > 6;
         }
         if (o.kind === 'foliage') {
           note(o.name, x, y, z, d);
+          surface(x, y, z, o.name, d);
           if (!hitCat) { hitCat = 'leaves'; hitDist = d; }
           return ++leaves >= 2;
         }
         note(o.name, x, y, z, d);
+        surface(x, y, z, o.name, d);
         if (!hitCat) { hitCat = catOf(o.name); hitDist = d; }
         return true;
       });
@@ -453,6 +485,19 @@ export class Vision {
       }
     }
     this.composition = comp;
+    // 视线看到的格写进共享空间记忆：只写变化或到刷新时间的格，近的先写，每帧有上限。
+    for (const [key, f] of this.fed) if (now - f.at > VISION_FEED_REFRESH_MS * 4) this.fed.delete(key);
+    const fresh = [...feed.entries()]
+      .filter(([key, c]) => { const old = this.fed.get(key); return !old || old.name !== c.name || now - old.at >= VISION_FEED_REFRESH_MS; })
+      .sort((a, b) => a[1].d - b[1].d).slice(0, VISION_FEED_MAX_CELLS);
+    if (fresh.length > 0 && this.admitSpatial(s, eye)) {
+      this.spatial!.observe(fresh.map(([key, c]) => {
+        this.fed.set(key, { name: c.name, at: now });
+        const pos = { x: c.x, y: c.y, z: c.z }, block = this.adapter.blockStateAt?.(pos);
+        return { name: block?.name ?? c.name, properties: { ...block?.properties }, stateComplete: block != null, pos, worldId: s.worldId, sessionId: s.sessionId,
+          dimension: s.dim, observationId: s.observationId, observedAt: now, source: 'vision' as const };
+      }));
+    }
     // 视距：在眼睛高度水平看出去（与低头/抬头无关），左/中/右各 3 条射线取平均，衡量前方是否开阔
     const sector = (from: number, to: number) => {
       let sum = 0;
@@ -578,6 +623,31 @@ export class Vision {
       .sort((a, b) => a.dist - b.dist);
   }
 
+  /**
+   * 共享空间记忆的写入准入（scan 与 observeBlocks 共用）：可信 ready 时，作用域变化或此前被中断就
+   * beginSession 一次；不 ready 时把已准入的旧证据中断一次并置 stale。没有共享记忆或正在关停时返回 false。
+   */
+  private admitSpatial(state: ReturnType<GameAdapter['state']>, eye: Eye | null): boolean {
+    if (this.spatial === undefined || this.spatial.closing) return false;
+    if (!(state.connected && state.alive && state.observationReady && state.dim !== 'unknown' && eye !== null)) {
+      // 实际可信状态已不 ready（例如同一 sessionId 下区块丢失）：已准入的旧证据
+      // 必须此刻中断一次并置 stale，不能等下一帧或下一次作用域变化。中断后准入为
+      // false，重复的未就绪读取不会再次 interrupt。
+      this.spatialScope = null;
+      if (this.spatial.observationAdmitted) this.spatial.interrupt();
+      return false;
+    }
+    const scopeKey = `${state.worldId}|${state.dim}|${state.sessionId}`;
+    // 真实 ready 的作用域变化，或此前已被中断（walk 生命周期可能先看到未就绪），
+    // 都需要 beginSession 重新准入。首次作用域变化即使本批最终没有合法观测也应
+    // 开始会话；但同一作用域/同一批之后绝不只为每批重复 begin。
+    if (scopeKey !== this.spatialScope || !this.spatial.observationAdmitted) {
+      this.spatial.beginSession({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
+      this.spatialScope = scopeKey;
+    }
+    return true;
+  }
+
   /** Inspect a bounded set of actual sight lines, never cached memory behind a wall. */
   observeBlocks(positions: Vec3Like[]): BlockObservation[] {
     const state = this.syncScope(), eye = this.adapter.eye();
@@ -585,24 +655,7 @@ export class Vision {
     // late reads; stop this shared writer without scanning further.
     if (this.spatial?.closing === true) return [];
     const trustedReady = state.connected && state.alive && state.observationReady && state.dim !== 'unknown' && eye !== null;
-    if (this.spatial !== undefined) {
-      if (!trustedReady) {
-        // 实际可信状态已不 ready（例如同一 sessionId 下区块丢失）：已准入的旧证据
-        // 必须此刻中断一次并置 stale，不能等下一帧或下一次作用域变化。中断后准入为
-        // false，重复的未就绪读取不会再次 interrupt。
-        this.spatialScope = null;
-        if (this.spatial.observationAdmitted) this.spatial.interrupt();
-        return [];
-      }
-      const scopeKey = `${state.worldId}|${state.dim}|${state.sessionId}`;
-      // 真实 ready 的作用域变化，或此前已被中断（walk 生命周期可能先看到未就绪），
-      // 都需要 beginSession 重新准入。首次作用域变化即使本批最终没有合法观测也应
-      // 开始会话；但同一作用域/同一批之后绝不只为每批重复 begin。
-      if (scopeKey !== this.spatialScope || !this.spatial.observationAdmitted) {
-        this.spatial.beginSession({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
-        this.spatialScope = scopeKey;
-      }
-    }
+    if (this.spatial !== undefined && !this.admitSpatial(state, eye)) return [];
     if (!trustedReady) return [];
     const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
     const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
