@@ -77,22 +77,21 @@ export function closeReasonOf(session: MovementSession, current: Vec3Like, now: 
 
 /**
  * 从冻结意图派生本段 waypoint。中间目标只是执行提示，不覆盖原意图。
- * - advance：沿冻结射线取“已推进 + 本段预算”处；Y 用当前脚高只作搜索提示，
- *   实际脚高仍由 land-search 按落点几何解析；
+ * - advance：沿冻结射线取“已推进 + 本段预算”处；Y 取该列已观测的、离当前脚高最近的站立面
+ *   （footY），没观测过才用当前脚高。Y 只作搜索提示，实际脚高仍由 land-search 按落点几何解析；
  * - navigate：原目标不变，分段上限只限制本次执行步数。
  */
-export function waypointOf(session: MovementSession, current: Vec3Like, maxStepsPerSegment: number): Vec3Like {
+export function waypointOf(session: MovementSession, current: Vec3Like, maxStepsPerSegment: number,
+  footY?: (x: number, z: number, aroundY: number) => number | null): Vec3Like {
   const intent = session.intent;
   if (intent.kind === 'navigate') return { ...intent.to };
   if (session.bearing === undefined) return { ...current };
   const { along } = project(session.frozenOrigin, session.bearing, current);
   const step = Math.max(1, Math.min(maxStepsPerSegment, intent.distance - along));
   const reach = Math.min(intent.distance, Math.max(0, along) + step);
-  return {
-    x: roundTo(session.frozenOrigin.x + session.bearing.x * reach, 0.5),
-    y: current.y,
-    z: roundTo(session.frozenOrigin.z + session.bearing.z * reach, 0.5),
-  };
+  const x = roundTo(session.frozenOrigin.x + session.bearing.x * reach, 0.5);
+  const z = roundTo(session.frozenOrigin.z + session.bearing.z * reach, 0.5);
+  return { x, y: footY?.(Math.floor(x), Math.floor(z), current.y) ?? current.y, z };
 }
 
 export function summaryOf(intent: MovementIntent): string {

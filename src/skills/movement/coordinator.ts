@@ -3,7 +3,7 @@ import { shortId } from '../../util.ts';
 import { fail, isAbort, ok, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
-import type { LandSearchBoundary } from '../../spatial/land-search.ts';
+import { observedFootY, type LandSearchBoundary } from '../../spatial/land-search.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -150,8 +150,10 @@ function blockerBoundaryOf(segment: SegmentReceipt): LandSearchBoundary | undefi
   };
 }
 
-function boundaryKeyOf(boundary: LandSearchBoundary): string {
-  return `${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}|${boundary.status}`;
+/** 边界去重键含观察者所在格：换了站位就是新的视角，允许再观察同一边界。 */
+function boundaryKeyOf(boundary: LandSearchBoundary, observer: Vec3Like): string {
+  return `${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}|${boundary.status}`
+    + `@${Math.floor(observer.x)},${Math.floor(observer.y)},${Math.floor(observer.z)}`;
 }
 
 function renderSummary(session: MovementSession, stop: StopReceipt, segments: readonly SegmentReceipt[]): string {
@@ -303,7 +305,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         request.invocationMaxTransitions - invocationTransitions,
         remainingCumulative,
       ));
-      const waypoint = waypointOf(session, state.pos, request.maxStepsPerSegment);
+      // 路点脚高取该列已观测的站立面（下坡/上坡时不再沿用当前脚高）；没观测过才用当前脚高。
+      const voxel = spatial.session.voxel;
+      const waypoint = waypointOf(session, state.pos, request.maxStepsPerSegment,
+        (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
         to: waypoint,
@@ -380,7 +385,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         // 横向授权 >0 时，先观察阻挡两侧的必要空间；相关证据变化才允许重搜，
         // 不把“正前方有阻挡”直接当成整条走廊无路。观察预算与去重沿用同一 session。
         const blockedBoundary = blockerBoundaryOf(segment);
-        const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary);
+        const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary, after.pos);
         const canObserveSides = session.intent.kind === 'advance' && session.intent.maxLateralDrift > 0
           && blockedBoundary !== undefined && boundaryKey !== undefined
           && session.counters.observations < session.budget.maxObservations
@@ -434,9 +439,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           });
           break;
         }
-        const boundaryKey = boundaryKeyOf(boundary);
+        const boundaryKey = boundaryKeyOf(boundary, after.pos);
         if (session.observedBoundaries?.includes(boundaryKey) === true) {
-          stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已观察过这个边界；没有新的相关证据时不重复观察/搜索', { boundaries: [boundary] });
+          stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已在这个站位观察过这个边界；没有新的相关证据时不重复观察/搜索', { boundaries: [boundary] });
           break;
         }
         if (session.counters.observations >= session.budget.maxObservations || session.counters.newObservedCells >= session.budget.maxObservedCells) {
@@ -459,8 +464,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.lastObservation = observation;
         session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey];
         session.updatedAt = Date.now();
+        // 段内已先走到证据前缀端点，观察就是在新站位朝边界做的；没有相关变化时从同一站位重搜不会有新结果。
         if (!observation.relatedChanged) {
-          stop = stopOf('UNKNOWN_BOUNDARY', '观察后相关边界证据没有变化，不重复搜索同一未知边界', { boundaries: [boundary] });
+          stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', { boundaries: [boundary] });
           break;
         }
         session.phase = 'replanning';
