@@ -123,3 +123,15 @@ test('explore_toward 末段按 travel_to 的到达半径算走完：停在 93/96
   assert.equal(r.data?.stopReason, 'DISTANCE_MET');
   assert.ok((r.data?.progress as { along: number }).along >= 93);
 });
+
+test('explore_toward 段终点一直没走到、只顺带往前蹭几格：算卡住并停下，不在原地附近绕圈', async () => {
+  // 每跳往前 1 格、左右摆 5 格：travel_to 每段都报 NO_PROGRESS，但每段沿方向仍推进 ~3 格。
+  let flip = 1;
+  const h = harness({ walk: (_goal, from) => ({ x: from.x + 1, y: from.y, z: 0.5 + (flip = -flip) * 5 }) });
+  const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 96 }, h.adapter));
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.stopReason, 'NO_ALONG_PROGRESS', r.summary);
+  assert.ok((r.data?.segmentCount as number) <= 3, `最多几段就停，实际 ${r.data?.segmentCount} 段`);
+  assert.match(r.summary, /没走到段终点/);
+  assert.match(r.summary, /allowPlace/);
+});
