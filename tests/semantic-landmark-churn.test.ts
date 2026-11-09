@@ -26,3 +26,22 @@ test('反复看见同一处资源不再每帧写拓扑；同一修订号内查�
   try { memory.addLandmark('resource', 'nether_quartz_ore', 'the_nether', { x: 5, y: 60, z: 5 }); } finally { Date.now = real; }
   assert.ok(stores.topology.revision > revision, '超过刷新间隔才写一次');
 });
+
+test('同一修订号内反复查地标复用同一份语义节点拷贝，写入后立即看到新内容', () => {
+  const { memory, stores } = semanticMemory();
+  for (let i = 0; i < 50; i++) memory.addLandmark('resource', `ore_${i}`, 'the_nether', { x: i * 40, y: 60, z: 0 });
+  memory.landmarks();
+  let reads = 0;
+  const getNode = stores.topology.getNode.bind(stores.topology);
+  stores.topology.getNode = ((id) => { reads++; return getNode(id); }) as typeof stores.topology.getNode;
+
+  // 一帧里按视野方块逐格查：100 次查询不应每次都把 50 个节点重新深拷贝一遍。
+  for (let i = 0; i < 100; i++) memory.landmarks();
+  assert.equal(reads, 0, `同一修订号内不重新拷贝节点，实际读了 ${reads} 次`);
+
+  memory.addLandmark('danger', 'lava', 'the_nether', { x: 999, y: 60, z: 0 });
+  assert.ok(memory.landmarks().some((l) => l.label === 'lava'), '写入后缓存失效，新地标可见');
+  const victim = memory.landmarks().find((l) => l.label === 'ore_3')!;
+  memory.removeLandmark(victim.id);
+  assert.ok(!memory.landmarks().some((l) => l.id === victim.id), '删除后缓存失效');
+});
