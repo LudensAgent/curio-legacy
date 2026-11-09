@@ -30,6 +30,11 @@ test('空间记忆是 plan_route 的 source，不再是单独的导航技能', (
   assert.doesNotMatch(directory, /plan_memory_route/);
 });
 
+test('基础下行辅助不被进阶动作正则误藏', () => {
+  assert.match(movesCatalog(28), /^- descend_to /m, 'descend_to 是基础移动辅助，应在静态目录里给完整参数');
+  assert.doesNotMatch(advancedMovesLine(), /descend_to/, 'descend_to 不是下界/末地动作，不应等进阶情境才出现');
+});
+
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
   assert.match(directory, /常用动作.*walk_path/);
