@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { openSpatialSession, portalTraversalIdentity } from 'curio-minecraft-3d-memory/storage/sqlite';
+import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
 import type { JsonObject, PathFragment, SpatialNode } from 'curio-minecraft-3d-memory';
 import type { ChestRecord, FurnaceRecord } from '../src/memory/store.ts';
 import { ContainerLedger, type ContainerEntry, type FurnaceEntry } from '../src/memory/container-ledger.ts';
@@ -33,7 +34,7 @@ for (const arg of process.argv.slice(2)) {
 const database = args.get('database');
 const worldId = args.get('world-id');
 if (!database || !worldId) {
-  process.stderr.write('usage: spatial-normalize --database=<path> --world-id=<id> [--container-ledger=<path>] [--travel-memory=<path>] [--report=<path>] [--backup=<path>] [--execute]\n');
+  process.stderr.write('usage: spatial-normalize --database=<path> --world-id=<id> [--container-ledger=<path>] [--travel-memory=<path>] [--report=<path>] [--backup=<path>] [--snapshot-max-mb=<n>] [--execute]\n');
   process.exit(1);
 }
 const containerPath = resolve(args.get('container-ledger') ?? join(dirname(dirname(resolve(database))), 'containers.json'));
@@ -99,7 +100,26 @@ if (!execute) {
   backupDatabase(resolve(database), backupPath);
 }
 
-const session = await openSpatialSession({ databasePath: workingDatabase, worldId, timeoutMs: 30_000 });
+// 必须用运行时同样的上限打开：库默认（4096 links / 64MB 快照）比运行时小，运行时能读的长矿道 fragment
+// 与大快照在这里读不进来（实机 live 库：6053 links、73MB 快照，打开即原生崩溃）。
+const snapshotMaxMb = Number(args.get('snapshot-max-mb') ?? DEFAULT_SNAPSHOT_MAX_MB);
+if (!Number.isFinite(snapshotMaxMb) || snapshotMaxMb <= 0) {
+  process.stderr.write('--snapshot-max-mb 必须是正数\n');
+  process.exit(1);
+}
+/** 删除 dry-run 的临时副本：副本本身、WAL/SHM，以及库升级 schema 时给副本自动留的 pre-vN 备份（不碰原库和它的备份）。 */
+function removeDryRunCopies() {
+  const dir = dirname(workingDatabase), base = workingDatabase.slice(dir.length + 1);
+  for (const name of readdirSync(dir)) {
+    if (name === base || name.startsWith(`${base}-`) || name.startsWith(`${base}.pre-v`)) rmSync(join(dir, name), { force: true });
+  }
+  rmSync(workingContainerPath, { force: true });
+}
+
+const session = await openSpatialSession({
+  databasePath: workingDatabase, worldId, timeoutMs: 30_000,
+  snapshotLimits: { maxBytes: Math.round(snapshotMaxMb * 1024 * 1024) }, fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+});
 const containers = new ContainerLedger(workingContainerPath, worldId);
 const actions = {
   chestContents: 0,
@@ -386,16 +406,10 @@ try {
     writeFileSync(resolve(reportPath), `${JSON.stringify(report, null, 2)}\n`);
   }
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (!execute) {
-    rmSync(workingDatabase, { force: true });
-    rmSync(workingContainerPath, { force: true });
-  }
+  if (!execute) removeDryRunCopies();
   process.exitCode = state.dirty || !close.completed ? 1 : 0;
 } catch (error) {
   await session.close();
-  if (!execute) {
-    rmSync(workingDatabase, { force: true });
-    rmSync(workingContainerPath, { force: true });
-  }
+  if (!execute) removeDryRunCopies();
   throw error;
 }

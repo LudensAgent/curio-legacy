@@ -216,7 +216,7 @@ const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
- "next":{同 activity，可提前写下一段；手上的活成功结束后再接上}}
+ "next":{同 activity，可提前写下一段；手上的活成功结束后无条件接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next}}
 手上还有活要接着做就只写 decision:"continue"，不要写 activity；要做新的一段或换做法，写 decision:"new"/"adjust"/"switch"（不要写 continue）。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;

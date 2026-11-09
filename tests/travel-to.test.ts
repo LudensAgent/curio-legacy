@@ -63,6 +63,7 @@ test('travel_to 按 ≤24 格分跳执行并实测到达；默认不挖不放、
   assert.ok(opts.avoid?.includes('magma_block'));
   assert.equal(opts.allowSwimming, false, '默认不下水，寻路器排除水格');
   assert.equal(opts.searchRadius, 48, '单跳绕路有上限');
+  assert.equal(opts.lavaEdgeCost, 10, '默认离岩浆边远一点');
   assert.equal(result.data?.backend, 'pathfinder');
   assert.equal((result.data?.nav as { outcome: string }).outcome, 'ARRIVED');
   assert.ok(Math.abs(at().x - 60.5) < 1);
@@ -141,4 +142,10 @@ test('travel_to 没授权下水却掉进水里：立刻停下报 IN_WATER 与氧
   assert.equal(r.failureCode, 'STUCK');
   assert.match(r.summary, /进了水，已停下，氧气 12\/20/);
   assert.equal(h.calls.length, 2, '掉进水的那一跳之后不再发新的寻路');
+});
+
+test('travel_to allowHazard:true 时不额外加岩浆边代价', async () => {
+  const h = harness();
+  await travelTo.run(h.ctx, argsOf({ to: '30,0', allowHazard: true }, h.adapter));
+  assert.equal(h.calls[0].opts.lavaEdgeCost, undefined);
 });

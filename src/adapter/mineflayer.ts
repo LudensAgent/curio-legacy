@@ -1032,6 +1032,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         // blocksToAvoid 只拦身体所在格；岩浆块、营火这类实心/可站的方块还要拦“站在上面”：落脚格的支撑是它就不走。
         movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => avoidIds.has(movements.getBlock(block.position, 0, -1, 0)?.type) ? 100 : 0];
       }
+      // 贴着岩浆走一下击退就会掉进去：按委托给站位四邻的岩浆加代价，让路线离岩浆边远一点（每步 ≤40，低于 100 的“不能走”阈值）。
+      if (opts.lavaEdgeCost && this.mcData?.blocksByName?.lava) {
+        const lavaId = this.mcData.blocksByName.lava.id, per = opts.lavaEdgeCost;
+        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => {
+          let n = 0;
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, -1]) {
+            if (movements.getBlock(block.position, dx, dy, dz)?.type === lavaId) n++;
+          }
+          return Math.min(40, n * per);
+        }];
+      }
       // 默认走路，调用方明确 sprint:true 才跑（逃离也不例外）：冲刺每格都在消耗饥饿值，走路几乎不耗；跑不跑由委托方定
       movements.allowSprinting = opts.sprint === true;
       if (opts.maxDropDown !== undefined) {
@@ -4339,16 +4350,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const danger = (): DriveResult['stopped'] | null => {
       if (opts.guard === false) return null;
       const v = b.entity.velocity ?? { x: 0, z: 0 };
-      const speed = Math.hypot(v.x, v.z);
-      if (speed < 0.02) return null;
-      const ahead = b.entity.position.offset((v.x / speed) * 0.7, 0, (v.z / speed) * 0.7);
+      let speed = Math.hypot(v.x, v.z), dir = { x: v.x, z: v.z };
+      // 刚起步时速度还很小：按按下的方向键和朝向推算要去的方向，不等身体已经迈出去才看
+      if (speed < 0.02) {
+        const f = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0), r = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+        if (!f && !r) return null; // 只跳/潜行：没有水平去向
+        const yaw = b.entity.yaw ?? 0, fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+        dir = { x: fx * f - fz * r, z: fz * f + fx * r };
+        speed = Math.hypot(dir.x, dir.z);
+        if (speed < 0.01) return null;
+      }
+      const ahead = b.entity.position.offset((dir.x / speed) * 0.7, 0, (dir.z / speed) * 0.7);
       const at = (dy: number) => b.blockAt(ahead.offset(0, dy, 0))?.name ?? null;
       // 走进传送门（下界门/末地门/折跃门）不算地形危险：门会接住人并传送。
       // 是否允许非预期传送是调用方的显式委托（allowPortal），guard 本身不保证避开传送门。
       if (/^(nether_portal|end_portal|end_gateway)$/.test(at(0) ?? '')) return opts.allowPortal === false ? 'portal' : null;
-      if ([0, -1].some((dy) => /^(lava|fire|soul_fire|magma_block|campfire|soul_campfire)$/.test(at(dy) ?? ''))) return 'lava';
+      const hazard = (n: string | null) => /^(lava|fire|soul_fire|magma_block|campfire|soul_campfire)$/.test(n ?? '');
+      if ([0, -1].some((dy) => hazard(at(dy)))) return 'lava';
       if (!b.entity.onGround) return null;
       const open = (n: string | null) => n === null || AIR_BLOCKS.has(n);
+      // 前方脚下是空的：顺着往下找第一格非空气，是岩浆/火就是要掉进去（实机：举盾后撤从一格台阶退进下面的岩浆）
+      if (open(at(-1))) for (let dy = -2; dy >= -5; dy--) { const n = at(dy); if (open(n)) continue; if (hazard(n)) return 'lava'; break; }
       if (open(at(-1)) && open(at(-2)) && open(at(-3)) && open(at(-4))) return 'cliff';
       return null;
     };

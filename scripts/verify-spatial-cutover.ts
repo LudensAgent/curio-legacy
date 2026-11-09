@@ -4,19 +4,29 @@
  *
  * Open a copy of the database, never the live one while the Agent is running.
  */
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SpatialNode } from 'curio-minecraft-3d-memory';
 import { ContainerLedger } from '../src/memory/container-ledger.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { SpatialSemanticStore } from '../src/spatial/semantic-store.ts';
+import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
 
 const [database, worldId, dim = 'overworld', containerLedger] = process.argv.slice(2);
 if (!database || !worldId) {
   process.stderr.write('usage: verify-spatial-cutover <database-copy> <worldId> [dim] [container-ledger]\n');
   process.exitCode = 1;
+} else if (!existsSync(resolve(database))) {
+  // 只读校验：路径不存在时打开会新建一个空库，结果全是 0，还会留下一个空库文件
+  process.stderr.write(`verify-spatial-cutover: database not found: ${resolve(database)}\n`);
+  process.exitCode = 1;
 } else {
-  const session = await openSpatialSession({ databasePath: resolve(database), worldId, timeoutMs: 30_000 });
+  // 与运行时同样的上限打开：库默认比运行时小，运行时能读的库会在这里被误判
+  const session = await openSpatialSession({
+    databasePath: resolve(database), worldId, timeoutMs: 30_000,
+    snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+  });
   try {
     const containers = new ContainerLedger(containerLedger ? resolve(containerLedger) : null, worldId);
     const semantic = new SpatialSemanticStore(session, containers, { worldId });

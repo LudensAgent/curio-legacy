@@ -270,6 +270,8 @@ export function oreOpportunityFact(
 /** 镐的档次从低到高；不同档次能挖的方块不同，材料稀缺时先看更便宜的替代。 */
 const PICK_TIERS = ['wooden', 'stone', 'iron', 'diamond'] as const;
 type PickTier = typeof PICK_TIERS[number];
+/** 原版镐的挖掘速度系数（对应材质的方块，无附魔）。 */
+const PICK_SPEED: Record<PickTier, number> = { wooden: 2, stone: 4, iron: 6, diamond: 8 };
 const PICK_ZH: Record<PickTier, string> = { wooden: '木镐', stone: '石镐', iron: '铁镐', diamond: '钻石镐' };
 
 /**
@@ -349,6 +351,8 @@ export function toolTierFact(input: {
   ].filter(Boolean).join('；');
   const heldPick = held?.endsWith('_pickaxe') ? held : null;
   const alreadyHeld = heldPick === cheapName;
+  // 正拿着不可补的高阶镐在挖：这正是要掂量的时刻，必须单独说清代价（实机：给了铁镐马上换上去挖石头阶梯）
+  const heldHigh = heldPick === `${high}_pickaxe`;
   const matZh = high === 'iron' ? '铁锭' : '钻石';
   const parts = [`你包里有${highZh}×${highItem.count}（${durText(highItem)}），${matZh}只剩 ${scarce} 个${scarce < 3 ? `，现在做不出新的${highZh}` : ''}（做一把新的要 3 个）`];
   if (choice.item) {
@@ -357,7 +361,11 @@ export function toolTierFact(input: {
       ? `包里还有${cheapZh}×${choice.item.count}（${durText(choice.item)}，合计还能挖约 ${left} 格）`
       : `包里的${cheapZh}×${choice.item.count}（${durText(choice.item)}）剩余都不足 15%，合计还能挖约 ${left} 格`);
   } else parts.push(`包里没有${cheapZh}`);
-  if (heldPick) parts.push(`现在主手是 ${heldPick}`);
+  if (heldHigh) parts.push(`现在主手就是${highZh}：每挖一格都耗它 1 点耐久${scarce < 3 ? '，坏了没得补' : ''}`);
+  else if (heldPick) parts.push(`现在主手是 ${heldPick}`);
+  // 速度是换高阶镐唯一的好处，把它也量化摆出来（原版 1.20.1：石头硬度 1.5，镐速 木2/石4/铁6/钻8，无附魔、站在地上）
+  const stoneSecs = (tier: PickTier) => Math.round(1.5 * 1.5 / PICK_SPEED[tier] * 20) / 20;
+  parts.push(`挖普通石头每格约：${cheapZh} ${stoneSecs(choice.tier)} 秒、${highZh} ${stoneSecs(high)} 秒（无附魔；深板岩约翻倍）`);
   // 便宜镐能不能补、补一把要什么，是和高阶镐“坏了没得补”对照的关键事实；即使现有便宜镐还可用也报，
   // 否则很容易被理解成“石镐是稀缺备份，留着别用”。
   // 背包和箱子分开算：箱子里有材料不等于现在能做；否则会提示“材料已经够了”，
@@ -382,7 +390,8 @@ export function toolTierFact(input: {
   const gap = `${choice.item && usable(choice.item) ? 'usable' : 'worn'}:${refill}`;
   const key = [
     `tier:${high}`,
-    `held:${heldPick ? 'pickaxe' : 'none'}`,
+    // 主手换到不可补的高阶镐要重新说一次；便宜镐之间来回换不重发
+    `held:${heldHigh ? 'high' : heldPick ? 'pickaxe' : 'none'}`,
     `cheap:${choice.tier}:${choice.item?.count ?? 0}:${bucket(choice.item)}`,
     `high:${highItem.count}:${bucket(highItem)}`,
     `mat:${scarce}`,

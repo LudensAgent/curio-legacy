@@ -69,3 +69,31 @@ test('hurt on dry land still stops unrelated work', async (t) => {
   assert.notEqual(w.arbiter.info()?.skill, 'press_keys', '陆地上挨打仍应停下手上的事');
   assert.ok(w.events.some((e) => e.type === 'notice' && /手上的事先停了/.test(e.msg)));
 });
+
+async function startDryTask(t: TestContext) {
+  const w = fixture(t, 'press_keys');
+  const events: { type: string; msg: string }[] = [];
+  w.bus.on('event', (e: { type: string; msg: string }) => events.push(e));
+  w.adapter.inWater = false;
+  w.adapter.entities = [];
+  w.mind.tick();
+  const started = w.arbiter.start({ skill: 'press_keys', args: { keys: { forward: true }, ms: 10000 } }, 'llm');
+  if ('error' in started) assert.fail(started.error);
+  await flush();
+  return { ...w, events };
+}
+
+test('没有怪但身上着火掉血：停下手上的移动，把伤害事实交回心智（不替它脱险）', async (t) => {
+  const w = await startDryTask(t);
+  w.bus.publish('hurt', 'P1', '受到伤害', { around: '身体碰着 soul_sand、身上着火' });
+  await sleep(850);
+  assert.notEqual(w.arbiter.info()?.skill, 'press_keys', '环境掉血也要停下手上的事');
+  assert.ok(w.events.some((e) => e.type === 'notice' && /掉血.*身上着火.*手上的事先停了/.test(e.msg)));
+});
+
+test('没有怪、也没有伤害原因的挨打（来源不明）不打断', async (t) => {
+  const w = await startDryTask(t);
+  w.bus.publish('hurt', 'P1', '受到伤害');
+  await sleep(850);
+  assert.equal(w.arbiter.info()?.skill, 'press_keys');
+});

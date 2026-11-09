@@ -63,7 +63,9 @@ const DEFAULT_TIMEOUT_MS = 5000;
 
 /** 单条通道 fragment 的 links 上限。库默认 4096，但长期沿一条主矿道行走会持续追加走过的边
  *  （线上已出现 4107 条，落盘时被拒并产生 P0）；提高到 16384 给长矿道留出余量。 */
-const MAX_FRAGMENT_LINKS = 16_384;
+export const MAX_FRAGMENT_LINKS = 16_384;
+/** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
+export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
 /** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
 const MAX_WALK_TOPOLOGY_NODES = 8;

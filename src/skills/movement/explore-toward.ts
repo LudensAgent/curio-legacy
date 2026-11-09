@@ -25,7 +25,7 @@ type ExploreArgs = {
 export const MAX_EXPLORE_DISTANCE = 512;
 /** 每段交给 travel_to 的到达半径（格）；走完全程的判定与它一致，否则每段都“到了”却永远差几格算不上走完。 */
 const SEGMENT_RANGE = 3;
-/** 连续这么多段沿方向推进不足 2 格就停（没挪动，或只是横着/往回走），不在原地或侧向反复试。 */
+/** 连续这么多段没走到段终点、或沿方向推进不足 2 格就停（没挪动，或只是横着/往回走），不在原地或侧向反复试。 */
 const MAX_STUCK_SEGMENTS = 2;
 
 const round1 = (v: number) => Math.round(v * 10) / 10;
@@ -38,7 +38,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
+  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走，每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段没走到段终点、沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
   argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
@@ -134,7 +134,11 @@ export const exploreToward: Skill<ExploreArgs> = {
         // 进展按沿冻结方向的实测推进算：横着走或往回绕不算前进（下界岩洞里 pathfinder 可能绕出反方向的路）。
         const now = project(end);
         if (Math.abs(now.lateral) > args.maxLateralDrift) { stop = 'LATERAL_DRIFT'; break; }
-        if (now.along >= bestAlong + 2) { bestAlong = now.along; stuck = 0; }
+        const gained = now.along >= bestAlong + 2;
+        if (gained) bestAlong = now.along;
+        // 这一段 travel_to 没走到段终点（正前方与偏转都试过）也算卡住，哪怕顺带往前蹭了几格：
+        // 实机下界两段都 NO_PROGRESS、各往前蹭 9 格和 3 格，按“推进 ≥2 格”一直不停，在原地附近绕圈。
+        if (gained && hop.status === 'succeeded') stuck = 0;
         else if (++stuck >= MAX_STUCK_SEGMENTS) { stop = Math.hypot(end.x - segStart.x, end.z - segStart.z) >= 2 ? 'NO_ALONG_PROGRESS' : 'BLOCKED'; break; }
       }
     } catch (e) {
@@ -168,7 +172,7 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (stop === 'UNTIL_SEEN') return ok(`往 ${args.direction} 探索途中看见 ${args.until}：${measured}${effects}；看见的位置见 sighting`, facts);
     const why = {
       BLOCKED: `连续 ${MAX_STUCK_SEGMENTS} 段几乎没挪动（最后一段：${lastFailure?.summary.slice(0, 160) ?? '无'}）`,
-      NO_ALONG_PROGRESS: `连续 ${MAX_STUCK_SEGMENTS} 段沿 ${args.direction} 推进不足 2 格（身体在动，但是横着或往回绕）`,
+      NO_ALONG_PROGRESS: `连续 ${MAX_STUCK_SEGMENTS} 段没走到段终点或沿 ${args.direction} 推进不足 2 格（身体在动，寻路在附近横着/往回绕；正前方与偏转都没走通）`,
       LATERAL_DRIFT: `横向偏离冻结方向超过 ${args.maxLateralDrift} 格（绕路太远；maxLateralDrift 可放宽到 64）`,
       TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
       DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
