@@ -1023,6 +1023,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         movements.scafoldingBlocks = allowPlace ? [...this.normalMovements.scafoldingBlocks] : [];
         movements.allow1by1towers = allowTower && this.normalMovements.allow1by1towers;
       }
+      if (opts.noPlaceAt?.length) {
+        const banned = new Set(opts.noPlaceAt.map((p) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`));
+        // 权重远超 pathfinder 的 100「不能走」阈值：带这个放置的候选步直接被丢弃。
+        movements.exclusionAreasPlace = [...movements.exclusionAreasPlace, (block: any) =>
+          banned.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 1000 : 0];
+      }
       movements.allowParkour = false;
       // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
       if (opts.avoid?.length) {

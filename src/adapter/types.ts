@@ -185,6 +185,8 @@ export interface MoveOpts {
   allowPlace?: boolean;
   /** 是否允许寻路原地搭柱；未指定时沿用 allowPlace。 */
   allowTower?: boolean;
+  /** 寻路垫脚/搭桥不得往这些格子放方块（例如门框格与门内空间）；只限制放置，不限制行走。 */
+  noPlaceAt?: Vec3Like[];
   /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
   allowSwimming?: boolean;
   /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路（逃离也一样，要跑就写 true） */

@@ -46,6 +46,40 @@ test('build_portal places exactly ten obsidian and records only the activated po
   assert.deepEqual(snapshot.routes, []);
 });
 
+test('build_portal allowTower 授权寻路垫脚，且禁止往门框与门内放方块', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 4);
+  const calls: { pos: { x: number; y: number; z: number }; opts: Parameters<FakeAdapter['moveTo']>[1] }[] = [];
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'place_block') calls.push({ pos: target.pos, opts });
+    return moveTo(target, opts);
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.ok(calls.length > 0 && calls.every((c) => c.opts.allowPlace === true && c.opts.allowTower === true));
+  const banned = new Set(calls[0].opts.noPlaceAt!.map((p) => `${p.x},${p.y},${p.z}`));
+  for (const key of ['4,64,0', '5,66,0', '3,67,0', '4,67,0', '6,65,0']) assert.ok(banned.has(key), `门框/门内 ${key} 禁止垫脚`);
+});
+
+test('build_portal 未授权垫脚时不替 Agent 搭柱，够不到就报出那一格离脚多高', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 4);
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    assert.notEqual(opts.allowTower, true);
+    if (target.kind === 'place_block' && target.pos.y >= 66) throw new Error('PLACEMENT_NOT_REACHABLE');
+    return moveTo(target, opts);
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
+  assert.equal(outcome.result.status, 'failed');
+  assert.match(outcome.result.summary, /PLACEMENT_NOT_REACHABLE.*比脚高 \d+ 格.*allowTower/);
+});
+
 test('a refused ignition cannot produce a successful portal record', async () => {
   const { adapter, memory, run } = setup();
   adapter.inv.set('obsidian', 10);

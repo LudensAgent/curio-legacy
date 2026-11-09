@@ -23,10 +23,10 @@ function knownPortals(store: ReturnType<typeof travelStore>, worldId: string) {
   ).join('；') || '（还没有记录任何门）';
 }
 
-export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
+export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower: boolean }> = {
   name: 'build_portal',
-  description: '在身边用 10 块黑曜石建最小下界门并用打火石点燃；逐块验收，记录实际门位置。需要少量施工支撑块。',
-  argsDoc: '{"origin"?:{"x":number,"y":number,"z":number},"axis"?:"x"|"z"}',
+  description: '在身边用 10 块黑曜石建最小下界门并用打火石点燃；逐块验收，记录实际门位置。需要少量施工支撑块。门框上段离地 2–3 格，站在地面看不到可贴的面；allowTower:true 时允许原地垫方块站高去放（消耗圆石/泥土/下界岩等，垫的柱子不拆，不往门框和门内放），不写则够不到就停下并报告是哪一格。',
+  argsDoc: '{"origin"?:{"x":number,"y":number,"z":number},"axis"?:"x"|"z","allowTower"?:boolean}',
   timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw);
@@ -34,7 +34,8 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
     const origin = value.origin ?? { x: Math.floor(here.x) + 3, y: Math.floor(here.y) - 1, z: Math.floor(here.z) };
     if (![origin.x, origin.y, origin.z].every(Number.isInteger) || dist3(origin, here) > 24) return { ok: false, error: 'origin 必须是 24 格内的整数坐标' };
     if (value.axis !== undefined && value.axis !== 'x' && value.axis !== 'z') return { ok: false, error: 'axis 必须是 x 或 z' };
-    return { ok: true, args: { origin, axis: value.axis ?? 'x' } };
+    if (value.allowTower !== undefined && typeof value.allowTower !== 'boolean') return { ok: false, error: 'allowTower 必须是 true 或 false' };
+    return { ok: true, args: { origin, axis: value.axis ?? 'x', allowTower: value.allowTower === true } };
   },
   async run(ctx, args) {
     const { adapter, signal } = ctx;
@@ -57,9 +58,19 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z' }> = {
     // 这次要开始立框（新开工），也记下：中途失败/被中断都能回同一处补全
     ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
     let placed = 0;
+    // 门框格与门内空间：垫脚时不能往这里放方块，否则门框错位或门内被堵。
+    const keepClear = [0, 1, 2, 3, 4].flatMap((y) => [0, 1, 2, 3].map((u) => at(u, y)));
     const place = async (pos: Vec3Like, name: string) => {
       throwIfAborted(signal);
-      await adapter.moveTo({ kind: 'place_block', pos }, { signal, timeoutMs: 20000 });
+      try {
+        await adapter.moveTo({ kind: 'place_block', pos }, args.allowTower
+          ? { signal, timeoutMs: 20000, allowPlace: true, allowTower: true, noPlaceAt: keepClear }
+          : { signal, timeoutMs: 20000 });
+      } catch (error) {
+        if (isAbort(error) || args.allowTower) throw error;
+        const feet = Math.floor(adapter.state().pos.y);
+        throw new Error(`${(error as Error).message}：(${pos.x},${pos.y},${pos.z}) 比脚高 ${pos.y - feet} 格，本次未授权垫脚（allowTower 未开），寻路没有找到能看到它贴附面的站位`);
+      }
       const result = await adapter.placeBlockAt(pos, [name], signal);
       if (!result.ok || adapter.blockAt(pos) !== name) throw new Error(result.reason ?? `PLACEMENT_MISMATCH:${name}`);
     };
