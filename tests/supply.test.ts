@@ -139,16 +139,19 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   assert.match(f.text, /换不换、做不做由你定/);
   assert.match(f.key, /tier:iron/);
   assert.match(f.key, /cheap:stone:1:ok/);
-  // 主手拿着便宜镐时不要再叫它去拿；主手是否拿镐进 key，但两把镐之间换手不改 key（避免重播同一句）
+  // 主手拿着便宜镐时不要再叫它去拿
   const heldCheap = toolTierFact({ inventory: inv, held: 'stone_pickaxe', digging: true })!;
   assert.match(heldCheap.text, /主手就是石镐/);
   assert.doesNotMatch(heldCheap.text, /要换就先 hold_item stone_pickaxe/);
   assert.match(heldCheap.key, /held:pickaxe/);
-  assert.equal(
-    toolTierFact({ inventory: inv, held: 'iron_pickaxe', digging: true })!.key,
-    heldCheap.key,
-    '铁镐/石镐之间换手不改变 key，最多等 30 秒冷却',
-  );
+  // 速度是换高阶镐唯一的好处：两边都量化摆出来
+  assert.match(heldCheap.text, /挖普通石头每格约：石镐 0\.55 秒、铁镐 0\.4 秒/);
+  // 换到不可补的铁镐上挖：要重新说一次，并说清每格都在耗它（实机：给了铁镐马上换上去挖石头阶梯，之后再没提示）
+  const heldHigh = toolTierFact({ inventory: inv, held: 'iron_pickaxe', digging: true })!;
+  assert.notEqual(heldHigh.key, heldCheap.key, '换到不可补的高阶镐上必须重新提示');
+  assert.match(heldHigh.key, /held:high/);
+  assert.match(heldHigh.text, /现在主手就是铁镐：每挖一格都耗它 1 点耐久，坏了没得补/);
+  assert.match(heldHigh.text, /要用现有石镐就先 hold_item stone_pickaxe/);
   assert.notEqual(
     toolTierFact({ inventory: [item('iron_pickaxe', 1), item('stone_pickaxe', 1, { durability: { left: 1, max: 131 } }), item('iron_ingot', 0)], digging: true })!.key,
     f.key,
@@ -256,6 +259,6 @@ test('toolTierFact：稀缺材料按箱子账本合计，held 进 key', () => {
   })!;
   assert.match(f.text, /铁锭只剩 1 个/);
   assert.match(f.text, /再做一把石镐：做 stone_pickaxe×1/);
-  assert.match(f.key, /held:pickaxe/);
+  assert.match(f.key, /held:high/, '主手是不可补的铁镐');
   assert.match(f.key, /mat:1/);
 });
