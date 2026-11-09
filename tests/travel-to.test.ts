@@ -165,6 +165,25 @@ test('travel_to 剩余主要是高差时不做水平偏转绕圈，直接报目�
   assert.match(r.summary, /目标在下方 54 格/);
 });
 
+test('travel_to 已加载范围内的三维目标直接以真实目标寻路，不先走一个只按水平方向定的中间点', async () => {
+  const h = harness();
+  await travelTo.run(h.ctx, argsOf({ to: { x: 40, y: 87, z: 0 }, range: 3 }, h.adapter));
+  assert.deepEqual(h.calls[0]!.target, { kind: 'near', pos: { x: 40, y: 87, z: 0 }, range: 3 });
+});
+
+test('travel_to 超出直接寻路范围的三维目标：中间跳限制终点高度，不让一跳带着下到矿道', async () => {
+  const h = harness();
+  await travelTo.run(h.ctx, argsOf({ to: { x: 100, y: 87, z: 0 }, range: 3 }, h.adapter));
+  const hop = h.calls[0]!.target;
+  assert.equal(hop.kind, 'xz');
+  // 出发 y64、目标 y87：高差 23，允许最多再多一次行走下落（4 格）
+  assert.deepEqual(hop.kind === 'xz' ? hop.footY : null, [87 - 27, 87 + 27]);
+  const flat = harness();
+  await travelTo.run(flat.ctx, argsOf({ to: { x: 40, z: 0 } }, flat.adapter));
+  const free = flat.calls[0]!.target;
+  assert.equal(free.kind === 'xz' ? free.footY : 'not-xz', undefined, '只给水平坐标的目标不约束高度');
+});
+
 test('travel_to 沿历史片段遇到竖井走不通时，放弃路点并说明是多少格的直上直下段', async () => {
   const cells = [...Array.from({ length: 4 }, (_, i) => ({ x: i, y: 64, z: 0 })), ...Array.from({ length: 24 }, (_, i) => ({ x: 3, y: 63 - i, z: 0 }))];
   const fragment = { id: 'shaft', worldId: 'w', dim: 'overworld', kind: 'dug', entrances: [], polyline: [cells[0]!], geometrySource: 'legacy',

@@ -165,7 +165,8 @@ export interface AgentState {
 
 export type MoveTarget =
   | { kind: 'near'; pos: Vec3Like; range: number }
-  | { kind: 'xz'; x: number; z: number; range: number }
+  /** footY：可选的终点脚格高度范围 [min,max]（含端点）；不写则任何高度都算到达。 */
+  | { kind: 'xz'; x: number; z: number; range: number; footY?: [number, number] }
   /** 站到这一格；y 是脚高，可为分数（半砖/雪层等薄层，如 64.5）。普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
   | { kind: 'xyz'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }

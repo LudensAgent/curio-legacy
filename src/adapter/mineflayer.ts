@@ -1168,9 +1168,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       case 'near':
         goal = new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, target.range);
         break;
-      case 'xz':
+      case 'xz': {
         goal = new goals.GoalNearXZ(target.x, target.z, target.range);
+        const band = target.footY;
+        if (band) {
+          // 只约束终点节点的脚高，路上照常起伏；节点 y 即脚所在格。
+          const nominalEnd = goal.isEnd.bind(goal);
+          goal.isEnd = (node: any) => nominalEnd(node) && node.y >= band[0] && node.y <= band[1];
+        }
         break;
+      }
       case 'xyz':
         // y 是脚高（可为分数）。pathfinder 的节点是“脚下那块 +1”：整块脚高 64 → 节点 64，
         // 半砖脚高 64.5 → 节点 65（见 pathfinder getPathFromTo 的 offset）。

@@ -34,6 +34,12 @@ type TravelToArgs = {
 
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
 const HOP = 24;
+/**
+ * 三维目标在这个水平距离内（通常仍在已加载区块里）时，正前方一跳直接以真实目标为寻路终点：
+ * pathfinder 在可达路线里找最短的那条，不必先朝一个只按水平方向定出的中间点走——那个点不在去目标的路上，
+ * 会把身体带下矿道/坡底后再也上不去。搜不完时它走的部分路径也按到真实目标的三维距离挑。
+ */
+const DIRECT_3D_REACH = 64;
 /** 正前方一跳走不通时依次试的偏转角（度）；偏转跳更短，只用于绕开眼前的阻挡。 */
 const DETOURS = [45, -45, 90, -90];
 const DETOUR_HOP = 16;
@@ -243,14 +249,19 @@ export const travelTo: Skill<TravelToArgs> = {
       if (next !== undefined) {
         return { kind: 'near', pos: { x: Math.floor(next.x), y: Math.floor(next.y), z: Math.floor(next.z) }, range: 2 };
       }
-      if (turn === null && left <= HOP) {
+      if (turn === null && (left <= HOP || (target.y !== undefined && left <= DIRECT_3D_REACH))) {
         return target.y === undefined
           ? { kind: 'xz', x: target.x, z: target.z, range: args.range }
           : { kind: 'near', pos: { x: target.x, y: target.y, z: target.z }, range: args.range };
       }
       const angle = Math.atan2(target.z - from.z, target.x - from.x) + (turn ?? 0) * Math.PI / 180;
       const len = turn === null ? HOP : DETOUR_HOP;
-      return { kind: 'xz', x: Math.round(from.x + Math.cos(angle) * len), z: Math.round(from.z + Math.sin(angle) * len), range: 3 };
+      const x = Math.round(from.x + Math.cos(angle) * len), z = Math.round(from.z + Math.sin(angle) * len);
+      if (target.y === undefined) return { kind: 'xz', x, z, range: 3 };
+      // 三维目标的中间跳（偏转跳、或目标超出直接寻路范围时）：终点与目标的高差最多比出发时多一次行走下落
+      // （WALK_MAX_DROP），否则只按水平坐标找最省的路，会顺着矿道/坡一路下到远离目标高度的地方。
+      const allowed = Math.abs(Math.floor(target.y) - Math.floor(from.y)) + WALK_MAX_DROP;
+      return { kind: 'xz', x, z, range: 3, footY: [Math.floor(target.y) - allowed, Math.floor(target.y) + allowed] };
     };
 
     let best = gap(start), staleRounds = 0, hops = 0, failedHops = 0, detours = 0, lastError = '';
