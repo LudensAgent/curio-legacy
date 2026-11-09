@@ -767,6 +767,12 @@ function worldKnowledge(ctx: MindContext) {
   });
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
+  // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
+  const aliasBase = m.base(p.self.dim);
+  const otherBases = m.landmarks().filter((l) => l.kind === 'base' && l.dim === p.self.dim && l.id !== aliasBase?.id).length;
+  const baseAlias = aliasBase && otherBases
+    ? `；移动目标写 "base" 指 ${aliasBase.label}（${Math.round(Math.hypot(aliasBase.pos.x - here.x, aliasBase.pos.z - here.z))} 格外），另记得 ${otherBases} 处基地，去别处写地标名或坐标`
+    : '';
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const remember = p.nearby.resources.filter((r) => r.seen === 'memory').slice(0, ctx.tier === 'glance' ? 3 : 6).map((r) => `${r.block} ${r.dir ?? ''}${r.nearest}格`);
   // 记得的矿点：每种矿最近的一两处（带高低差），瞥一眼也看得到——想挖铁时知道铁在哪
@@ -774,7 +780,7 @@ function worldKnowledge(ctx: MindContext) {
   // 记得的生物出没点（不主动攻击的：羊、牛、狼、村民……）：动物会走动，只是大概那一带，带着多久前看见
   const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
   return {
-    home: home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家',
+    home: `${home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家'}${baseAlias}`,
     ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
     ...(builds.length ? { my_builds: builds.map(describeBuild) } : {}),
     // 建筑师画好、还没盖的图纸：一直惦记着
