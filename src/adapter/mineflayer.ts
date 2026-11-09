@@ -1032,6 +1032,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         // blocksToAvoid 只拦身体所在格；岩浆块、营火这类实心/可站的方块还要拦“站在上面”：落脚格的支撑是它就不走。
         movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => avoidIds.has(movements.getBlock(block.position, 0, -1, 0)?.type) ? 100 : 0];
       }
+      // 贴着岩浆走一下击退就会掉进去：按委托给站位四邻的岩浆加代价，让路线离岩浆边远一点（每步 ≤40，低于 100 的“不能走”阈值）。
+      if (opts.lavaEdgeCost && this.mcData?.blocksByName?.lava) {
+        const lavaId = this.mcData.blocksByName.lava.id, per = opts.lavaEdgeCost;
+        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => {
+          let n = 0;
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, -1]) {
+            if (movements.getBlock(block.position, dx, dy, dz)?.type === lavaId) n++;
+          }
+          return Math.min(40, n * per);
+        }];
+      }
       // 默认走路，调用方明确 sprint:true 才跑（逃离也不例外）：冲刺每格都在消耗饥饿值，走路几乎不耗；跑不跑由委托方定
       movements.allowSprinting = opts.sprint === true;
       if (opts.maxDropDown !== undefined) {

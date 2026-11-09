@@ -156,6 +156,8 @@ export const travelTo: Skill<TravelToArgs> = {
       allowPlace: args.allowPlace, allowTower: args.allowTower,
       ...(args.allowSwim ? {} : { allowSwimming: false }),
       sprint: args.sprint, avoid,
+      // 不另外授权冒险时，路线尽量离岩浆边远一点（只加代价，唯一的路仍可走）
+      ...(args.allowHazard ? {} : { lavaEdgeCost: 10 }),
       // 不下水时才限制绕路余量：寻路器的水格代价是陆路的 10 倍，授权游泳时一段水路的代价远超“直线 + 48”，
       // 加了上限等于不让游。
       ...(args.allowSwim ? {} : { searchRadius: HOP_SEARCH_RADIUS }),

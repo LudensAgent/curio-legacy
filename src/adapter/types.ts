@@ -195,6 +195,8 @@ export interface MoveOpts {
   avoid?: string[];
   /** 寻路绕路余量：路线代价最多比起点到目标的直线估计多这么多（pathfinder searchRadius）；不写不限。 */
   searchRadius?: number;
+  /** 站位四邻（脚部/支撑高度）每有一格岩浆额外加的寻路代价；只加代价不禁止，贴岩浆的唯一路仍可走。不写为 0。 */
+  lavaEdgeCost?: number;
 }
 
 export interface EffectEvidence {
