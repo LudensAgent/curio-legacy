@@ -23,6 +23,7 @@ test('directional observation rejects remembered or opposite targets and disting
   t.mock.method(adapter, 'look', async () => { views++; });
   const found = await lookAround.run(ctx, { for: 'stone', direction: 'S', seconds: 2 });
   assert.equal(found.status, 'succeeded');
+  assert.match(found.summary, /位置 \(2,64,5\)/, '看见的位置要进摘要，不能只给方向和距离');
   assert.equal(views, 2, 'neither north nor remembered south stone can short-circuit looking');
   assert.equal(found.data?.newlyDiscovered, true);
   assert.equal(found.data?.directionInspected, true);
@@ -36,6 +37,7 @@ test('directional observation rejects remembered or opposite targets and disting
   assert.equal(known.data?.turned, false);
   assert.deepEqual(known.data?.foundPos, newSouth.pos);
   assert.match(known.summary, /没有转头/);
+  assert.match(known.summary, /位置 \(2,64,5\)/);
   visible = false;
   const missing = await lookAround.run(ctx, { for: 'stone', direction: 'S', seconds: 2 });
   assert.equal(missing.failureCode, 'NOT_FOUND');
