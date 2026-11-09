@@ -24,6 +24,11 @@ test('计划声称走远/换地方，却只有观察或采集：报告计划覆�
   assert.ok(planCoverageGap(jumpOnly), '只原地跳不算移动');
   const forward = make('走远找树', [{ skill: 'press_keys', args: { keys: { forward: true }, ms: 500 } }]);
   assert.equal(planCoverageGap(forward), null);
+
+  const approached = make('走到北边一格看得见的草地格', [
+    { skill: 'approach_visible', args: { target: { pos: { x: 1, y: 64, z: 0 } } } },
+  ]);
+  assert.equal(planCoverageGap(approached), null, 'approach_visible 会移动身体，不算覆盖缺口');
 });
 
 test('收工条件不能验收目标时记为有界尝试，资源目标未完成', () => {
