@@ -600,7 +600,7 @@ test('move_step 两格高整块墙：返回真实阻挡，不给必败的上一�
   assert.deepEqual(w.pos, { x: 0.5, y: 79, z: 0.5 });
 });
 
-test('move_step 一格台阶：上方空气时给出经身体净空预检的上一级建议并可执行', async (t) => {
+test('move_step 一格台阶：相对写法锁定同一列，按经身体净空检查的实际脚高执行', async (t) => {
   const w = flat();
   w.pos = { x: 0.5, y: 79, z: 0.5 };
   w.groundY = 78;
@@ -608,13 +608,49 @@ test('move_step 一格台阶：上方空气时给出经身体净空预检的上�
   const ctx = makeCtx(w);
   t.after(() => ctx.memory.close());
   const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
-  assert.equal(r.status, 'failed', '同层写法与真实脚高不符，先如实拒绝');
-  assert.equal(problemKind(r), 'FOOT_HEIGHT_MISMATCH');
-  assert.deepEqual(r.data?.remediation, { at: [1, 1, 0] });
-  assert.equal(r.data?.surfaceCandidateY, 80);
-  assert.equal(r.data?.standableFootY, 80);
-
-  const corrected = await moveStep.run(ctx, { at: [1, 1, 0], facing: 'E' });
-  assert.equal(corrected.status, 'succeeded', corrected.summary);
+  assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(w.pos.y, 80);
+  assert.deepEqual(r.data?.requestedAt, [1, 0, 0]);
+  assert.deepEqual(r.data?.resolvedAt, [1, 1, 0]);
+  assert.equal(r.data?.standableFootY, 80);
+  assert.match(r.summary, /上一级/);
+});
+
+test('move_step 落点有岩浆时默认拒绝，allowHazard 显式接受后才迈', async (t) => {
+  const w = flat();
+  w.blocks.push({ name: 'lava', pos: { x: 1, y: 64, z: 1 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal(problemKind(r), 'HAZARD_RISK_UNAUTHORIZED');
+  assert.equal(r.data?.movementNotAttempted, true);
+  assert.deepEqual((r.data?.hazards as { cell: Vec3Like; name: string; where: string }[])[0], { cell: { x: 1, y: 64, z: 1 }, name: 'lava', where: 'adjacent' });
+  assert.match(r.summary, /allowHazard/);
+  assert.deepEqual(w.pos, { x: 0.5, y: 64, z: 0.5 });
+
+  const v = moveStep.validate({ to: [1, 0, 0], facing: 'E', allowHazard: true }, w);
+  if (!v.ok) assert.fail(v.error);
+  assert.equal(v.args.allowHazard, true);
+  const allowed = await moveStep.run(ctx, v.args);
+  assert.equal(allowed.status, 'succeeded', allowed.summary);
+  assert.equal(allowed.data?.allowHazard, true);
+});
+
+test('move_step 支撑是岩浆块、身体格是火时同样按危险拒绝', async (t) => {
+  const magma = flat();
+  magma.blocks.push({ name: 'magma_block', pos: { x: 1, y: 63, z: 0 } });
+  const magmaCtx = makeCtx(magma);
+  t.after(() => magmaCtx.memory.close());
+  const onMagma = await moveStep.run(magmaCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(problemKind(onMagma), 'HAZARD_RISK_UNAUTHORIZED');
+  assert.equal((onMagma.data?.hazards as { where: string }[])[0]?.where, 'support');
+
+  const fire = flat();
+  fire.blocks.push({ name: 'fire', pos: { x: 1, y: 64, z: 0 } });
+  const fireCtx = makeCtx(fire);
+  t.after(() => fireCtx.memory.close());
+  const inFire = await moveStep.run(fireCtx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(problemKind(inFire), 'HAZARD_RISK_UNAUTHORIZED');
+  assert.equal((inFire.data?.hazards as { where: string }[])[0]?.where, 'body');
 });
