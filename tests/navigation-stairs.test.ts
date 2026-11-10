@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { navigateTo } from '../src/skills/movement/index.ts';
+import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -85,4 +86,31 @@ test('navigate_to performs a one-block step up through the measured body path', 
   assert.equal(adapter.pos.y, 65);
   const transitions = result.data?.transitions as { kind: string; from: { y: number }; to: { y: number } }[] | undefined;
   assert.ok(transitions?.some((transition) => transition.kind === 'step' && transition.from.y === 64 && transition.to.y === 65));
+});
+
+test('travel_to continues up observed stairs with real landing residuals without spending a search per step', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const cells = Array.from({ length: 13 }, (_, x) =>
+    Array.from({ length: 3 }, (_, z) =>
+      Array.from({ length: 16 }, (_, y) => ({ x: x - 8, y: y + 63, z: z - 2 })))).flat(2);
+  fill(map, 'minecraft:air', cells);
+  fill(map, 'minecraft:stone', Array.from({ length: 11 }, (_, x) => ({ x: x - 8, y: x + 63, z: -1 })));
+  const { adapter, ctx } = setup(map, { x: -7.5, y: 64, z: -0.5 });
+  t.after(() => ctx.memory.close());
+  const targets: { x: number; y: number; z: number }[] = [];
+  t.mock.method(adapter, 'moveTo', async (target) => {
+    assert.equal(target.kind, 'feet');
+    if (target.kind !== 'feet') return;
+    targets.push({ x: target.x, y: target.y, z: target.z });
+    // 日志中的每次落脚约差 0.032 格，另有很小的横向误差。
+    adapter.pos = { x: target.x - 0.0324, y: target.y, z: target.z + 0.00015 };
+  });
+  const validation = travelTo.validate({ to: { x: 2, y: 74, z: -1 }, range: 1 }, adapter);
+  assert.ok(validation.ok, validation.ok ? '' : validation.error);
+  const result = await travelTo.run(ctx, validation.args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(targets.length, 10, '应走完整段阶梯，不在第 6 次搜索时停止');
+  assert.equal((result.data?.counters as { searches: number }).searches, 1);
+  assert.deepEqual(targets.at(-1), { x: 2.5, y: 74, z: -0.5 }, '保留计划落点，不随残余误差逐步漂移');
+  assert.deepEqual(result.data?.position, adapter.pos, '回执保留实际落脚，不用计划点覆盖');
 });

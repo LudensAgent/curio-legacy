@@ -200,7 +200,7 @@ test('cell 目标保留 0.01 脚高容差；feet 目标使用 0.12/0.05 且要�
   assert.deepEqual(feetAdapter.actions, [], '不能为了凑容差改写目标或移动');
 });
 
-test('实测 endpoint 漂移不改写冻结精确目标；下一评估从实际位置开始，无法继续时显式 UNSUPPORTED', async (t) => {
+test('到达精度内的 endpoint 偏差按真实起点复验，继续走向原精确目标', async (t) => {
   const map = flatMap(3);
   const adapter = new StopShortOnceAdapter();
   adapter.pos = at(0.3, 64, 0.5);
@@ -213,32 +213,49 @@ test('实测 endpoint 漂移不改写冻结精确目标；下一评估从实际�
     maxSearches: 6, allowUnknownCorridor: false,
   });
 
-  assert.equal(r.status, 'failed', r.summary);
-  assert.notEqual(r.data?.arrived, true, '漂移后的残余距离不得被当成到达');
-  assert.equal(adapter.feetTargets.length, 1, '从 1.25 到 3.3 不在受支持格点上，不应再派发移动');
-  assert.equal(adapter.feetTargets[0]?.x, 1.3, '第一次请求的 endpoint 仍是计划点 1.3');
-  assert.equal(adapter.pos.x, 1.25, '夹具实测停在请求 endpoint 前 0.05 格');
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(adapter.feetTargets.map((point) => point.x), [1.3, 2.3, 3.3], '每步仍走向原计划落点');
+  assert.equal(adapter.pos.x, 3.3, '必须实际走到原目标，不能把中途偏差当到达');
   assert.ok(adapter.feetTargets.every((point) => point.x !== 3.25), '不得把精确目标改写成 3.25');
 
   const requested = r.data?.requestedTarget as Vec3Like | undefined;
   const segment = r.data?.segment as {
     endStance?: Vec3Like; arrivedAtTarget?: boolean; remainingTarget?: Vec3Like;
   } | undefined;
-  const replans = r.data?.replans as {
-    plannedStart?: Vec3Like | null; measuredStart?: Vec3Like; measuredEnd?: Vec3Like;
-  }[] | undefined;
   const counters = r.data?.counters as { searches?: number } | undefined;
   const resolved = r.data?.resolvedTarget as Vec3Like | undefined;
 
   assert.deepEqual(requested, target, '原精确脚位目标不被重锚');
-  assert.deepEqual(segment?.remainingTarget, target, '剩余目标仍是原精确脚位');
-  assert.equal(segment?.arrivedAtTarget, false);
+  assert.equal(segment?.arrivedAtTarget, true);
   assert.equal(resolved?.x, 3.3, '搜索解析目标仍是原精确点，不是 3.25');
-  assert.equal(segment?.endStance?.x, 1.25, '回执的实测终点是 1.25，不是计划点 1.3');
-  assert.equal(replans?.[0]?.plannedStart?.x, 1.3, '重规划事实保留旧计划起点');
-  assert.equal(replans?.[0]?.measuredEnd?.x, 1.25, '重规划事实保留实际测量终点');
-  assert.equal(counters?.searches, 2, '漂移后确实从实测位置发起了第二次搜索');
-  assert.equal(r.data?.searchStatus, 'UNSUPPORTED', '受支持格点无法继续时给出显式能力缺口');
+  assert.equal(segment?.endStance?.x, 3.3);
+  assert.equal(counters?.searches, 1, '小偏差只复验下一步，不重新搜索整条路线');
+  assert.equal(r.data?.searchStatus, 'FOUND');
+});
+
+test('小偏差后的真实扫掠碰到侧面障碍，不能只复用原计划的 OPEN', async (t) => {
+  const map = flatMap(3);
+  observe(map, 'minecraft:stone', [at(2, 64, 1), at(2, 65, 1)]);
+  const adapter = new FakeAdapter();
+  adapter.pos = at(0.3, 64, 0.7);
+  const ctx = ctxFor(adapter, map);
+  t.after(() => ctx.memory.close());
+  let moves = 0;
+  t.mock.method(adapter, 'moveTo', async (target) => {
+    assert.equal(target.kind, 'feet');
+    if (target.kind !== 'feet') return;
+    moves += 1;
+    // 原路线的身体边缘只贴着 z=1；真实落脚向侧面多了 0.05 格。
+    adapter.pos = at(target.x - 0.05, target.y, target.z + 0.05);
+  });
+  const result = await navigateTo.run(ctx, {
+    to: at(3.3, 64, 0.7), allowed: ['walk'], historical: false, maxSteps: 8,
+    allowUnknownCorridor: false,
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal((result.data?.stop as { reason: string }).reason, 'BLOCKED', result.summary);
+  assert.equal(moves, 1, '真实起点到下一落点的扫掠受阻，不能再发移动');
+  assert.deepEqual(adapter.pos, at(1.25, 64, 0.75));
 });
 
 test('段内第三次移动取消：保留前两条已确认 receipt、搜索次数与实际终点', async (t) => {

@@ -714,9 +714,12 @@ async function runNavigationSegmentInner(
         ...(route.policy === undefined ? {} : { policy: route.policy }),
       });
     }
-    // 旧计划只在实测起点与计划 from 完全一致时才有几何意义；有偏差就交回 Coordinator
-    // 按冻结目标从实测位置重新规划，不用单位步判定器证明另一条运动。
-    if (current.pos.x !== transition.from.x || current.pos.y !== transition.from.y || current.pos.z !== transition.from.z) {
+    // 身体按已声明的到达精度停下，不会精确等于计划浮点坐标。步行/台阶/下落在这个
+    // 范围内复验“实测起点 → 原计划落点”的真实几何；更大偏差仍从实测位置重规划。
+    const startDrift = current.pos.x !== transition.from.x || current.pos.y !== transition.from.y || current.pos.z !== transition.from.z;
+    const canVerifyResidual = (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop')
+      && feetReached(transition.from, current.pos, current.onGround);
+    if (startDrift && !canVerifyResidual) {
       return receipt('replan', {
         stopCode: 'start_drift',
         currentCheck: { status: 'START_DRIFT' },
@@ -728,7 +731,7 @@ async function runNavigationSegmentInner(
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在动作前耗尽：已执行 ${executed}/${planned.length} 段` });
     }
     // 只对这一次动作做有界当前证据复验（支撑、扫掠、头部空间与现有风险约束）。
-    const verification = verifyLandRoute(voxel, currentRequest, [{ ...transition, from: { ...current.pos } }], Date.now());
+    const verification = verifyLandRoute(voxel, { ...currentRequest, measuredStart: current.pos }, [transition], Date.now());
     const check = verification.transitions[0]!;
     if (check.status !== 'OPEN') {
       return refusal(index, transition, check, current);

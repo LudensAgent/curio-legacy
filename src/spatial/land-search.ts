@@ -1,6 +1,7 @@
 import { supportTop } from '../perception/geometry.ts';
 import {
   evaluateLandTransition,
+  evaluateWalkSegment,
   evaluateWalkStep,
   resolveLandLimits,
   type BodyContext,
@@ -222,17 +223,21 @@ function checkTransition(
   to: Vec3Like,
   limits: ReturnType<typeof resolveLandLimits>,
   now: number,
+  plannedFrom?: Vec3Like,
 ): Check {
   const body = { ...request.body, feet: { ...from } };
   if (kind === 'walk') {
-    const dx = to.x - from.x, dz = to.z - from.z;
+    const dx = to.x - (plannedFrom ?? from).x, dz = to.z - (plannedFrom ?? from).z;
     const direction = Math.abs(dx) > EPS
       ? { axis: 'x' as const, sign: Math.sign(dx) as 1 | -1 }
       : { axis: 'z' as const, sign: Math.sign(dz) as 1 | -1 };
-    const evaluation = evaluateWalkStep(map, {
+    const query = {
       worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
-      mode: 'walk', body, direction,
-    }, request.rules.shapeProvider, now);
+      mode: 'walk' as const, body, direction,
+    };
+    const evaluation = plannedFrom === undefined
+      ? evaluateWalkStep(map, query, request.rules.shapeProvider, now)
+      : evaluateWalkSegment(map, query, to, request.rules.shapeProvider, now, 0.05);
     const obstacle = evaluation.obstacles.find((entry) => entry.kind === 'block');
     return {
       status: evaluation.status,
@@ -245,6 +250,7 @@ function checkTransition(
   const evaluation = evaluateLandTransition(map, {
     worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
     body, transition: { kind, from: { ...from }, to: { ...to } },
+    ...(plannedFrom === undefined ? {} : { plannedFrom }),
   }, request.rules, now, limits);
   const obstacle = evaluation.obstacles.find((entry) => entry.kind === 'block');
   return {
@@ -415,14 +421,19 @@ export async function searchLandRouteAsync(map: VoxelMap, request: LandSearchReq
 }
 
 /** 对已选路线逐段用当前证据复验；remembered 候选在执行前必须过这一关。 */
-export function verifyLandRoute(map: VoxelMap, request: Pick<LandSearchRequest, 'worldId' | 'dim' | 'sessionId' | 'body' | 'rules'>, transitions: readonly LandSearchTransition[], now = Date.now()): LandRouteVerification {
+export function verifyLandRoute(map: VoxelMap, request: Pick<LandSearchRequest, 'worldId' | 'dim' | 'sessionId' | 'body' | 'rules'> & {
+  /** 执行前复验第一步的真实起点；计划落点保持不变。 */
+  measuredStart?: Vec3Like;
+}, transitions: readonly LandSearchTransition[], now = Date.now()): LandRouteVerification {
   const limits = resolveLandLimits();
   const results: LandRouteVerificationTransition[] = [];
   let openPrefix = 0;
   let verdict = 'OPEN';
   for (const transition of transitions) {
     const kind = transition.kind;
-    const check = checkTransition(map, request, kind, transition.from, transition.to, limits, now);
+    const from = results.length === 0 ? request.measuredStart ?? transition.from : transition.from;
+    const drifted = from.x !== transition.from.x || from.y !== transition.from.y || from.z !== transition.from.z;
+    const check = checkTransition(map, request, kind, from, transition.to, limits, now, drifted ? transition.from : undefined);
     // 搜索层拒绝的危险格/非下落 hazard 也要在复验层保持一致，不能只靠 evaluate 的几何状态。
     const hazardBlocked = check.status === 'OPEN' && !safe(check, map, request.dim, transition.to);
     const status = hazardBlocked ? 'BLOCKED' : check.status;
