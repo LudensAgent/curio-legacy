@@ -55,8 +55,14 @@ const HOP_SEARCH_RADIUS = 48;
 const MAX_STALE_ROUNDS = 3;
 /** 历史路线路点的间距（沿路线累计的格数）：太密的点合并，每跳仍由 pathfinder 实测。按三维路程算，竖井/螺旋阶梯的路点不会被水平距离吞掉。 */
 const HISTORY_SPACING = 8;
-/** 起点/目标吸附到记录路径格的半径（格） */
+/** 目标吸附到记录路径格的半径（格） */
 const HISTORY_NEAR = 8;
+/** 历史路线可以从这么远的记录格上路（不在记录上的那段按离路代价计，由 pathfinder 按授权走/挖/垫过去） */
+const HISTORY_REACH = 24;
+/** 两片不相连的记录相距不超过这么多格时，可以跨过去接着走（同样按离路代价计） */
+const HISTORY_GAP = 16;
+const historyRoute = (fragments: Parameters<typeof buildPathGraph>[0], from: Vec3Like, to: Vec3Like, deadline: number) =>
+  routeOnPathGraph(buildPathGraph(fragments), from, to, HISTORY_NEAR, deadline, { reach: HISTORY_REACH, maxGap: HISTORY_GAP });
 /** 行走辅助（mineflayer-pathfinder 默认 maxDropDown）一次最多往下落几格；更高的落差它不会走 */
 const WALK_MAX_DROP = 4;
 /** 剩余高差超过这么多格、且是水平剩余的 2 倍以上时，水平偏转绕行帮不上，不再偏转 */
@@ -237,17 +243,18 @@ export const travelTo: Skill<TravelToArgs> = {
         if (wanted !== null && fragments.length === 0) {
           return fail('NOT_FOUND', `${s0.dim} 里没有片段 ${wanted}${scan.partial || scan.truncated ? '（片段列表没读全）' : ''}；没有移动`, { originalRequest: request, backend });
         }
-        const route = routeOnPathGraph(buildPathGraph(fragments), start, goalPoint, HISTORY_NEAR, Date.now() + 1500);
-        if (route.status !== 'START_NOT_RECORDED' && route.points.length > 1) {
+        const route = historyRoute(fragments, start, goalPoint, Date.now() + 1500);
+        if ('points' in route && route.points.length > 1) {
           points = route.points.map((p) => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 }));
           history = {
             found: true, source: 'path_fragments', status: route.status, points: points.length, fragments: route.fragments.slice(0, 8),
             joinsUsed: route.joinsUsed, startSnap: route.startSnap, endDistance: route.endDistance,
+            ...(route.connectors.length ? { connectors: route.connectors } : {}),
             ...(route.climbs.length ? { climbs: route.climbs.length, climbHeight: route.climbs.reduce((sum, c) => sum + c.height, 0), firstClimb: route.climbs[0]!.from } : {}),
             ...(scan.partial || scan.truncated ? { fragmentsIncomplete: true } : {}),
           };
         } else {
-          reasons.push(route.status === 'START_NOT_RECORDED' ? `片段：${route.message}` : '片段：记录路径没有比起点更接近目标的部分');
+          reasons.push('points' in route ? '片段：记录路径没有比起点更接近目标的部分' : `片段：${route.message}`);
         }
       }
       if (history === undefined) {
@@ -420,12 +427,12 @@ export const travelTo: Skill<TravelToArgs> = {
     let recordedNote = '';
     if (args.via === 'direct' && ctx.spatial !== undefined && stop !== 'NOT_ALIVE' && stop !== 'DIMENSION_CHANGED') {
       const scan = pageFragments(ctx.spatial, { dim: s0.dim, maxFragments: 1000, signal, deadline: Date.now() + 1500 });
-      const route = routeOnPathGraph(buildPathGraph(scan.items), end, { x: target.x, y: target.y ?? end.y, z: target.z }, HISTORY_NEAR, Date.now() + 1000);
-      if (route.status !== 'START_NOT_RECORDED' && route.points.length > 1) {
+      const route = historyRoute(scan.items, end, { x: target.x, y: target.y ?? end.y, z: target.z }, Date.now() + 1000);
+      if ('points' in route && route.points.length > 1) {
         const climbHeight = route.climbs.reduce((sum, c) => sum + c.height, 0);
         const recorded = { fragments: route.fragments.slice(0, 8), points: route.points.length, endDistance: route.endDistance, status: route.status, ...(climbHeight ? { climbs: route.climbs.length, climbHeight } : {}) };
         Object.assign(facts, { recordedRoute: recorded });
-        recordedNote = `；记录里有从你附近出发、沿自己走过的路（片段 ${recorded.fragments.join('、')}，${recorded.points} 格）${route.status === 'PARTIAL' ? `到离目标 ${route.endDistance} 格处` : '到目标附近'}的连续路径，via:"history" 会沿它走（历史记录，现在是否还通未确认）${climbHeight ? `；其中 ${route.climbs.length} 处当初是掉下来的，沿它返回要爬升共 ${climbHeight} 格` : ''}`;
+        recordedNote = `；记录里有从你附近${route.startSnap > 2 ? `（离最近的记录格约 ${Math.round(route.startSnap)} 格）` : ''}出发、沿自己走过的路（片段 ${recorded.fragments.join('、')}，${recorded.points} 格${route.connectors.length ? `，中间 ${route.connectors.length} 处要跨过两片记录之间的空当` : ''}）${route.status === 'PARTIAL' ? `到离目标 ${route.endDistance} 格处` : '到目标附近'}的连续路径，via:"history" 会沿它走（历史记录，现在是否还通未确认）${climbHeight ? `；其中 ${route.climbs.length} 处当初是掉下来的，沿它返回要爬升共 ${climbHeight} 格` : ''}`;
       }
     }
     return receipt(fail(code, `没到 ${target.label}：${why}；${measured}，比出发时近 ${closer} 格，剩余水平 ${remaining.horizontal} 格${effects}${historyNote}${recordedNote}。${permissions}；这只说明辅助走不通，不描述没看见的地形，下一步由你决定`, facts));

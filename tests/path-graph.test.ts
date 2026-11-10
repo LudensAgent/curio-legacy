@@ -53,3 +53,40 @@ test('记录过的掉落是单向的：往下照常走，逆着往上要爬升�
   assert.equal(up.status, 'FOUND');
   assert.deepEqual(up.status === 'START_NOT_RECORDED' ? null : up.climbs, [{ from: { x: 2, y: 52, z: 0 }, to: { x: 1, y: 70, z: 0 }, height: 18 }]);
 });
+
+const trail = (id: string, cells: { x: number; y: number; z: number }[]): PathFragment => ({
+  id, worldId: 'w', dim: 'the_nether', kind: 'dug', entrances: [], polyline: cells, geometrySource: 'traversal',
+  deepestY: Math.min(...cells.map((c) => c.y)), createdAt: 1, lastUsedAt: 1, uses: 1,
+} as PathFragment);
+const column = (x: number, y: number, z0: number, z1: number) => Array.from({ length: Math.abs(z1 - z0) + 1 }, (_, i) => ({ x, y, z: z0 + Math.sign(z1 - z0) * i }));
+const opts = { reach: 24, maxGap: 16 };
+
+test('历史路线：脚下是一小段孤立记录、旁边隔着空当有通往目标的长隧道时，跨过空当接上隧道走，而不是只走脚下这段', () => {
+  // 线上 09:18：刚 explore 出来的一段在 x=23 附近，通往门的长隧道在 x=-13（z -340..-120），起点离隧道 35 格、超出上路半径。
+  const graph = buildPathGraph([
+    // 新记录沿 z=-300 往西走到 x=0，离隧道（x=-13，高 9 格）约 15.8 格，不相连。
+    trail('fresh', [...column(23, 45, -326, -301), ...Array.from({ length: 24 }, (_, i) => ({ x: 23 - i, y: 45, z: -300 }))]),
+    trail('tunnel', column(-13, 54, -340, -120)),
+  ]);
+  const route = routeOnPathGraph(graph, { x: 23.5, y: 45, z: -326.5 }, { x: -13, y: 54, z: -122 }, 8, Date.now() + 2000, opts);
+  assert.equal(route.status, 'FOUND', 'message' in route ? route.message : '');
+  if (route.status !== 'FOUND') return;
+  assert.ok(route.fragments.includes('tunnel'), '路线用上了那条长隧道');
+  assert.equal(route.connectors.length, 1, '跨过一处两片记录之间的空当');
+  assert.ok(route.points.filter((p) => p.x === -13).length > 150, '大部分路程沿隧道走');
+});
+
+test('历史路线：附近只有方向相反的旧路时，不被它带偏，如实说沿记录走没有好处', () => {
+  const graph = buildPathGraph([trail('away', column(0, 64, 0, -60))]);
+  const route = routeOnPathGraph(graph, { x: 0.5, y: 64, z: 0.5 }, { x: 0, y: 64, z: 80 }, 8, Date.now() + 2000, opts);
+  assert.equal(route.status, 'NO_BENEFIT');
+});
+
+test('历史路线：起点不在记录上、旁边 20 格有通往目标的旧路时，从旁边上路；不传 reach 时仍按旧口径只认近处', () => {
+  const graph = buildPathGraph([trail('road', column(20, 64, 0, 200))]);
+  const route = routeOnPathGraph(graph, { x: 0.5, y: 64, z: 0.5 }, { x: 20, y: 64, z: 198 }, 8, Date.now() + 2000, opts);
+  assert.equal(route.status, 'FOUND');
+  if (route.status !== 'FOUND') return;
+  assert.ok(route.startSnap >= 19 && route.startSnap <= 21, `从 20 格外上路，实际 ${route.startSnap}`);
+  assert.equal(routeOnPathGraph(graph, { x: 0.5, y: 64, z: 0.5 }, { x: 20, y: 64, z: 198 }, 8, Date.now() + 2000).status, 'START_NOT_RECORDED');
+});
