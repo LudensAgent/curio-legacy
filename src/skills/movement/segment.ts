@@ -133,7 +133,6 @@ export interface SegmentReceipt {
 }
 
 const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop'];
-const SEARCH_CAP_MS = 1500;
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
 
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
@@ -261,7 +260,9 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     ? 0
     : Math.abs((p.x - request.corridor.origin.x) * request.corridor.bearing.z - (p.z - request.corridor.origin.z) * request.corridor.bearing.x);
   const corridorLimit = request.corridor === undefined ? Infinity : request.corridor.maxLateral + 0.01;
-  const searchDeadline = () => Math.min(request.deadline, Date.now() + SEARCH_CAP_MS);
+  // 搜索与执行共享原 invocation deadline；库的 maxSyncSliceMs 保证同步切片有界，
+  // 不再用固定 1500ms 截断长路线搜索。预算耗尽时仍由同一个 deadline 停止。
+  const searchWindow = () => ({ deadlineMs: request.deadline, maxSearchMs: Math.max(1, request.deadline - Date.now()) });
   let searches = 0;
 
   if (request.searchBudget < 1) {
@@ -274,14 +275,20 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     };
   }
   request.onPhase?.('searching');
-  const strict = await searchLandRouteAsync(voxel, { ...base, deadlineMs: searchDeadline() });
+  const strict = await searchLandRouteAsync(voxel, { ...base, ...searchWindow() });
   searches += 1;
   if (strict.status === 'CANCELLED') {
     return cancelledReceipt(strict, request, start, searches);
   }
   let chosen: LandSearchResult | null = strict.status === 'FOUND' ? strict : null;
-  if (chosen === null && request.historical && request.searchBudget - searches > 0) {
-    const historical = await searchLandRouteAsync(voxel, { ...base, evidenceMode: 'remembered', deadlineMs: searchDeadline() });
+  let historical: LandSearchResult | null = null;
+  // 当前证据已有可执行前缀时先走前缀，不再为“完整历史路线”消耗一次长搜索；
+  // 前缀走到边界后由 Coordinator 观察/重搜。历史候选只在前缀不可用时兜底。
+  const currentPrefixUsable = strict.prefix !== undefined
+    && strict.prefix.transitions.length > 0
+    && strict.prefix.knownBlockerAhead === undefined;
+  if (chosen === null && !currentPrefixUsable && request.historical && request.searchBudget - searches > 0) {
+    historical = await searchLandRouteAsync(voxel, { ...base, evidenceMode: 'remembered', ...searchWindow() });
     searches += 1;
     if (historical.status === 'CANCELLED') return cancelledReceipt(historical, request, start, searches);
     if (historical.status === 'FOUND') chosen = historical;
@@ -412,11 +419,15 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   const reachable = strict.prefix;
   const blockerAhead = reachable?.knownBlockerAhead;
   if (chosen === null && (reachable === undefined || reachable.transitions.length === 0 || blockerAhead !== undefined)) {
+    // 历史几何搜索的预算耗尽是真实终态，不能被 strict 的“证据不足”覆盖成普通未知边界。
+    const historicalBudget = blockerAhead === undefined && chosen === null && historical?.status === 'BUDGET_EXHAUSTED'
+      ? historical : null;
     // 直接阻挡/不支持与“整个授权走廊内没有路”、“已存几何无路”、“证据不足”分开，不互相顶替。
     const outcome: SegmentOutcome = blockerAhead?.status === 'BLOCKED' ? 'blocked'
       : blockerAhead?.status === 'UNSUPPORTED' ? 'unsupported'
         : strict.corridorLimited === true ? 'corridor_exhausted'
-          : outcomeOfStatus(strict.status);
+          : historicalBudget !== null ? 'search_budget'
+            : outcomeOfStatus(strict.status);
     const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
     return {
       waypoint, outcome, stopCode: blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
@@ -424,8 +435,11 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       evidenceMode: 'current', searches,
       planned: reachable?.transitions ?? [], confirmed: [], remaining: reachable?.transitions ?? [],
       pathLength: 0, arrived: false, directDrop: false, boundarySummary,
-      ...(strict.budget === undefined ? {} : { budget: strict.budget }),
-      ...(strict.unavailableSections.length === 0 ? {} : { unavailableSections: strict.unavailableSections }),
+      ...(historicalBudget?.budget !== undefined ? { budget: historicalBudget.budget }
+        : strict.budget === undefined ? {} : { budget: strict.budget }),
+      ...(historicalBudget !== null && historicalBudget.unavailableSections.length > 0
+        ? { unavailableSections: historicalBudget.unavailableSections }
+        : strict.unavailableSections.length === 0 ? {} : { unavailableSections: strict.unavailableSections }),
       ...(strict.policy === undefined ? {} : { policy: strict.policy }),
       ...(blockerAhead === undefined ? {} : { blockerAhead }),
       ...(outcome === 'unknown_boundary' && blockedBoundary !== undefined ? { boundary: blockedBoundary } : {}),
@@ -433,7 +447,9 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
         ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
         : strict.corridorLimited === true
           ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
-          : statusDetail(strict),
+          : historicalBudget !== null
+            ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
+            : statusDetail(strict),
     };
   }
 
