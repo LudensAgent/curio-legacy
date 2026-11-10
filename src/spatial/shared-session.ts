@@ -349,6 +349,19 @@ export interface SharedSpatialDrainResult {
   checkpointError: unknown;
 }
 
+/**
+ * 一次保存后换出的事实。`status` 只描述本次淘汰尝试，不改变已确认保存的
+ * 成功/失败；sample 是有界诊断键，不是完整换代清单。
+ */
+export interface PostSaveEviction {
+  status: 'evicted' | 'skipped' | 'failed';
+  evictedSections: number;
+  rejectedSections: number;
+  capacity: string | null;
+  sample: SectionKey[];
+  error?: unknown;
+}
+
 /** 一个附着同时保留 report 通道和取消通道；取消后仍保留 receiver 完成本次同步派发。 */
 interface Attachment {
   token: number;
@@ -660,6 +673,8 @@ export class SharedSpatialSession {
   private deliveryFailure: { committed: true; error: unknown } | null = null;
   /** 最近一次因库能力为 false 而未调用的写方法；`null` 表示没有拒绝过。 */
   private capabilityRejection: SharedSpatialWriteRejection | null = null;
+  /** 最近一次保存后换出的事实；只描述换出，不改写已确认保存。 */
+  private lastEviction: PostSaveEviction | null = null;
 
   private constructor(
     session: SpatialSession,
@@ -1406,8 +1421,31 @@ export class SharedSpatialSession {
     const result = await this.session.checkpoint();
     // 保存确认后淘汰已提交、非 pinned/dirty 的冷 Section；保存成功不因换出结果改写。
     // manual 没有预存遗忘钩子；eager 仍走 retainObservations 的兼容路径。
-    if (!this.closingFlag && this.coordinator !== null) this.freeOnce();
+    if (!this.closingFlag && this.coordinator !== null) {
+      const free = this.freeOnce();
+      this.lastEviction = free.kind === 'result'
+        ? {
+            status: free.result.evicted.length > 0 ? 'evicted' : 'skipped',
+            evictedSections: free.result.evicted.length,
+            rejectedSections: free.result.evictionRejected.length,
+            capacity: free.result.capacity?.kind ?? null,
+            sample: free.result.evicted.slice(0, 8).map((key) => ({ ...key })),
+          }
+        : {
+            status: 'failed',
+            evictedSections: 0,
+            rejectedSections: 0,
+            capacity: null,
+            sample: [],
+            error: free.error,
+          };
+    }
     return result;
+  }
+
+  /** 最近一次保存后换出的事实；eager 或尚未保存时为 null。只读，不触发换出。 */
+  lastPostSaveEviction(): PostSaveEviction | null {
+    return this.lastEviction;
   }
 
   /** 落盘前修剪体素观测：只留最近 MAX_OBSERVED_CELLS 格。按需驻留时库无法和未驻留区段统一排序，不修剪。 */

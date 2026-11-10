@@ -10,6 +10,7 @@
  */
 import type { SpatialCheckpointResult, SpatialPersistenceState } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { errorFacts, type ErrorFacts } from './host-shutdown.ts';
+import type { PostSaveEviction } from './shared-session.ts';
 
 /** 常规运行时存档周期；固定默认值，不提供用户配置开关。 */
 export const DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS = 30_000;
@@ -22,6 +23,8 @@ export interface SpatialCheckpointSource {
   readonly session: { readonly busy: boolean };
   checkpoint(): Promise<SpatialCheckpointResult>;
   getPersistenceState(): SpatialPersistenceState;
+  /** 最近一次保存后换出事实；eager/未保存时可为 null 或缺失。 */
+  lastPostSaveEviction?(): PostSaveEviction | null;
 }
 
 /** 一次调度保存的事实：已确认的 checkpoint，或失败与当时的真实状态。 */
@@ -33,6 +36,8 @@ export type SpatialCheckpointReport =
     /** 保存完成后的最新状态；保存期间的新观测会让它再次 dirty。 */
     state: SpatialPersistenceState;
     remainingDirty: boolean;
+    /** 与本次 checkpoint 相邻的换出事实；不表示保存失败。 */
+    eviction: PostSaveEviction | null;
   }
   | {
     status: 'failed';
@@ -66,7 +71,10 @@ export function startSpatialCheckpointScheduler(
       .then((checkpoint) => {
         // 公开 checkpoint 只在提交确认后 resolve；当前状态只用于汇报剩余 dirty。
         const state = spatial.getPersistenceState();
-        report({ status: 'saved', checkpoint, remainingDirty: state.dirty, state: { ...state } });
+        report({
+          status: 'saved', checkpoint, remainingDirty: state.dirty, state: { ...state },
+          eviction: spatial.lastPostSaveEviction?.() ?? null,
+        });
       }, (error: unknown) => {
         const state = spatial.getPersistenceState();
         report({ status: 'failed', error: errorFacts(error), remainingDirty: state.dirty, state: { ...state } });

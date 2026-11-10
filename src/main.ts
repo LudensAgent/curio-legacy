@@ -177,9 +177,12 @@ if (!migrationGate.ok) {
 const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) => {
   if (fact.status === 'saved') {
     const { checkpoint } = fact;
+    const evictionNote = fact.eviction === null
+      ? '｜换出=not_reported'
+      : `｜换出=${fact.eviction.status}（${fact.eviction.evictedSections} sections${fact.eviction.error === undefined ? '' : `，error=${String(fact.eviction.error)}`}）`;
     bus.publish('spatial_checkpoint', 'P3',
-      `共享空间记忆已保存 ${checkpoint.checkpointId}（voxel=${checkpoint.voxelRevision}, fragment=${checkpoint.fragmentRevision}, topology=${checkpoint.topologyRevision}）｜剩余 dirty=${fact.remainingDirty}`,
-      { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state });
+      `共享空间记忆已保存 ${checkpoint.checkpointId}（voxel=${checkpoint.voxelRevision}, fragment=${checkpoint.fragmentRevision}, topology=${checkpoint.topologyRevision}）｜剩余 dirty=${fact.remainingDirty}${evictionNote}`,
+      { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state, eviction: fact.eviction });
     return;
   }
   const capacityNote = fact.error.kind === 'capacity'

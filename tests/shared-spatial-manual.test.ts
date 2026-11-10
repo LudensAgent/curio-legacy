@@ -226,6 +226,9 @@ test('a confirmed checkpoint evicts saved manual sections; prepare reloads the o
     await shared.checkpoint();
     assert.equal(shared.session.sectionResidency(keyAt()).residency, 'not_resident',
       '确认保存后应淘汰已提交冷页，而不是删除证据');
+    const eviction = shared.lastPostSaveEviction();
+    assert.equal(eviction?.status, 'evicted');
+    assert.ok((eviction?.evictedSections ?? 0) >= 1, '换出事实必须报告实际淘汰的 section 数');
 
     const prepared = await shared.prepare([keyAt()], { deadline: Date.now() + 5000 });
     assert.equal(prepared.status, 'ready');
