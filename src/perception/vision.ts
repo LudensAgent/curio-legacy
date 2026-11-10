@@ -737,6 +737,18 @@ export class Vision {
   /** 这一格这几秒内亲眼看见是什么（看不见返回 null，不透视） */
   seenAt(pos: Vec3Like): string | null { return this.visibleSurfaces.get(keyOf(pos.x, pos.y, pos.z))?.name ?? null; }
 
+  /** 只读最近所见的原时间与作用域；不扫描，也不把旧会话的表面当成新观察。 */
+  seenEvidence(pos: Vec3Like) {
+    const state = this.adapter.state();
+    if (!state.observationReady || this.scope !== `${state.worldId}\u0000${state.dim}` || this.session !== state.sessionId) return null;
+    const surface = this.visibleSurfaces.get(keyOf(pos.x, pos.y, pos.z));
+    if (surface === undefined || Date.now() - surface.at > 3000) return null;
+    return {
+      name: surface.name, pos: { ...surface.pos }, observedAt: surface.at,
+      worldId: state.worldId, dimension: state.dim, sessionId: state.sessionId,
+    };
+  }
+
   /** 这一格认得出是什么吗：刚看见的，或者之前亲眼见过、记着的（矿、功能方块……）；都没有就 null */
   recognizedAt(pos: Vec3Like): string | null {
     const seen = this.seenAt(pos);
@@ -747,7 +759,7 @@ export class Vision {
 
   /** 刚挖开一格后，这一格暴露出的邻面是贴脸可见的（不用转头、不用视线确认）：把值得注意的方块直接记进视野记忆。返回记下的方块名。 */
   expose(pos: Vec3Like): string | null {
-    const state = this.adapter.state();
+    const state = this.syncScope();
     if (!state.observationReady) return null;
     const name = this.adapter.blockStateAt?.(pos)?.name ?? this.adapter.blockOptics(pos.x, pos.y, pos.z)?.name;
     if (!name || name === 'air' || name === 'cave_air' || name === 'void_air') return null;

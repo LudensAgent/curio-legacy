@@ -3,7 +3,7 @@ export { durationText, realSecondsToTicks, TICKS_PER_GAME_HOUR } from './time.ts
 import { isSoftBlock, surroundings, type ExitOptions, type Surroundings } from './surroundings.ts';
 import { isContainerLandmark, totalStock, type StockRow } from '../memory/chest-memory.ts';
 import { facingOfYaw, localMap } from './local.ts';
-import type { GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
+import type { BlockObservation, GameAdapter, InvItem, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround, shortId } from '../util.ts';
@@ -12,6 +12,7 @@ import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type V
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import type { LandmarkObservation } from '../spatial/semantic-store.ts';
 import { TraversalVisitRecorder, type TraversalVisitReceipt } from '../spatial/traversal-visit-recorder.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
@@ -231,13 +232,22 @@ export class Perception {
    * 没有共享会话、该格未驻留或本轮尚未写入体素图时，明确不返回版本（缺口），
    * 不用 Date.now/0/批次号代替。只读 cellAt，不加载 Section、不刷新证据。
    */
-  private resourceEvidence(dim: string, pos: Vec3Like): { sourceCellVersion?: number; observedAt?: number } {
-    const cell = this.spatial?.session.voxel.cellAt(dim, pos.x, pos.y, pos.z);
-    if (cell === undefined || !cell.observed) return {};
-    return {
-      sourceCellVersion: cell.evidence.revision,
-      observedAt: cell.evidence.observation.observedAt,
+  private resourceEvidence(observed: Pick<BlockObservation, 'name' | 'pos' | 'observedAt' | 'worldId' | 'dimension' | 'sessionId'>): LandmarkObservation {
+    const evidence: LandmarkObservation = {
+      observedAt: observed.observedAt,
+      source: { source: 'program', sessionId: observed.sessionId },
     };
+    const state = this.adapter.state();
+    const voxel = this.spatial?.session.voxel;
+    if (voxel === undefined || voxel.worldId !== observed.worldId || state.worldId !== observed.worldId
+      || state.dim !== observed.dimension || state.sessionId !== observed.sessionId || !state.observationReady) return evidence;
+    const cell = voxel.cellAt(observed.dimension, observed.pos.x, observed.pos.y, observed.pos.z);
+    if (!cell.observed) return evidence;
+    const accepted = cell.evidence.observation;
+    if (accepted.worldId !== observed.worldId || accepted.dim !== observed.dimension || accepted.sessionId !== observed.sessionId
+      || accepted.observedAt !== observed.observedAt
+      || accepted.state.name.replace(/^minecraft:/, '') !== observed.name.replace(/^minecraft:/, '')) return evidence;
+    return { ...evidence, sourceCellVersion: cell.evidence.revision };
   }
 
   /**
@@ -508,7 +518,8 @@ export class Perception {
         if (this.memory.markSeen('blocks', name)) this.bus.publish('discovery', 'P2', `首次看见方块：${name}（刚挖开的邻面）`, { category: 'block', name, pos });
         if (DANGER.has(name)) this.memory.addLandmark('danger', name, s.dim, pos);
         if (isResourceBlock(name) && name !== 'lava') {
-          this.memory.addLandmark('resource', name, s.dim, pos, 24, this.resourceEvidence(s.dim, pos));
+          const observed = this.vision.seenEvidence(pos);
+          if (observed?.name === name) this.memory.addLandmark('resource', name, s.dim, pos, 24, this.resourceEvidence(observed));
         }
       }
     }
@@ -576,8 +587,9 @@ export class Perception {
         this.memory.removeLandmark(l.id);
         this.memory.markGone(l.label, l.dim, l.pos, flowing ? 'lava（流动，非源方块）' : now!);
       } else if (l.kind === 'resource' && now && oreKind(now) === oreKind(l.label)) {
-        // 同一格同一类资源重新看见：只有更新的体素版本才刷新锚点时间/版本。
-        this.memory.refreshResourceSource(l.id, this.resourceEvidence(l.dim, l.pos));
+        // 保留这次实际所见的时间；仅已接受的同一格、同一观察才能提供版本。
+        const sighting = observed ?? this.vision.seenEvidence(l.pos);
+        if (sighting?.name === now) this.memory.refreshResourceSource(l.id, this.resourceEvidence(sighting));
       }
     }
     for (const c of boxes) {
@@ -630,7 +642,10 @@ export class Perception {
         const key = `${kind}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
         if (noted.has(key) || noted.size >= LANDMARK_NOTES_PER_UPDATE) return;
         noted.add(key);
-        this.memory.addLandmark(kind, name, s.dim, pos, 24, kind === 'resource' ? this.resourceEvidence(s.dim, pos) : undefined);
+        if (kind === 'resource') {
+          const observed = v.seenEvidence(pos);
+          if (observed?.name === name) this.memory.addLandmark(kind, name, s.dim, pos, 24, this.resourceEvidence(observed));
+        } else this.memory.addLandmark(kind, name, s.dim, pos, 24);
       };
       for (const b of v.visibleNow.values()) {
         if (!NOTABLE.has(b.name)) continue;

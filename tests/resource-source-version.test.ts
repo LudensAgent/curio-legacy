@@ -2,7 +2,7 @@
  * 第四批宿主侧：资源来源格版本链路与 places 分页接线。
  *
  * 版本来自共享体素图的实际 CellEvidence.revision；缺失时是显式缺口，不用
- * Date.now/0 填充。只有严格更新的版本能刷新 anchor；替换/移除仍走撤销。
+ * Date.now/0 填充。同版本的新观察也能刷新时间；替换/移除仍走撤销。
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -15,7 +15,12 @@ import type { ShutdownResult } from '../src/spatial/shared-session.ts';
 import { SpatialSemanticStore } from '../src/spatial/semantic-store.ts';
 import { spatialQuery } from '../src/skills/spatial-query.ts';
 import type { SkillCtx, SkillResult } from '../src/skills/types.ts';
-import type { PlaceFact } from 'curio-minecraft-3d-memory';
+import { VoxelMap, type PlaceFact } from 'curio-minecraft-3d-memory';
+import { EventBus } from '../src/events.ts';
+import { Perception } from '../src/perception/perception.ts';
+import { Vision } from '../src/perception/vision.ts';
+import type { BlockObservation } from '../src/adapter/types.ts';
+import { FakeAdapter } from './fake-adapter.ts';
 import { semanticMemory } from './semantic-fixture.ts';
 
 const D = 'overworld';
@@ -53,7 +58,7 @@ function items(result: SkillResult): Record<string, unknown>[] {
   return data.items.map((item) => rec(item));
 }
 
-test('同格同资源只有严格更新的来源格版本才刷新 anchor 与索引', () => {
+test('同格同资源允许同版本的新时间，拒绝旧版本、旧时间与缺失时间', () => {
   const { memory, stores } = semanticMemory('source-version-updates');
   const pos = at(4, 40, 4);
   memory.addLandmark('resource', 'iron_ore', D, pos, 1, {
@@ -63,12 +68,12 @@ test('同格同资源只有严格更新的来源格版本才刷新 anchor 与索
   const id = memory.landmarks().find((landmark) => landmark.kind === 'resource')!.id;
   assert.equal(stores.facts.resources().items[0]?.sourceCellVersion, 7);
 
-  // Same version: no rewrite, no duplicate.
+  // Same state keeps its cell version, but the new sighting time is real.
   memory.addLandmark('resource', 'iron_ore', D, pos, 1, {
     sourceCellVersion: 7,
     observedAt: 2_000,
   });
-  assert.equal(stores.facts.resources().items[0]?.observedAt, 1_000);
+  assert.equal(stores.facts.resources().items[0]?.observedAt, 2_000);
   assert.equal(stores.facts.resources().items.length, 1);
 
   // Older version: ignore even with a later wall-clock observation.
@@ -77,7 +82,7 @@ test('同格同资源只有严格更新的来源格版本才刷新 anchor 与索
     observedAt: 3_000,
   });
   assert.equal(stores.facts.resources().items[0]?.sourceCellVersion, 7);
-  assert.equal(stores.facts.resources().items[0]?.observedAt, 1_000);
+  assert.equal(stores.facts.resources().items[0]?.observedAt, 2_000);
 
   // Newer version: update version and real observation time; the near index follows.
   memory.addLandmark('resource', 'iron_ore', D, pos, 1, {
@@ -92,6 +97,87 @@ test('同格同资源只有严格更新的来源格版本才刷新 anchor 与索
   assert.equal(memory.refreshResourceSource(id, { sourceCellVersion: 9 }), null);
   memory.refreshResourceSource(id, { sourceCellVersion: 11, observedAt: 5_000 });
   assert.equal(stores.facts.resources().items[0]?.sourceCellVersion, 11);
+  assert.equal(memory.refreshResourceSource(id, { sourceCellVersion: 12, observedAt: 4_999 }), null);
+  assert.equal(memory.refreshResourceSource(id, { sourceCellVersion: 12 }), null);
+  assert.equal(stores.facts.resources().items[0]?.sourceCellVersion, 11);
+  assert.equal(stores.facts.resources().items[0]?.observedAt, 5_000, '不能用当前时间替换缺失或旧的观察时间');
+});
+
+test('真实体素同格刷新保持版本，邻格聚类不能把来源版本写到原锚点', () => {
+  const worldId = 'resource-real-voxel';
+  const { memory, stores } = semanticMemory(worldId);
+  const voxel = new VoxelMap(worldId);
+  voxel.beginSession('s1');
+  const observe = (pos: { x: number; y: number; z: number }, observedAt: number, name = 'iron_ore') => {
+    voxel.observe({ worldId, dim: D, sessionId: 's1', observedAt, sequence: observedAt,
+      source: 'vision', evidence: 'seen', stateComplete: true, pos,
+      state: { name, properties: {} } });
+    const cell = voxel.cellAt(D, pos.x, pos.y, pos.z);
+    assert.ok(cell.observed);
+    return { sourceCellVersion: cell.evidence.revision, observedAt: cell.evidence.observation.observedAt };
+  };
+  const a = at(4, 40, 4), b = at(5, 40, 4);
+  const first = observe(a, 1_000);
+  memory.addLandmark('resource', 'iron_ore', D, a, 24, first);
+  const refreshed = observe(a, 2_000);
+  assert.equal(refreshed.sourceCellVersion, first.sourceCellVersion, '同状态观察不会改变 CellEvidence.revision');
+  memory.addLandmark('resource', 'iron_ore', D, a, 24, refreshed);
+  const saved = stores.facts.resources().items[0]!;
+  assert.equal(saved.observedAt, 2_000);
+  observe(b, 2_500, 'stone');
+  const neighbor = observe(b, 3_000);
+  assert.ok(neighbor.sourceCellVersion > first.sourceCellVersion);
+  memory.addLandmark('resource', 'iron_ore', D, b, 24, neighbor);
+  assert.deepEqual(stores.facts.resources().items, [saved], '24格聚类保留A，B的版本/时间不能污染A');
+  memory.addLandmark('resource', 'iron_ore', D, b, 24);
+  assert.deepEqual(stores.facts.resources().items, [saved], '无版本旧调用同样不能刷新邻格');
+});
+
+test('资源证据只关联已接受的同名、同时间、同作用域体素；暴露邻面保留缺口', (t) => {
+  let now = 100_000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter();
+  const pos = at(3, 64, 0);
+  adapter.blocks.push({ name: 'iron_ore', pos });
+  const { memory } = semanticMemory(adapter.worldId);
+  const voxel = new VoxelMap(adapter.worldId, { now: () => now, validityWindowMs: 1000 });
+  voxel.beginSession(adapter.sessionId);
+  const spatial = { session: { voxel } } as SharedSpatialSession;
+  const vision = new Vision(adapter);
+  const perception = new Perception(adapter, memory, new EventBus(), vision, spatial);
+  const observed: BlockObservation = { worldId: adapter.worldId, dimension: D, sessionId: adapter.sessionId,
+    observationId: 1, observedAt: now, source: 'vision', name: 'iron_ore', properties: {}, pos };
+  const accept = (value: BlockObservation) => voxel.observe({ worldId: value.worldId, dim: value.dimension,
+    sessionId: value.sessionId, observedAt: value.observedAt, sequence: value.observationId,
+    source: 'vision', evidence: 'seen', stateComplete: true, pos: value.pos,
+    state: { name: value.name, properties: {} } });
+  accept(observed);
+  assert.ok(perception['resourceEvidence'](observed).sourceCellVersion !== undefined);
+  now += 2000;
+  const current = { ...observed, observedAt: now, observationId: 2 };
+  assert.equal(perception['resourceEvidence'](current).sourceCellVersion, undefined, '过期缓存不是本次尚未应用的观察');
+  assert.equal(perception['resourceEvidence'](current).observedAt, now, '缺版本仍保留实际所见时间');
+  assert.equal(perception['resourceEvidence']({ ...observed, name: 'diamond_ore' }).sourceCellVersion, undefined);
+  assert.equal(perception['resourceEvidence']({ ...observed, sessionId: 'another-session' }).sourceCellVersion, undefined);
+  assert.equal(perception['resourceEvidence']({ ...observed, worldId: 'another-world' }).sourceCellVersion, undefined);
+  assert.equal(perception['resourceEvidence']({ ...observed, dimension: 'the_nether' }).sourceCellVersion, undefined);
+  accept(current);
+  assert.ok(perception['resourceEvidence'](current).sourceCellVersion !== undefined);
+  now += 1;
+  assert.equal(vision.expose(pos), 'iron_ore');
+  const exposed = vision.seenEvidence(pos);
+  assert.ok(exposed !== null);
+  assert.equal(exposed.observedAt, now);
+  const evidence = perception['resourceEvidence'](exposed);
+  assert.equal(evidence.sourceCellVersion, undefined, 'expose没有同步写入体素时不能借用上一条已接受证据');
+  memory.addLandmark('resource', exposed.name, D, pos, 24, evidence);
+  assert.equal(memory.resourceIndexStatus().withoutSourceVersion, 1);
+  assert.equal(memory.landmarks()[0]?.ts, now);
+  now += 3001;
+  assert.equal(vision.seenEvidence(pos), null, '读取不会把旧视野时间刷新');
+  vision.expose(pos);
+  adapter.sessionId = 'next-session';
+  assert.equal(vision.seenEvidence(pos), null, '换会话后不提供旧视野的证据');
 });
 
 test('替换/确认移除立即撤销默认视图与近邻索引，历史仍可按 includeGone 读取', () => {
@@ -137,18 +223,24 @@ test('真实 SharedSpatialSession 保存/重开保留版本，迟到 ACK 不清�
       new ContainerLedger(null, worldId),
       { worldId },
     );
-    const landmark = semantic.addLandmark('resource', 'iron_ore', D, pos, 1, {
-      sourceCellVersion: 7,
-      observedAt: 1_000,
-    });
+    const observe = (observedAt: number) => {
+      svc.session.voxel.observe({ worldId, dim: D, sessionId: 's1', observedAt, sequence: observedAt,
+        source: 'vision', evidence: 'seen', stateComplete: true, pos,
+        state: { name: 'iron_ore', properties: { test: String(observedAt) } } });
+      const cell = svc.session.voxel.cellAt(D, pos.x, pos.y, pos.z);
+      assert.ok(cell.observed);
+      return { sourceCellVersion: cell.evidence.revision, observedAt: cell.evidence.observation.observedAt };
+    };
+    const landmark = semantic.addLandmark('resource', 'iron_ore', D, pos, 1, observe(1_000));
     assert.ok(landmark !== null);
     await svc.checkpoint();
     const confirmed = svc.session.facts.confirmedRevision;
 
     // A newer same-cell observation after the save; a delayed ACK must not roll it back.
-    semantic.refreshResourceSource(landmark.id, { sourceCellVersion: 9, observedAt: 2_000 });
+    const updated = observe(2_000);
+    semantic.refreshResourceSource(landmark.id, updated);
     svc.session.facts.confirmRevision(confirmed);
-    assert.equal(svc.session.facts.resources().items[0]?.sourceCellVersion, 9);
+    assert.equal(svc.session.facts.resources().items[0]?.sourceCellVersion, updated.sourceCellVersion);
     assert.equal(svc.session.facts.resources().items[0]?.observedAt, 2_000);
     await svc.checkpoint();
 
@@ -174,7 +266,7 @@ test('真实 SharedSpatialSession 保存/重开保留版本，迟到 ACK 不清�
       { worldId },
     );
     const restored = reopened.stores.facts.resources({ worldId, includeGone: true }).items[0];
-    assert.equal(restored?.sourceCellVersion, 9);
+    assert.equal(restored?.sourceCellVersion, updated.sourceCellVersion);
     assert.equal(restored?.observedAt, 2_000);
     assert.equal(restored?.revoked, true);
     const second = await svc.shutdown();

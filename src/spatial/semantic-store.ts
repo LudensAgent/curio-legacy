@@ -35,7 +35,7 @@ import {
  */
 export interface LandmarkObservation {
   sourceCellVersion?: number;
-  /** Real observation time from the same voxel evidence. */
+  /** Actual sighting time; a source version is present only for matching accepted voxel evidence. */
   observedAt?: number;
   /** Provenance of this observation; defaults to the landmark writer. */
   source?: FactProvenance;
@@ -487,10 +487,11 @@ export class SpatialSemanticStore {
     const nearResource = kind === 'resource' ? this.findNearLiveResource(label, dim, at, radius) : undefined;
     const near = nearPlace ?? nearResource;
     if (near) {
-      // A real newer source-cell version is the only thing that may update a
-      // resource anchor's version/time. Same/older versions are ignored.
+      // Nearby resources still share one landmark, but only the anchor's exact
+      // source cell can refresh its evidence. Another cell's revision is unrelated.
       if (kind === 'resource' && isResourceFact(near)) {
-        if (observation.sourceCellVersion !== undefined) {
+        if (near.sourceCell.x !== at.x || near.sourceCell.y !== at.y || near.sourceCell.z !== at.z) return null;
+        if (observation.sourceCellVersion !== undefined || observation.observedAt !== undefined) {
           this.refreshResourceSource(near.id, observation);
           return null;
         }
@@ -570,20 +571,20 @@ export class SpatialSemanticStore {
    * Explicit same-cell refresh after the host actually re-observed a resource
    * source cell. This is never called from a query path.
    *
-   * Only a strictly newer source-cell version updates the anchor's version and
-   * observation time; same/older versions are ignored. An absent version is a
-   * gap and never clears a known one. Replacement/removal stays on the existing
+   * Same-state sightings retain the cell version and advance the real time.
+   * Older versions/times are ignored; missing versions or times remain gaps,
+   * never a reason to invent a timestamp. Replacement/removal keeps its existing
    * revocation path.
    */
   refreshResourceSource(id: string, observation: LandmarkObservation): ResourceAnchorFact | null {
     const version = observation.sourceCellVersion;
-    if (version === undefined) return null;
+    const observedAt = observation.observedAt;
+    if (version === undefined || observedAt === undefined) return null;
     const fact = this.snapshot().resources.find((candidate) => candidate.id === id && !candidate.revoked);
     if (fact === undefined) return null;
-    if (fact.sourceCellVersion !== undefined && version <= fact.sourceCellVersion) return null;
-    const observedAt = observation.observedAt !== undefined && observation.observedAt > fact.observedAt
-      ? observation.observedAt
-      : this.observedNow(fact.observedAt);
+    if (fact.sourceCellVersion !== undefined && version < fact.sourceCellVersion) return null;
+    if (observedAt < fact.observedAt) return null;
+    if (version === fact.sourceCellVersion && observedAt === fact.observedAt) return null;
     return this.upsertResource({
       ...fact,
       observedAt,
