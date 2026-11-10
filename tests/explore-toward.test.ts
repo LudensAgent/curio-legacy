@@ -30,9 +30,9 @@ test('方向探索保留距离，明确拒绝不支持的对角/施工能力与�
 test('方向探索跨四个窗口沿冻结方向推进 64 格，扫描次数有界且不改变方向', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(80);
   t.after(() => ctx.memory.close());
-  let scans = 0;
+  const scanPositions: number[] = [];
   t.mock.method(lookAround, 'run', async (scanCtx, args) => {
-    scans++;
+    scanPositions.push(scanCtx.adapter.state().pos.x);
     assert.equal(args.direction, 'E');
     await scanCtx.adapter.look(Math.PI, -0.05);
     return { status: 'succeeded', summary: '已扫视，当前面朝南' };
@@ -47,7 +47,7 @@ test('方向探索跨四个窗口沿冻结方向推进 64 格，扫描次数有�
   assert.deepEqual(adapter.pos, { x: 64.5, y: 64, z: 0.5 });
   assert.equal((result.data?.progress as { along: number }).along, 64);
   assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 64);
-  assert.equal(scans, 4, '只在四个完整窗口后扫描，不在64个单步之后扫描');
+  assert.deepEqual(scanPositions, [16.5, 32.5, 48.5], '只在仍需前进的三个窗口结束时扫描，抵达后直接返回');
   assert.ok(adapter.actions.every((action) => !/^moveTo:(xz|near|advance)/.test(action)));
 });
 
@@ -60,6 +60,22 @@ test('until 只根据段后本轮扫视停止，不将其报为走完全部距�
   assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
   assert.ok(adapter.pos.x < 64);
   assert.equal((result.data?.intent as { distance: number }).distance, 64);
+});
+
+test('带 until 的最后一个窗口仍在终点扫描本轮目标', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(20);
+  t.after(() => ctx.memory.close());
+  const scan = t.mock.method(lookAround, 'run', async (_ctx, args) => {
+    assert.equal(args.for, 'log');
+    assert.deepEqual(adapter.pos, { x: 16.5, y: 64, z: 0.5 });
+    return { status: 'succeeded', summary: '本轮看见原木', data: { found: 'oak_log' } };
+  });
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 16, segment: 16, until: 'log' }, adapter));
+  assert.equal(scan.mock.callCount(), 1);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
+  assert.deepEqual(result.data?.sighting, { found: 'oak_log' });
+  assert.equal((result.data?.progress as { along: number }).along, 16);
 });
 
 test('已做定向观察的短前沿不再追加广角扫描', async (t) => {
