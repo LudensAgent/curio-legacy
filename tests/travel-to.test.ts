@@ -176,9 +176,10 @@ test('目标格受阻但当前已证实前缀可进入 range 时，走到范围�
 });
 
 test('无 y 的范围搜索可在不同脚高的目标列旁按水平格距完成', async (t) => {
-  const { adapter, map, ctx } = voxelNavigationFixture(8);
+  // 平台到 x=4，目标列另建在 y=70，避免同一毫秒里先种地面再覆盖成空气。
+  const { adapter, map, ctx } = voxelNavigationFixture(4);
   t.after(() => ctx.memory.close());
-  [63, 64, 65, 66, 67, 68, 69, 70, 71, 72].forEach((y) => map.observe({
+  [69, 70, 71].forEach((y) => map.observe({
     worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
     observedAt: Date.now(), sequence: 10000 + y, source: 'vision', evidence: 'seen', stateComplete: true,
     state: { name: y === 69 ? 'minecraft:stone' : 'minecraft:air', properties: {} }, pos: { x: 6, y, z: 0 },
