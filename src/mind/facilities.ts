@@ -10,7 +10,7 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
  * “我的设施”：自己在世界里留下、以后还能接着用的东西——箱子、工作台熔炉这些工作站、床。
  * 以前它们各记各的、只在“认真想”时混在一堆地点里给出去，于是它存了东西不去拿。
  * 这里是查它们的统一入口：认真想时列出来，需要的时候（缺材料）按需提一句。
- * 挖过的通道不在这里：下矿时由 prompt 的 decisionReminders 按距离提附近几条，路线复用走 travel_to 的 via。
+ * 挖过的通道不在设施表里：已观测的通道体素由共享 VoxelMap 保留，移动按该证据搜索。
  */
 export type FacilityKind = 'chest' | 'station' | 'bed';
 export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number }

@@ -636,7 +636,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 }
 
 /** 两个公开开挖入口共用的路线范围说明：同一条文案，避免公开说明与实际调用链漂移。 */
-export const EXCAVATION_ROUTE_NOTE = '按指定方向和模式（stairs/stairs_up/tunnel）的直线施工：不会自动绕旁路，也不会改走旁边现成的路面、旧桥或旧巷道。travel_to/explore_toward 只做直接寻路，不查询、不优先复用历史路线或路径片段；授权施工时先按不施工搜索，只有明确 NoPath 且原请求允许施工才按授权挖/垫。需要按已记录体素证据 3D 移动时用 navigate_to/advance。';
+export const EXCAVATION_ROUTE_NOTE = '按指定方向和模式（stairs/stairs_up/tunnel）的直线施工：不会自动绕旁路，也不会改走旁边现成的路面、旧桥或旧巷道。travel_to/navigate_to 按位置、explore_toward/advance 按方向，通过共享 VoxelMap 三维寻路；已观测的通道参与路线搜索，不读取历史路线或路径片段，不挖掘或放置。施工与沿现有地形移动是不同的委托，寻路失败本身不证明需要开挖。';
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',

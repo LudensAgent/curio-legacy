@@ -47,13 +47,16 @@ test('approach_visible 在静态指导与目录里可发现，target 三种写�
   for (const marker of ['"target"', '"pos"', '"block"', '"entity"', '"radius"']) assert.ok(details.includes(marker), `缺少 ${marker}`);
 });
 
-test('公开目录只说明直接寻路与体素导航，不再宣传旧路优先或 via', () => {
+test('公开目录区分直线施工与共享体素导航，不再宣传旧寻路后端或施工参数', () => {
   const catalog = movesCatalog(28);
   assert.match(catalog, /excavate_run .*不会改走旁边/);
   assert.match(deliberateSystem(''), /navigate_to/);
   assert.match(moveDetails(['excavate_run']), /不会自动绕旁路.*不会改走旁边/);
-  assert.match(moveDetails(['excavate_run']), /travel_to\/explore_toward 只做直接寻路/);
-  assert.match(moveDetails(['excavate_run']), /不查询、不优先复用历史路线或路径片段/);
+  const excavation = moveDetails(['excavate_run']);
+  assert.match(excavation, /travel_to\/navigate_to 按位置、explore_toward\/advance 按方向，通过共享 VoxelMap 三维寻路/);
+  assert.match(excavation, /已观测的通道参与路线搜索/);
+  assert.match(excavation, /不读取历史路线或路径片段，不挖掘或放置/);
+  assert.doesNotMatch(excavation, /授权施工时先按不施工搜索|NoPath|只做直接寻路/);
   const travel = moveDetails(['travel_to']);
   assert.match(travel, /共享 VoxelMap A\*/);
   assert.match(travel, /委托 navigate_to/);
