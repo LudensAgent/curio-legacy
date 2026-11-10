@@ -75,6 +75,14 @@ if (!Number.isFinite(snapshotMaxMb) || snapshotMaxMb <= 0 || snapshotMaxMb > 409
   throw new Error(`SPATIAL_SNAPSHOT_MAX_MB 必须是 (0,4096] 内的数字，收到：${snapshotMaxMb}`);
 }
 const snapshotMaxBytes = Math.round(snapshotMaxMb * 1024 * 1024);
+// 整库已提交体素的观测格数上限（不是单次批量）。库默认 1_000_000；4M distinct
+// 格的验收目标需要显式放宽，否则超过 1M 后每次 checkpoint 都 capacity 失败。
+// 它与 SPATIAL_SNAPSHOT_MAX_MB 的字节额度是两个独立上限，只决定“能否落盘”，
+// 不改变驻留上限或游戏规则；可用 SPATIAL_MAX_OBSERVED_CELLS 调整。
+const maxObservedCells = num('SPATIAL_MAX_OBSERVED_CELLS', 4_100_000);
+if (!Number.isSafeInteger(maxObservedCells) || maxObservedCells < 1 || maxObservedCells > 16_000_000) {
+  throw new Error(`SPATIAL_MAX_OBSERVED_CELLS 必须是 [1,16000000] 内的整数，收到：${maxObservedCells}`);
+}
 // 单次 checkpoint 的体素 dirty 批次上限；默认 16MiB，必须不超过总快照上限。
 // 小于总量时一次保存只提交有界前缀，剩余 dirty 由后续批次提交。
 const voxelBatchMb = num('SPATIAL_VOXEL_BATCH_MB', 16);
@@ -192,9 +200,11 @@ export const config = {
     /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
     maxResidentMb,
     maxResidentBytes,
-    /** 单次空间快照的序列化字节上限；默认 192MiB，可用 SPATIAL_SNAPSHOT_MAX_MB 调整。 */
+    /** 单次空间快照的序列化字节上限；默认 1024MiB，可用 SPATIAL_SNAPSHOT_MAX_MB 调整。 */
     snapshotMaxMb,
     snapshotMaxBytes,
+    /** 整库已提交体素的观测格数上限；默认 410 万，可用 SPATIAL_MAX_OBSERVED_CELLS 调整。 */
+    maxObservedCells,
     /** 单次 checkpoint 的体素 dirty 批次上限；默认 16MiB，可用 SPATIAL_VOXEL_BATCH_MB 调整。 */
     voxelBatchMb,
     voxelBatchMaxBytes,

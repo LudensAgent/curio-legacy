@@ -79,6 +79,15 @@ test('空间体素证据有效期默认 5 分钟，可用 SPATIAL_VOXEL_VALIDITY
   assert.equal(overridden.config.spatial.voxelValidityWindowMs, 90_000);
 });
 
+test('空间观测格额度默认 410 万，可用 SPATIAL_MAX_OBSERVED_CELLS 覆盖', async (t) => {
+  project(t);
+  const defaults = await loadConfig();
+  assert.equal(defaults.config.spatial.maxObservedCells, 4_100_000);
+  process.env.SPATIAL_MAX_OBSERVED_CELLS = '2000000';
+  const overridden = await loadConfig();
+  assert.equal(overridden.config.spatial.maxObservedCells, 2_000_000);
+});
+
 test('界面默认只在窗口边界短暂停留，显式等待值仍然生效', async (t) => {
   project(t);
   const defaults = await loadConfig();

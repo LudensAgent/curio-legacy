@@ -107,7 +107,10 @@ try {
     voxelLoading: config.spatial.voxelLoading,
     // 快照序列化容量是宿主配置，不是库的固定规则；长期世界超过库默认 64MiB 后
     // checkpoint 会一直 capacity 失败。上限只决定一次保存能否完成，不改变驻留。
-    snapshotLimits: { maxBytes: config.spatial.snapshotMaxBytes },
+    snapshotLimits: {
+      maxBytes: config.spatial.snapshotMaxBytes,
+      maxObservedCells: config.spatial.maxObservedCells,
+    },
     // 单次保存只提交有界 dirty 前缀；剩余 dirty 由同一调度周期的后续批次提交。
     voxelBatchMaxBytes: config.spatial.voxelBatchMaxBytes,
     ...(config.spatial.voxelLoading === 'manual'
