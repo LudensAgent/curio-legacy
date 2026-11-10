@@ -33,6 +33,37 @@ function fakeSpatial(map: VoxelMap) {
   } as unknown as SharedSpatialSession;
 }
 
+test('navigate_to descends an explicitly allowed ladder column with measured feet', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: { x: number; y: number; z: number }[] = [];
+  for (let x = -1; x <= 1; x++) for (let y = 64; y <= 68; y++) for (let z = -1; z <= 1; z++) air.push({ x, y, z });
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', [{ x: 0, y: 63, z: 0 }]);
+  fill(map, 'minecraft:ladder', [{ x: 0, y: 64, z: 0 }, { x: 0, y: 65, z: 0 }, { x: 0, y: 66, z: 0 }], { facing: 'north' });
+
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 66, z: 0.5 };
+  adapter.worldId = WORLD;
+  adapter.sessionId = SESSION;
+  adapter.dim = DIM;
+  adapter.speed = 100_000;
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const validated = navigateTo.validate({
+    to: { x: 0, y: 64, z: 0 }, allowed: ['ladder'], historical: false, maxSteps: 8,
+  }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await navigateTo.run(ctx, validated.args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(adapter.pos.y, 64);
+  const transitions = result.data?.transitions as { kind: string; from: { y: number }; to: { y: number } }[] | undefined;
+  assert.deepEqual(transitions?.map((transition) => [transition.kind, transition.from.y, transition.to.y]), [
+    ['ladder', 66, 65],
+    ['ladder', 65, 64],
+  ]);
+});
+
 test('navigate_to climbs an explicitly allowed ladder column with measured feet', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   const air: { x: number; y: number; z: number }[] = [];
