@@ -8,6 +8,7 @@ import {
   observedFootY,
   searchLandRouteAsync,
   summarizeBoundaries,
+  verifyLandRouteBounded,
   type LandSearchBoundarySummary,
   type LandSearchResult,
   type LandSearchTransition,
@@ -380,6 +381,17 @@ const routeSummary = (evaluation: Evaluation) => ({
   steps: evaluation.planned.length,
   ...(evaluation.executableSteps === null ? {} : { executableSteps: evaluation.executableSteps }),
   ...(evaluation.deadRoute ? { deadRoute: true } : {}),
+  ...(evaluation.result.verification === undefined ? {} : {
+    verification: {
+      verdict: evaluation.result.verification.verdict,
+      openPrefix: evaluation.result.verification.openPrefix,
+      checked: evaluation.result.verification.coverage?.checked ?? evaluation.result.verification.transitions.length,
+      total: evaluation.result.verification.coverage?.total ?? evaluation.result.verification.transitions.length,
+      complete: evaluation.result.verification.coverage?.complete ?? true,
+      ...(evaluation.result.verification.coverage?.stopped === undefined
+        ? {} : { stopped: evaluation.result.verification.coverage.stopped }),
+    },
+  }),
   ...(evaluation.targetMismatch ? { targetMismatch: true, target: { ...evaluation.result.target } } : {}),
   ...(evaluation.boundaries.total === 0 ? {} : { boundaries: evaluation.boundaries.counts }),
   ...(evaluation.disallowed === null ? {} : { disallowed: evaluation.disallowed.kind }),
@@ -944,16 +956,38 @@ export const approachVisible: Skill<Args> = {
       };
       const strict = await searchLandRouteAsync(voxel, request);
       if (strict.status === 'CANCELLED') return cancelled('路线搜索被取消。', { searched: evaluations.length, resolvedStance: candidate.stance });
+      // 给历史候选的当前证据复验保留同一 slice 的尾部时间，不能被历史搜索吃完。
+      const historicalDeadline = Math.min(sliceEnd, Date.now() + Math.max(1, Math.floor((sliceEnd - Date.now()) * 0.8)));
       const historical = strict.status === 'FOUND' || !args.historical || ctx.signal.aborted
         ? null
-        : await searchLandRouteAsync(voxel, { ...request, evidenceMode: 'remembered', deadlineMs: sliceEnd });
+        : await searchLandRouteAsync(voxel, { ...request, evidenceMode: 'remembered', deadlineMs: historicalDeadline });
       if (historical?.status === 'CANCELLED') return cancelled('历史路线搜索被取消。', { searched: evaluations.length, resolvedStance: candidate.stance });
-      const result = strict.status === 'FOUND' ? strict : historical?.status === 'FOUND' ? historical : strict;
+      let result = strict.status === 'FOUND' ? strict : historical?.status === 'FOUND' ? historical : strict;
+      // 历史候选只证明“记忆几何里存在路线”，不证明当前可执行。这里按当前证据有界复验，
+      // 让 blocker/executableSteps 基于实际当前事实；复验未完成的部分不能当作已 OPEN。
+      if (result.status === 'FOUND' && result.evidenceMode === 'historical') {
+        const verification = await verifyLandRouteBounded(
+          voxel,
+          {
+            worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
+            body: request.body, rules: request.rules,
+          },
+          result.transitions,
+          { deadlineMs: sliceEnd, signal: ctx.signal },
+        );
+        if (verification.coverage?.stopped === 'cancelled') {
+          return cancelled('历史路线当前证据复验期间收到取消。', { searched: evaluations.length, resolvedStance: candidate.stance });
+        }
+        result = { ...result, verification };
+      }
       const planned = result.status === 'FOUND' ? result.transitions : (strict.prefix?.transitions ?? []);
       // navigate_to 只在首个 BLOCKED 段前停止；STALE/UNKNOWN 段仍会按现场证据逐步复核，
-      // 所以“可执行段数”取 blocker 下标，而不是 verification.openPrefix。
+      // 所以“可执行段数”取 blocker 下标，而不是 verification.openPrefix。复验因期限提前
+      // 停止时，未检查的尾部也不能冒充可执行。
       const blocker = result.status === 'FOUND' ? blockerOf(result.verification) : null;
-      const executableSteps = result.status === 'FOUND' ? (blocker === null ? planned.length : blocker.index) : null;
+      const checkedSteps = result.verification?.coverage === undefined
+        ? planned.length : Math.min(planned.length, result.verification.coverage.checked);
+      const executableSteps = result.status === 'FOUND' ? (blocker === null ? checkedSteps : blocker.index) : null;
       const historicalDead = result.evidenceMode === 'historical' && result.status === 'FOUND' && executableSteps === 0;
       const mode: RouteMode = result.status === 'FOUND' && !historicalDead
         ? (result.evidenceMode === 'current' ? 'current' : 'historical')
@@ -1002,7 +1036,9 @@ export const approachVisible: Skill<Args> = {
       !evaluation.deadRoute && !evaluation.targetMismatch);
     if (!executable.length) {
       const { position, displacement } = snapshot();
-      return fail('NOT_FOUND', '没有可执行候选：路线落脚点与当前实测验证的站位不一致，或历史路线的第一步已被当前证据阻挡；没有执行任何一步', {
+      const incompleteVerification = evaluations.some((evaluation) =>
+        evaluation.result.verification?.coverage?.complete === false);
+      return fail('NOT_FOUND', `没有可执行候选：路线落脚点与当前实测验证的站位不一致，或历史路线的第一步已被当前证据阻挡${incompleteVerification ? '，或历史候选的当前证据复验未在期限内完成' : ''}；没有执行任何一步`, {
         ...base, outcome: 'UNKNOWN', stop: 'UNKNOWN', evidenceState: 'UNKNOWN',
         position, displacement, resolvedStance: null,
         candidates: evaluations.map(routeSummary),

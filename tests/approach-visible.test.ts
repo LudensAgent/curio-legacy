@@ -729,6 +729,16 @@ test('approach_visible 用历史体素候选路线，但过期当前证据在动
   assert.equal(r.data?.searchEvidenceMode, 'historical', '候选来源仍是历史体素');
   assert.equal((r.data?.navigation as { evidenceMode: string }).evidenceMode, 'historical');
   assert.deepEqual(adapter.pos, before, 'STALE 当前证据不启动身体');
+  const candidates = (r.data?.candidates ?? []) as {
+    mode: string;
+    executableSteps?: number;
+    verification?: { verdict: string; openPrefix: number; checked: number; total: number; complete: boolean };
+  }[];
+  const historical = candidates.find((candidate) => candidate.mode === 'historical');
+  assert.ok(historical?.verification, '历史候选必须附当前证据复验事实');
+  assert.equal(historical.verification.openPrefix, 0, '过期证据下当前 OPEN 前缀为 0');
+  assert.equal(historical.verification.checked, historical.verification.total, '小地图复验应完成全部段');
+  assert.equal(historical.verification.complete, true);
 });
 
 test('approach_visible 在已知 BLOCKED 边界前停下，返回 BLOCKED 而不是 UNKNOWN', async (t) => {
