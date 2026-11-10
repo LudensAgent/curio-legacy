@@ -13,6 +13,7 @@ import {
   HERD_CAP,
   LANDMARK_CAP,
   SpatialSemanticStore,
+  type LandmarkObservation,
   type SpatialLibraryStores,
 } from '../spatial/semantic-store.ts';
 import { createInMemoryLibraryStores } from '../spatial/in-memory.ts';
@@ -476,8 +477,20 @@ export class WorldMemory {
   }
 
   // ------------------------------------------------ 地标
-  addLandmark(kind: LandmarkKind, label: string, dim: string, pos: Vec3Like, dedupeRadius = 24): Landmark | null {
-    return this.semantic.addLandmark(kind, label, dim, pos, dedupeRadius);
+  addLandmark(
+    kind: LandmarkKind,
+    label: string,
+    dim: string,
+    pos: Vec3Like,
+    dedupeRadius = 24,
+    observation?: LandmarkObservation,
+  ): Landmark | null {
+    return this.semantic.addLandmark(kind, label, dim, pos, dedupeRadius, observation);
+  }
+
+  /** 刚重新看见某个资源来源格时显式刷新；同格旧版本不覆盖新版本。 */
+  refreshResourceSource(id: string, observation: LandmarkObservation) {
+    return this.semantic.refreshResourceSource(id, observation);
   }
 
   private inWorld(record: { worldId?: string }): boolean { return (record.worldId ?? 'default') === this.worldId; }
@@ -541,7 +554,14 @@ export class WorldMemory {
   }
 
   /** 资源索引只是已记录锚点的派生投影；complete=false，不是全图资源结论。 */
-  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number; rebuilds: number } {
+  resourceIndexStatus(): {
+    complete: false;
+    reason: string;
+    resourceAnchors: number;
+    withSourceVersion: number;
+    withoutSourceVersion: number;
+    rebuilds: number;
+  } {
     return this.semantic.resourceIndexStatus();
   }
 

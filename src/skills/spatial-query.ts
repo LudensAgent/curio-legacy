@@ -1,7 +1,7 @@
 /**
  * spatial_query：契约查询端口的薄适配（契约 §5，Curio 计划 v2 §3.3 C1–C3）。
  *
- * 宿主不维护第二套查询投影，也不复刻库的请求 schema：15 种 kind 的字段、枚举、
+ * 宿主不维护第二套查询投影，也不复刻库的请求 schema：各 kind 的字段、枚举、
  * 上限与未知字段都由库自己的 validator 在 `SharedSpatialSession.query` 的委托
  * 边界上校验（`invalid_request`）。本技能只做 skill 边界（参数必须是对象）、
  * 生命周期检查、调用委托和结果信封转发。
@@ -124,11 +124,12 @@ function summaryOf(kind: string, result: SpatialQueryResult): string {
 export const spatialQuery: Skill<SpatialQueryArgs> = {
   name: 'spatial_query',
   description:
-    '只读查询共享空间记忆的契约端口（契约 §5）：cells、nodes、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
+    '只读查询共享空间记忆的契约端口（契约 §5）：cells、nodes、places、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
     + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges、anchor、portals）已退役，返回结构化 unsupported + reason:"route_retired"，不返回空列表冒充无记录；导航请用 navigate_to/advance。'
     + '返回契约 SpatialQueryResult 信封（status/contract/worldId/dim/sessionId/computedAt/readOnly:true/executable:false/data/problem/total/nextAfter）；data 是库的原样分页/投影，不再由宿主改写。'
     + '历史几何与最近观测都不代表当前可通行、可执行或在线观察；不观察、不移动、不加载 Section、不刷新证据时间、不写库。'
     + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；containerAnchors 只读 facts 中未消失的精确容器/熔炉锚点，contents 仍由宿主精确账本回答。resourceAnchors 默认排除已标 gone 的资源；需要历史记录时显式 includeGone:true。'
+    + 'places 是仅地点流的有界分页（tag/label/source/includeGone/after/limit），data.pageSource="memory" 表示回答来自内存事实权威，不是持久化冷页读取；没有逐页冷读接口，宿主不伪造。'
     + '分页统一用 after/limit；旧 fragment/route/historyRoute 查询已随路线片段读面退役。'
     + 'kind==="capabilities" 时，库报告原样在信封的 data.capabilities；信封顶层另加 hostComposed（与信封 data 同级、owner:"host_composed"）列出宿主真实能力。',
   argsDoc:
@@ -136,6 +137,7 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     + '{"kind":"cells","dim":"overworld","positions":[{"x":0,"y":64,"z":0}]}  // observed 为 false 时看 residency/unobservedReason/gap\n'
     + '{"kind":"nodes","dim":"overworld","tag":"base|...|portal","label":"x","source":"agent|program","after":"cursor","limit":100}  // 语义节点；旧路线节点不作为导航依据\n'
     + '{"kind":"nodes","tag":"portal","after":"cursor","limit":100}  // 传送门端点，不推断连接\n'
+    + '{"kind":"places","dim":"overworld","tag":"base","label":"x","source":"agent|program","includeGone":false,"after":"cursor","limit":100}  // 地点专用分页；pageSource:"memory" 是内存事实权威，不是持久化冷读\n'
     + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges、anchor、portals）已退役，传入会返回 unsupported；导航请用 navigate_to/advance。\n'
     + '{"kind":"resourceAnchors","dim":"overworld","tag":"...","label":"x","includeGone":false,"after":"cursor","limit":100}  // 默认排除 gone；includeGone:true 才返回历史\n'
     + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // exact 容器/熔炉锚点；默认排除 gone\n'
