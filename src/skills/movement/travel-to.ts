@@ -79,7 +79,7 @@ function parseTarget(raw: unknown): TravelTarget | string {
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或目标列缺证据时如实报缺口。无 y 的坐标会先用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），但路线目标仍是原坐标；不会把范围目标改成更近的点。只接受 to/range/timeoutMs/sessionId（以及通用 make），其他参数一律拒绝。',
+  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或需要移动但目标列缺证据时如实报缺口。无 y 且尚未在到达范围内时，用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），实测站稳并进入范围即停止；路线目标仍是原坐标，不会把范围目标改成更近的点。只接受 to/range/timeoutMs/sessionId（以及通用 make），其他参数一律拒绝。',
   argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号"}；只接受 to/range/timeoutMs/sessionId/make，未知参数会被拒绝。',
   timeoutMs: 600000,
   movement: true,
@@ -146,27 +146,20 @@ export const travelTo: Skill<TravelToArgs> = {
     }
 
     const requestedY = point.y !== undefined;
-    const goalY = point.y ?? observedFootY(voxel, s0.dim, Math.floor(point.x), Math.floor(point.z), Math.floor(start.y), TARGET_FOOT_SCAN, TARGET_FOOT_SCAN);
+    let goalY = point.y;
     const resolvedTarget = { x: point.x, ...(requestedY ? { y: point.y } : {}), z: point.z };
-    if (goalY === null) {
-      return fail('BAD_ARGS', `目标 (${point.x},${point.z}) 没有给 y，且共享 VoxelMap 在该列 ±${TARGET_FOOT_SCAN} 格内没有可站立面的新鲜证据；travel_to 不猜落脚高度。请写 {x,y,z}（y 是脚高）或先观察该列；没有移动`, {
-        originalRequest: request, backend, resolvedTarget, outcome: 'UNSUPPORTED',
-        capabilityGap: 'target_foot_y_unobserved', target: resolvedTarget,
-      });
-    }
-    const goal = { x: point.x, y: goalY, z: point.z };
 
     // 原到达条件只在实测边界使用：无 y 按水平格距、有 y 按三维格距。
     const flat = (p: Vec3Like) => Math.hypot(Math.floor(p.x) - Math.floor(point.x), Math.floor(p.z) - Math.floor(point.z));
     const gap = (p: Vec3Like) => requestedY
       ? Math.hypot(flat(p), Math.floor(p.y) - Math.floor(point.y!))
       : flat(p);
-    const arrived = (p: Vec3Like) => gap(p) <= args.range;
-    const arrivalAt = (p: Vec3Like) => ({
+    const arrived = (p: Vec3Like, onGround: boolean) => onGround && gap(p) <= args.range;
+    const arrivalAt = (p: Vec3Like, onGround: boolean) => ({
       mode: 'near_radius' as const,
       required: { radius: args.range, metric: requestedY ? '3d' : 'horizontal' },
-      measured: { position: { ...p }, distance: round1(gap(p)) },
-      satisfied: arrived(p),
+      measured: { position: { ...p }, distance: round1(gap(p)), onGround },
+      satisfied: arrived(p, onGround),
     });
 
     const startedAt = Date.now();
@@ -176,7 +169,7 @@ export const travelTo: Skill<TravelToArgs> = {
       const displacement = { horizontal: round1(Math.hypot(end.x - start.x, end.z - start.z)), vertical: round1(end.y - start.y) };
       return {
         requestedTarget: resolvedTarget, resolvedTarget, label,
-        targetFootY: goalY, targetYSource: requestedY ? 'requested' : 'voxel_observed',
+        ...(goalY === undefined ? {} : { targetFootY: goalY, targetYSource: requestedY ? 'requested' : 'voxel_observed' }),
         backend, delegate: 'navigate_to' as const,
         position: end, displacement,
         remaining: { horizontal: round1(flat(end)), ...(requestedY ? { vertical: Math.floor(point.y!) - Math.floor(end.y) } : {}) },
@@ -185,17 +178,20 @@ export const travelTo: Skill<TravelToArgs> = {
         ...(trace.length > 1 ? { trace: trace.slice(-24).map((p) => ({ ...p })) } : {}),
       };
     };
-    const receipt = (r: SkillResult, outcome: NavOutcome) => navReceipt(r, {
-      backend, originalRequest: request, resolvedTarget, outcome,
-      position: { ...adapter.state().pos }, trace, arrival: arrivalAt(adapter.state().pos),
-    });
+    const receipt = (r: SkillResult, outcome: NavOutcome) => {
+      const state = adapter.state();
+      return navReceipt(r, {
+        backend, originalRequest: request, resolvedTarget, outcome,
+        position: { ...state.pos }, trace, arrival: arrivalAt(state.pos, state.onGround),
+      });
+    };
 
     if (ctx.signal.aborted) {
       return receipt({ status: 'cancelled', summary: 'travel_to 开始前已取消，没有移动', data: facts() }, 'CANCELLED');
     }
 
     // 开始前已满足原到达条件：这是实测事实，不是用请求坐标冒充到达。
-    if (arrived(start)) {
+    if (arrived(start, s0.onGround)) {
       return receipt(ok(`已在 ${label} 的到达范围内：实测 ${at(start)}，距离 ${round1(gap(start))} 格 ≤ range ${args.range}；没有移动`, {
         ...facts(), outcome: 'ARRIVED' as const, alreadyWithinRange: true,
       }), 'ARRIVED');
@@ -205,6 +201,16 @@ export const travelTo: Skill<TravelToArgs> = {
         ...facts(), outcome: 'TIMEOUT' as const, stopReason: 'TIMEOUT', timeoutSource: 'budget',
       }), 'TIMEOUT');
     }
+
+    // 只有尚未进入原到达范围、确实需要规划移动时，才要求目标列的脚高证据。
+    goalY ??= observedFootY(voxel, s0.dim, Math.floor(point.x), Math.floor(point.z), Math.floor(start.y), TARGET_FOOT_SCAN, TARGET_FOOT_SCAN) ?? undefined;
+    if (goalY === undefined) {
+      return receipt(fail('BAD_ARGS', `目标 (${point.x},${point.z}) 没有给 y，且共享 VoxelMap 在该列 ±${TARGET_FOOT_SCAN} 格内没有可站立面的新鲜证据；travel_to 不猜落脚高度。请写 {x,y,z}（y 是脚高）或先观察该列；没有移动`, {
+        ...facts(), originalRequest: request, outcome: 'UNSUPPORTED',
+        capabilityGap: 'target_foot_y_unobserved', target: resolvedTarget,
+      }), 'FAILED');
+    }
+    const goal = { x: point.x, y: goalY, z: point.z };
 
     const direct = Math.hypot(goal.x - start.x, goal.y - start.y, goal.z - start.z);
     const maxSteps = Math.min(HARD_MAX_STEPS, Math.max(16, Math.ceil(direct * MAX_DETOUR_FACTOR) + DETOUR_SLACK));
@@ -227,14 +233,19 @@ export const travelTo: Skill<TravelToArgs> = {
     let moved: SkillResult;
     try {
       ctx.progress(0, `委托 VoxelMap A* 走向 ${label}`);
-      moved = await runSkill(ctx, navigateTo, nested.args);
+      moved = await runSkill(ctx, navigateTo, {
+        ...nested.args,
+        arrival: { radius: args.range, metric: requestedY ? '3d' : 'horizontal' },
+      });
     } catch (error) {
       if (!isAbort(error)) throw error;
       trace.push({ ...adapter.state().pos });
-      throw cancelledNav(error, { backend, originalRequest: request, resolvedTarget, position: trace.at(-1) ?? null, trace, arrival: arrivalAt(adapter.state().pos) });
+      const state = adapter.state();
+      throw cancelledNav(error, { backend, originalRequest: request, resolvedTarget, position: trace.at(-1) ?? null, trace, arrival: arrivalAt(state.pos, state.onGround) });
     }
     trace.push({ ...adapter.state().pos });
-    const end = { ...adapter.state().pos };
+    const endState = adapter.state();
+    const end = { ...endState.pos };
     const movedFacts = facts();
     const stop = (moved.data?.stop ?? {}) as { reason?: string };
     const stopReason = typeof stop.reason === 'string' ? stop.reason : undefined;
@@ -253,7 +264,7 @@ export const travelTo: Skill<TravelToArgs> = {
         data: { ...(moved.data ?? {}), ...routeFacts, outcome: 'CANCELLED' as const },
       }, 'CANCELLED');
     }
-    if (arrived(end)) {
+    if (arrived(end, endState.onGround)) {
       const effects = moved.status === 'succeeded' ? '' : '；VoxelMap A* 没有报成功，但实测位置满足原到达条件';
       return receipt(ok(`到了 ${label} 附近：实测 ${at(end)}，距离 ${round1(gap(end))} 格 ≤ range ${args.range}（水平位移 ${movedFacts.displacement.horizontal} 格）${effects}`, {
         ...routeFacts, outcome: 'ARRIVED' as const,

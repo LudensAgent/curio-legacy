@@ -74,9 +74,12 @@ export function closeReasonOf(
     }
     return null;
   }
-  const goal = goalFromIntent(intent.to, intent.targetKind);
+  const goal = goalFromIntent(intent.to, intent.targetKind, intent.arrival);
   if (goalReached(goal, current, onGround, airborneLadderGoal)) {
     const where = `实测脚位 (${round2(current.x)},${round2(current.y)},${round2(current.z)})`;
+    if (intent.arrival !== undefined) {
+      return { reason: 'ARRIVED', detail: `${where} 已站稳并进入原目标的 ${intent.arrival.metric === 'horizontal' ? '水平' : '三维'}格距 ${intent.arrival.radius} 格范围` };
+    }
     return goal.kind === 'cell'
       ? { reason: 'ARRIVED', detail: `${where} 在目标格 (${goal.cell.x},${goal.footY},${goal.cell.z})，脚高在容差内` }
       : { reason: 'ARRIVED', detail: `${where} 与精确脚位目标一致（水平/垂直容差内）` };

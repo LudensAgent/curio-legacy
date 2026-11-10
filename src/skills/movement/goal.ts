@@ -11,7 +11,10 @@ import { FEET_ARRIVAL_TOLERANCE, type Vec3Like } from '../../adapter/types.ts';
  * `requested` 始终保存调用者原始写法；`footY` 是请求的脚高，或在拥有“近似候选”语义的
  * 边界（go_near/approach_visible）里由该边界显式解析出的真实支撑面。这里不做任何吸附。
  */
-export type NavigationGoal =
+/** travel_to 的已验证到达条件；只改变验收谓词，不改写搜索目的地。 */
+export type NavigationArrival = { radius: number; metric: 'horizontal' | '3d' };
+
+export type NavigationGoal = (
   | {
       kind: 'cell';
       requested: Vec3Like;
@@ -22,7 +25,8 @@ export type NavigationGoal =
       kind: 'feet';
       requested: Vec3Like;
       feet: Vec3Like;
-    };
+    }
+) & { arrival?: NavigationArrival };
 
 export type NavigationTargetKind = NavigationGoal['kind'];
 
@@ -56,10 +60,11 @@ export function cellGoal(cell: { x: number; z: number }, footY: number, requeste
 }
 
 /** 恢复会话意图时使用已冻结的 targetKind，不重新猜测。 */
-export function goalFromIntent(to: Vec3Like, kind: NavigationTargetKind): NavigationGoal {
+export function goalFromIntent(to: Vec3Like, kind: NavigationTargetKind, arrival?: NavigationArrival): NavigationGoal {
+  const completion = arrival === undefined ? {} : { arrival: { ...arrival } };
   return kind === 'cell'
-    ? { kind: 'cell', requested: { ...to }, cell: { x: Math.floor(to.x), z: Math.floor(to.z) }, footY: to.y }
-    : { kind: 'feet', requested: { ...to }, feet: { ...to } };
+    ? { kind: 'cell', requested: { ...to }, cell: { x: Math.floor(to.x), z: Math.floor(to.z) }, footY: to.y, ...completion }
+    : { kind: 'feet', requested: { ...to }, feet: { ...to }, ...completion };
 }
 
 /**
@@ -111,6 +116,12 @@ export function goalReached(
   onGround: boolean,
   airborneLadderGoal = false,
 ): boolean {
+  if (goal.arrival !== undefined) {
+    const horizontal = Math.hypot(Math.floor(measured.x) - Math.floor(goal.requested.x), Math.floor(measured.z) - Math.floor(goal.requested.z));
+    const distance = goal.arrival.metric === 'horizontal' ? horizontal
+      : Math.hypot(horizontal, Math.floor(measured.y) - Math.floor(goal.requested.y));
+    return onGround && distance <= goal.arrival.radius;
+  }
   const grounded = onGround || airborneLadderGoal;
   return goal.kind === 'cell'
     ? cellReached({ x: goal.cell.x + 0.5, y: goal.footY, z: goal.cell.z + 0.5 }, measured, grounded)

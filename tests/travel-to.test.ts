@@ -4,6 +4,7 @@ import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
+import type { MovementIntent } from '../src/skills/movement/session.ts';
 
 const argsOf = (raw: unknown, adapter = new FakeAdapter()) => {
   const result = travelTo.validate(raw, adapter);
@@ -40,6 +41,8 @@ test('travel_to 只有体素规划：到达已知目标，不发 broad pathfinde
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.backend, 'voxel_astar');
   assert.deepEqual(result.data?.requestedTarget, { x: 6, y: 64, z: 0 });
+  assert.deepEqual(adapter.pos, { x: 5.5, y: 64, z: 0.5 }, '进入 range=1 就停止，不继续走到目标格');
+  assert.deepEqual((result.data?.navigation as Record<string, unknown>)?.requestedTarget, { x: 6, y: 64, z: 0 }, 'range 只决定验收，不改写原目标');
   assert.ok(adapter.actions.some((action) => action.startsWith('moveTo:feet')));
   assert.ok(adapter.actions.every((action) => !/^moveTo:(xz|near|advance)/.test(action)));
 });
@@ -59,6 +62,7 @@ test('委托保留坐标、期限、signal、sessionId 与未到达进展', asyn
   t.mock.method(navigateTo, 'run', async (nestedCtx, args) => {
     assert.deepEqual(args.to, target);
     assert.equal(args.sessionId, 'same');
+    assert.deepEqual(args.arrival, { radius: 1, metric: '3d' });
     assert.equal(nestedCtx.signal, ctx.signal);
     assert.ok(args.deadlineMs <= ctx.deadline);
     adapter.pos.x = 3.5;
@@ -92,6 +96,78 @@ test('range 的既有到达条件在开始前生效，不强制走到格心', as
   assert.equal(result.status, 'succeeded');
   assert.equal(result.data?.alreadyWithinRange, true);
   assert.equal(adapter.actions.length, 0);
+});
+
+test('无 y 且已经进入水平范围时，不要求远处目标列证据', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(0);
+  t.after(() => ctx.memory.close());
+  const result = await travelTo.run(ctx, argsOf({ to: { x: 2, z: 0 }, range: 3 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.alreadyWithinRange, true);
+  assert.deepEqual(result.data?.requestedTarget, { x: 2, z: 0 });
+  assert.equal(result.data?.targetFootY, undefined, '未使用目标列高度，不凭空报告已观测脚高');
+  assert.equal(adapter.actions.length, 0);
+});
+
+test('travel_to 在原目标范围内按格距验收，停在第一处已站稳的位置', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  const target = { x: 6, y: 64, z: 0 };
+  const result = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.pos, { x: 4.5, y: 64, z: 0.5 });
+  assert.equal(adapter.actions.filter(action => action.startsWith('moveTo:feet')).length, 4);
+  assert.deepEqual(result.data?.requestedTarget, target);
+  const intent = result.data?.intent as Extract<MovementIntent, { kind: 'navigate' }>;
+  assert.deepEqual(intent.to, target);
+  assert.deepEqual(intent.arrival, { radius: 2, metric: '3d' });
+});
+
+test('无 y 的移动范围保持水平格距，不被推导脚高改成三维距离', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  t.mock.method(navigateTo, 'run', async (_ctx, args) => {
+    assert.deepEqual(args.to, { x: 6, y: 64, z: 0 });
+    assert.deepEqual(args.arrival, { radius: 2, metric: 'horizontal' });
+    adapter.pos = { x: 4.5, y: 70, z: 0.5 };
+    return { status: 'failed', failureCode: 'NOT_FOUND', summary: '前方未知' };
+  });
+  const result = await travelTo.run(ctx, argsOf({ to: { x: 6, z: 0 }, range: 2 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(result.data?.requestedTarget, { x: 6, z: 0 });
+});
+
+test('悬空经过 range 不能被包装成已经到达', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  t.mock.method(navigateTo, 'run', async () => {
+    adapter.pos = { x: 5.5, y: 64, z: 0.5 };
+    adapter.onGround = false;
+    return { status: 'failed', failureCode: 'EFFECT_NOT_CONFIRMED', summary: '仍未落稳' };
+  });
+  const result = await travelTo.run(ctx, argsOf({ to: { x: 6, y: 64, z: 0 }, range: 2 }, adapter));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
+  assert.equal((result.data?.arrival as { satisfied: boolean })?.satisfied, false);
+});
+
+test('有 y 的范围保留垂直距离，同 session 续接不能改验收范围', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  const target = { x: 70, y: 64, z: 0 };
+  const first = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(first.status, 'failed');
+  assert.equal(typeof first.data?.sessionId, 'string');
+  const second = await travelTo.run(ctx, argsOf({ to: target, range: 3, sessionId: first.data?.sessionId }, adapter));
+  assert.equal(second.failureCode, 'BAD_ARGS');
+  assert.equal(second.data?.reason, 'INTENT_MISMATCH');
+
+  t.mock.method(navigateTo, 'run', async () => {
+    adapter.pos = { x: 68.5, y: 70, z: 0.5 };
+    return { status: 'failed', failureCode: 'NOT_FOUND', summary: '未到原脚高' };
+  });
+  const high = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(high.status, 'failed', '水平距 2 格但高 6 格，不能当成三维 range=2 已到达');
 });
 test('开始前取消即使已在范围内，也不翻译为到达', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture();

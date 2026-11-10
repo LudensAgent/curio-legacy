@@ -2,13 +2,15 @@ import type { Vec3Like } from '../../adapter/types.ts';
 import { feetCell } from '../../perception/local.ts';
 import { obj, type Skill } from '../types.ts';
 import { coordinatorData, runMovementCoordinator, type CoordinatorOutcome } from './coordinator.ts';
-import { targetKindOf, type NavigationTargetKind } from './goal.ts';
+import { targetKindOf, type NavigationArrival, type NavigationTargetKind } from './goal.ts';
 import type { MoveMode } from './session.ts';
 
 type NavigateArgs = {
   to: Vec3Like;
   /** validate 时冻结；直接调用 run 的旧入口可省略，run 会在唯一入口边界补齐。 */
   targetKind?: NavigationTargetKind;
+  /** 内部已验证委托的验收条件；公开 navigate_to 保持精确目标语义。 */
+  arrival?: NavigationArrival;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -166,7 +168,7 @@ export const navigateTo: Skill<NavigateArgs> = {
     // validate 会冻结 targetKind；直接调用 run 的旧入口在这里按原目标补一次（只在这个边界）。
     const targetKind = args.targetKind ?? targetKindOf(args.to);
     const outcome = await runMovementCoordinator(ctx, {
-      intent: { kind: 'navigate', to: { ...args.to }, targetKind, allowed: args.allowed, historical: args.historical !== false },
+      intent: { kind: 'navigate', to: { ...args.to }, targetKind, ...(args.arrival === undefined ? {} : { arrival: { ...args.arrival } }), allowed: args.allowed, historical: args.historical !== false },
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? maxSteps,
       maxTransitions: args.maxTransitions ?? maxSteps * maxSegments,
