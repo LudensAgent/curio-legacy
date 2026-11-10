@@ -2,10 +2,13 @@ import type { Vec3Like } from '../../adapter/types.ts';
 import { feetCell } from '../../perception/local.ts';
 import { obj, type Skill } from '../types.ts';
 import { coordinatorData, runMovementCoordinator, type CoordinatorOutcome } from './coordinator.ts';
+import { targetKindOf, type NavigationTargetKind } from './goal.ts';
 import type { MoveMode } from './session.ts';
 
 type NavigateArgs = {
   to: Vec3Like;
+  /** validate 时冻结；直接调用 run 的旧入口可省略，run 会在唯一入口边界补齐。 */
+  targetKind?: NavigationTargetKind;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -17,6 +20,9 @@ type NavigateArgs = {
   maxObservations?: number;
   maxObservedCells?: number;
   maxNoProgressSegments?: number;
+  /** 单次搜索的节点/边预算；省略时用库默认值。 */
+  maxNodes?: number;
+  maxEdges?: number;
   sessionId?: string;
   deadlineMs?: number;
 };
@@ -76,8 +82,8 @@ function segmentCompat(
  */
 export const navigateTo: Skill<NavigateArgs> = {
   name: 'navigate_to',
-  description: '按你指定的目的地和允许的 walk/step/drop 执行 3D 路线。宿主用已记录体素规划（当前证据优先，可用历史体素），并逐步用 move_step/descend_to 核实；不挖、不放、不搭、不换目标，遇 2 格以上高差、阻挡、落点不可见或历史路线失效就停下报事实。没有完整路线时，若当前证据确认了一段可达前缀，会沿该前缀自动走到边界（最多 maxSteps 段）再停下；只走当前证据 OPEN 的段，不进入 UNKNOWN/STALE 格，不声称到达。默认 maxSegments=1（单段/单前缀）；显式提高后由 Coordinator 分段推进，每段从实测位置重新派生、验证，原目标不变；回执带 sessionId，未完成时可原样续接（目标/允许模式改变必须新建）。回执带原目的地、可达前缀端点、UNKNOWN/STALE/BLOCKED 边界（位置/方向/状态/原因）、额外观察是否可能解决、是否需要显式动作或其他移动能力。不自动挖；清障由你显式 mine_cell 后再观察/规划。',
-  argsDoc: '{"to":{"x":整数,"y":脚高,"z":整数},"allowed"?":["walk","step","drop"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false,"maxSegments"?1,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；historical 默认 true（当前证据没路时用历史体素，结果标 historical/UNKNOWN）；没有完整路线时会自动执行当前证据确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限（默认 16），maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），maxSegments 默认 1，只有显式提高才多段协调；sessionId 只用于续接同一冻结目标；不自动施工，不自动切换游泳/船/攀爬。',
+  description: '按你指定的目的地和允许的 walk/step/drop 执行 3D 路线。宿主用已记录体素做有界搜索（当前证据优先，可用历史体素作候选），并按每段连续脚位执行、实测核实；不挖、不放、不搭、不换目标，遇阻挡、落点不可见或历史路线失效就停下报事实。目标写法决定语义：整数 x/z 表示走到那一格（完成条件是脚在格内且脚高在 0.01 格容差内）；分数 x/z 表示精确连续脚位（完成条件是身体中心水平 0.12 / 垂直 0.05 格内），不会用工整格心或附近格顶替。没有完整路线时，若当前证据确认了一段可达前缀，会沿该前缀自动走到边界（最多 maxSteps 段）再停下；只走当前证据 OPEN 的段，不进入 UNKNOWN/STALE 格，不声称到达。默认 maxSegments=1（单段/单前缀）；显式提高后由 Coordinator 分段推进，每段从实测位置重新派生、验证，原目标不变；回执带 sessionId，未完成时可原样续接（目标/允许模式/目标类型改变必须新建）。回执带原目的地、可达前缀端点、UNKNOWN/STALE/BLOCKED 边界（位置/方向/状态/原因）、搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）与未驻留 Section、额外观察是否可能解决、是否需要显式动作或其他移动能力。不自动挖；清障由你显式 mine_cell 后再观察/规划。',
+  argsDoc: '{"to":{"x":整数或分数,"y":脚高,"z":整数或分数},"allowed"?":["walk","step","drop"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false,"maxSegments"?1,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"maxNodes"?,"maxEdges"?,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收（水平 0.12 / 垂直 0.05 格），不会自动改写成格心；historical 默认 true（当前证据没路时用历史体素候选，结果标 historical 并逐段当前证据复验）；没有完整路线时会自动执行当前证据确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限（默认 16），maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），maxSegments 默认 1，只有显式提高才多段协调；sessionId 只用于续接同一冻结目标/目标类型；不自动施工，不自动切换游泳/船/攀爬。',
   timeoutMs: 30000,
   movement: true,
   outcomeBoundary: true,
@@ -106,6 +112,12 @@ export const navigateTo: Skill<NavigateArgs> = {
         return { ok: false, error: `${key} 需要 ${min}–${max} 的整数` };
       }
     }
+    for (const key of ['maxNodes', 'maxEdges'] as const) {
+      const value = a[key];
+      if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 8192)) {
+        return { ok: false, error: `${key} 需要 1–8192 的整数（单次搜索预算）` };
+      }
+    }
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) {
       return { ok: false, error: 'sessionId 需要非空字符串；续接时必须原样传回回执里的 sessionId' };
     }
@@ -117,6 +129,8 @@ export const navigateTo: Skill<NavigateArgs> = {
       ok: true,
       args: {
         to,
+        // 只在请求边界判定一次：整数 x/z 是格目标，分数是精确连续脚位。
+        targetKind: targetKindOf(to),
         allowed: [...new Set(allowedRaw as MoveMode[])],
         historical: a.historical !== false,
         maxSteps,
@@ -128,6 +142,8 @@ export const navigateTo: Skill<NavigateArgs> = {
         maxObservations: (a.maxObservations as number | undefined) ?? 2,
         maxObservedCells: (a.maxObservedCells as number | undefined) ?? 64,
         maxNoProgressSegments: (a.maxNoProgressSegments as number | undefined) ?? 2,
+        ...(a.maxNodes === undefined ? {} : { maxNodes: a.maxNodes as number }),
+        ...(a.maxEdges === undefined ? {} : { maxEdges: a.maxEdges as number }),
         ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
         ...(a.deadlineMs === undefined ? {} : { deadlineMs: a.deadlineMs }),
       },
@@ -145,8 +161,10 @@ export const navigateTo: Skill<NavigateArgs> = {
     const startObservedCells = voxel.checkpointFullCounts().observedCells;
     const maxSteps = args.maxSteps ?? 16;
     const maxSegments = args.maxSegments ?? 1;
+    // validate 会冻结 targetKind；直接调用 run 的旧入口在这里按原目标补一次（只在这个边界）。
+    const targetKind = args.targetKind ?? targetKindOf(args.to);
     const outcome = await runMovementCoordinator(ctx, {
-      intent: { kind: 'navigate', to: { ...args.to }, allowed: args.allowed, historical: args.historical !== false },
+      intent: { kind: 'navigate', to: { ...args.to }, targetKind, allowed: args.allowed, historical: args.historical !== false },
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? maxSteps,
       maxTransitions: args.maxTransitions ?? maxSteps * maxSegments,
@@ -155,6 +173,9 @@ export const navigateTo: Skill<NavigateArgs> = {
       maxObservations: args.maxObservations ?? 2,
       maxObservedCells: args.maxObservedCells ?? 64,
       maxNoProgressSegments: args.maxNoProgressSegments ?? 2,
+      ...(args.maxNodes === undefined && args.maxEdges === undefined
+        ? {}
+        : { searchLimits: { ...(args.maxNodes === undefined ? {} : { maxNodes: args.maxNodes }), ...(args.maxEdges === undefined ? {} : { maxEdges: args.maxEdges }) } }),
       ...(args.sessionId === undefined ? {} : { sessionId: args.sessionId }),
       ...(args.deadlineMs === undefined ? {} : { deadlineMs: args.deadlineMs }),
       allowUnknownCorridor: args.allowUnknownCorridor === true,
@@ -185,7 +206,9 @@ export const navigateTo: Skill<NavigateArgs> = {
       remainingTarget: { ...args.to },
       ...(outcome.status === 'succeeded'
         ? { remaining: [] }
-        : { remaining: last?.remaining.length ? last.remaining : [{ to: { ...args.to } }], prefixRemaining: last?.remaining ?? [] }),
+        : last?.outcome === 'replan'
+          ? { remaining: [{ to: { ...args.to } }], prefixRemaining: [] }
+          : { remaining: last?.remaining.length ? last.remaining : [{ to: { ...args.to } }], prefixRemaining: last?.remaining ?? [] }),
       ...(last?.blockerAhead === undefined ? {} : { blockerAhead: last.blockerAhead }),
       ...(last?.blocker === undefined ? {} : { blocker: last.blocker }),
       ...(last?.disallowed === undefined ? {} : { disallowed: last.disallowed }),

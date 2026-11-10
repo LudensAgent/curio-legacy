@@ -4,6 +4,7 @@ import { fail, isAbort, ok, type FailureCode, type SkillCtx, type SkillResult, t
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, type LandSearchBoundary } from '../../spatial/land-search.ts';
+import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -30,6 +31,8 @@ export interface CoordinatorRequest {
   maxObservations: number;
   maxObservedCells: number;
   maxNoProgressSegments: number;
+  /** 单次搜索的节点/边预算；省略时用库默认值。 */
+  searchLimits?: { maxNodes?: number; maxEdges?: number };
   sessionId?: string;
   deadlineMs?: number;
   allowUnknownCorridor: boolean;
@@ -54,6 +57,7 @@ const STOP_FAILURE: Record<StopReason, FailureCode> = {
   BLOCKED: 'PATH_NOT_FOUND',
   TARGET_UNRESOLVED: 'PATH_NOT_FOUND',
   ROUTE_INVALIDATED: 'PATH_NOT_FOUND',
+  NO_PATH: 'PATH_NOT_FOUND',
   PHYSICAL_FAILURE: 'EFFECT_NOT_CONFIRMED',
   ACTION_FAILURE: 'ERROR',
   MODE_GAP: 'PATH_NOT_FOUND',
@@ -71,12 +75,12 @@ const STOP_FAILURE: Record<StopReason, FailureCode> = {
 const isSuccess = (reason: StopReason) => reason === 'DISTANCE_MET' || reason === 'REGION_ENTERED' || reason === 'UNTIL_SEEN' || reason === 'ARRIVED';
 const canResume = (reason: StopReason) =>
   reason === 'BUDGET_EXHAUSTED' || reason === 'TIMEOUT' || reason === 'NO_PROGRESS' || reason === 'UNKNOWN_BOUNDARY'
-  || reason === 'BLOCKED' || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED';
+  || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED';
 
 /** 终止后仍允许同一 session 续接的原因；其余终态必须新建意图。 */
 const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
   'BUDGET_EXHAUSTED', 'TIMEOUT', 'NO_PROGRESS', 'UNKNOWN_BOUNDARY',
-  'BLOCKED', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED',
+  'BLOCKED', 'NO_PATH', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED',
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -145,7 +149,7 @@ function blockerBoundaryOf(segment: SegmentReceipt): LandSearchBoundary | undefi
     to: { ...blocker.transition.to },
     kind: blocker.transition.kind,
     status: 'BLOCKED',
-    ...(blocker.reason === undefined ? {} : { reason: blocker.reason }),
+    reason: blocker.reason ?? '执行层报告已观测阻挡',
     direction: boundaryDirectionOf(blocker.transition.from, blocker.transition.to),
   };
 }
@@ -263,7 +267,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
 
     session.phase = 'executing';
-    while (segments.length < request.maxSegments) {
+    let executedSegments = 0;
+    while (executedSegments < request.maxSegments) {
       const state = ctx.adapter.state();
       if (state.worldId !== session.scope.worldId || state.dim !== session.scope.dim || state.sessionId !== session.scope.sessionId) {
         stop = stopOf('SCOPE_CHANGED', `world/dimension/adapter session 已变化（${JSON.stringify(scope)} → ${state.worldId}/${state.dim}/${state.sessionId}）；旧 session 不跨 scope 续接`);
@@ -282,7 +287,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         onGround: state.onGround, inWater: state.inWater,
       };
       session.progress = progressOf(session, state.pos, Date.now());
-      const close = closeReasonOf(session, state.pos, Date.now());
+      const close = closeReasonOf(session, state.pos, Date.now(), state.onGround);
       if (close !== null) {
         stop = stopOf(close.reason, close.detail);
         break;
@@ -309,9 +314,28 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const voxel = spatial.session.voxel;
       const waypoint = waypointOf(session, state.pos, request.maxStepsPerSegment,
         (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
+      // advance 的路点是候选格列（x/z 可能是半格），navigate 使用冻结的 targetKind。
+      let goal: NavigationGoal = session.intent.kind === 'advance'
+        ? cellGoal({ x: waypoint.x, z: waypoint.z }, waypoint.y, waypoint)
+        : goalFromIntent(session.intent.to, session.intent.targetKind);
+      // 格目标的格内偏移取实测起点，可能让中继路点落在当前站位同一投影上（例如漂移后
+      // 分数偏移变化）；此时把中继格沿冻结方向推进一格，保证推进请求仍能前进。
+      const bearing = session.bearing;
+      if (session.intent.kind === 'advance' && bearing !== undefined) {
+        const along = (point: Vec3Like) =>
+          (point.x - session.frozenOrigin.x) * bearing.x
+          + (point.z - session.frozenOrigin.z) * bearing.z;
+        if (goal.kind === 'cell' && along(stanceFor(goal, state.pos)) <= along(state.pos) + 1e-9) {
+          goal = cellGoal(
+            { x: goal.cell.x + Math.round(bearing.x), z: goal.cell.z + Math.round(bearing.z) },
+            goal.footY,
+            waypoint,
+          );
+        }
+      }
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
-        to: waypoint,
+        goal,
         allowed: session.intent.allowed,
         historical: session.intent.historical,
         ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
@@ -319,15 +343,20 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         allowUnknownCorridor: request.allowUnknownCorridor,
         deadline,
         searchBudget: Math.max(0, session.budget.maxSearches - session.counters.searches),
+        ...(request.searchLimits === undefined ? {} : { searchLimits: request.searchLimits }),
         onPhase: (phase) => ctx.setStationaryWait?.(phase === 'searching'),
       });
       ctx.setStationaryWait?.(false);
       session.counters.newChunks += Math.max(0, ctx.memory.visitedChunkCount - chunksBefore);
+      const isReplan = segment.outcome === 'replan';
       segments.push(segment);
       session.lastSegment = segment;
       session.lastSearch = segment.search;
       session.counters.searches += segment.searches;
-      session.counters.segments += 1;
+      if (!isReplan) {
+        session.counters.segments += 1;
+        executedSegments += 1;
+      }
       session.counters.confirmedTransitions += segment.confirmed.length;
       invocationTransitions += segment.confirmed.length;
       session.counters.confirmedRouteLength += segment.pathLength;
@@ -344,9 +373,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const measuredMove = Math.hypot(after.pos.x - segment.measuredStart.x, after.pos.z - segment.measuredStart.z)
         + Math.abs(after.pos.y - segment.measuredStart.y);
       const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
-      session.progress.stagnationSegments = progressed ? 0 : session.progress.stagnationSegments + 1;
+      if (!isReplan) {
+        session.progress.stagnationSegments = progressed ? 0 : session.progress.stagnationSegments + 1;
+      }
       if (progressed) session.progress.lastProgressAt = Date.now();
-      ctx.progress(Math.min(1, segments.length / request.maxSegments), `${session.intent.kind} ${segments.length}/${request.maxSegments}`);
+      ctx.progress(Math.min(1, executedSegments / request.maxSegments), `${session.intent.kind} ${executedSegments}/${request.maxSegments}`);
 
       if (segment.outcome === 'cancelled') {
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
@@ -354,10 +385,24 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       // 段内的实测位置已经达到冻结意图时，先按实测收工；剩余边界只说明“再往后未知”，
       // 不能推翻已经真实完成的沿方向/到达条件。横向超授权仍由 closeReasonOf 先拦。
-      const closeAfterSegment = closeReasonOf(session, after.pos, Date.now());
+      const closeAfterSegment = closeReasonOf(session, after.pos, Date.now(), after.onGround);
       if (closeAfterSegment !== null) {
         stop = stopOf(closeAfterSegment.reason, closeAfterSegment.detail);
         break;
+      }
+      if (segment.outcome === 'replan') {
+        // 不把实测起点覆盖成计划点；保留冻结目标，从实测位置重新搜索。
+        // 搜索次数与 deadline 由 session/本次调用预算继续约束，不重置、不延长。
+        if (session.counters.searches >= session.budget.maxSearches) {
+          stop = stopOf('BUDGET_EXHAUSTED', `起点与计划不一致，累计搜索预算 ${session.budget.maxSearches} 已用尽；原目标与实测进展保留`);
+          break;
+        }
+        if (Date.now() >= deadline) {
+          stop = stopOf('TIMEOUT', '起点与计划不一致，当前 invocation 的 deadline 已到期；原目标与实测进展保留');
+          break;
+        }
+        session.phase = 'replanning';
+        continue;
       }
       if (segment.outcome === 'timeout') {
         stop = stopOf('TIMEOUT', segment.detail ?? '执行期限耗尽');
@@ -375,6 +420,17 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       if (segment.outcome === 'corridor_exhausted') {
         stop = stopOf('DETOUR_TOO_LARGE', segment.detail ?? '授权横向走廊内没有可走路线；外侧绕行未授权');
+        break;
+      }
+      if (segment.outcome === 'no_path') {
+        // NO_PATH_IN_MEMORY 不是“已观测阻挡”，也不升级成 BLOCKED；路线事实原样交回。
+        stop = stopOf('NO_PATH', segment.detail ?? '已存几何里没有 walk/step/drop 路线', {
+          boundaries: segment.search.boundaries,
+        });
+        break;
+      }
+      if (segment.outcome === 'invalidated') {
+        stop = stopOf('ROUTE_INVALIDATED', segment.detail ?? '搜索期间地图证据/驻留发生变化；候选已作废');
         break;
       }
       if (segment.outcome === 'lateral_authorization') {
@@ -433,7 +489,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       if (segment.outcome === 'unknown_boundary') {
         // 观察/重搜也要消耗剩余段数；没有下一段预算时如实停在边界。
         const boundary = segment.boundary;
-        if (boundary === undefined || segments.length >= request.maxSegments) {
+        if (boundary === undefined || executedSegments >= request.maxSegments) {
           stop = stopOf('UNKNOWN_BOUNDARY', segment.detail ?? '搜索边界证据不足；未进入 UNKNOWN/STALE', {
             boundaries: boundary === undefined ? [] : [boundary],
           });
@@ -522,8 +578,18 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
 export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true }>, extra: Record<string, unknown> = {}) {
   const session = outcome.session;
   const last = outcome.segments.at(-1);
+  const replans = outcome.segments.filter((segment) => segment.outcome === 'replan');
   return {
     ...extra,
+    ...(replans.length === 0 ? {} : {
+      replanCount: replans.length,
+      replans: replans.map((segment) => ({
+        reason: segment.detail ?? 'start_drift',
+        plannedStart: segment.transition === undefined ? null : { ...segment.transition.from },
+        measuredStart: { ...segment.measuredStart },
+        measuredEnd: { ...segment.measuredEnd },
+      })),
+    }),
     ...stateFacts(session),
     continuation: continuationOf(session),
     ...(last === undefined ? {} : {
@@ -531,6 +597,10 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
       confirmedSegments: session.counters.confirmedTransitions,
       position: { ...session.measured.current },
       evidenceMode: last.evidenceMode,
+      searchStatus: last.searchStatus,
+      searchReason: last.searchReason,
+      ...(last.budget === undefined ? {} : { budget: last.budget }),
+      ...(last.unavailableSections === undefined ? {} : { unavailableSections: last.unavailableSections }),
       assurance: last.chosen?.assurance ?? last.search.assurance,
       points: last.chosen?.points ?? last.search.points,
       transitions: last.planned,
@@ -541,6 +611,8 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
       ...(last.chosen?.verification === undefined ? {} : { verification: last.chosen.verification }),
       plannedTransitions: last.planned.length,
       ...(last.partialDisplacement === undefined ? {} : { partialDisplacement: last.partialDisplacement }),
+      ...(last.currentCheck === undefined ? {} : { currentCheck: last.currentCheck }),
+      policy: last.chosen?.policy ?? last.search.policy ?? null,
       measuredDisplacement: {
         horizontal: Math.hypot(last.measuredEnd.x - last.measuredStart.x, last.measuredEnd.z - last.measuredStart.z),
         vertical: Math.abs(last.measuredEnd.y - last.measuredStart.y),

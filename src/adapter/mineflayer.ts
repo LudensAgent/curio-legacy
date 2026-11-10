@@ -17,6 +17,7 @@ import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, sapling
 import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
+import { FEET_ARRIVAL_TOLERANCE } from './types.ts';
 
 import type {
   InvItem,
@@ -1020,9 +1021,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 只有 travel_portal（enterPortalAt）自己能把身体送进门格；其余精确落点一律拒绝，交回事实。
     if (!this.inPortalTransition) {
       const cell = target.kind === 'xyz' ? { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) }
-        : target.kind === 'near' && target.range < 1 ? { x: Math.floor(target.pos.x), y: Math.floor(target.pos.y), z: Math.floor(target.pos.z) } : null;
+        : target.kind === 'feet' ? { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) }
+          : target.kind === 'near' && target.range < 1 ? { x: Math.floor(target.pos.x), y: Math.floor(target.pos.y), z: Math.floor(target.pos.z) } : null;
       const portal = cell && [0, 1].map((dy) => this.blockAt({ ...cell, y: cell.y + dy })).find((n): n is string => !!n && PORTAL_KINDS.has(n));
       if (cell && portal) throw new Error(`PORTAL_CELL: 目标站位 (${cell.x},${cell.y},${cell.z}) 是 ${portal} 方块，进去会被传送；没有移动。要穿门用 travel_portal`);
+    }
+    // 连续脚位：不经过 pathfinder 的整数节点/格心，直接用现有身体控制推进到实测点。
+    // 旧的 move_step 仍走下方 xyz/adjacentStep 路径，保持格心语义不变。
+    if (target.kind === 'feet') {
+      const deadline = Date.now() + opts.timeoutMs;
+      const outcome = await this.driveToFeet({ x: target.x, y: target.y, z: target.z }, deadline, check, 'feet', opts.corridor);
+      const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
+      if (outcome === 'arrived') return;
+      if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 连续脚位没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
+      throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了连续脚位目标' : '身体控制没有完成连续脚位'}，实际位于 ${where}`);
     }
     this.pathDigTool = opts.digTool ?? null;
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
@@ -1644,24 +1656,43 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 确认仍拥有本次控制，旧回调不能松新动作的键。返回分类供调用方区分越段、超时与到达。
    */
   private async finishAdjacentStep(target: { x: number; y: number; z: number }, deadline: number, check: (() => void) & { signal?: AbortSignal }): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
+    return this.driveToFeet(target, deadline, check, 'cell');
+  }
+
+  /**
+   * 连续脚位/格心相邻一步共用的身体控制。`cell` 模式保留 move_step 的“先归位格心、再走到格心”契约；
+   * `feet` 模式不归位、不取格心，直接朝实测连续点推进，并按声明的物理精度验收。
+   */
+  private async driveToFeet(
+    target: { x: number; y: number; z: number }, deadline: number,
+    check: (() => void) & { signal?: AbortSignal }, mode: 'cell' | 'feet',
+    corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number },
+  ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
     if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return 'blocked';
     if (Date.now() >= deadline) return 'timeout';
-    // 身体中心偏离格心超过 0.2 时，0.6 宽的身体已经压进相邻列；从偏心的实测位置
-    // 直接朝相邻格走，第一步可能被斜角方块挡住。先在原地潜行归位到脚下格心，
-    // 再执行这一步；不改目标、不换落点。
+    // 格心模式：身体压线时先潜行归位，保持 legacy move_step 的既有契约。
+    // 连续脚位模式不改写调用者目标，也不把身体挪到格心。
     const signal = check.signal ?? new AbortController().signal;
-    const recentre = this.edgeSupport() ?? this.spanningCell();
-    if (recentre) {
-      await this.steady(recentre, signal, check);
-      check();
+    if (mode === 'cell') {
+      const recentre = this.edgeSupport() ?? this.spanningCell();
+      if (recentre) {
+        await this.steady(recentre, signal, check);
+        check();
+      }
     }
-    const tx = Math.floor(target.x) + 0.5, tz = Math.floor(target.z) + 0.5;
+    const tx = mode === 'cell' ? Math.floor(target.x) + 0.5 : target.x;
+    const tz = mode === 'cell' ? Math.floor(target.z) + 0.5 : target.z;
     const fx = Math.floor(target.x), fz = Math.floor(target.z);
     const settled = () => {
       const p = b.entity.position;
-      return !!b.entity.onGround && Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= 0.01;
+      if (!b.entity.onGround) return false;
+      if (mode === 'cell') {
+        return Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= 0.01;
+      }
+      return Math.hypot(p.x - target.x, p.z - target.z) <= FEET_ARRIVAL_TOLERANCE.horizontal
+        && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
     };
     const p0 = b.entity.position;
     const p0y = p0.y;
@@ -1670,7 +1701,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (dist() > 1.2 || Math.abs(p0y - target.y) > 1) return 'blocked';
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
+    // 连续脚位可选走廊：只按实测身体位置到原 origin→bearing 轴线的横向距离判定，不用 0.12 到达容差冒充横向授权。
+    // +0.01 与仓库既有走廊几何（withinCorridor / segment 的 corridorLimit）一致，只吸收浮点误差。
+    const activeCorridor = mode === 'feet' ? corridor : undefined;
+    const corridorLimit = activeCorridor === undefined ? Infinity : activeCorridor.maxLateral + 0.01;
+    const corridorLateral = () => activeCorridor === undefined ? 0
+      : Math.abs((b.entity.position.x - activeCorridor.origin.x) * activeCorridor.bearing.z
+        - (b.entity.position.z - activeCorridor.origin.z) * activeCorridor.bearing.x);
+    const checkCorridor = () => {
+      if (activeCorridor === undefined) return;
+      const measured = corridorLateral();
+      if (measured <= corridorLimit) return;
+      // 按键释放在已有的 finally 里完成（那里已按 epoch/bot/维度确认归属）；这里只停止并报事实。
+      const p = b.entity.position;
+      throw new Error(`CORRIDOR_VIOLATION: 连续脚位实测横向 ${measured.toFixed(2)} 格，超出授权 ${activeCorridor.maxLateral} 格；实际位于 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，已停止`);
+    };
     check();
+    checkCorridor();
     if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p0.x), -(tz - p0.z)), 0, true); } catch { /* ignore */ } }
     b.clearControlStates();
     b.setControlState('forward', true);
@@ -1692,6 +1739,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
       while (!settled() && Date.now() < deadline) {
         check();
+        checkCorridor();
         if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
         const d = dist();
         const v = b.entity.velocity;
@@ -1703,6 +1751,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
+        checkCorridor();
       }
     } finally {
       if (ownsControls()) {
@@ -1710,7 +1759,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         try { b.setControlState('jump', false); } catch { /* ignore */ }
       }
     }
-    if (overshot) return 'overshot';
+    checkCorridor();
+    // 连续脚位允许有限次低速修正：制动估计偏差可能让身体停在目标外几厘米，
+    // 格心模式仍保留旧的越段即停语义。
+    if (overshot && (mode === 'cell' || dist() > 0.6)) return 'overshot';
     // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住
     // （低于物理的 negligibleVelocity 0.003，之后速度被置零、身体不再滑动），不因单帧 settled 提前返回。
     const stopped = () => {
@@ -1718,14 +1770,39 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return !v || Math.hypot(v.x, v.z) < 0.003;
     };
     let stable = 0;
+    let corrections = 0;
     while (Date.now() < deadline) {
       check();
+      checkCorridor();
       if (settled() && stopped()) {
         if (++stable >= 2) return 'arrived';
       } else {
         stable = 0;
+        const d = dist();
+        if (mode === 'feet' && corrections < 8 && d > 0.02 && d <= 0.6 && b.entity.onGround && stopped()) {
+          // 发下一次修正前重新核对动作归属与原期限：剩余 <=0 就不再按键，等待时长也不得超过原期限。
+          check();
+          if (deadline - Date.now() <= 0) break;
+          checkCorridor();
+          // 朝真实目标方向点按一次前进；短脉冲后释放并重新测量，不用到达容差冒充停稳。
+          corrections += 1;
+          const p = b.entity.position;
+          if (typeof b.look === 'function') {
+            try { b.look(Math.atan2(-(target.x - p.x), -(target.z - p.z)), 0, true); } catch { /* ignore */ }
+          }
+          const tapMs = Math.min(120, Math.max(50, Math.round(d / 0.2) * 50), deadline - Date.now());
+          if (tapMs <= 0) break;
+          try {
+            b.setControlState('forward', true);
+            await this.afterAction(() => sleep(tapMs, signal), check);
+          } finally {
+            if (ownsControls()) b.setControlState('forward', false);
+          }
+          checkCorridor();
+        }
       }
       await this.afterAction(() => sleep(Math.min(40, Math.max(1, deadline - Date.now())), check.signal), check);
+      checkCorridor();
     }
     return 'timeout';
   }

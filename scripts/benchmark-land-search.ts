@@ -12,6 +12,7 @@
 import { performance } from 'node:perf_hooks';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { walkLandRules } from '../src/adapter/land-rules.ts';
+import { goalOf } from '../src/skills/movement/goal.ts';
 import { searchLandRoute, searchLandRouteAsync } from '../src/spatial/land-search.ts';
 
 const WORLD = 'bench-world', DIM = 'overworld', SESSION = 'bench-session';
@@ -46,24 +47,23 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
   const body = { feet, width: 0.6, height: 1.8, pose: 'standing' as const };
   const samples: {
     totalMs: number; timerDelayMs: number; strictMs: number; historicalMs: number;
-    nodes: number; edges: number; visitedSections: number; sectionReads: number;
-    snapshotCount: number; cloneCount: number; status: string; cancelReason: string | null;
-    routeKey: string;
+    nodes: number; edges: number; sectionsRead: number; surfaceReads: number;
+    status: string; budget: string | null; routeKey: string;
   }[] = [];
   const asyncSamples: {
     totalMs: number; timerDelayMs: number; yields: number; maxSyncSliceMs: number;
-    status: string; cancelReason: string | null; historical: string | null;
-    nodes: number; edges: number; sectionReads: number; snapshotCount: number; cloneCount: number;
+    status: string; budget: string | null; historical: string | null;
+    nodes: number; edges: number; sectionsRead: number; surfaceReads: number;
   }[] = [];
   for (let i = 0; i < REPEATS; i++) {
     const deadlineMs = Date.now() + BUDGET_MS;
-    const request = { worldId: WORLD, dim: DIM, sessionId: SESSION, body, to, rules: walkLandRules, maxNodes: 2048, maxEdges: 8192, deadlineMs };
+    const request = { worldId: WORLD, dim: DIM, sessionId: SESSION, body, goal: goalOf(to), rules: walkLandRules, maxNodes: 2048, maxEdges: 8192, deadlineMs };
     let timerAt = 0;
     setTimeout(() => { timerAt = performance.now(); }, 0);
     const t0 = performance.now();
     const strict = searchLandRoute(map, request);
     const tStrict = performance.now();
-    const historical = strict.status === 'FOUND' ? null : searchLandRoute(map, { ...request, allowStale: true });
+    const historical = strict.status === 'FOUND' ? null : searchLandRoute(map, { ...request, evidenceMode: 'remembered' as const });
     const t1 = performance.now();
     await new Promise((resolve) => setTimeout(resolve, 0));
     const t2 = performance.now();
@@ -71,14 +71,13 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
       totalMs: t1 - t0, timerDelayMs: (timerAt || t2) - t0,
       strictMs: tStrict - t0, historicalMs: t1 - tStrict,
       nodes: strict.stats.nodesExpanded, edges: strict.stats.edgesEvaluated,
-      visitedSections: strict.stats.visitedSections, sectionReads: strict.stats.sectionReads,
-      snapshotCount: strict.stats.snapshotCount, cloneCount: strict.stats.cloneCount,
-      status: strict.status, cancelReason: strict.stats.cancelReason,
+      sectionsRead: strict.stats.sectionsRead, surfaceReads: strict.stats.surfaceReads,
+      status: strict.status, budget: strict.budget ?? null,
       routeKey: JSON.stringify({ points: strict.points, transitions: strict.transitions, boundaries: strict.boundaries }),
     });
 
-    // The async entry yields about every 8ms of compute. Measure the longest
-    // interval between 1ms timer ticks during the sli
+    // The async entry yields around its bounded compute slice. Measure the longest
+    // interval between 1ms timer ticks during the sliced search.
     let asyncTimerDelay = 0;
     let asyncLastTick = performance.now();
     const timer = setInterval(() => {
@@ -90,41 +89,36 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     const a0 = performance.now();
     const asyncStrict = await searchLandRouteAsync(map, { ...request, deadlineMs: asyncDeadline });
     const asyncHistorical = asyncStrict.status === 'FOUND'
-      ? null : await searchLandRouteAsync(map, { ...request, allowStale: true, deadlineMs: asyncDeadline });
+      ? null : await searchLandRouteAsync(map, { ...request, evidenceMode: 'remembered', deadlineMs: asyncDeadline });
     const a1 = performance.now();
     clearInterval(timer);
     asyncSamples.push({
       totalMs: a1 - a0, timerDelayMs: asyncTimerDelay,
       yields: asyncStrict.stats.yieldCount, maxSyncSliceMs: asyncStrict.stats.maxSyncSliceMs,
-      status: asyncStrict.status, cancelReason: asyncStrict.stats.cancelReason,
+      status: asyncStrict.status, budget: asyncStrict.budget ?? null,
       historical: asyncHistorical?.status ?? null,
       nodes: asyncStrict.stats.nodesExpanded, edges: asyncStrict.stats.edgesEvaluated,
-      sectionReads: asyncStrict.stats.sectionReads, snapshotCount: asyncStrict.stats.snapshotCount,
-      cloneCount: asyncStrict.stats.cloneCount,
+      sectionsRead: asyncStrict.stats.sectionsRead, surfaceReads: asyncStrict.stats.surfaceReads,
     });
   }
   // Deterministic strict result: every repeat must take the same route and
-  // counters. status/cancelReason are deliberately excluded — the strict
+  // truthful counters. status/budget are deliberately excluded — the strict
   // deadline is wall-clock based, so a loaded machine can legitimately stop
-  // with `time` instead of `edges`. A mismatch is reported as budget noise
-  // when a repeat hit `time`/`signal`, otherwise as a search regression.
+  // on a time budget. A mismatch is reported as budget noise when a repeat
+  // hit the time budget, otherwise as a search regression.
   const signature = (sample: (typeof samples)[number]) => JSON.stringify({
     routeKey: sample.routeKey, nodes: sample.nodes, edges: sample.edges,
-    visitedSections: sample.visitedSections, sectionReads: sample.sectionReads,
-    snapshotCount: sample.snapshotCount, cloneCount: sample.cloneCount,
+    sectionsRead: sample.sectionsRead, surfaceReads: sample.surfaceReads,
   });
   const expected = signature(samples[0]!);
   const mismatch = samples.findIndex((sample) => signature(sample) !== expected);
-  const budgetStopped = samples.some((sample) => sample.cancelReason === 'time' || sample.cancelReason === 'signal');
+  const budgetStopped = samples.some((sample) => sample.budget === 'time');
   if (mismatch !== -1) {
-    const stops = samples.map((sample) => `${sample.status}/${sample.cancelReason ?? '-'}`).join(', ');
+    const stops = samples.map((sample) => `${sample.status}/${sample.budget ?? '-'}`).join(', ');
     throw new Error(budgetStopped
       ? `budget/deadline exhaustion during repeats (${scenario.label}: ${stops}); routes not comparable, not a search regression`
       : `non-deterministic strict result at repeat ${mismatch} in ${scenario.label} (${stops})`);
   }
-  // snapshotCount is 0 after the SectionRef fix for both entries.
-  if (samples.some((sample) => sample.snapshotCount !== 0)) throw new Error(`section deep-copy (snapshotCount > 0) in ${scenario.label}`);
-  if (asyncSamples.some((sample) => sample.snapshotCount !== 0)) throw new Error(`section deep-copy (async snapshotCount > 0) in ${scenario.label}`);
   const pct = (values: number[], p: number) => {
     const sorted = [...values].sort((a, b) => a - b);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;
@@ -137,30 +131,27 @@ async function run(scenario: Scenario): Promise<Record<string, unknown>> {
     budgetMs: BUDGET_MS,
     // Offline synthetic VoxelMap; timings are a proxy, not a live-server run.
     synthetic: true,
-    checks: { strictDeterministic: true, snapshotCountZero: true },
+    checks: { strictDeterministic: true },
     status: samples[0]!.status,
-    cancelReason: samples[0]!.cancelReason,
+    budget: samples[0]!.budget,
     nodes: samples[0]!.nodes,
     edges: samples[0]!.edges,
-    visitedSections: samples[0]!.visitedSections,
-    sectionReads: samples[0]!.sectionReads,
-    snapshotCount: samples[0]!.snapshotCount,
-    cloneCount: samples[0]!.cloneCount,
+    sectionsRead: samples[0]!.sectionsRead,
+    surfaceReads: samples[0]!.surfaceReads,
     searchMs: { p50: round(pct(samples.map((s) => s.totalMs), 0.5)), p95: round(pct(samples.map((s) => s.totalMs), 0.95)) },
     strictMs: { p50: round(pct(samples.map((s) => s.strictMs), 0.5)), p95: round(pct(samples.map((s) => s.strictMs), 0.95)) },
     historicalMs: { p50: round(pct(samples.map((s) => s.historicalMs), 0.5)), p95: round(pct(samples.map((s) => s.historicalMs), 0.95)) },
     timerDelayMs: { p50: round(pct(samples.map((s) => s.timerDelayMs), 0.5)), p95: round(pct(samples.map((s) => s.timerDelayMs), 0.95)) },
     async: {
       status: asyncSamples[0]!.status,
-      cancelReason: asyncSamples[0]!.cancelReason,
+      budget: asyncSamples[0]!.budget,
       historical: asyncSamples[0]!.historical,
       yields: asyncSamples[0]!.yields,
       maxSyncSliceMs: asyncSamples[0]!.maxSyncSliceMs,
       nodes: asyncSamples[0]!.nodes,
       edges: asyncSamples[0]!.edges,
-      sectionReads: asyncSamples[0]!.sectionReads,
-      snapshotCount: asyncSamples[0]!.snapshotCount,
-      cloneCount: asyncSamples[0]!.cloneCount,
+      sectionsRead: asyncSamples[0]!.sectionsRead,
+      surfaceReads: asyncSamples[0]!.surfaceReads,
       totalMs: { p50: round(pct(asyncSamples.map((s) => s.totalMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.totalMs), 0.95)) },
       timerDelayMs: { p50: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.5)), p95: round(pct(asyncSamples.map((s) => s.timerDelayMs), 0.95)) },
     },

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { Vec3 } from 'vec3';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import { config } from '../src/config.ts';
@@ -77,9 +78,13 @@ function physicsBot(world: ReturnType<typeof stepWorld>, startFootY: number) {
     pathfinder: { goto: async () => {}, setGoal() {}, stop() {}, setMovements() {}, isMoving: () => false, isBuilding: () => false },
   });
   const physics = Physics(data, world);
-  const timer = setInterval(() => { physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot); }, 50);
+  const trajectory: Vec3[] = [];
+  const timer = setInterval(() => {
+    physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
+    trajectory.push(bot.entity.position.clone());
+  }, 50);
   timer.unref?.();
-  return { bot, timer };
+  return { bot, timer, trajectory };
 }
 
 function adapter(bot: any) {
@@ -97,6 +102,8 @@ function noPhysicsBot() {
     entity: { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} },
     jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
     inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
+    // 把同一个控制状态对象暴露在 bot 上：测试读取的就是 setControlState/clearControlStates 实际改的键。
+    control,
     blockAt: () => null,
     setControlState(name: string, value: boolean) { control[name] = value; if (name === 'forward') forwardSets.push(value); },
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
@@ -337,7 +344,40 @@ test('末段前推的期限已过时不发前进键', async () => {
   assert.equal(forwardSets.length, 0, '期限已过不该发任何前进键');
 });
 
-test('纯移动不改变地形：普通 moveTo 不允许寻路挖掘（含树叶）、架桥或搭柱', async () => {
+test('连续脚位控制：非格心起点走到非格心 endpoint，不先归位格心也不横向漂移', async (t) => {
+  const world = {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const block = Block.fromStateId(p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const { bot, timer, trajectory } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  bot.entity.position = new Vec3(0.2, 64, 0.2);
+  const a = adapter(bot);
+  await a.moveTo(
+    { kind: 'feet', x: 0.2, y: 64, z: -0.8 },
+    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false },
+  );
+  assert.equal(bot.entity.onGround, true, '完成时实测触地');
+  assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003, `完成时水平速度 ${bot.entity.velocity}`);
+  assert.ok(Math.abs(bot.entity.position.x - 0.2) <= 0.12, `横向 x=${bot.entity.position.x}`);
+  assert.ok(Math.abs(bot.entity.position.z + 0.8) <= 0.12, `纵向 z=${bot.entity.position.z}`);
+  assert.ok(Math.abs(bot.entity.position.y - 64) <= 0.05, `脚高 ${bot.entity.position.y}`);
+  assert.equal(bot.control.forward, false, '到达后应已松开前进键');
+  // 整条物理轨迹的横向不应漂移；不是只看最终误差。
+  assert.ok(trajectory.length > 0);
+  assert.ok(trajectory.every((point) => Math.abs(point.x - 0.2) <= 0.05), `轨迹横向漂移：${trajectory.map((point) => point.x.toFixed(3)).join(',')}`);
+  // 到达后继续物理推进：真实 grounded/stable，不滑出容差。
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(bot.entity.onGround, true);
+  assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
+  assert.ok(Math.abs(bot.entity.position.z + 0.8) <= 0.12, `稳定后 z=${bot.entity.position.z}`);
+});
+
+test('纯移动不改变地形：普通 moveTo 不允许寻路挖掘（含树叶）、架桥或搭柱', async (t) => {
   const { Movements } = require('mineflayer-pathfinder');
   let selected: any;
   const bot: any = { registry: data, game: { dimension: 'overworld' }, entity: { position: new Vec3(2.5, 64, 0.5) }, inventory: { items: () => [] },
@@ -397,4 +437,131 @@ test('到达后继续推进物理，身体仍稳定停在目标列', async (t) =
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(Math.floor(bot.entity.position.z), -1, `停稳后仍在目标列 z=${bot.entity.position.z}`);
   assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.02, `停稳后脚高 ${bot.entity.position.y}`);
+});
+
+test('连续脚位修正阶段：剩余期限不足标称点按时，只按住剩余时间且到期后不再发控制', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  const { bot } = noPhysicsBot();
+  bot.entity.position = new Vec3(0.5, 64, 0.2);
+  // 初段只读一次速度：首次 0.3 让制动估计立即结束初段推进，随后稳态读取为 0，从而进入低速修正。
+  let velocityReads = 0;
+  Object.defineProperty(bot.entity, 'velocity', {
+    configurable: true,
+    get: () => (++velocityReads === 1 ? new Vec3(0.3, 0, 0) : new Vec3(0, 0, 0)),
+  });
+  const a = adapter(bot);
+  const forwardEvents: { value: boolean; at: number }[] = [];
+  const setControlState = bot.setControlState.bind(bot);
+  bot.setControlState = (name: string, value: boolean) => {
+    const before = bot.control[name];
+    setControlState(name, value);
+    // 只记实际状态变化；重复松键是清理路径的正常行为，不算一次新的控制脉冲。
+    if (name === 'forward' && before !== value) forwardEvents.push({ value, at: Date.now() });
+  };
+  const start = Date.now();
+  const deadline = start + 180;
+  const check = (a as any).actionCheckpoint(new AbortController().signal);
+  const running = (a as any).driveToFeet({ x: 0.5, y: 64, z: -0.35 }, deadline, check, 'feet');
+  // 同步阶段先发出初段前进（随即使被制动估计松开），随后进入第一次低速修正点按。
+  assert.deepEqual(forwardEvents.map((event) => event.value), [true, false, true], '必须先到修正阶段');
+
+  t.mock.timers.tick(120);
+  await setImmediate();
+  t.mock.timers.tick(40);
+  await setImmediate();
+  t.mock.timers.tick(20);
+  await setImmediate();
+  t.mock.timers.tick(1);
+  await setImmediate();
+
+  assert.equal(await running, 'timeout');
+  assert.deepEqual(forwardEvents.map((event) => event.value), [true, false, true, false, true, false]);
+  assert.deepEqual(forwardEvents.map((event) => event.at - start), [0, 0, 0, 120, 160, 180]);
+  assert.ok(forwardEvents.filter((event) => event.value).every((event) => event.at < deadline), '到期后不再发出前进键');
+  assert.equal(forwardEvents[5]!.at - forwardEvents[4]!.at, 20, '第二次修正只按住剩余的 20ms，而不是标称 120ms');
+  assert.equal(bot.control.forward, false, '修正结束后已释放前进键');
+});
+
+test('旧 epoch 的连续脚位清理不会释放新任务的前进键', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_700_000_000_000 });
+  const { bot } = noPhysicsBot();
+  bot.entity.position = new Vec3(0.5, 64, 0.2);
+  let velocityReads = 0;
+  Object.defineProperty(bot.entity, 'velocity', {
+    configurable: true,
+    get: () => (++velocityReads === 1 ? new Vec3(0.3, 0, 0) : new Vec3(0, 0, 0)),
+  });
+  const a = adapter(bot);
+  const check = (a as any).actionCheckpoint(new AbortController().signal);
+  const running = (a as any).driveToFeet({ x: 0.5, y: 64, z: -0.3 }, Date.now() + 500, check, 'feet');
+  assert.equal(bot.control.forward, true, '旧任务正在按住修正脉冲');
+
+  a.stopAll();
+  bot.setControlState('forward', true);
+
+  // 先挂上拒绝处理器，再推进 mock 时间；否则旧任务被终止时的拒绝会被当成未处理。
+  const aborted = assert.rejects(running, { name: 'AbortedError' });
+  t.mock.timers.tick(120);
+  await setImmediate();
+  await aborted;
+  assert.equal(bot.control.forward, true, '旧任务的 finally 不得松开新 epoch 的按键');
+});
+
+test('连续脚位走廊：maxLateral=0 且起点偏离轴线时不发控制直接停止', async () => {
+  const { bot, forwardSets } = noPhysicsBot();
+  bot.entity.position = new Vec3(0.55, 64, 0.5);
+  const a = adapter(bot);
+  const check = (a as any).actionCheckpoint(new AbortController().signal);
+  const error = await (a as any).driveToFeet(
+    { x: 0.55, y: 64, z: -0.5 }, Date.now() + 1000, check, 'feet',
+    { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 0, z: -1 }, maxLateral: 0 },
+  ).then(() => null, (e: Error) => e);
+  assert.ok(error, '横向 0.05 格（小于 0.12 到达容差）仍应被 maxLateral=0 拒绝');
+  assert.match(error.message, /CORRIDOR_VIOLATION/);
+  assert.match(error.message, /超出授权 0 格/, '横向授权必须是 maxLateral=0，而不是到达容差');
+  assert.equal(forwardSets.length, 0, '越界时不应发出任何前进键');
+  assert.deepEqual({ x: bot.entity.position.x, z: bot.entity.position.z }, { x: 0.55, z: 0.5 }, '保留实测位置，不挪回走廊');
+
+  // 同一几何不提供 corridor 时仍走原来的身体控制，不因横向偏离被走廊逻辑拒绝。
+  const free = noPhysicsBot();
+  free.bot.entity.position = new Vec3(0.55, 64, 0.5);
+  const freeAdapter = adapter(free.bot);
+  const noCorridor = await (freeAdapter as any).driveToFeet(
+    { x: 0.55, y: 64, z: -0.5 }, Date.now() + 10,
+    (freeAdapter as any).actionCheckpoint(new AbortController().signal), 'feet',
+  );
+  assert.equal(noCorridor, 'timeout');
+  assert.ok(free.forwardSets.some((value) => value === true), '未提供 corridor 时仍按原逻辑发出控制');
+});
+
+test('连续脚位走廊：实测横向移动越过 maxLateral 时立即停止并保留实测位置', async (t) => {
+  const world = {
+    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
+      const p = position.floored();
+      const block = Block.fromStateId(p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const { bot, timer } = physicsBot(world, 64);
+  t.after(() => clearInterval(timer));
+  const a = adapter(bot);
+  // 起点在走廊轴线上，目标偏东；前进会把身体真实带离北向轴线，而不是只在终点改坐标。
+  const error = await a.moveTo(
+    { kind: 'feet', x: 0.9, y: 64, z: -0.5 },
+    {
+      signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false,
+      corridor: { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 0, z: -1 }, maxLateral: 0 },
+    },
+  ).then(() => null, (e: Error) => e);
+  assert.ok(error, '横向越界应停止，而不是声称到达');
+  assert.match(error.message, /CORRIDOR_VIOLATION/);
+  assert.match(error.message, /超出授权 0 格/);
+  assert.equal(bot.control.forward, false, '停止后已释放前进键');
+  const measured = /实际位于 \((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\)/.exec(error.message);
+  assert.ok(measured, '回执保留越界时的实测位置');
+  const measuredX = Number(measured[1]);
+  assert.ok(measuredX > 0.5 + 0.02, `实测横向应已越界：x=${measuredX}`);
+  assert.ok(bot.entity.position.x >= measuredX - 0.05, `不得把身体挪回走廊：x=${bot.entity.position.x}`);
+  assert.ok(Math.hypot(bot.entity.position.x - 0.9, bot.entity.position.z + 0.5) > 0.12, '越界后没有声称到达目标');
 });

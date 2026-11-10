@@ -3,8 +3,10 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { EntityInfo, MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
-import type { Senses, SkillCtx, SkillResult } from '../src/skills/types.ts';
+import type { FailureCode, Senses, SkillCtx, SkillResult } from '../src/skills/types.ts';
+import { navigationOutcome } from '../src/skills/movement/approach-visible.ts';
 import { approachVisible } from '../src/skills/movement/index.ts';
+import type { LandSearchResult } from '../src/spatial/land-search.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import type { FakeAdapter } from './fake-adapter.ts';
 import { FakeAdapter as Fake } from './fake-adapter.ts';
@@ -64,29 +66,33 @@ function flatMap(maxX = 5) {
   ]);
 }
 
-/** 只有 z=0 一条已观察走廊；floorMaxX 控制地板观察到哪一格。 */
+/** 只有 z=0 一条已观察走廊；floorMaxX 控制地板观察到哪一格。相邻行没有证据，未知不能被当成可走。 */
 function corridorMap(maxX: number, floorMaxX: number) {
   return worldMap([
-    { name: 'minecraft:air', cells: airCells(maxX) },
+    { name: 'minecraft:air', cells: airCells(maxX, [0]) },
     { name: 'minecraft:grass_block', cells: floorCells(floorMaxX) },
   ]);
 }
 
-/** z=0 近侧被地图证据挡死、z=±1 两侧已观察的窄巷：用来比较“最近但走不通”和“稍远但可走”。 */
+/** z=0 近侧被地图证据挡死、z=-1 侧已观察的窄巷：用来比较“最近但走不通”和“稍远但可走”。
+ *  实际身体在 z=-1 站位的 AABB 会跨到 z=-2，所以那条列也要有观察证据；z=1 侧不用来绕行。 */
 function laneMap() {
   return worldMap([
-    { name: 'minecraft:air', cells: exceptCells(airCells(4), [{ x: 1, y: 64, z: 0 }]) },
-    { name: 'minecraft:grass_block', cells: floorCells(4, [-1, 0]) },
+    // 地图与适配器都要有同一条真实障碍/目标事实：近侧墙、目标箱子本身。
+    { name: 'minecraft:air', cells: exceptCells(airCells(4, [-2, -1, 0, 1]), [{ x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }]) },
+    { name: 'minecraft:grass_block', cells: floorCells(4, [-2, -1, 0, 1]) },
     // 地图证据说这一格是墙；适配器仍说它是空气，用来验证“站位合法 ≠ 路线可走”。
     { name: 'minecraft:stone', cells: [{ x: 1, y: 64, z: 0 }] },
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
   ]);
 }
 
-/** 地图里也记着目标方块（与适配器一致）；三格宽走廊允许从旁边绕过去。 */
+/** 地图里也记着目标方块（与适配器一致）；四格宽走廊允许从旁边绕过去。
+ *  非格心身体的 AABB 会压到 z=-2 邻列，所以那条实际会被身体占用的列也要有合法观察证据。 */
 function chestMap(maxX = 5, chests: Cell[] = [{ x: 2, y: 64, z: 0 }]) {
   return worldMap([
-    { name: 'minecraft:air', cells: exceptCells(airCells(maxX), chests) },
-    { name: 'minecraft:grass_block', cells: floorCells(maxX, [-1, 0, 1]) },
+    { name: 'minecraft:air', cells: exceptCells(airCells(maxX, [-2, -1, 0, 1]), chests) },
+    { name: 'minecraft:grass_block', cells: floorCells(maxX, [-2, -1, 0, 1]) },
     { name: 'minecraft:chest', cells: chests },
   ]);
 }
@@ -262,8 +268,8 @@ test('approach_visible 排除双箱的另一半，不把结构格当站位', asy
   adapter.blocks.push({ name: 'chest', pos: { x: 1, y: 64, z: 0 } }, { name: 'chest', pos: { x: 2, y: 64, z: 0 } });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
   const rejected = r.data?.rejected as { cell: Cell; status: string }[];
   assert.ok(rejected.some((entry) => entry.status === 'STRUCTURE' && entry.cell.x === 1 && entry.cell.z === 0), JSON.stringify(rejected));
   const stance = r.data?.resolvedStance as Vec3Like;
@@ -272,30 +278,41 @@ test('approach_visible 排除双箱的另一半，不把结构格当站位', asy
 
 test('approach_visible 使用真实半砖支撑（y=63.5）并验证身体净空', async (t) => {
   const map = worldMap([
-    { name: 'minecraft:air', cells: airCells(5) },
-    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5), [{ x: 1, y: 63, z: 0 }]) },
-    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
+    { name: 'minecraft:air', cells: exceptCells(airCells(5), [{ x: 2, y: 64, z: 0 }]) },
+    // 实际起点偏心：身体在 (1.3,63.5,0.2) 的 AABB 会压进 z=-1 的相邻列，
+    // 因此相邻列必须是同一种底面半砖（顶面 63.5）；整块草方块会在 y=63.5..64 与身体真实相交。
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5, [-1, 0]), [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }]) },
+    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }] },
+    // 地图里的目标箱子与适配器一致，不让搜索把目标格当成空气通道。
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
   ]);
   const { adapter, ctx } = setup(map);
-  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } }, { name: 'chest', pos: { x: 2, y: 64, z: 0 } });
+  adapter.blocks.push(
+    { name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } },
+    { name: 'stone_slab', pos: { x: 1, y: 63, z: -1 } },
+    { name: 'chest', pos: { x: 2, y: 64, z: 0 } },
+  );
   adapter.blockProperties.set('1,63,0', { type: 'bottom' });
+  adapter.blockProperties.set('1,63,-1', { type: 'bottom' });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } }, { allowed: ['walk', 'step', 'drop'] });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
   const stance = r.data?.resolvedStance as Vec3Like;
-  assert.equal(stance.x, 1.5);
-  assert.equal(stance.y, 63.5);
-  assert.equal(adapter.pos.y, 63.5);
-  assert.equal((r.data?.interaction as { inReach: boolean }).inReach, true);
+  assert.equal(stance.x, 1.5, `应选半砖站位；data=${JSON.stringify(r.data)}`);
+  assert.equal(stance.y, 63.5, `应选半砖站位；data=${JSON.stringify(r.data)}`);
+  assert.equal(adapter.pos.y, 63.5, `实测脚高；data=${JSON.stringify(r.data)}`);
+  assert.equal((r.data?.interaction as { inReach: boolean }).inReach, true, JSON.stringify(r.data));
 });
 
 test('approach_visible 拒绝头顶被占的站位，改用其他合法站位', async (t) => {
   const map = worldMap([
-    { name: 'minecraft:air', cells: exceptCells(airCells(5), [{ x: 1, y: 65, z: 0 }]) },
-    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5, [-1, 0, 1]), [{ x: 1, y: 63, z: 0 }]) },
+    // 平地绕行到 z=-1 的实际身体 AABB 会压到 z=-2；那条列也要有真实可走的观察证据。
+    { name: 'minecraft:air', cells: exceptCells(airCells(5, [-2, -1, 0, 1]), [{ x: 1, y: 65, z: 0 }, { x: 2, y: 64, z: 0 }]) },
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5, [-2, -1, 0, 1]), [{ x: 1, y: 63, z: 0 }]) },
     { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
     { name: 'minecraft:stone', cells: [{ x: 1, y: 65, z: 0 }] },
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
   ]);
   const { adapter, ctx } = setup(map);
   adapter.blocks.push(
@@ -306,8 +323,8 @@ test('approach_visible 拒绝头顶被占的站位，改用其他合法站位', 
   adapter.blockProperties.set('1,63,0', { type: 'bottom' });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } }, { allowed: ['walk', 'step', 'drop'] });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
   const rejected = r.data?.rejected as { cell: Cell; status: string; reason: string }[];
   assert.ok(rejected.some((entry) => entry.cell.x === 1 && entry.cell.z === 0 && entry.status === 'UNSUPPORTED' && /身体空间/.test(entry.reason)), JSON.stringify(rejected));
   const stance = r.data?.resolvedStance as Vec3Like;
@@ -516,9 +533,9 @@ test('approach_visible 比较候选路线，不先执行最近但走不通的站
   adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
-  assert.equal(r.data?.routeMode, 'current');
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
+  assert.equal(r.data?.routeMode, 'current', JSON.stringify(r.data));
   const stance = r.data?.resolvedStance as Vec3Like;
   assert.notDeepEqual({ x: Math.floor(stance.x), y: Math.floor(stance.y), z: Math.floor(stance.z) }, { x: 1, y: 64, z: 0 });
   const candidates = r.data?.candidates as { cell: Cell; mode: string; stance: Vec3Like }[];
@@ -573,18 +590,23 @@ test('approach_visible 不把 heard 实体当作初始接近目标', async (t) =
 
 test('approach_visible 位置请求允许半砖脚高差在到达容差内', async (t) => {
   const map = worldMap([
-    { name: 'minecraft:air', cells: airCells(5) },
-    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5), [{ x: 1, y: 63, z: 0 }]) },
-    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
+    { name: 'minecraft:air', cells: exceptCells(airCells(5), [{ x: 2, y: 64, z: 0 }]) },
+    // 实际起点偏心：身体在 (1.3,63.5,0.2) 的 AABB 会压进 z=-1 的相邻列，
+    // 因此相邻列必须是同一种底面半砖（顶面 63.5）；整块草方块会在 y=63.5..64 与身体真实相交。
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5, [-1, 0]), [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }]) },
+    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }] },
+    // 地图里的目标箱子与适配器一致，不让搜索把目标格当成空气通道。
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
   ]);
   const { adapter, ctx } = setup(map);
-  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } }, { name: 'stone_slab', pos: { x: 1, y: 63, z: -1 } });
   adapter.blockProperties.set('1,63,0', { type: 'bottom' });
+  adapter.blockProperties.set('1,63,-1', { type: 'bottom' });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { pos: { x: 1.5, y: 64, z: 0.5 } }, { allowed: ['walk', 'step', 'drop'] });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
-  assert.equal(adapter.pos.y, 63.5);
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
+  assert.equal(adapter.pos.y, 63.5, JSON.stringify(r.data));
   const offset = (r.data?.interaction as { requestedOffset: { vertical: number } }).requestedOffset;
   assert.equal(offset.vertical, 0.5);
 });
@@ -694,18 +716,19 @@ test('approach_visible 接受 VoxelMap 里已观察、当前不在视野内的�
   assert.equal(evidence.target.freshness, 'FRESH');
 });
 
-test('approach_visible 用历史体素候选路线，但执行时按现场证据复核', async (t) => {
+test('approach_visible 用历史体素候选路线，但过期当前证据在动作前阻止执行', async (t) => {
   const map = chestMap(5);
   map.markStale(DIM, 'expired');
   const { adapter, ctx } = setup(map);
   adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
+  const before = { ...adapter.pos };
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
-  assert.equal(r.data?.searchEvidenceMode, 'historical');
-  assert.equal(r.data?.evidenceMode, 'historical');
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.outcome, 'UNKNOWN');
+  assert.equal(r.data?.searchEvidenceMode, 'historical', '候选来源仍是历史体素');
   assert.equal((r.data?.navigation as { evidenceMode: string }).evidenceMode, 'historical');
+  assert.deepEqual(adapter.pos, before, 'STALE 当前证据不启动身体');
 });
 
 test('approach_visible 在已知 BLOCKED 边界前停下，返回 BLOCKED 而不是 UNKNOWN', async (t) => {
@@ -839,19 +862,24 @@ test('approach_visible 观察后仍未知的候选返回 UNKNOWN，并如实报�
 
 test('approach_visible 位置请求在格边+半砖时按解析 stance 验收，不因 0.78 格偏移失败', async (t) => {
   const map = worldMap([
-    { name: 'minecraft:air', cells: airCells(5) },
-    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5), [{ x: 1, y: 63, z: 0 }]) },
-    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }] },
+    { name: 'minecraft:air', cells: exceptCells(airCells(5), [{ x: 2, y: 64, z: 0 }]) },
+    // 实际起点偏心：身体在 (1.3,63.5,0.2) 的 AABB 会压进 z=-1 的相邻列，
+    // 因此相邻列必须是同一种底面半砖（顶面 63.5）；整块草方块会在 y=63.5..64 与身体真实相交。
+    { name: 'minecraft:grass_block', cells: exceptCells(floorCells(5, [-1, 0]), [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }]) },
+    { name: 'minecraft:stone_slab', properties: { type: 'bottom' }, cells: [{ x: 1, y: 63, z: 0 }, { x: 1, y: 63, z: -1 }] },
+    // 地图里的目标箱子与适配器一致，不让搜索把目标格当成空气通道。
+    { name: 'minecraft:chest', cells: [{ x: 2, y: 64, z: 0 }] },
   ]);
   const { adapter, ctx } = setup(map);
-  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } });
+  adapter.blocks.push({ name: 'stone_slab', pos: { x: 1, y: 63, z: 0 } }, { name: 'stone_slab', pos: { x: 1, y: 63, z: -1 } });
   adapter.blockProperties.set('1,63,0', { type: 'bottom' });
+  adapter.blockProperties.set('1,63,-1', { type: 'bottom' });
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { pos: { x: 1.9, y: 64, z: 0.9 } }, { allowed: ['walk', 'step', 'drop'] });
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.outcome, 'ARRIVED');
+  assert.equal(r.status, 'succeeded', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'ARRIVED', JSON.stringify(r.data));
   const stance = r.data?.resolvedStance as Vec3Like;
-  assert.deepEqual(stance, { x: 1.5, y: 63.5, z: 0.5 });
+  assert.deepEqual(stance, { x: 1.5, y: 63.5, z: 0.5 }, JSON.stringify(r.data));
   const offset = (r.data?.interaction as { requestedOffset: { horizontal: number; vertical: number } }).requestedOffset;
   assert.ok(offset.horizontal > 0.5, JSON.stringify(offset));
   assert.equal(offset.vertical, 0.5);
@@ -1019,14 +1047,28 @@ test('approach_visible 拒绝超过累计位移预算的绕行路线', async (t)
     { name: 'minecraft:grass_block', cells: floor },
     { name: 'minecraft:chest', cells: [{ x: 3, y: 64, z: 0 }] },
   ]);
-  const { adapter, ctx } = setup(map, { x: 0.5, y: 64, z: 0.5 });
+  // 这条通道只以 VoxelMap 里的记录为证据；BlindWorld 的现场读数全部未知，
+  // 不让 FakeAdapter 的通用草地凭空造出七个无关候选站位。
+  const adapter = new BlindWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   adapter.blocks.push({ name: 'chest', pos: { x: 3, y: 64, z: 0 } });
+  const ctx = context(adapter, map, { observeBlocks: undefined, effectiveRange: () => 32 });
   const before = { ...adapter.pos };
   t.after(() => ctx.memory.close());
   const r = await call(ctx, { block: { x: 3, y: 64, z: 0 } });
-  assert.equal(r.status, 'failed', r.summary);
-  assert.equal(r.data?.outcome, 'BUDGET_EXCEEDED');
-  assert.equal(r.data?.stop, 'BUDGET_EXCEEDED');
+  assert.equal(r.status, 'failed', `${r.summary}；data=${JSON.stringify(r.data)}`);
+  assert.equal(r.data?.outcome, 'BUDGET_EXCEEDED', JSON.stringify(r.data));
+  assert.equal(r.data?.stop, 'BUDGET_EXCEEDED', JSON.stringify(r.data));
+  const budget = r.data?.budget as {
+    plannedDistance: number; distanceLimit: number;
+    executableTransitions: number; travelLimit: number; plannedTransitions: number;
+  };
+  // 必须是因为真实已找到的 32 段路线超出累计位移预算，而不是所有候选都耗尽搜索时间。
+  assert.equal(r.data?.routeMode, 'current', JSON.stringify(r.data));
+  assert.deepEqual(r.data?.resolvedStance, { x: 4.5, y: 64, z: 0.5 }, JSON.stringify(r.data));
+  assert.equal(budget.plannedTransitions, 32, JSON.stringify(budget));
+  assert.ok(budget.plannedDistance > budget.distanceLimit, JSON.stringify(budget));
+  assert.ok(budget.executableTransitions > budget.travelLimit, JSON.stringify(budget));
   assert.deepEqual(adapter.pos, before);
 });
 
@@ -1049,4 +1091,49 @@ test('approach_visible 空气方块目标按能力缺口拒绝', async (t) => {
   const r = await call(ctx, { block: { x: 2, y: 64, z: 0 } }, { allowed: ['walk'] });
   assert.equal(r.status, 'failed');
   assert.equal(r.data?.outcome, 'UNSUPPORTED');
+});
+
+const causeOf = (
+  data: Record<string, unknown>, searchStatus: LandSearchResult['status'] = 'FOUND', failureCode?: FailureCode,
+) => navigationOutcome({
+  status: 'failed', summary: 'cause test', data,
+  ...(failureCode === undefined ? {} : { failureCode }),
+}, searchStatus).cause;
+
+test('navigationOutcome 以最终 stop.reason 优先，较早的搜索终态不覆盖真实阻挡', () => {
+  // 严格搜索 INSUFFICIENT_EVIDENCE 后，历史/实际执行发现 BLOCKED：最终原因必须保留 BLOCKED。
+  assert.equal(causeOf({
+    stop: { reason: 'BLOCKED' }, searchStatus: 'INSUFFICIENT_EVIDENCE', blockerAhead: { status: 'BLOCKED' },
+  }), 'BLOCKED');
+  assert.equal(causeOf({
+    stop: { reason: 'BLOCKED' }, searchStatus: 'INSUFFICIENT_EVIDENCE', blockerAhead: { status: 'UNSUPPORTED' },
+  }), 'UNSUPPORTED');
+  assert.equal(causeOf({ stop: { reason: 'PHYSICAL_FAILURE' }, searchStatus: 'FOUND' }), 'NOT_CONFIRMED');
+});
+
+test('navigationOutcome 的精确失效/不支持/证据不足不被通用 no_route 覆盖', () => {
+  const segment = { invalidation: 'no_route' };
+  assert.equal(causeOf({ stop: { reason: 'ROUTE_INVALIDATED' }, searchStatus: 'INVALIDATED', segment }), 'INVALIDATED');
+  assert.equal(causeOf({ stop: { reason: 'TARGET_UNRESOLVED' }, searchStatus: 'UNSUPPORTED', segment }), 'UNSUPPORTED');
+  assert.equal(causeOf({ stop: { reason: 'UNKNOWN_BOUNDARY' }, searchStatus: 'INSUFFICIENT_EVIDENCE', segment }), 'UNKNOWN');
+  assert.equal(causeOf({ stop: { reason: 'BUDGET_EXHAUSTED' }, searchStatus: 'BUDGET_EXHAUSTED', segment }), 'BUDGET_EXCEEDED');
+  // 没有最终 stop.reason 时，仍按精确 searchStatus 区分，最后才用兼容 stopCode。
+  assert.equal(causeOf({ searchStatus: 'INVALIDATED', segment }), 'INVALIDATED');
+  assert.equal(causeOf({ searchStatus: 'INSUFFICIENT_EVIDENCE', segment }), 'UNKNOWN');
+  assert.equal(causeOf({ searchStatus: 'NO_PATH_IN_MEMORY', segment }), 'NO_PATH');
+});
+
+test('navigationOutcome 把 max_steps 预算报为 BUDGET_EXCEEDED，不因先前搜索 FOUND 误报 TIMEOUT', () => {
+  assert.equal(causeOf({ stop: { reason: 'BUDGET_EXHAUSTED' }, searchStatus: 'FOUND', executed: 2 }, 'FOUND'), 'BUDGET_EXCEEDED');
+  assert.equal(causeOf({ stop: { reason: 'TIMEOUT' }, searchStatus: 'FOUND' }, 'FOUND'), 'TIMEOUT');
+  assert.equal(causeOf({ stop: { reason: 'CANCELLED' }, searchStatus: 'FOUND' }), 'CANCELLED');
+});
+
+test('navigationOutcome 不为裸 no_route/FOUND 制造 NO_PATH 或 BLOCKED', () => {
+  // 没有精确最终 stop.reason、搜索仍为 FOUND、也没有已观测 blocker 时，通用兼容字段不证明无路。
+  assert.equal(causeOf({ searchStatus: 'FOUND', segment: { invalidation: 'no_route' } }, 'FOUND'), 'UNKNOWN');
+  assert.equal(causeOf({ segment: { invalidation: 'no_route' } }, 'FOUND'), 'UNKNOWN');
+  assert.equal(causeOf({ searchStatus: 'FOUND' }, 'FOUND', 'PATH_NOT_FOUND'), 'UNKNOWN');
+  // 真实已知边界仍然可以报 BLOCKED。
+  assert.equal(causeOf({ blockerAhead: { status: 'BLOCKED' }, segment: { invalidation: 'no_route' } }, 'FOUND'), 'BLOCKED');
 });

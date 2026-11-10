@@ -1,5 +1,6 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import { shortId } from '../../util.ts';
+import type { NavigationTargetKind } from './goal.ts';
 
 /**
  * 短期移动委托状态：只保存“一个尚未完成的移动意图”的控制事实。
@@ -17,7 +18,8 @@ export type CardinalDirection = 'N' | 'E' | 'S' | 'W';
 export const CARDINAL_DIRECTIONS: readonly CardinalDirection[] = ['N', 'E', 'S', 'W'];
 
 export type MovementIntent =
-  | { kind: 'navigate'; to: Vec3Like; allowed: MoveMode[]; historical: boolean }
+  /** targetKind 在请求边界冻结：格目标的完成条件与精确连续脚位不同，续接不能改语义。 */
+  | { kind: 'navigate'; to: Vec3Like; targetKind: NavigationTargetKind; allowed: MoveMode[]; historical: boolean }
   | {
       kind: 'advance';
       direction: CardinalDirection;
@@ -42,6 +44,7 @@ export type StopReason =
   | 'BLOCKED'
   | 'TARGET_UNRESOLVED'
   | 'ROUTE_INVALIDATED'
+  | 'NO_PATH'
   | 'PHYSICAL_FAILURE'
   | 'ACTION_FAILURE'
   | 'MODE_GAP'
@@ -146,7 +149,7 @@ const sessions = new Map<string, MovementSession>();
 /** 同一 intent 的稳定指纹（不含预算与单次调用旋钮）。 */
 export function intentKeyOf(intent: MovementIntent): string {
   return JSON.stringify(intent.kind === 'navigate'
-    ? { kind: intent.kind, to: intent.to, allowed: [...intent.allowed].sort(), historical: intent.historical }
+    ? { kind: intent.kind, to: intent.to, targetKind: intent.targetKind, allowed: [...intent.allowed].sort(), historical: intent.historical }
     : {
         kind: intent.kind, direction: intent.direction, distance: intent.distance,
         maxLateralDrift: intent.maxLateralDrift, allowed: [...intent.allowed].sort(), historical: intent.historical,

@@ -227,6 +227,7 @@ export class FakeAdapter extends EventEmitter implements GameAdapter {
     if (t.kind === 'near' || t.kind === 'reach_block' || t.kind === 'place_block') dest = t.pos;
     else if (t.kind === 'xz') dest = { x: t.x, y: this.pos.y, z: t.z };
     else if (t.kind === 'xyz') dest = { x: t.x + 0.5, y: t.y, z: t.z + 0.5 };
+    else if (t.kind === 'feet') dest = { x: t.x, y: t.y, z: t.z };
     else if (t.kind === 'away_from') dest = { x: this.pos.x + t.distance, y: this.pos.y, z: this.pos.z };
     else if (t.kind === 'advance') dest = { x: t.origin.x + t.dir.x * t.minAlong, y: this.pos.y, z: t.origin.z + t.dir.z * t.minAlong };
     else if (t.kind === 'follow_entity') {

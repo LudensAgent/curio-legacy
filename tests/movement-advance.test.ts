@@ -89,7 +89,37 @@ test('A1 开阔地 20 格：单次 advance 完成，实测 along 达标，frozen
   assert.equal((r.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 20);
   assert.equal(Math.floor(adapter.pos.x), 20);
   assert.equal((r.data?.continuation as { canContinue: boolean }).canContinue, false);
-  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '只迈步，不挖/不放');
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '只迈步，不挖/不放');
+});
+
+test('A1b 非格心起点 + maxLateralDrift 0：沿实测偏移连续推进，不被格心化偏移', async (t) => {
+  const map = corridor(20);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.1 };
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 8, maxLateralDrift: 0 }));
+
+  assert.equal(r.status, 'succeeded', r.summary);
+  const progress = r.data?.progress as { along: number; lateral: number };
+  assert.ok(progress.along >= 7.99, `along=${progress.along}`);
+  assert.ok(progress.lateral <= 0.01, `横向授权 0 时不得滑到格心：lateral=${progress.lateral}`);
+  assert.ok(Math.abs(adapter.pos.z - 0.1) <= 0.01, `实际 z=${adapter.pos.z}`);
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '连续脚位执行，不经过格心 move_step');
+});
+
+test('A1c 实测横向 0.05 偏差不算授权：maxLateralDrift=0 时在第一步后停止，不再发下一段', async (t) => {
+  const map = corridor(20);
+  const adapter = new LateralDriftOnceWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.1 };
+  const ctx: SkillCtx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 8, maxLateralDrift: 0 }));
+
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal((r.data?.stop as { reason: string }).reason, 'LATERAL_DRIFT');
+  assert.equal(adapter.actions.filter((action) => action === 'moveTo:feet').length, 1, '超授权后不再发下一段控制');
+  assert.ok(Math.abs(adapter.pos.z - 0.15) <= 1e-9, `实测偏差保留：z=${adapter.pos.z}`);
+  assert.equal((r.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 1, '已发生位移按实测确认并保留');
 });
 
 test('A2 开阔地 50 格：两次调用同一 session 完成，累计预算不重置', async (t) => {
@@ -167,7 +197,7 @@ test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕�
   assert.ok(progress.lateral <= 1.01, `final lateral=${progress.lateral}`);
   const counters = r.data?.counters as { confirmedRouteLength: number };
   assert.ok(counters.confirmedRouteLength > 21, `detour path=${counters.confirmedRouteLength}`);
-  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '绕行也只迈步，不挖/不放');
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '绕行也只迈步，不挖/不放');
 });
 
 test('A4c 阻挡两侧先观察：侧向证据变化后选择已验证绕行', async (t) => {
@@ -197,7 +227,7 @@ test('A4c 阻挡两侧先观察：侧向证据变化后选择已验证绕行', a
   assert.equal((r.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
   assert.ok(observations >= 1, '应先做边界侧向观察');
   assert.equal((r.data?.lastObservation as { relatedChanged: boolean }).relatedChanged, true);
-  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '绕行也只迈步，不挖/不放');
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '绕行也只迈步，不挖/不放');
 });
 
 test('A4d 边界观察发现 3D 落点，沿已验证落差继续推进', async (t) => {
@@ -249,10 +279,22 @@ test('A4d 边界观察发现 3D 落点，沿已验证落差继续推进', async 
   assert.ok(observation?.landingCandidates?.length, '边界观察应带可见落点候选');
 });
 
+/** 第一次连续脚位移动产生 0.05 横向偏差：到达容差不能被当成走廊授权。 */
+class LateralDriftOnceWorld extends FakeAdapter {
+  drifted = false;
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    await super.moveTo(target, opts);
+    if (target.kind === 'feet' && !this.drifted) {
+      this.drifted = true;
+      this.pos = { ...this.pos, z: this.pos.z + 0.05 };
+    }
+  }
+}
+
 class PartialMoveWorld extends FakeAdapter {
   failed = false;
   override async moveTo(target: MoveTarget, opts: MoveOpts) {
-    if (target.kind === 'xyz' && !this.failed) {
+    if (target.kind === 'feet' && !this.failed) {
       this.failed = true;
       this.pos = { ...this.pos, x: this.pos.x + 0.5 };
       throw Object.assign(new Error('partial move timeout'), { name: 'TimeoutError' });
@@ -313,7 +355,7 @@ test('A5 UNKNOWN 边界链：定向观察、相关证据变化、重搜并继续
   assert.equal(counters.confirmedTransitions, 20);
   const observation = r.data?.lastObservation as { relatedChanged: boolean } | undefined;
   assert.equal(observation?.relatedChanged, true, '相关边界证据变化后才重搜');
-  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'));
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'));
 });
 
 test('A6 无关格新增观测：不触发重搜', async (t) => {

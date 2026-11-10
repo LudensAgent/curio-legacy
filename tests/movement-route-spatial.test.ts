@@ -216,9 +216,10 @@ test('plan_route source:"auto" 目标脚高变化且 spatial 无路时，不回�
   clearRouteRecords();
   const r = await planRoute.run(ctx, { to: at(3, 5, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
   assert.equal(r.status, 'failed');
-  assert.doesNotMatch(r.summary, /this walk planner|fixed feet height/, '目标换层时不再调用必然失败的同高 search');
-  assert.match(r.summary, /目标脚高 5 与当前 0 不同|不能表示换层/);
-  assert.equal(r.data?.heightChange, 5);
+  assert.doesNotMatch(r.summary, /this walk planner|fixed feet height/, 'auto 不再回退到同高 compatibility search');
+  assert.equal(r.data?.source, 'spatial', 'auto 原样返回体素终态来源');
+  assert.ok(['INSUFFICIENT_EVIDENCE', 'NO_PATH_IN_MEMORY', 'UNSUPPORTED'].includes(String(r.data?.searchStatus)), JSON.stringify(r.data?.searchStatus));
+  assert.deepEqual(r.data?.requestedTarget, at(3, 5, 0));
   assert.ok(Array.isArray(r.data?.boundaries), '保留空间 3D 的边界事实');
 });
 
@@ -255,32 +256,42 @@ test('plan_route source:"spatial" 严格无路时用历史体素给出带 UNKNOW
   assert.ok(steps.every((step) => !!SKILLS[step.skill]));
 });
 
-test('plan_route auto 失败时带出历史拓扑缺口，而不是只说空间 3D 没路', async (t) => {
+test('plan_route source:"auto" 只用体素：即使历史查询可返回路线也不调用/不选择', async (t) => {
   const map = flatWorld();
   fillBox(map, 'minecraft:stone', at(2, 0, -1), at(2, 2, 1));
-  const { w, ctx: base } = ctxAt(map, at(0.5, 0, 0.5));
+  const { ctx: base } = ctxAt(map, at(0.5, 0, 0.5));
+  let historyCalls = 0;
   const spatial = {
     ...fakeSpatial(map),
-    query: () => ({
-      status: 'ok',
-      data: {
-        kind: 'historyRoute',
-        inspection: {
-          status: 'DISCONNECTED', message: 'history fragments are disconnected',
-          points: [], segments: [], gaps: [], fromNodeId: null, toNodeId: null,
+    query: () => {
+      historyCalls += 1;
+      return {
+        status: 'ok',
+        data: {
+          kind: 'historyRoute',
+          inspection: {
+            worldId: WORLD, dim: DIM, from: at(0, 0, 0), to: at(3, 0, 0), near: 5, status: 'FOUND',
+            fromNodeId: 'n0', toNodeId: 'n1', points: [at(0.5, 0, 0.5), at(3.5, 0, 0.5)],
+            nodeIds: ['n0', 'n1'], edgeIds: ['e0'],
+            segments: [{
+              edgeId: 'e0', from: 'n0', to: 'n1', type: 'HORIZONTAL', direction: 'forward', evidenceId: 't0',
+              evidence: { id: 't0', fragmentId: 'f', from: at(0.5, 0, 0.5), to: at(3.5, 0, 0.5), worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: 1, source: 'confirmed_walk', mode: 'walk' },
+            }],
+            gaps: [], message: 'found', historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN',
+          },
         },
-      },
-    }),
+      };
+    },
   } as unknown as SharedSpatialSession;
   const ctx = { ...base, spatial };
   t.after(() => ctx.memory.close());
   clearRouteRecords();
   const r = await planRoute.run(ctx, { to: at(3, 0, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
-  assert.equal(r.status, 'failed');
-  assert.match(r.summary, /历史拓扑/);
-  assert.match(r.summary, /DISCONNECTED|disconnected/);
-  assert.ok(r.data?.memoryGap, '保留 memory gap facts');
-  assert.equal((r.data?.memoryGap as { status?: string }).status, 'DISCONNECTED');
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(historyCalls, 0, '普通 auto 不查询历史拓扑');
+  assert.equal(r.data?.memoryGap, undefined, '不把历史成功/缺口混进 auto 回执');
+  assert.ok(['NO_PATH_IN_MEMORY', 'INSUFFICIENT_EVIDENCE', 'UNSUPPORTED'].includes(String(r.data?.searchStatus)), JSON.stringify(r.data?.searchStatus));
+  assert.equal(r.data?.historicalGeometry, undefined, 'auto 不返回历史路线');
 });
 
 test('plan_route source:"spatial" 无法确认时返回边界事实，不伪造 steps', async (t) => {

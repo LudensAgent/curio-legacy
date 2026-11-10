@@ -15,7 +15,8 @@ import {
 import type { AgentState, Vec3Like } from '../../adapter/types.ts';
 import { walkCollisionProvider } from '../../adapter/walk-route.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
-import { searchLandRouteAsync, summarizeBoundaries, type LandRouteVerification, type LandSearchResult } from '../../spatial/land-search.ts';
+import { searchLandRouteAsync, summarizeBoundaries, verifyLandRouteBounded, type LandRouteVerification, type LandSearchResult } from '../../spatial/land-search.ts';
+import { goalOf, stanceFor, type NavigationGoal } from './goal.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 
 /**
@@ -91,19 +92,15 @@ const finitePoint = (v: unknown): Vec3Like | null => {
  * `plan_route` 的 to 沿用其它动作的方块格坐标约定：x/z 是整数时表示“走到那一格”。
  * 库的步行格点以实测脚位为原点，只接受整数 X/Z 偏移；玩家实际脚位几乎总带小数
  * （如 -61.3/-42.7），直接把整数格坐标传进去会被判成“非整数偏移”。
- * 这里在目标格内取与当前脚下相同的偏移，既落在目标格内，又正好是库的格点。
- * 分数 x/z 仍按精确脚位原样传入，供测试/内部调用使用。
+ * 这里只由共享 goal 语义派生一次：格目标取目标格内与起点相同的偏移；连续目标原样。
  */
-function targetStance(to: Vec3Like, from: Vec3Like): { stance: Vec3Like; cell?: Vec3Like } {
-  if (!Number.isInteger(to.x) || !Number.isInteger(to.z)) return { stance: { ...to } };
-  const cell = { x: Math.floor(to.x), y: to.y, z: Math.floor(to.z) };
+function planTarget(to: Vec3Like, from: Vec3Like): { goal: NavigationGoal; stance: Vec3Like; cell?: Vec3Like } {
+  const goal = goalOf(to);
+  const stance = stanceFor(goal, from);
   return {
-    stance: {
-      x: from.x + (cell.x - Math.floor(from.x)),
-      y: to.y,
-      z: from.z + (cell.z - Math.floor(from.z)),
-    },
-    cell,
+    goal,
+    stance,
+    ...(goal.kind === 'cell' ? { cell: { x: goal.cell.x, y: goal.footY, z: goal.cell.z } } : {}),
   };
 }
 
@@ -360,8 +357,17 @@ const facingOf = (from: Vec3Like, to: Vec3Like): 'N' | 'E' | 'S' | 'W' => {
   return dz >= 0 ? 'S' : 'N';
 };
 
-/** 3D 搜索结果只翻译成现有动作：walk/step/drop=1 → move_step，drop>1 → descend_to。 */
-export function landSearchSteps(result: Pick<LandSearchResult, 'transitions'>) {
+/**
+ * 格目标的 3D 搜索结果只翻译成现有动作：walk/step/drop=1 → move_step，drop>1 → descend_to。
+ * 连续精确脚位没有等价的格动作，返回空数组；执行请用 navigate_to 保持连续 endpoint，
+ * 不能用 move_step 的格心动作冒充。
+ */
+export function landSearchSteps(result: Pick<LandSearchResult, 'transitions'>, goalKind: NavigationGoal['kind'] = 'cell') {
+  const centered = (p: Vec3Like) => Math.abs(p.x - (Math.floor(p.x) + 0.5)) <= 1e-6
+    && Math.abs(p.z - (Math.floor(p.z) + 0.5)) <= 1e-6;
+  // 连续目标只有恰好落在目标格心时，move_step/descend_to 才是等价动作；
+  // 任意分数偏移不生成会把它格心化的步骤。
+  if (goalKind === 'feet' && !result.transitions.every((transition) => centered(transition.from) && centered(transition.to))) return [];
   return result.transitions.map((transition) => {
     // L1 move_step 的绝对 xyz 是“方块格”坐标；descend_to 的 target 也会规整到格心。
     const fromCell = { x: Math.floor(transition.from.x), y: transition.from.y, z: Math.floor(transition.from.z) };
@@ -375,26 +381,26 @@ export function landSearchSteps(result: Pick<LandSearchResult, 'transitions'>) {
   });
 }
 
-async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, to: Vec3Like, signal: AbortSignal, deadlineMs: number) {
+async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: AgentState, goal: NavigationGoal, signal: AbortSignal, deadlineMs: number) {
   const request = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: BODY.width, height: BODY.height, pose: BODY.pose },
-    to,
+    goal,
     maxDrop: 4,
     rules: walkLandRules,
     signal,
     deadlineMs,
   };
-  // 先用当前证据；找不到时再用历史体素试一次。历史路线只作为候选，
-  // 逐段用真实当前证据复验，执行时仍由 move_step/descend_to 核实。
-  // 分片搜索：两次 A* 共用同一截止时间，并在计算期间让出事件循环。
+  // 先用当前证据；找不到时再用历史体素候选。历史路线逐段用真实当前证据复验，
+  // 执行时仍由连续身体控制逐步核实。两次搜索共用同一截止时间。
   const strict = await searchLandRouteAsync(spatial.session.voxel, request);
-  const historical = strict.status === 'FOUND' ? null : await searchLandRouteAsync(spatial.session.voxel, { ...request, allowStale: true });
+  const historical = strict.status === 'FOUND' ? null
+    : await searchLandRouteAsync(spatial.session.voxel, { ...request, evidenceMode: 'remembered' });
   const result = strict.status === 'FOUND' ? strict
     : historical?.status === 'FOUND' ? historical
-      : historical?.status === 'NO_PATH' ? historical
+      : historical?.status === 'NO_PATH_IN_MEMORY' ? historical
         : strict;
-  const steps = result.status === 'FOUND' ? landSearchSteps(result) : [];
+  const steps = result.status === 'FOUND' ? landSearchSteps(result, goal.kind) : [];
   // boundarySummary 只汇总它伴随的 result.boundaries，避免同一回执里边界列表与计数
   // 来自不同证据来源。当前证据（strict）的前缀单独命名，历史几何不冒充可通行。
   const resultBoundarySummary = summarizeBoundaries(result.boundaries);
@@ -413,18 +419,22 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
     return all;
   }, {});
   const boundaryDetail = Object.entries(boundaryCounts).map(([key, count]) => `${key}×${count}`).join('、');
-  const stale = result.stats.staleEdges > 0;
-  const boundaryGuidance = result.status === 'UNKNOWN'
+  const stale = result.stats.staleReads > 0;
+  const boundaryGuidance = result.status === 'INSUFFICIENT_EVIDENCE'
     ? `还有未观察/证据过期（STALE）的边界${stale ? '，当前证据已过期' : ''}；先 look_around/靠近刷新证据再试`
-    : result.status === 'NO_PATH'
+    : result.status === 'NO_PATH_IN_MEMORY'
       ? result.evidenceMode === 'historical'
-        ? '历史体素里也没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
-        : '已观察地形里没有 walk/step/drop 路线；需要挖/垫/搭或换目标时由你决定'
-      : result.status === 'BUDGET_EXHAUSTED'
-        ? result.stats.cancelReason === 'time'
-          ? `搜索时间预算耗尽（${result.stats.durationMs}ms / ${SPATIAL_SEARCH_MS}ms），先规划更近的一段或走近再试`
-          : `搜索节点/边预算耗尽（${result.stats.durationMs}ms），先规划更近的一段`
-        : '先规划更近的一段，或走近/看清后再试';
+        ? '历史体素里也没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标时由你决定'
+        : '已存几何里没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标时由你决定'
+      : result.status === 'UNSUPPORTED'
+        ? `搜索不支持该精确目标：${result.reason}；不自动改写成附近格或吸附脚高`
+        : result.status === 'INVALIDATED'
+          ? '搜索期间地图证据/驻留发生变化；重新观察或重试由你决定'
+          : result.status === 'BUDGET_EXHAUSTED'
+            ? result.budget === 'time'
+              ? `搜索时间预算耗尽（${result.stats.durationMs}ms / ${SPATIAL_SEARCH_MS}ms），先规划更近的一段或走近再试`
+              : `搜索 ${result.budget ?? '节点/边'} 预算耗尽（${result.stats.durationMs}ms），先规划更近的一段`
+            : '先规划更近的一段，或走近/看清后再试';
   const fmt = (v: Vec3Like) => `(${v.x.toFixed(1)},${v.y.toFixed(1)},${v.z.toFixed(1)})`;
   const accessibleNote = result === strict
     ? accessible === undefined || accessible.transitions.length === 0
@@ -435,28 +445,47 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
       : `历史搜索无完整路线；当前证据下存在可达前缀到 ${fmt(currentPrefix.endpoint)}（${currentPrefix.transitions.length} 段），这不是到达`;
   const boundaryNote = `；${resultBoundarySummary.observationMayResolve ? '额外观察/靠近可能刷新证据' : resultBoundarySummary.total === 0 ? '没有记录到边界' : '额外观察不会改变已观测阻挡'}；${resultBoundarySummary.needsExplicitActionOrOtherRoute ? '存在需要显式动作/其他移动能力/换路线的边界（由你决定）' : '未记录到需要挖/建或换路线的边界'}`;
   const routeLabel = result.evidenceMode === 'historical' ? '历史体素路线（含过期证据，当前可通行性未知）' : '空间 3D 路线';
-  const verification = result.verification;
+  // 兼容读取方的显式历史候选复验：共享原 deadline、取消感知、逐段有界并让出事件循环。
+  const verification = result.status === 'FOUND' && result.evidenceMode === 'historical'
+    ? await verifyLandRouteBounded(spatial.session.voxel, {
+        worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
+        body: { feet: { ...state.pos }, width: BODY.width, height: BODY.height, pose: BODY.pose },
+        rules: walkLandRules,
+      }, result.transitions, { deadlineMs, signal })
+    : undefined;
   // 历史候选的复验已经逐段在当前证据上重算；把首个 BLOCKED 段作为 blocker 事实
   // 交给调用方，执行方据此停在 blocker 前，不自动挖/放。
   const blocker = blockerOf(verification);
+  const verifyCoverage = verification?.coverage;
+  // 搜索候选已经完整（FOUND），但当前证据复验可以因真实取消提前停止。两者是不同事实：
+  // 保留搜索终态与候选，只把“复验被取消、没有完整 OPEN”作为这次规划的公开结局。
+  const verificationCancelled = verifyCoverage?.stopped === 'cancelled';
   const verifyNote = verification === undefined
     ? ''
-    : `；严格当前证据复验：${verification.verdict}（当前 OPEN ${verification.openPrefix}/${result.transitions.length} 段）${blocker === null ? '' : `；第 ${blocker.index + 1} 段 ${blocker.status}，执行时停在 blocker 前、不自动挖`}`;
+    : `；严格当前证据复验：${verification.verdict}（当前 OPEN ${verification.openPrefix}/${result.transitions.length} 段${verifyCoverage !== undefined && !verifyCoverage.complete ? `；只检查了 ${verifyCoverage.checked}/${verifyCoverage.total} 段，其余为 UNKNOWN，不是 OPEN` : ''}${verificationCancelled ? '；复验被取消，没有完成整条路线' : ''}）${blocker === null ? '' : `；第 ${blocker.index + 1} 段 ${blocker.status}，执行时停在 blocker 前、不自动挖`}`;
+  const stepsNote = goal.kind === 'feet'
+    ? '；这是精确连续脚位路线，没有 move_step 等价动作，请用 navigate_to 执行'
+    : '';
   return {
     result,
     steps,
+    verificationCancelled,
+    verificationCoverage: verifyCoverage,
     summary: result.status === 'FOUND'
-      ? `${routeLabel} ${result.transitions.length} 段（${detail || '无'}）；已生成现有动作步骤：${stepDetail || '无'}。先执行：${stepPreview}${steps.length > 3 ? '；…' : ''}；只读规划，不是执行授权；执行时按现场事实逐步核实，失败再重新规划${verifyNote}；drop>1 的 descend_to 仍要求当前可见落点`
+      ? `${routeLabel} ${result.transitions.length} 段（${detail || '无'}）；${steps.length > 0 ? `已生成现有动作步骤：${stepDetail || '无'}。先执行：${stepPreview}${steps.length > 3 ? '；…' : ''}` : '未生成格动作步骤'}${stepsNote}；只读规划，不是执行授权；执行时按现场事实逐步核实，失败再重新规划${verifyNote}；drop>1 的 descend_to 仍要求当前可见落点`
       : `${result.evidenceMode === 'historical' ? '历史体素' : '空间 3D'}搜索没有可用路线：${result.status}（${result.boundaries.length} 个边界事实${boundaryDetail ? `：${boundaryDetail}` : ''}）；${accessibleNote}；${boundaryGuidance}${boundaryNote}`,
     facts: {
-      source: 'spatial', backend: 'spatial_voxel_search',
+      source: 'spatial', backend: 'spatial_voxel_search', searchStatus: result.status,
       assurance: result.assurance, evidenceMode: result.evidenceMode, currentPassability: 'UNKNOWN', executable: false,
+      targetKind: goal.kind, requestedTarget: { ...goal.requested },
       points: result.points, transitions: result.transitions, steps: result.status === 'FOUND' ? steps : [],
       boundaries: result.boundaries, cost: result.cost, resolvedTarget: result.resolvedTarget,
       stats: result.stats, budgetMs: SPATIAL_SEARCH_MS, searchMs: result.stats.durationMs,
-      cancelReason: result.stats.cancelReason,
+      budget: result.budget ?? null, reason: result.reason,
+      policy: result.policy ?? null,
+      unavailableSections: result.unavailableSections,
       boundarySummary: resultBoundarySummary,
-      ...(accessible === undefined ? {} : { prefix: accessible, prefixSteps: landSearchSteps(accessible) }),
+      ...(accessible === undefined ? {} : { prefix: accessible, prefixSteps: landSearchSteps(accessible, goal.kind) }),
       ...(result === strict ? {} : {
         ...(currentPrefix === undefined ? {} : { currentPrefix }),
         currentBoundaries: strict.boundaries,
@@ -471,12 +500,13 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
  * 只读路线规划：共享空间记忆的 topology 历史路线 + 3D 体素搜索 + 库的已知空间搜索。
  * 不移动、不转头、不观察、不写库；不重新搜索、无 pathfinder 兜底、不自造 routeId。
  * `source:"memory"` 只查历史拓扑；`spatial` 在已观测 VoxelMap 上做 3D A*；
- * `auto` 依次尝试 memory → spatial → 同高 search。
+ * `auto` 只用实测体素（当前证据优先，可返回 remembered 几何候选，不回退同高搜索）；
+ * 历史拓扑仅由显式 `source:"memory"` 选择，同高兼容搜索仅由显式 `source:"search"` 选择。
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做 3D A*（walk/step/drop），search 查同高空间。memory 返回历史路点/过渡（legs 均带 executable:false、currentPassability UNKNOWN；跨多格 leg 不是一步 move_step），spatial 返回现有动作 steps（move_step/descend_to），仅历史候选额外带当前证据逐段复验的 verifiedOpenSegments/blocker，search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。spatial 失败时额外返回当前证据可达前缀 endpoint/transitions/prefixSteps 与 boundarySummary（边界位置/方向/状态/原因；前缀不是到达）；若回执采用历史候选，当前证据前缀另放 currentPrefix/currentBoundaries/currentBoundarySummary，不混用。auto 先 memory→spatial；spatial 当前证据无路时会用历史体素给出标记为 historical、currentPassability UNKNOWN 的候选路线；只有目标脚高与当前一致时才回退 search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 只走当前脚高的同高格点，目标 y 不同时不会回退到 search；spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；spatial 失败时返回可达前缀与边界摘要，前缀不是到达，也不会自动执行；search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；memory/spatial 都不是 routeId，也不直接授权执行。',
+  description: '只读规划路线：memory 查共享历史拓扑，spatial 在已观测 VoxelMap 上做有界 3D 搜索（walk/step/drop），search 查同高空间。memory 返回历史路点/过渡（legs 均带 executable:false、currentPassability UNKNOWN；跨多格 leg 不是一步 move_step），spatial 返回现有动作 steps（move_step/descend_to；精确连续脚位不给格动作），仅历史候选额外带当前证据逐段复验的 verifiedOpenSegments/blocker，search 返回 routeId（下一步交给 walk_path）；不新增动作。不移动/观察/写库，不挖/放/搭柱。spatial 失败时额外返回搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）、当前证据可达前缀 endpoint/transitions/prefixSteps 与 boundarySummary（边界位置/方向/状态/原因；前缀不是到达）；若回执采用历史候选，当前证据前缀另放 currentPrefix/currentBoundaries/currentBoundarySummary，不混用。auto 只用实测体素（当前证据优先、可返回 remembered 几何候选），不查询/不选择历史拓扑；只有显式 source:"memory" 才返回历史路线。目标脚高与当前不一致时不再回退同高 search。失败/gaps 时不要调用 walk_path；远目标证据不足时先规划更近的一段。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|memory|spatial|search","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。search 只走当前脚高的同高格点，目标 y 不同时不会回退到 search；spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；spatial 失败时返回可达前缀与边界摘要，前缀不是到达，也不会自动执行；search 返回 routeId（单次，交给 walk_path）；memory 返回路点/过渡；memory/spatial 都不是 routeId，也不直接授权执行；auto 只用实测体素（当前证据优先、可返回 remembered 几何候选）；历史拓扑路线只由显式 source:"memory" 选择。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -528,62 +558,58 @@ export const planRoute: Skill<PlanArgs> = {
     // 换会话/换维：旧 routeId 必须失效；重启由进程内注册表天然满足。
     noteRouteScope(scope);
     const from = { ...state.pos };
-    const { stance, cell } = targetStance(args.to, from);
+    const { goal, stance, cell } = planTarget(args.to, from);
     const cellNote = cell === undefined
       ? ''
       : `；目标格 (${cell.x},${cell.y},${cell.z})，按当前脚下偏移取格内站位 (${stance.x.toFixed(2)},${stance.y},${stance.z.toFixed(2)})`;
 
-    let memoryGap: { summary: string; facts: Record<string, unknown> } | null = null;
-    // 共享空间记忆优先：所有 kind 的历史通道在同一张拓扑图里，不按旧矿道/桥分支。
-    if ((args.source === 'memory' || args.source === 'auto') && typeof spatial.query === 'function') {
+    // 普通 auto 与 spatial 都只用实测体素（当前/remembered 候选）；历史拓扑只由显式 source:"memory" 选择。
+    // 已观测体素上的 3D 搜索：结果只翻译成现有 move_step/descend_to（格目标），
+    // 不新增动作，也不把步骤当执行授权。
+    if (args.source === 'spatial' || args.source === 'auto') {
+      if (!spatial.session?.voxel) {
+        return fail('NOT_CONNECTED', `plan_route source:"${args.source}" 需要共享空间 VoxelMap`);
+      }
+      const candidate = await spatialRoute(spatial, state, goal, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
+      const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell }), requestedTarget: { ...args.to }, targetStance: { ...stance } };
+      // 搜索已完成并给出候选，但随后的当前证据复验被真实取消：公开结局是取消，
+      // 不能因为搜索 FOUND 就报 ok，也不能把搜索改写成 CANCELLED 或丢掉候选事实。
+      if (candidate.verificationCancelled) {
+        const coverage = candidate.verificationCoverage;
+        const checked = coverage?.checked ?? 0;
+        const total = coverage?.total ?? facts.transitions.length;
+        return { status: 'cancelled', summary: `路线规划被取消：搜索候选仍是 FOUND（${facts.transitions.length} 段），但当前证据复验在取消时只检查了 ${checked}/${total} 段，未得到完整 OPEN${cellNote}`, data: facts };
+      }
+      if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
+      if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };
+      // auto 必须原样交回体素终态；不落到历史、同高兼容搜索或能力门禁。
+      const code: FailureCode = candidate.result.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT'
+        : candidate.result.status === 'INSUFFICIENT_EVIDENCE' ? 'NOT_FOUND'
+          : candidate.result.status === 'UNSUPPORTED' ? 'BAD_ARGS'
+            : 'PATH_NOT_FOUND';
+      return fail(code, `${candidate.summary}${cellNote}`, facts);
+    }
+
+    // 普通 auto 只用实测体素；历史拓扑路线只能由显式 source:"memory" 选择。
+    if (args.source === 'memory') {
+      if (typeof spatial.query !== 'function') {
+        return fail('NOT_CONNECTED', 'plan_route source:"memory" 需要共享空间会话的查询端口');
+      }
       const memory = effectiveCaps.query?.historyRoute === false
         ? { status: 'gap' as const, summary: '有效能力报告未授予 query.historyRoute，未查询历史拓扑', facts: { source: 'memory', executable: false, currentPassability: 'UNKNOWN' as const, capability: { domain: 'query', name: 'historyRoute' } } }
         : memoryRoute(spatial, state.dim, from, stance);
       const facts = { ...memory.facts, ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }) };
       if (memory.status === 'route') return ok(`${memory.summary}${cellNote}`, facts);
-      if (args.source === 'memory') return fail('PATH_NOT_FOUND', `${memory.summary}${cellNote}`, facts);
-      memoryGap = { summary: memory.summary, facts };
-    } else if (args.source === 'memory') {
-      return fail('NOT_CONNECTED', 'plan_route source:"memory" 需要共享空间会话的查询端口');
+      return fail('PATH_NOT_FOUND', `${memory.summary}${cellNote}`, facts);
     }
 
-    // 已观测体素上的 3D 搜索：结果只翻译成现有 move_step/descend_to，
-    // 不新增动作，也不把步骤当执行授权。
-    let spatialGap: { summary: string; facts: Record<string, unknown> } | null = null;
-    if (args.source === 'spatial' || args.source === 'auto') {
-      if (!spatial.session?.voxel) {
-        if (args.source === 'spatial') return fail('NOT_CONNECTED', 'plan_route source:"spatial" 需要共享空间 VoxelMap');
-      } else {
-        const candidate = await spatialRoute(spatial, state, stance, ctx.signal, Math.min(deadline, Date.now() + SPATIAL_SEARCH_MS));
-        const facts = { ...candidate.facts, ...(cell === undefined ? {} : { targetCell: cell }), requestedTarget: { ...args.to }, targetStance: { ...stance } };
-        if (candidate.result.status === 'FOUND') return ok(`${candidate.summary}${cellNote}`, facts);
-        if (candidate.result.status === 'CANCELLED') return { status: 'cancelled', summary: `${candidate.summary}${cellNote}`, data: facts };
-        if (args.source === 'spatial') {
-          const code: FailureCode = candidate.result.status === 'BUDGET_EXHAUSTED' ? 'TIMEOUT' : candidate.result.status === 'UNKNOWN' ? 'NOT_FOUND' : 'PATH_NOT_FOUND';
-          return fail(code, `${candidate.summary}${cellNote}`, facts);
-        }
-        spatialGap = { summary: candidate.summary, facts };
-      }
+    // 只有显式 source:"search" 使用同高兼容搜索。
+    if (!spatial.session?.voxel) {
+      return fail('NOT_CONNECTED', 'plan_route source:"search" 需要共享空间 VoxelMap');
     }
-
-    // 同高 search 的库只接受与当前脚高完全一致的精确目标；目标 y 变化时它必然
-    // 返回 unsupported_target，再回退只会把真正有用的 3D 边界事实淹没。auto 到这里
-    // 说明 memory/spatial 都没有给出可执行路线，直接把换层事实和边界交回。
-    const heightChange = Math.abs(stance.y - from.y) > 0.01;
-    if (args.source === 'auto' && heightChange) {
-      const gaps = [memoryGap ? `历史拓扑：${memoryGap.summary}` : '', spatialGap ? `空间 3D：${spatialGap.summary}` : ''].filter(Boolean).join('；');
-      return fail('BAD_ARGS', `目标脚高 ${stance.y} 与当前 ${from.y} 不同（${(stance.y - from.y).toFixed(2)} 格），同高 search 只支持固定脚高 ${from.y}，不能表示换层${gaps ? `；${gaps}` : ''}；换层由你用相邻一格 move_step，或更大落差先 assess_landings 再 descend_to 显式处理（不自动改目标）${cellNote}`, {
-        ...(spatialGap?.facts ?? {}), ...(memoryGap?.facts ?? {}),
-        targetFoot: stance.y, currentFoot: from.y, heightChange: stance.y - from.y,
-        ...(cell === undefined ? {} : { targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance }),
-        ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}),
-      });
-    }
-
     if (effectiveCaps.plan?.walkSearch === false) {
       return fail('NOT_CONNECTED', '有效能力报告未授予 plan.walkSearch，未调用库路线搜索', {
         classification: 'CAPABILITY_UNAVAILABLE', capability: { domain: 'plan', name: 'walkSearch' },
-        ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}),
       });
     }
     const search = new WalkRouteSearch(spatial.session.voxel, {
@@ -616,16 +642,10 @@ export const planRoute: Skill<PlanArgs> = {
     if (result.plan === undefined) {
       const problem: PlanProblem = result.problem ?? { kind: 'unavailable', detail: 'route planning returned neither a plan nor a problem' };
       const outcome = planProblemResult(problem, result.message, search);
-      const annotated = cell === undefined ? outcome : {
+      return cell === undefined ? outcome : {
         ...outcome,
         summary: `${outcome.summary}${cellNote}`,
         data: { ...(outcome.data ?? {}), targetCell: cell, requestedTarget: { ...args.to }, targetStance: stance },
-      };
-      const gaps = [memoryGap ? `历史拓扑：${memoryGap.summary}` : '', spatialGap ? `空间 3D：${spatialGap.summary}` : ''].filter(Boolean);
-      return gaps.length === 0 ? annotated : {
-        ...annotated,
-        summary: `${annotated.summary}；${gaps.join('；')}`,
-        data: { ...(annotated.data ?? {}), ...(memoryGap ? { memoryGap: memoryGap.facts } : {}), ...(spatialGap ? { spatialGap: spatialGap.facts } : {}) },
       };
     }
     const plan = result.plan;

@@ -109,7 +109,7 @@ test('navigate_to 执行已知最远前缀后停在 UNKNOWN 边界；前缀不�
   assert.equal(boundaries.observationMayResolve, true, 'UNKNOWN 边界可由额外观察刷新');
   assert.equal(boundaries.needsExplicitActionOrOtherRoute, false);
   assert.ok((r.data?.executed as number) >= 3);
-  assert.ok(adapter.actions.every((action) => action === 'moveTo:xyz'), '只执行已规划前缀，不挖/不放');
+  assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '只执行已规划前缀，不挖/不放');
 });
 
 test('navigate_to 没有任何已确认前缀时不移动，prefix 如实标 atStart', async (t) => {
@@ -180,42 +180,66 @@ test('plan_route source:"spatial" 返回与 navigate_to 相同的前缀事实形
   assert.deepEqual(adapter.actions, [], 'plan_route 只读，不移动');
 });
 
-test('navigate_to 在预算边界停止但实测终点就是目标时，报告到达而不是未到达', async (t) => {
+test('navigate_to 在节点预算边界停止后仍执行当前证据前缀，不要求预算之后的时间', async (t) => {
+  // 明确的小节点预算：确定性停在预算处并给出当前证据前缀，不靠真实耗时触发超时。
+  const N = 200;
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
-  fill(map, 'minecraft:air', [
-    { x: 0, y: 64, z: 0 }, { x: 0, y: 65, z: 0 },
-    { x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 },
-  ]);
-  fill(map, 'minecraft:stone', [{ x: 0, y: 63, z: 0 }, { x: 1, y: 63, z: 0 }]);
+  const air: { x: number; y: number; z: number }[] = [];
+  const floor: { x: number; y: number; z: number }[] = [];
+  for (let x = 0; x <= N; x++) {
+    air.push({ x, y: 64, z: 0 }, { x, y: 65, z: 0 });
+    floor.push({ x, y: 63, z: 0 });
+  }
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', floor);
   const { adapter, ctx } = setup(map);
-  // 模拟慢证据读取：首轮展开后触及 1500ms 时间预算，目标已入队但尚未弹出。
-  const realCellAt = map.cellAt.bind(map);
-  let reads = 0;
-  map.cellAt = (dim, x, y, z) => {
-    if (reads < 60) {
-      reads += 1;
-      const until = Date.now() + 50;
-      while (Date.now() < until) { /* bounded slow read */ }
-    }
-    return realCellAt(dim, x, y, z);
-  };
-  t.after(() => { map.cellAt = realCellAt; ctx.memory.close(); });
+  t.after(() => ctx.memory.close());
+  const deadline = Date.now() + 5000;
 
   const r = await navigateTo.run(ctx, {
-    to: { x: 1, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 8, allowUnknownCorridor: false,
+    to: { x: N, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 8,
+    allowUnknownCorridor: false, maxNodes: 96, deadlineMs: deadline,
+  });
+
+  assert.equal(r.status, 'failed', r.summary);
+  assert.ok(r.data?.executed as number > 0, '预算停止的前缀仍被执行');
+  assert.ok(adapter.pos.x > 0, `身体只走到当前证据前缀（实际 x=${adapter.pos.x}）`);
+  assert.deepEqual(r.data?.requestedTarget, { x: N, y: 64, z: 0 }, '原目的地不被前缀替换');
+  assert.equal((r.data?.segment as Segment).arrivedAtTarget, false);
+  const prefix = r.data?.prefix as PrefixFacts | undefined;
+  assert.ok(prefix, '预算停止必须带当前证据前缀事实');
+  assert.equal(prefix.atTarget, false, '前缀不是到达');
+  assert.ok(Date.now() <= deadline + 2000, '没有要求预算之后的时间');
+});
+
+test('搜索在节点/边预算停止但当前前缀 atTarget=true 时，执行实测到达后仍报告真实到达', async (t) => {
+  // 目标边先入队；两侧有真实现测支撑，使下一次边预算检查在弹出目标前触发。
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: { x: number; y: number; z: number }[] = [];
+  const floor: { x: number; y: number; z: number }[] = [];
+  for (let x = 0; x <= 1; x++) for (let z = -1; z <= 1; z++) {
+    air.push({ x, y: 64, z }, { x, y: 65, z });
+    floor.push({ x, y: 63, z });
+  }
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', floor);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+
+  const r = await navigateTo.run(ctx, {
+    to: { x: 1, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 8,
+    allowUnknownCorridor: false, maxEdges: 1,
   });
 
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(Math.floor(adapter.pos.x), 1, '实测已走到目标格');
   assert.equal(r.data?.arrived, true);
   assert.deepEqual(r.data?.remaining, []);
-  const segment = r.data?.segment as Segment;
-  assert.equal(segment.arrivedAtTarget, true, '实测终点就是目标，不能仍标未到达');
-  assert.equal(segment.invalidation, null);
-  assert.equal(segment.progress.reason, 'arrived_at_target');
+  assert.equal(Math.floor(adapter.pos.x), 1, '实测已到目标格');
   const prefix = r.data?.prefix as PrefixFacts | undefined;
-  assert.equal(prefix?.atTarget, true, '预算停止时目标已在前缀端点');
-  assert.match(r.summary, /到达/);
+  assert.equal(prefix?.atTarget, true, '预算停止时目标已经是当前证据前缀端点');
+  const segment = r.data?.segment as Segment;
+  assert.equal(segment.arrivedAtTarget, true);
+  assert.equal(segment.invalidation, null);
   assert.doesNotMatch(r.summary, /不是到达/);
 });
 
@@ -236,7 +260,8 @@ test('plan_route 历史候选回执的 boundarySummary 只汇总同源 boundarie
   // x=4..5 是一条已过期观测的实心墙：strict 看到 STALE（证据不足），
   // historical 升级后看到 BLOCKED（历史几何无路）。
   const staleWall: { x: number; y: number; z: number }[] = [];
-  for (let x = 4; x <= 5; x++) for (let y = 63; y <= 66; y++) staleWall.push({ x, y, z: 0 });
+  // 覆盖库在该列评估的完整支撑范围（脚高 64, maxDrop 4 → y 59..65）；否则会先报 UNKNOWN。
+  for (let x = 4; x <= 5; x++) for (let y = 59; y <= 66; y++) staleWall.push({ x, y, z: 0 });
   fillAt(map, 'minecraft:stone', staleWall, old);
 
   const { ctx } = setup(map);

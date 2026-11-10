@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../../adapter/types.ts';
+import { goalFromIntent, goalReached } from './goal.ts';
 import type { CardinalDirection, MovementIntent, MovementProgress, MovementSession, StopReason } from './session.ts';
 
 /** 与世界方向一致：N=-Z、E=+X、S=+Z、W=-X。 */
@@ -42,12 +43,15 @@ export function progressOf(session: MovementSession, current: Vec3Like, sampledA
 }
 
 /**
- * 关闭条件只看实测位置：
+ * 关闭条件只看实测位置与冻结目标语义：
  * - advance：沿冻结方向的进度达到 distance，且横向偏移未超授权；
- * - navigate：实测脚格/脚高与目标一致。
- * 返回 null 表示尚未满足，也不是失败。
+ * - navigate 格目标：实测脚所在格一致且脚高在声明容差内；
+ * - navigate 连续脚位：实测身体中心到精确脚位的水平/垂直距离在声明容差内。
+ * `onGround` 是完成证据的一部分；悬空经过目标格不算到达。返回 null 表示尚未满足，也不是失败。
  */
-export function closeReasonOf(session: MovementSession, current: Vec3Like, now: number): { reason: StopReason; detail: string } | null {
+export function closeReasonOf(
+  session: MovementSession, current: Vec3Like, now: number, onGround = true,
+): { reason: StopReason; detail: string } | null {
   const intent = session.intent;
   if (intent.kind === 'advance') {
     const projection = session.bearing === undefined
@@ -67,10 +71,12 @@ export function closeReasonOf(session: MovementSession, current: Vec3Like, now: 
     }
     return null;
   }
-  const sameCell = Math.floor(current.x) === Math.floor(intent.to.x)
-    && Math.floor(current.z) === Math.floor(intent.to.z);
-  if (sameCell && Math.abs(current.y - intent.to.y) <= 0.01) {
-    return { reason: 'ARRIVED', detail: `实测脚位 (${round2(current.x)},${round2(current.y)},${round2(current.z)}) 与目标脚位一致` };
+  const goal = goalFromIntent(intent.to, intent.targetKind);
+  if (goalReached(goal, current, onGround)) {
+    const where = `实测脚位 (${round2(current.x)},${round2(current.y)},${round2(current.z)})`;
+    return goal.kind === 'cell'
+      ? { reason: 'ARRIVED', detail: `${where} 在目标格 (${goal.cell.x},${goal.footY},${goal.cell.z})，脚高在容差内` }
+      : { reason: 'ARRIVED', detail: `${where} 与精确脚位目标一致（水平/垂直容差内）` };
   }
   return null;
 }

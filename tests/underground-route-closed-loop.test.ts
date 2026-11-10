@@ -284,13 +284,36 @@ test('c) 已记录通道放入 blocker：复验停在 blocker 前、执行窗口
     observeCells(svc, SESSION_1, corridorCells(0, 7), nextObservedAt());
     recordDugTraversal(svc, SESSION_1, 5, 7);
     // 显式 markStale（真正收到陈旧通知）：旧 clearance 不再被当作当前证据；
-    // blocker 只在物理世界出现。没有该写入时，从未观测的格是 UNKNOWN 而不是 STALE。
+    // blocker 先在物理世界出现，直到执行中观察才进入当前记忆。没有该写入时，
+    // 从未观测的格是 UNKNOWN 而不是 STALE。
     const staleWrite = svc.markStale(DIM, 'observation_gap');
     if (staleWrite.status !== 'written') assert.fail(`markStale rejected: ${JSON.stringify(staleWrite.reason)}`);
     assert.ok(staleWrite.report.sections.length > 0, 'markStale 必须给出受影响的 sections');
 
-    const adapter = adapterAt(0, SESSION_1);
-    // 头部格是实体方块：脚下无台阶可借，move_step 报 HEAD_BLOCKED 并停在 blocker 前。
+    // markStale 后只有真正重新观察的格才是当前证据：先显式提交前两步的支撑/净空
+    // （x=0..2），其余格保持原 STALE。第三格的头部阻挡在执行中观察，不来自隐藏方块。
+    observeCells(svc, SESSION_1, corridorCells(0, 2), nextObservedAt());
+
+    // 第二步真实移动完成后提交下一步所需观察：x=3 的支撑/脚部净空与头部石头。
+    class ObserveSecondStepWorld extends FakeAdapter {
+      private feetMoves = 0;
+      override async moveTo(target: MoveTarget, opts: MoveOpts) {
+        await super.moveTo(target, opts);
+        if (target.kind === 'feet' && ++this.feetMoves === 2) {
+          observeCells(svc, SESSION_1, [
+            { pos: at(3, 63, 0), name: 'minecraft:stone' },
+            { pos: at(3, FEET_Y, 0), name: 'minecraft:air' },
+            { pos: at(3, FEET_Y + 1, 0), name: 'minecraft:stone' },
+          ], nextObservedAt());
+        }
+      }
+    }
+    const adapter = new ObserveSecondStepWorld();
+    adapter.pos = { x: 0.5, y: FEET_Y, z: 0.5 };
+    adapter.worldId = WORLD;
+    adapter.sessionId = SESSION_1;
+    adapter.dim = DIM;
+    // 物理世界里头部格确实是石头；它不等于当前记忆，必须由上面的观察提交。
     adapter.blocks.push({ name: 'stone', pos: at(3, FEET_Y + 1, 0) });
     const ctx = ctxFor(adapter, svc);
     const partial = await navigateTo.run(ctx, { to: at(5, FEET_Y, 0), allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false });
@@ -300,14 +323,17 @@ test('c) 已记录通道放入 blocker：复验停在 blocker 前、执行窗口
     assert.equal(partial.data?.executed, 2, '只执行 blocker 前的前缀');
     assert.equal(partial.data?.confirmedSegments, 2);
     assert.equal(Math.floor(adapter.pos.x), 2);
-    const blocker = partial.data?.blocker as { index: number; status: string; problem: string; cell?: Vec3Like } | null;
+    assert.equal(adapter.actions.filter((action) => action === 'moveTo:feet').length, 2, '只实际移动两步');
+    const blocker = partial.data?.blocker as { index: number; status: string; problem: string; reason?: string; cell?: Vec3Like; obstacle?: Vec3Like } | null;
     assert.equal(blocker?.index, 2);
     assert.equal(blocker?.status, 'BLOCKED');
     assert.equal(blocker?.problem, 'HEAD_BLOCKED');
     assert.deepEqual(blocker?.cell, at(3, FEET_Y, 0));
+    assert.deepEqual(blocker?.obstacle, at(3, FEET_Y + 1, 0), '阻挡是实测观察到的头部格');
+    assert.match(String(blocker?.reason), /collision with minecraft:stone at \(3, 65, 0\)/, '阻挡原因来自当前证据复验');
     assert.deepEqual(partial.data?.lastMeasuredPosition, { ...adapter.pos }, '保留最后实测位置');
     assert.equal((partial.data?.remaining as unknown[]).length, 3, 'blocker 段及其后都留在剩余段');
-    assert.ok(!adapter.actions.some((action) => action.startsWith('dig:')), '不自动挖 blocker');
+    assert.ok(!adapter.actions.some((action) => action.startsWith('dig:') || action.startsWith('place:')), '不自动挖/放 blocker');
 
     // 用当前证据显式观察同一个 blocker：历史几何不变，但复验在 blocker 停止。
     observeCells(svc, SESSION_1, corridorCells(0, 6), nextObservedAt());
@@ -422,7 +448,8 @@ test('e) 无地板支撑的挖空与一格高通道都不得被当成可走路�
   await withCleanSession(db, async (svc) => {
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
     const observedAt = Date.now();
-    // z=0：起点有地板，x=1..3 是挖空但无地板（y=63 也是空气）。
+    // z=0：起点有地板，x=1..3 是挖空但 y=63 也是空气。这里只观察 y=63..65；
+    // 搜索的 maxDrop=4 还会读取更深的支撑列，更深处仍是 UNKNOWN，不能宣称整列已观察无支撑。
     observeCells(svc, SESSION_1, [
       { pos: at(0, 63, 0), name: 'minecraft:stone' },
       { pos: at(0, FEET_Y, 0), name: 'minecraft:air' },
@@ -453,7 +480,8 @@ test('e) 无地板支撑的挖空与一格高通道都不得被当成可走路�
     assert.equal(cavity.status, 'failed', cavity.summary);
     assert.deepEqual(cavity.data?.steps, [], '无地板挖空不能生成可执行路线');
     const cavityBoundaries = cavity.data?.boundaries as { status: string; reason?: string }[];
-    assert.ok(cavityBoundaries.some((boundary) => boundary.status === 'UNKNOWN' && /no observed standable surface/.test(boundary.reason ?? '')), '无地板列只报告未知边界');
+    assert.ok(cavityBoundaries.some((boundary) => boundary.status === 'UNKNOWN' && /support-surface coverage or shape rules are incomplete in the bounded column/.test(boundary.reason ?? '')), '更深支撑列未观察：准确事实是 UNKNOWN 缺证据，不是已观测无支撑');
+    assert.equal(cavityBoundaries.some((boundary) => boundary.status === 'BLOCKED'), false, '缺证据不得伪装成已观测阻挡');
     assert.deepEqual(noFloor.actions, [], '规划不移动');
     const cavityRun = await navigateTo.run(noFloorCtx, { to: at(3, FEET_Y, 0), allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false });
     assert.equal(cavityRun.status, 'failed', cavityRun.summary);
@@ -466,8 +494,8 @@ test('e) 无地板支撑的挖空与一格高通道都不得被当成可走路�
     const low = await planRoute.run(lowTunnelCtx, { to: at(4, FEET_Y, 10), mode: 'walk', source: 'spatial', arrival: { kind: 'exact' } });
     assert.equal(low.status, 'failed', low.summary);
     assert.deepEqual(low.data?.steps, [], '一格高通道不能生成可执行路线');
-    const lowBoundaries = low.data?.boundaries as { status: string; kind: string }[];
-    assert.ok(lowBoundaries.some((boundary) => boundary.status === 'BLOCKED'), '一格高通道的边应被判阻塞');
+    const lowBoundaries = low.data?.boundaries as { status: string; kind: string; reason?: string }[];
+    assert.ok(lowBoundaries.some((boundary) => boundary.status === 'BLOCKED' && /collision with minecraft:stone at \(1, 65, 10\)/.test(boundary.reason ?? '')), '一格高通道的边应带真实头部碰撞原因');
     assert.deepEqual(lowTunnel.actions, [], '规划不移动');
     const lowRun = await navigateTo.run(lowTunnelCtx, { to: at(4, FEET_Y, 10), allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false });
     assert.equal(lowRun.status, 'failed', lowRun.summary);

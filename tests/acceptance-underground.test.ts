@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import type { Vec3Like } from 'curio-minecraft-3d-memory';
-import type { BlockObservation } from '../src/adapter/types.ts';
+import type { BlockObservation, MoveOpts, MoveTarget } from '../src/adapter/types.ts';
 import { walkLandRules } from '../src/adapter/land-rules.ts';
 import { verifyLandRoute, type LandRouteVerification, type LandSearchTransition } from '../src/spatial/land-search.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
@@ -267,20 +267,49 @@ test('UG-2a 人工放阻挡：路线拒绝/停止在实测前缀，不自动挖'
   const staleWrite = svc.markStale(DIM, 'observation_gap');
   if (staleWrite.status !== 'written') assert.fail(`markStale rejected: ${JSON.stringify(staleWrite.reason)}`);
 
-  const adapter = adapterAt(0, SESSION_1);
+  // markStale 让整图变 STALE；只有真正重新观察的格才是当前证据。执行前显式提交
+  // 前两步实际可观察的支撑/净空（x=0..2），其余格保持原 STALE 时间。
+  // 不从隐藏的 adapter.blocks 推定当前记忆：第三格的头部阻挡是执行中观察到的。
+  observeCells(svc, SESSION_1, corridorCells(0, 2), nextObservedAt());
+
+  // 第二步真实移动完成后才提交下一步所需观察：x=3 的支撑/脚部净空与头部石头。
+  class ObserveSecondStepWorld extends FakeAdapter {
+    private feetMoves = 0;
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      await super.moveTo(target, opts);
+      if (target.kind === 'feet' && ++this.feetMoves === 2) {
+        observeCells(svc, SESSION_1, [
+          { pos: at(3, 63, 0), name: 'minecraft:stone' },
+          { pos: at(3, FEET_Y, 0), name: 'minecraft:air' },
+          { pos: at(3, FEET_Y + 1, 0), name: 'minecraft:stone' },
+        ], nextObservedAt());
+      }
+    }
+  }
+  const adapter = new ObserveSecondStepWorld();
+  adapter.pos = { x: 0.5, y: FEET_Y, z: 0.5 };
+  adapter.worldId = WORLD;
+  adapter.sessionId = SESSION_1;
+  adapter.dim = DIM;
+  // 物理世界里头部格确实是石头；它不等于当前记忆，必须由上面的观察提交。
   adapter.blocks.push({ name: 'stone', pos: at(3, FEET_Y + 1, 0) });
   const ctx = ctxFor(adapter, svc);
   const partial = await navigateTo.run(ctx, { to: at(5, FEET_Y, 0), allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false });
   assert.equal(partial.status, 'failed', partial.summary);
   assert.equal(partial.data?.executed, 2, '只执行 blocker 前的前缀');
+  assert.equal(partial.data?.confirmedSegments, 2);
   assert.equal(Math.floor(adapter.pos.x), 2, '身体停在实测前缀');
-  const blocker = partial.data?.blocker as { index: number; status: string; problem: string; cell?: Vec3Like } | null;
+  assert.equal(adapter.actions.filter((action) => action === 'moveTo:feet').length, 2, '只实际移动两步');
+  const blocker = partial.data?.blocker as { index: number; status: string; problem: string; reason?: string; cell?: Vec3Like; obstacle?: Vec3Like } | null;
+  assert.equal(blocker?.index, 2);
   assert.equal(blocker?.status, 'BLOCKED');
   assert.equal(blocker?.problem, 'HEAD_BLOCKED');
   assert.deepEqual(blocker?.cell, at(3, FEET_Y, 0));
+  assert.deepEqual(blocker?.obstacle, at(3, FEET_Y + 1, 0), '阻挡是实测观察到的头部格');
+  assert.match(String(blocker?.reason), /collision with minecraft:stone at \(3, 65, 0\)/, '阻挡原因来自当前证据复验');
   assert.deepEqual(partial.data?.lastMeasuredPosition, { ...adapter.pos }, '保留最后实测位置');
   assert.equal((partial.data?.remaining as unknown[]).length, 3, 'blocker 段及之后留在剩余');
-  assert.equal(adapter.actions.some((action) => action.startsWith('dig:')), false, '不自动挖 blocker');
+  assert.equal(adapter.actions.some((action) => action.startsWith('dig:') || action.startsWith('place:')), false, '不自动挖/放 blocker');
 
   observeCells(svc, SESSION_1, corridorCells(0, 6), nextObservedAt());
   observeCells(svc, SESSION_1, [{ pos: at(3, FEET_Y + 1, 0), name: 'minecraft:stone' }], nextObservedAt());
@@ -369,7 +398,9 @@ test('UG-3a 无支撑/一格高/落沙：三种可区分的拒绝原因' , async
   });
   svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
   const observedAt = nextObservedAt();
-  // z=0：x=1..3 挖空但 y=63 也是空气（无地板）。
+  // z=0：x=1..3 挖空但 y=63 也是空气（无地板）。这里只观察 y=63..65；
+  // 搜索的 maxDrop=4 还会读取更深的支撑列，那些格仍是 UNKNOWN，因此不能宣称
+  // “整列已观察且无支撑”——真实事实是缺证据。
   observeCells(svc, SESSION_1, [
     { pos: at(0, 63, 0), name: 'minecraft:stone' },
     { pos: at(0, FEET_Y, 0), name: 'minecraft:air' },
@@ -400,7 +431,8 @@ test('UG-3a 无支撑/一格高/落沙：三种可区分的拒绝原因' , async
   observeCells(svc, SESSION_1, [{ pos: at(2, FEET_Y, 20), name: 'minecraft:sand' }], observedAt + 3);
 
   const checks = [
-    { name: '无地板', pos: { x: 0.5, y: FEET_Y, z: 0.5 }, target: at(3, FEET_Y, 0), expect: 'UNKNOWN', reason: /no observed standable surface/, x: 0.5 },
+    // 更深支撑列未观察：准确状态是 UNKNOWN，原因是库的“证据覆盖不完整”，不是已观测无支撑。
+    { name: '无地板', pos: { x: 0.5, y: FEET_Y, z: 0.5 }, target: at(3, FEET_Y, 0), expect: 'UNKNOWN', reason: /support-surface coverage or shape rules are incomplete in the bounded column/, x: 0.5 },
     { name: '一格高', pos: { x: 0.5, y: FEET_Y, z: 10.5 }, target: at(4, FEET_Y, 10), expect: 'BLOCKED', reason: /collision with minecraft:stone at \(1, 65, 10\)/, x: 0.5 },
     { name: '落沙', pos: { x: 0.5, y: FEET_Y, z: 20.5 }, target: at(3, FEET_Y, 20), expect: 'BLOCKED', reason: /collision with minecraft:sand at \(2, 64, 20\)/, x: 1.5 },
   ] as const;
@@ -430,7 +462,58 @@ test('UG-3a 无支撑/一格高/落沙：三种可区分的拒绝原因' , async
   t.diagnostic(`UG-3a reasons=${JSON.stringify(reasons)}; falling-block physics NOT_RUN (V4-QA-02)`);
 });
 
-test('UG-3b 流体：1D land-search 边界仍标 OPEN（缺口），不能离线证明“不报可走”' , { skip: '离线缺口：plan_route source:spatial 的 land-search 边界把水格标成 OPEN；verifyLandRoute 与执行会阻断 hazard，但“搜索不报可走”无法在不改 src 的情况下离线证明。缺口已记入报告。' }, () => {});
+test('UG-3b 流体：宿主的只读搜索策略拒绝水格，不发布越过水格的路线', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'acceptance-ug3b-'));
+  const db = join(dir, 'memory.db');
+  const svc = await openSession(db);
+  t.after(async () => {
+    await svc.shutdown();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+  svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
+  // 与 UG-3c 同类：z=30 的一条已观察通道，x=2 两格是水。
+  observeCells(svc, SESSION_1, [0, 1, 2, 3, 4, 5].flatMap((x) => [
+    { pos: at(x, 63, 30), name: 'minecraft:stone' },
+    { pos: at(x, FEET_Y, 30), name: 'minecraft:air' },
+    { pos: at(x, FEET_Y + 1, 30), name: 'minecraft:air' },
+  ]), nextObservedAt());
+  observeCells(svc, SESSION_1, [
+    { pos: at(2, FEET_Y, 30), name: 'minecraft:water' },
+    { pos: at(2, FEET_Y + 1, 30), name: 'minecraft:water' },
+  ], nextObservedAt());
+
+  const adapter = adapterAt(0, SESSION_1);
+  adapter.pos = { x: 0.5, y: FEET_Y, z: 30.5 };
+  const ctx = ctxFor(adapter, svc);
+  clearRouteRecords();
+  const planned = await planRoute.run(ctx, { to: at(4, FEET_Y, 30), mode: 'walk', source: 'spatial', arrival: { kind: 'exact' } });
+  assert.equal(planned.status, 'failed', planned.summary);
+  assert.equal(planned.data?.searchStatus, 'INSUFFICIENT_EVIDENCE', '通道两侧未观察，搜索是证据不足而不是假装水格是地形阻挡');
+  assert.deepEqual(planned.data?.transitions, [], '没有完整路线被发布');
+  assert.deepEqual(planned.data?.steps, [], '更不会生成越过水格的执行步骤');
+  assert.deepEqual(adapter.actions, [], '只读搜索不移动');
+
+  const policy = planned.data?.policy as {
+    version?: string;
+    rejectedEdges?: number;
+    firstRejection?: { from?: Vec3Like; to?: Vec3Like; reason?: string };
+  } | null;
+  assert.equal(policy?.version, 'host-land-edge-policy.danger-set.fall-only.lava-neighbor-3.v1');
+  assert.ok((policy?.rejectedEdges ?? 0) >= 1, '策略拒绝边必须计数，不能静默当作没路');
+  assert.deepEqual(policy?.firstRejection?.from, { x: 1.5, y: FEET_Y, z: 30.5 });
+  assert.deepEqual(policy?.firstRejection?.to, { x: 2.5, y: FEET_Y, z: 30.5 });
+  assert.match(String(policy?.firstRejection?.reason), /water_contact/, '拒绝原因是几何 hazard，不是已观察碰撞');
+  assert.match(String(policy?.firstRejection?.reason), /only fall is allowed/);
+
+  const boundaries = (planned.data?.boundaries ?? []) as { status: string; to?: Vec3Like }[];
+  assert.equal(
+    boundaries.some((boundary) => boundary.status === 'BLOCKED'
+      && Math.floor(boundary.to?.x ?? NaN) === 2 && Math.floor(boundary.to?.z ?? NaN) === 30),
+    false,
+    '策略拒绝不得伪装成水格地形 BLOCKED',
+  );
+  t.diagnostic(`UG-3b policyVersion=${policy?.version} rejectedEdges=${policy?.rejectedEdges} firstRejection=${JSON.stringify(policy?.firstRejection)}; real fluid physics NOT_RUN`);
+});
 
 test('UG-3c 流体：导航不进入水格，verifyLandRoute 以 hazard 阻断' , async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'acceptance-ug3c-'));

@@ -5,6 +5,7 @@ import { feetCell } from '../../perception/local.ts';
 import { LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import {
   isDangerousBlock,
+  observedFootY,
   searchLandRouteAsync,
   summarizeBoundaries,
   type LandSearchBoundarySummary,
@@ -13,6 +14,7 @@ import {
 } from '../../spatial/land-search.ts';
 import { fail, isAbort, obj, ok, runSkill, validateSkill, type FailureCode, type Skill, type SkillCtx, type SkillResult } from '../types.ts';
 import { inspectBody, stateReader } from './facts.ts';
+import { anchorOf, cellGoal, type NavigationGoal } from './goal.ts';
 import { navigateTo } from './navigate.ts';
 import { travelTo } from './travel-to.ts';
 import { blockerOf } from './route.ts';
@@ -34,8 +36,8 @@ type Args = {
   maxSteps?: number;
   allowUnknownCorridor: boolean;
 };
-type Outcome =
-  | 'ARRIVED' | 'PARTIAL' | 'BLOCKED' | 'UNKNOWN' | 'UNSUPPORTED'
+export type Outcome =
+  | 'ARRIVED' | 'PARTIAL' | 'BLOCKED' | 'NO_PATH' | 'UNKNOWN' | 'UNSUPPORTED'
   | 'INVALIDATED' | 'BUDGET_EXCEEDED' | 'NOT_CONFIRMED' | 'TIMEOUT' | 'CANCELLED';
 type RouteMode = 'current' | 'historical' | 'prefix' | 'none';
 
@@ -282,29 +284,68 @@ function stanceCandidates(
 
 /**
  * navigate_to 结局 → approach_visible 结局。
- * navigate_to 把 invalidation 放在 data.segment.invalidation，且不回传搜索 stats；
- * 这里只读真实存在的字段，并用调用方保留的 strict 搜索状态区分预算耗尽与期限耗尽。
+ *
+ * 优先级必须是：Coordinator 的精确最终 stop.reason → 精确 searchStatus → 通用兼容字段。
+ * - 较早的搜索终态（例如 INSUFFICIENT_EVIDENCE）不能覆盖之后记忆路线/身体执行得到的
+ *   真实 BLOCKED；通用 segment.invalidation='no_route' 也不证明 NO_PATH。
+ * - BUDGET_EXHAUSTED 是步数/搜索预算用尽，不是期限 TIMEOUT；TIMEOUT 只用于真实期限。
+ * - 取消仍是取消；实际发生的部分位移由调用方保留为 PARTIAL，stop 保留真实原因。
  */
-function navigationOutcome(moved: SkillResult, searchStatus: LandSearchResult['status']): { cause: Outcome; executed: number } {
+export function navigationOutcome(moved: SkillResult, searchStatus: LandSearchResult['status']): { cause: Outcome; executed: number } {
   const data = (moved.data ?? {}) as Record<string, unknown>;
   const executed = typeof data.executed === 'number' ? data.executed : 0;
   const segment = (data.segment ?? {}) as { invalidation?: string };
   const invalidation = typeof segment.invalidation === 'string' ? segment.invalidation : null;
+  const stop = (data.stop ?? {}) as { reason?: string };
+  const reason = typeof stop.reason === 'string' ? stop.reason : null;
+  const status = typeof data.searchStatus === 'string' ? data.searchStatus : searchStatus;
   const blocker = data.blockerAhead as { status?: string } | undefined;
-  const cause: Outcome =
-    invalidation === 'max_steps' ? 'BUDGET_EXCEEDED'
+  // 1) 已明确发生的最终 stop.reason：它就是这次身体执行的真实停止原因。
+  const final: Outcome | null = (() => {
+    switch (reason) {
+      case 'CANCELLED': return 'CANCELLED';
+      case 'SCOPE_CHANGED': return 'INVALIDATED';
+      case 'BUDGET_EXHAUSTED': return 'BUDGET_EXCEEDED';
+      case 'TIMEOUT': return 'TIMEOUT';
+      case 'BLOCKED': return blocker?.status === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'BLOCKED';
+      case 'NO_PATH': return 'NO_PATH';
+      case 'ROUTE_INVALIDATED': return 'INVALIDATED';
+      case 'TARGET_UNRESOLVED':
+      case 'MODE_GAP': return 'UNSUPPORTED';
+      case 'UNKNOWN_BOUNDARY': return 'UNKNOWN';
+      case 'PHYSICAL_FAILURE':
+      case 'ACTION_FAILURE': return 'NOT_CONFIRMED';
+      default: return null;
+    }
+  })();
+  if (final !== null) return { cause: final, executed };
+  // 2) 没有明确终因时，用精确搜索终态；FOUND 不是失败原因，继续走通用兼容字段。
+  const fromSearch: Outcome | null = (() => {
+    switch (status) {
+      case 'CANCELLED': return 'CANCELLED';
+      case 'INVALIDATED': return 'INVALIDATED';
+      case 'UNSUPPORTED': return 'UNSUPPORTED';
+      case 'NO_PATH_IN_MEMORY': return 'NO_PATH';
+      case 'BUDGET_EXHAUSTED': return 'BUDGET_EXCEEDED';
+      case 'INSUFFICIENT_EVIDENCE': return 'UNKNOWN';
+      default: return null;
+    }
+  })();
+  if (fromSearch !== null) return { cause: fromSearch, executed };
+  // 3) 最后才退回通用兼容/失败码。已知 blocker 是真实边界，可以据此报 BLOCKED；
+  // 裸 'no_route'/'PATH_NOT_FOUND' 只是兼容分类，不能据此制造 NO_PATH/BLOCKED，
+  // 没有精确终态时如实报 UNKNOWN（未确认），交给 Agent 继续观察/核实。
+  const cause: Outcome = blocker !== undefined ? (blocker.status === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'BLOCKED')
+    : invalidation === 'invalidated' ? 'INVALIDATED'
       : invalidation === 'deadline' ? 'TIMEOUT'
         : invalidation === 'start_drift' || invalidation === 'effect_not_confirmed' ? 'NOT_CONFIRMED'
-          // 已知边界优先于“证据不足”的失败码：navigate_to 在 UNKNOWN 搜索下也会报 NOT_FOUND。
-          : blocker !== undefined ? (blocker.status === 'UNSUPPORTED' ? 'UNSUPPORTED' : 'BLOCKED')
-            : moved.failureCode === 'TIMEOUT' ? (searchStatus === 'BUDGET_EXHAUSTED' ? 'BUDGET_EXCEEDED' : 'TIMEOUT')
-              : moved.failureCode === 'NOT_FOUND' ? 'UNKNOWN'
-                : moved.failureCode === 'PATH_NOT_FOUND' ? 'BLOCKED'
-                  : moved.failureCode === 'EFFECT_NOT_CONFIRMED' ? 'NOT_CONFIRMED'
-                    : moved.failureCode === 'BAD_ARGS' ? 'UNSUPPORTED'
-                      : moved.failureCode === 'TARGET_GONE' ? 'INVALIDATED'
-                        : moved.failureCode === 'WRONG_DIMENSION' || moved.failureCode === 'NOT_CONNECTED' ? 'UNSUPPORTED'
-                          : 'BLOCKED';
+          : moved.failureCode === 'TIMEOUT' ? 'TIMEOUT'
+            : moved.failureCode === 'NOT_FOUND' ? 'UNKNOWN'
+              : moved.failureCode === 'EFFECT_NOT_CONFIRMED' ? 'NOT_CONFIRMED'
+                : moved.failureCode === 'BAD_ARGS' ? 'UNSUPPORTED'
+                  : moved.failureCode === 'TARGET_GONE' ? 'INVALIDATED'
+                    : moved.failureCode === 'WRONG_DIMENSION' || moved.failureCode === 'NOT_CONNECTED' ? 'UNSUPPORTED'
+                      : 'UNKNOWN';
   return { cause, executed };
 }
 
@@ -312,6 +353,7 @@ function navigationOutcome(moved: SkillResult, searchStatus: LandSearchResult['s
 const failureCodeOf = (outcome: Outcome): FailureCode => {
   switch (outcome) {
     case 'UNSUPPORTED': return 'PATH_NOT_FOUND';
+    case 'NO_PATH': return 'PATH_NOT_FOUND';
     case 'UNKNOWN': return 'NOT_FOUND';
     case 'TIMEOUT':
     case 'BUDGET_EXCEEDED': return 'TIMEOUT';
@@ -324,7 +366,7 @@ const failureCodeOf = (outcome: Outcome): FailureCode => {
 
 const evidenceStateOf = (result: LandSearchResult | undefined): 'CURRENT' | 'STALE' | 'UNKNOWN' => {
   if (result?.status === 'FOUND' && result.evidenceMode === 'current') return 'CURRENT';
-  return result !== undefined && result.stats.staleEdges > 0 ? 'STALE' : 'UNKNOWN';
+  return result !== undefined && result.stats.staleReads > 0 ? 'STALE' : 'UNKNOWN';
 };
 
 const routeSummary = (evaluation: Evaluation) => ({
@@ -338,7 +380,7 @@ const routeSummary = (evaluation: Evaluation) => ({
   steps: evaluation.planned.length,
   ...(evaluation.executableSteps === null ? {} : { executableSteps: evaluation.executableSteps }),
   ...(evaluation.deadRoute ? { deadRoute: true } : {}),
-  ...(evaluation.targetMismatch ? { targetMismatch: true, resolvedTarget: { ...evaluation.result.resolvedTarget } } : {}),
+  ...(evaluation.targetMismatch ? { targetMismatch: true, target: { ...evaluation.result.target } } : {}),
   ...(evaluation.boundaries.total === 0 ? {} : { boundaries: evaluation.boundaries.counts }),
   ...(evaluation.disallowed === null ? {} : { disallowed: evaluation.disallowed.kind }),
 });
@@ -618,8 +660,10 @@ export const approachVisible: Skill<Args> = {
         }
         // 终点站位还无法验证时不提前判死：把已知空间里的可执行前缀交给 navigate_to，
         // 走到最后一个已验证安全位置后停下；不声称到达，也不把 UNKNOWN 当 OPEN。
-        const to = { x: baseCell.x + 0.5, y: target.pos.y, z: baseCell.z + 0.5 };
-        const direct = dist3(start, to);
+        // 目标写成整数格；脚高只在地图已观测到真实支撑时解析，否则保留请求 y 并如实暴露缺口。
+        const footY = observedFootY(voxel, state.dim, baseCell.x, baseCell.z, target.pos.y, POSITION_SCAN_DEPTH, POSITION_SCAN_DEPTH) ?? target.pos.y;
+        const to = { x: baseCell.x, y: footY, z: baseCell.z };
+        const direct = dist3(start, anchorOf(cellGoal({ x: baseCell.x, z: baseCell.z }, footY, to)));
         const travelLimit = Math.min(HARD_MAX_STEPS, Math.ceil(direct * MAX_DETOUR_FACTOR) + DETOUR_SLACK);
         const maxSteps = Math.min(HARD_MAX_STEPS, travelLimit, args.maxSteps ?? travelLimit);
         const prefixBudget = { maxSteps, travelLimit, plannedTransitions: null, basis: args.maxSteps === undefined ? 'prefix_fallback' : 'caller' };
@@ -694,7 +738,7 @@ export const approachVisible: Skill<Args> = {
             confirmedSegments: executedSegments, budget: prefixBudget, navigation: moved.data,
           });
         }
-        const { cause, executed } = navigationOutcome(moved, 'UNKNOWN');
+        const { cause, executed } = navigationOutcome(moved, 'INSUFFICIENT_EVIDENCE');
         const progressed = executed > 0 || after.displacement > MOVEMENT_EPS;
         const outcome: Outcome = progressed ? 'PARTIAL' : cause;
         const stop = progressed ? cause : null;
@@ -889,16 +933,20 @@ export const approachVisible: Skill<Args> = {
       const sliceEnd = Math.min(searchDeadline, sliceStart + slice);
       // strict 先跑；历史回退拿到同一份剩余时间，不能被 strict 搜完就饿死。
       const strictDeadline = Math.min(sliceEnd, sliceStart + Math.ceil(slice * 0.6));
+      // 候选站位来自现场验证；格目标只保留候选格，脚高用验证过的真实支撑，不交给搜索吸附。
+      const goal: NavigationGoal = cellGoal(
+        { x: candidate.cell.x, z: candidate.cell.z }, candidate.stance.y, candidate.stance,
+      );
       const request = {
         worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
         body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
-        to: candidate.stance, maxDrop: 4, rules: walkLandRules, signal: ctx.signal, deadlineMs: strictDeadline,
+        goal, allowed: args.allowed, maxDrop: 4, rules: walkLandRules, signal: ctx.signal, deadlineMs: strictDeadline,
       };
       const strict = await searchLandRouteAsync(voxel, request);
       if (strict.status === 'CANCELLED') return cancelled('路线搜索被取消。', { searched: evaluations.length, resolvedStance: candidate.stance });
       const historical = strict.status === 'FOUND' || !args.historical || ctx.signal.aborted
         ? null
-        : await searchLandRouteAsync(voxel, { ...request, allowStale: true, deadlineMs: sliceEnd });
+        : await searchLandRouteAsync(voxel, { ...request, evidenceMode: 'remembered', deadlineMs: sliceEnd });
       if (historical?.status === 'CANCELLED') return cancelled('历史路线搜索被取消。', { searched: evaluations.length, resolvedStance: candidate.stance });
       const result = strict.status === 'FOUND' ? strict : historical?.status === 'FOUND' ? historical : strict;
       const planned = result.status === 'FOUND' ? result.transitions : (strict.prefix?.transitions ?? []);
@@ -910,10 +958,9 @@ export const approachVisible: Skill<Args> = {
       const mode: RouteMode = result.status === 'FOUND' && !historicalDead
         ? (result.evidenceMode === 'current' ? 'current' : 'historical')
         : planned.length > 0 && strict.prefix?.knownBlockerAhead === undefined && result.status !== 'FOUND' ? 'prefix' : 'none';
-      const resolved = result.resolvedTarget;
-      const targetMismatch = !(Math.floor(resolved.x) === Math.floor(candidate.stance.x)
-        && Math.floor(resolved.z) === Math.floor(candidate.stance.z)
-        && Math.abs(resolved.y - candidate.stance.y) <= STANCE_TOLERANCE);
+      // 地图证据与现场验证的候选脚高不一致，不能把“已找到路线”当可执行；这不是吸附。
+      const mapFoot = observedFootY(voxel, state.dim, candidate.cell.x, candidate.cell.z, candidate.stance.y, POSITION_SCAN_DEPTH, POSITION_SCAN_DEPTH);
+      const targetMismatch = mapFoot !== null && Math.abs(mapFoot - candidate.stance.y) > STANCE_TOLERANCE;
       evaluations.push({
         candidate, strict, result, mode,
         planned,
@@ -949,11 +996,10 @@ export const approachVisible: Skill<Args> = {
         candidates: evaluations.map(routeSummary), disallowed: kinds,
       });
     }
-    // 路线搜索解析出的落脚点与实测验证的站位不一致（例如地图还记着整块、现场已是半砖）时，
-    // 不能把“已找到路线”当成可执行；只允许前缀/无路线候选走到自己的证据边界。
+    // 地图证据与现场验证的候选脚高不一致（例如地图还记着整块、现场已是半砖）时，
+    // 不能把“已找到路线”或“朝地图支撑面的前缀”当成可执行；那会把不同落脚点冒充原站位。
     const executable = allowedPool.filter((evaluation) =>
-      !evaluation.deadRoute
-      && !(evaluation.targetMismatch && (evaluation.mode === 'current' || evaluation.mode === 'historical')));
+      !evaluation.deadRoute && !evaluation.targetMismatch);
     if (!executable.length) {
       const { position, displacement } = snapshot();
       return fail('NOT_FOUND', '没有可执行候选：路线落脚点与当前实测验证的站位不一致，或历史路线的第一步已被当前证据阻挡；没有执行任何一步', {
@@ -1077,8 +1123,12 @@ export const approachVisible: Skill<Args> = {
       deadline: ctx.deadline,
       executedTransitions: null as number | null,
     };
+    // 格目标：整数 x/z + 已验证的真实脚高；不能把候选的 0.5 格心坐标当成精确连续脚位。
+    const navigationTarget = {
+      x: selected.candidate.cell.x, y: selected.candidate.stance.y, z: selected.candidate.cell.z,
+    };
     const validated = validateSkill(navigateTo, {
-      to: selected.candidate.stance,
+      to: navigationTarget,
       allowed: args.allowed,
       historical: args.historical,
       maxSteps: budget.maxSteps,
@@ -1128,13 +1178,19 @@ export const approachVisible: Skill<Args> = {
       const evidenceRelevant = outcome === 'UNKNOWN' || stop === 'UNKNOWN';
       const evidenceState = evidenceRelevant ? evidenceStateOf(selected.strict) : undefined;
       const evidence = evidenceRelevant
-        ? { stale: selected.strict.stats.staleEdges, unknown: selected.strict.stats.unknownEdges, boundaries: selected.boundaries.counts }
+        ? {
+            stale: selected.strict.stats.staleReads,
+            unknown: (selected.boundaries.counts.UNKNOWN ?? 0) + (selected.boundaries.counts.INCOMPLETE ?? 0),
+            boundaries: selected.boundaries.counts,
+          }
         : undefined;
       const search = {
         status: selected.strict.status,
-        cancelReason: selected.strict.stats.cancelReason,
-        staleEdges: selected.strict.stats.staleEdges,
-        unknownEdges: selected.strict.stats.unknownEdges,
+        budget: selected.strict.budget ?? null,
+        staleReads: selected.strict.stats.staleReads,
+        boundaries: selected.boundaries.counts,
+        reason: selected.strict.reason,
+        unavailableSections: selected.strict.unavailableSections,
       };
       const note = outcome === 'PARTIAL'
         ? `只完成部分接近（${executed} 段，停止原因 ${stop ?? '未知'}）；原目的地不变`

@@ -277,15 +277,18 @@ test('plan_route 目标与当前同格时按零段路线成功，而不是把 .7
   assert.match(r.summary, /0 段/);
 });
 
-function memorySpatial(map: VoxelMap, inspection: Record<string, unknown>) {
+function memorySpatial(map: VoxelMap, inspection: Record<string, unknown>, onQuery?: () => void) {
   const base = fakeSpatial(map) as unknown as Record<string, unknown>;
   return {
     ...base,
-    query: (request: Record<string, unknown>) => ({
-      status: 'ok', contract: 'memory-host-contract/1', worldId: WORLD, dim: DIM,
-      sessionId: SESSION, computedAt: Date.now(), readOnly: true, executable: false,
-      data: { kind: 'historyRoute', inspection: { ...inspection, request } },
-    }),
+    query: (request: Record<string, unknown>) => {
+      onQuery?.();
+      return {
+        status: 'ok', contract: 'memory-host-contract/1', worldId: WORLD, dim: DIM,
+        sessionId: SESSION, computedAt: Date.now(), readOnly: true, executable: false,
+        data: { kind: 'historyRoute', inspection: { ...inspection, request } },
+      };
+    },
   } as unknown as SharedSpatialSession;
 }
 
@@ -297,6 +300,7 @@ test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 rout
     observedAt: 1, source: 'confirmed_traversal', mode: 'walk',
   });
   const points = [{ x: 0.5, y: 64, z: 0.5 }, { x: 1.5, y: 64, z: 0.5 }, { x: 2.5, y: 64, z: 0.5 }];
+  let historyQueries = 0;
   const spatial = memorySpatial(map, {
     worldId: WORLD, dim: DIM, from: points[0], to: points[2], near: 5, status: 'FOUND',
     fromNodeId: 'n0', toNodeId: 'n2', points, nodeIds: ['n0', 'n1', 'n2'], edgeIds: ['e0', 'e1'],
@@ -306,7 +310,7 @@ test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 rout
     ],
     gaps: [], stats: null, diagnostics: [], message: 'found',
     historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN',
-  });
+  }, () => { historyQueries += 1; });
   const ctx = { ...makeCtx(w), spatial };
   t.after(() => ctx.memory.close());
   clearRouteRecords();
@@ -320,10 +324,17 @@ test('plan_route source:"memory" 从共享拓扑返回通用过渡，不发 rout
   assert.match(r.summary, /第1段 walk/, '记忆路线摘要要带出前几段坐标，模型才知道先执行什么');
   assert.deepEqual(r.data?.targetCell, { x: 2, y: 64, z: 0 });
   assert.deepEqual(w.actions, [], '记忆规划不移动');
+  assert.equal(historyQueries, 1, '显式 memory 只查询一次历史拓扑');
   const auto = await planRoute.run(ctx, { to: { x: 2, y: 64, z: 0 }, mode: 'walk', source: 'auto', arrival: { kind: 'exact' } });
   assert.equal(auto.status, 'succeeded', auto.summary);
-  assert.equal(auto.data?.source, 'memory', 'auto 先查共享记忆');
-  assert.deepEqual((auto.data?.legs as { transition: string }[]).map((leg) => leg.transition), ['walk', 'step']);
+  // auto 只用实测体素：来源是 spatial 的 3D 搜索，返回 walk 过渡，不返回历史 legs/routeId。
+  assert.equal(auto.data?.source, 'spatial', 'auto 只使用实测体素搜索');
+  assert.equal(auto.data?.routeId, undefined, 'auto 不发 routeId');
+  assert.equal(auto.data?.legs, undefined, 'auto 不返回历史拓扑 legs');
+  const autoTransitions = auto.data?.transitions as { kind: string }[];
+  assert.ok(autoTransitions.length >= 2, 'auto 在体素上得到过渡');
+  assert.ok(autoTransitions.every((transition) => transition.kind === 'walk'), 'auto 使用体素 walk 过渡');
+  assert.equal(historyQueries, 1, 'auto 不访问历史查询端口');
 });
 
 test('plan_route：有效能力显式 plan.walkSearch=false 时不调用库路线搜索', async (t) => {

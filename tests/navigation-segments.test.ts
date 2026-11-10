@@ -166,7 +166,7 @@ test('100 格目标由同委托多段 navigate_to 完成；每段起点=上段�
   assert.deepEqual(nav.remaining, []);
   assert.ok(nav.completedSegments >= 100, `确认段数跨段累计（实际 ${nav.completedSegments}）`);
   assert.equal(adapter.actions.filter((a) => a.startsWith('dig') || a.startsWith('place')).length, 0, '多段续接不自动挖/放');
-  assert.equal(adapter.actions.every((a) => a === 'moveTo:xyz' || a === 'moveTo:pos'), true, '只用已规划路线移动，没有 pathfinder/施工动作');
+  assert.equal(adapter.actions.every((a) => a === 'moveTo:feet' || a === 'moveTo:xyz' || a === 'moveTo:pos'), true, '只用已规划路线移动，没有 pathfinder/施工动作');
 });
 
 test('段正常结束（未到）不算失败；超时/取消保留确认段与剩余目标', () => {
@@ -309,8 +309,9 @@ class DropWorld extends FakeAdapter {
 function observeAs(map: VoxelMap, name: string, cells: { x: number; y: number; z: number }[], startSequence = 0) {
   let sequence = startSequence;
   for (const pos of cells) {
+    sequence += 1;
     map.observe({
-      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now(), sequence: ++sequence,
+      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now() + sequence, sequence,
       source: 'vision', evidence: 'seen', stateComplete: true,
       state: { name, properties: {} }, pos,
     });
@@ -340,7 +341,8 @@ test('段回执 backend 按实际产出区分：land-search / direct-drop / none
   dropCtx.senses.landingOptions = () => [{ ...option, receipt: { ...option.receipt, at: Date.now(), from: { ...dropAdapter.pos }, observationId: dropAdapter.state().observationId } }];
   t.after(() => dropCtx.memory.close());
   const dropped = await navigateTo.run(dropCtx, {
-    to: { x: 1, y: 62, z: 0 }, allowed: ['walk', 'step', 'drop'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+    to: { x: 1, y: 62, z: 0 }, allowed: ['walk', 'step', 'drop'], historical: true, maxSteps: 8,
+    allowUnknownCorridor: false, maxNodes: 1,
   });
   assert.equal(dropped.status, 'succeeded', dropped.summary);
   assert.equal((dropped.data?.segment as { backend?: string } | undefined)?.backend, 'direct-drop', '相邻下落直执行不能标成 land-search');

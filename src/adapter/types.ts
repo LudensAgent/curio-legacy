@@ -12,6 +12,13 @@ export interface Vec3Like {
   z: number;
 }
 
+/**
+ * 连续脚位到达的实测容差（格）。与库 GROUNDED_ARRIVAL_DEFAULTS 的
+ * horizontalTolerance=0.12、feetTolerance=0.05 一致；这是身体控制的
+ * 实际精度声明，不是用来放宽调用者目标的吸附半径。
+ */
+export const FEET_ARRIVAL_TOLERANCE = { horizontal: 0.12, vertical: 0.05 } as const;
+
 export type EntityKind = 'hostile' | 'passive' | 'player' | 'item' | 'other';
 
 export interface EntityInfo {
@@ -169,6 +176,8 @@ export type MoveTarget =
   | { kind: 'xz'; x: number; z: number; range: number; footY?: [number, number] }
   /** 站到这一格；y 是脚高，可为分数（半砖/雪层等薄层，如 64.5）。普通移动不改地形，明确挖掘/爬升动作可另行授权。 */
   | { kind: 'xyz'; x: number; y: number; z: number }
+  /** 精确连续脚位（x/z 是身体中心连续坐标，不取格心）；用于 land-search 的格点执行，不改变 xyz 的旧语义。 */
+  | { kind: 'feet'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }
@@ -179,6 +188,11 @@ export type MoveTarget =
 export interface MoveOpts {
   /** 只执行一个相邻格：绕过 pathfinder 的整段搜索，直接用身体控制走/跳/下；仅 move_step 使用。 */
   adjacentStep?: boolean;
+  /**
+   * 仅连续脚位（feet）身体控制消费：实测身体位置到原 origin→bearing 轴线的横向距离不得超过 maxLateral。
+   * 超出即停止本动作、保留实测位置并返回事实；不用 FEET_ARRIVAL_TOLERANCE 当作横向授权，也不把身体挪回走廊。
+   */
+  corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
   signal: AbortSignal;
   timeoutMs: number;
   constructionSafe?: boolean;

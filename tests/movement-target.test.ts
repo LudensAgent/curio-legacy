@@ -1,12 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { resolveTarget } from '../src/skills/movement/index.ts';
+import { cellGoal, feetGoal, goalOf, goalReached, stanceFor, targetKindOf } from '../src/skills/movement/goal.ts';
 import { findStation } from '../src/skills/stations.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
 const DIM = 'overworld';
 const STATION = { x: 4, y: 64, z: 0 };
+
+test('目标语义：整数 x/z 是格目标，分数 x/z 是精确连续脚位；完成谓词不同', () => {
+  assert.equal(targetKindOf({ x: 3, y: 64, z: -2 }), 'cell');
+  assert.equal(targetKindOf({ x: 3.5, y: 64, z: -2.5 }), 'feet');
+
+  const cell = goalOf({ x: 3, y: 64, z: -2 });
+  assert.equal(cell.kind, 'cell');
+  const stance = stanceFor(cell, { x: 0.1, y: 64, z: -2.7 });
+  assert.ok(Math.abs(stance.x - 3.1) <= 1e-12 && stance.y === 64 && Math.abs(stance.z + 1.7) <= 1e-12,
+    `格目标落到起点同一格内偏移：${JSON.stringify(stance)}`);
+  assert.equal(goalReached(cell, { x: 3.8, y: 64, z: -1.2 }, true), true, '脚仍在该格 + 脚高在容差内即满足格目标');
+  assert.equal(goalReached(cell, { x: 4.1, y: 64, z: -1.2 }, true), false, '离开目标格不算到达');
+  assert.equal(goalReached(cell, { x: 3.8, y: 64.03, z: -1.2 }, true), false, 'cell 目标保留 0.01 脚高容差，0.03 不算到达');
+  assert.equal(goalReached(cell, { x: 3.8, y: 64.005, z: -1.2 }, true), true, 'cell 目标在 0.01 内仍可到达');
+  assert.equal(goalReached(cell, { x: 3.8, y: 64, z: -1.2 }, false), false, '悬空不算到达');
+
+  const feet = feetGoal({ x: 3.1, y: 64, z: -1.7 });
+  assert.equal(goalReached(feet, { x: 3.8, y: 64, z: -1.2 }, true), false, '同一格内但离开精确脚位不算到达');
+  assert.equal(goalReached(feet, { x: 3.16, y: 64.03, z: -1.66 }, true), true, '声明精度内视为到达');
+  assert.equal(goalReached(feet, { x: 3.1, y: 64, z: -1.7 }, false), false, '悬空不算到达');
+
+  const candidate = cellGoal({ x: 3, z: -2 }, 63.5, { x: 3, y: 63.5, z: -2 });
+  assert.equal(candidate.kind === 'cell' ? candidate.footY : null, 63.5, '候选语义可显式给出真实脚高');
+});
 
 const observationAt = (adapter: FakeAdapter, pos: { x: number; y: number; z: number }, name: string) => ({
   pos, name, properties: {}, worldId: adapter.worldId, sessionId: adapter.sessionId,
