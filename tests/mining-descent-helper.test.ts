@@ -21,21 +21,21 @@ function messagesFor(what: string, why: string, recentActionFailures: MindContex
 
 type MindContext = Parameters<typeof buildMindMessages>[0];
 
-test('下矿意图时把稳定下行辅助摆到模型面前', (t) => {
+test('下矿意图只提供相关事实，不自动选择下行施工', (t) => {
   const { memory, user } = messagesFor('下矿挖铁', '要攒装备');
   t.after(() => memory.close());
-  assert.match(user.content, /excavate_run/);
-  assert.match(user.content, /descend/);
-  assert.match(user.content, /assess_landings/);
+  assert.match(user.content, /铁地下分布/);
+  assert.doesNotMatch(user.content, /下矿有稳定下行辅助|excavate_run|assess_landings/);
 });
 
-test('手工阶梯连续 PATH_NOT_FOUND 时点名改用下行辅助', (t) => {
+test('手工阶梯失败保留原始回执，不归因成手工阶梯固有限制', (t) => {
   const fails = ['move_step', 'mine_cell'].map((skill, i) => ({ skill, args: { at: [1, -1, 0] }, failure_code: 'PATH_NOT_FOUND',
     summary: '迈不到', position: { x: 0.5, y: 60, z: 0.5 } as const, observed_at: `2026-10-30T12:0${i}:00.000Z` }));
   const { memory, user } = messagesFor('挖阶梯斜井往下', '下到 y16', fails);
   t.after(() => memory.close());
-  assert.match(user.content, /excavate_run/);
-  assert.match(user.content, /手工阶梯的固有限制/);
+  assert.match(user.content, /PATH_NOT_FOUND/);
+  assert.match(user.content, /迈不到/);
+  assert.doesNotMatch(user.content, /excavate_run|手工阶梯的固有限制/);
 });
 
 test('非下矿意图不注入下行辅助', (t) => {

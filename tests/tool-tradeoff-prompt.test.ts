@@ -153,7 +153,7 @@ test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文�
   memory.close();
 });
 
-test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额，地下挖掘时真正送达', () => {
+test('提示词：下矿的账/顺手采集不占 5 条提醒配额，不注入挖掘计划', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
@@ -165,7 +165,9 @@ test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额
       { skill: 'smelt', args: { item: 'raw_iron', count: 8 } },
     ],
   }, '', 'llm', adapter.state());
-  const ctx = { ...base, activity, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true } };
+  const ctx = { ...base, activity, trip: { minutes: 10, gained: { diamond: 1 }, nearEnd: true },
+    recentActionFailures: [{ skill: 'mine_cell', args: {}, failure_code: 'PATH_NOT_FOUND', summary: '目标超出触及范围',
+      position: { ...base.state.pos }, observed_at: new Date().toISOString(), repeats: 2 }] };
   (ctx.percept.self as any).where = { kind: 'underground', text: '在地下：头顶 3 格是 stone' };
   (ctx.percept.self as any).sky_visible = false;
   (ctx.state as any).gamerules = { keepInventory: true };
@@ -175,11 +177,11 @@ test('提示词：下矿的账/顺手采集/挖掘规模不占 5 条提醒配额
   const decisions = decisionReminders(ctx);
   assert.ok(decisions.some((r) => r.startsWith('下矿的账')), decisions.join('\n'));
   assert.ok(decisions.some((r) => r.startsWith('顺手采集')), decisions.join('\n'));
-  assert.ok(decisions.some((r) => r.startsWith('要下矿先想好')), decisions.join('\n'));
+  assert.ok(!decisions.some((r) => r.startsWith('要下矿先想好')), decisions.join('\n'));
   const user = buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
   assert.ok(user.includes('下矿的账'), '下矿的账必须真正进入 user 消息');
   assert.ok(user.includes('顺手采集'), '顺手采集必须真正进入 user 消息');
-  assert.ok(user.includes('要下矿先想好'), '挖掘规模提醒必须真正进入 user 消息');
+  assert.ok(!user.includes('要下矿先想好'), '不能凭关键词把挖掘计划写成当前任务');
   memory.close();
 });
 

@@ -15,25 +15,30 @@ import { Vision } from '../src/perception/vision.ts';
 import { Planner } from '../src/planner/planner.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
-test('同一位置连续路径失败时，用户提醒要求换动作类而不是重复路径', (t) => {
+test('同一位置连续路径失败时，用户提醒保留失败事实，不把程序失败归因成缺少施工', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
   t.after(() => { memory.close(); self.close(); });
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const percept = perception.update(), state = adapter.state();
-  const failures = ['move_step', 'plan_route', 'move_step'].map((skill, i) => ({
-    skill, args: {}, failure_code: i === 1 ? 'BAD_ARGS' : 'PATH_NOT_FOUND', summary: '同一土台高差走不通',
+  const failures = [
+    { skill: 'travel_to', failure_code: 'TIMEOUT', summary: '累计搜索预算 6 已用尽，已确认 6 段' },
+    { skill: 'explore_toward', failure_code: 'PATH_NOT_FOUND', summary: 'INVALIDATED：搜索期间证据发生变化' },
+    { skill: 'navigate_to', failure_code: 'BAD_ARGS', summary: 'to 缺少 y 坐标' },
+  ].map((failure) => ({
+    ...failure, args: {},
     position: { ...state.pos }, observed_at: new Date().toISOString(), repeats: 2,
   }));
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept, state, self, memory, activity: null,
     suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '',
     lastRecord: null, recentActionFailures: failures });
   assert.match(user.content, /【局部恢复】/);
-  assert.match(user.content, /不要只写同一个 move_step\/navigate_to\/advance/);
-  assert.match(user.content, /excavate_run/);
-  assert.match(user.content, /assess_landings 后再 descend_to/);
-  assert.match(user.content, /这几次都没授权挖\/放：只说明不施工时没找到/, '没授权施工的失败不能断言地形没有路线');
-  assert.match(user.content, /travel_to\/explore_toward 带 allowDig\/allowPlace/, '带施工授权的寻路与手动施工并列可见');
-  assert.doesNotMatch(user.content, /这段地形没有可执行/);
+  const recovery = user.content.split('\n').find((line) => line.includes('【局部恢复】'))!;
+  for (const failure of failures) {
+    assert.ok(recovery.includes(failure.skill));
+    assert.ok(recovery.includes(failure.failure_code));
+    assert.ok(recovery.includes(failure.summary));
+  }
+  assert.doesNotMatch(recovery, /不施工时没找到|没授权挖\/放|excavate_run|place_support|pillar_one|allowDig|allowPlace/);
 });
 
 test('activity reference frame survives creation, description, and the completed record', () => {
@@ -86,13 +91,13 @@ test('adjust replaces the activity reference frame and clears it when the new dr
   assert.equal(mind.activity?.applyingText, undefined);
 });
 
-test('瞥一眼同时看到施工授权、仍在执行的动作、受伤中断和失败回执', (t) => {
+test('瞥一眼同时看到原导航请求、仍在执行的动作、受伤中断和失败回执', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
   t.after(() => { memory.close(); self.close(); });
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const percept = perception.update(), state = adapter.state();
-  const args = { to: { heading: 'W', distance: 96 }, allowDig: true, allowPlace: true };
-  const draft: ActivityDraft = { what: '授权向西探索', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'travel_to', args }] };
+  const args = { to: { x: -96, y: 64, z: 0 }, range: 2, sessionId: 'ms_original' };
+  const draft: ActivityDraft = { what: '走向西边已知位置', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'travel_to', args }] };
   const activity = createActivity(draft, '', 'llm', state);
   activity.lastInterruption = { at: Date.now() - 5000, kind: 'hurt', reason: '挨打了（血 12，僵尸 3格），手上的事先停了', skill: 'travel_to', pos: { ...state.pos } };
   activity.failures = 1;
@@ -102,10 +107,10 @@ test('瞥一眼同时看到施工授权、仍在执行的动作、受伤中断�
     suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
   const line = user.content.split('\n').find((item) => item.startsWith('【手上的活】'))!;
   const current = JSON.parse(line.slice('【手上的活】'.length)).current_activity;
-  assert.match(current.routine[0], /"allowDig":true/);
-  assert.match(current.routine[0], /"allowPlace":true/);
+  assert.match(current.routine[0], /"range":2/);
+  assert.match(current.routine[0], /"sessionId":"ms_original"/);
   assert.equal(current.running_step.skill, 'travel_to');
-  assert.equal(current.running_step.args.allowDig, true);
+  assert.deepEqual(current.running_step.args, args);
   assert.ok(current.running_step.elapsed_real_s >= 69);
   assert.equal(current.last_interruption.kind, 'hurt');
   assert.match(current.last_interruption.reason, /挨打了/);
