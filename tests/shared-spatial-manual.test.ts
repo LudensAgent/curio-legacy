@@ -215,35 +215,87 @@ test('a confirmed checkpoint evicts saved manual sections; prepare reloads the o
       worldId: WORLD,
       databasePath: dbPath,
       voxelLoading: 'manual',
+      residencyLimits: { maxResidentSections: 2 },
       timeoutMs: 5000,
     });
     shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
-    shared.observe([blockObservation(0, 64, 0, 2000, 42, SESSION, 'minecraft:dirt', { axis: 'y' })]);
+    shared.observe([
+      blockObservation(0, 64, 0, 2000, 42, SESSION, 'minecraft:dirt', { axis: 'y' }),
+      blockObservation(16, 64, 0, 2001, 43, SESSION, 'minecraft:stone', { axis: 'x' }),
+    ]);
     const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
     assert.equal(drained.pending.observations, 0);
     assert.equal(shared.session.sectionResidency(keyAt()).residency, 'resident');
 
     await shared.checkpoint();
-    assert.equal(shared.session.sectionResidency(keyAt()).residency, 'not_resident',
-      '确认保存后应淘汰已提交冷页，而不是删除证据');
+    assert.equal(shared.workingSetStats().residentSections, 1,
+      '保存后应只淘汰到容量目标（2 → 1），不是清空全部冷页');
+    const evictedKey = [keyAt(0), keyAt(1)].find((key) => shared!.session.sectionResidency(key).residency === 'not_resident');
+    assert.ok(evictedKey !== undefined, '应有一个冷页被淘汰');
     const eviction = shared.lastPostSaveEviction();
     assert.equal(eviction?.status, 'evicted');
-    assert.ok((eviction?.evictedSections ?? 0) >= 1, '换出事实必须报告实际淘汰的 section 数');
+    assert.equal(eviction?.evictedSections, 1, '换出事实必须报告实际淘汰的 section 数');
 
-    const prepared = await shared.prepare([keyAt()], { deadline: Date.now() + 5000 });
+    const prepared = await shared.prepare([evictedKey], { deadline: Date.now() + 5000 });
     assert.equal(prepared.status, 'ready');
     if (prepared.status !== 'ready') assert.fail('saved section must load on demand');
     try {
-      const cell = shared.session.voxel.cellAt(DIM, 0, 64, 0);
+      const cell = shared.session.voxel.cellAt(DIM, evictedKey.cx * 16, 64, 0);
       assert.equal(cell.observed, true);
       if (cell.observed) {
-        assert.equal(cell.evidence.observation.observedAt, 2000, '冷读不刷新原观测时间');
+        assert.equal(cell.evidence.observation.observedAt, evictedKey.cx === 0 ? 2000 : 2001,
+          '冷读不刷新原观测时间');
         assert.equal(cell.evidence.observation.sessionId, SESSION);
-        assert.equal(cell.evidence.observation.state.name, 'minecraft:dirt');
+        assert.equal(cell.evidence.observation.state.name, evictedKey.cx === 0 ? 'minecraft:dirt' : 'minecraft:stone');
       }
     } finally {
       shared.release(prepared.lease.token);
     }
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
+    assert.equal(shutdown.error, null);
+    assertClose(close);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (!failed) {
+      const result = await shutdownQuietly(shared);
+      if (close === null) close = result?.close ?? null;
+    } else {
+      close = (await shutdownQuietly(shared))?.close ?? null;
+    }
+    cleanup(dir, close);
+  }
+});
+
+test('post-save eviction keeps recent hot pages up to the capacity target', { timeout: 20_000 }, async () => {
+  const { dir, dbPath } = makeTempDb();
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      residencyLimits: { maxResidentSections: 4 },
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    shared.observe([0, 16, 32, 48].map((x, i) => blockObservation(x, 64, 0, 1000 + i, i + 1, SESSION)));
+    const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
+    assert.equal(drained.pending.observations, 0);
+    assert.equal(shared.workingSetStats().residentSections, 4, '四个首次观测的 Section 都应驻留');
+
+    await shared.checkpoint();
+    const eviction = shared.lastPostSaveEviction();
+    assert.equal(eviction?.status, 'evicted');
+    assert.equal(eviction?.evictedSections, 1, '只淘汰到 75% 容量目标（4 → 3），不清空全部热页');
+    assert.equal(shared.workingSetStats().residentSections, 3);
+    assert.equal([0, 1, 2, 3].filter((cx) => shared!.session.sectionResidency(keyAt(cx, 0)).residency === 'resident').length, 3);
+    assert.equal([0, 1, 2, 3].filter((cx) => shared!.session.sectionResidency(keyAt(cx, 0)).residency === 'not_resident').length, 1);
 
     const shutdown = await shared.shutdown();
     close = shutdown.close;
