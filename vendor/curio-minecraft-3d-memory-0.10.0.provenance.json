@@ -3,12 +3,12 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.10.0"
   },
-  "sourceHEAD": "66ced6182426532958af1962f54f33531223ed88",
-  "artifactSHA256": "0c0e77141114a25a69404e80b2ba0fa5e36b2396be4802607874ad4e660567e4",
-  "npmIntegrity": "sha512-GUybMDCValBf+F5WjGgYDpcjKEeJ9iWDY1T40Nxm/khYri2vuKqD6BH+ZpTX68K1+ReW5C0JRWbHigbtgUrrxw==",
+  "sourceHEAD": "922546e305892c436267182ac73566240b61f401",
+  "artifactSHA256": "8a102e41716b8e8443e90eb369c68efd94d9753d30040197d72a7754809019f3",
+  "npmIntegrity": "sha512-A5/0NmOfERIu+1fnXGxlvAhcm/1ClakaW4hm5Jdus7zCfPo0Ne4I0QRWsHSqWOSTrYe7kj8xbSDpNUWJCihc0g==",
   "sourceBinding": {
     "clean": true,
-    "head": "66ced6182426532958af1962f54f33531223ed88",
-    "note": "Built from a detached worktree at sourceHEAD; unrelated uncommitted docs in the main checkout were not present."
+    "head": "922546e305892c436267182ac73566240b61f401",
+    "note": "Built from a clean detached worktree at sourceHEAD. The main library checkout's unrelated uncommitted design doc and untracked workspace files were not present."
   }
 }
