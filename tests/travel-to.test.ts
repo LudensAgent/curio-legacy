@@ -169,6 +169,49 @@ test('有 y 的范围保留垂直距离，同 session 续接不能改验收范�
   const high = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
   assert.equal(high.status, 'failed', '水平距 2 格但高 6 格，不能当成三维 range=2 已到达');
 });
+
+test('进入新范围不能绕过 session 原到达条件，合法续接可按实测收工', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  const target = { x: 12, y: 64, z: 0 };
+  const first = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(first.status, 'failed');
+  assert.equal(adapter.pos.x, 8.5);
+  const sessionId = first.data?.sessionId;
+  assert.equal(typeof sessionId, 'string');
+  const changed = await travelTo.run(ctx, argsOf({ to: target, range: 6, sessionId }, adapter));
+  assert.equal(changed.status, 'failed');
+  assert.equal(changed.failureCode, 'BAD_ARGS');
+  assert.equal(changed.data?.reason, 'INTENT_MISMATCH');
+  adapter.pos.x = 10.5;
+  const before = adapter.actions.length;
+  const unchanged = await travelTo.run(ctx, argsOf({ to: target, range: 2, sessionId }, adapter));
+  assert.equal(unchanged.status, 'succeeded', unchanged.summary);
+  assert.equal(unchanged.data?.sessionId, sessionId);
+  assert.equal(adapter.actions.length, before, '合法同意图续接已在范围内，无须再次移动');
+});
+
+test('无 y 续接使用冻结脚高，不因新站位超出原脚高扫描范围而失败', async (t) => {
+  const { adapter, map, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  for (const y of [63, 64, 65]) map.observe({
+    worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId, observedAt: Date.now(), sequence: y + 10000,
+    source: 'vision', evidence: 'seen', stateComplete: true,
+    state: { name: y === 63 ? 'minecraft:stone' : 'minecraft:air', properties: {} }, pos: { x: 12, y, z: 0 },
+  });
+  const target = { x: 12, z: 0 };
+  const first = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(first.status, 'failed');
+  assert.equal(first.data?.targetFootY, 64);
+  assert.equal(typeof first.data?.sessionId, 'string');
+  // 新身体位置高出原目标脚高 16 格之外；无 y 的水平到达条件仍可被实测满足。
+  adapter.pos = { x: 10.5, y: 90, z: 0.5 };
+  const second = await travelTo.run(ctx, argsOf({ to: target, range: 2, sessionId: first.data?.sessionId }, adapter));
+  assert.equal(second.status, 'succeeded', second.summary);
+  assert.equal(second.data?.targetFootY, 64);
+  assert.equal(second.data?.targetYSource, 'frozen_session');
+  assert.deepEqual(second.data?.requestedTarget, target);
+});
 test('开始前取消即使已在范围内，也不翻译为到达', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture();
   t.after(() => ctx.memory.close());

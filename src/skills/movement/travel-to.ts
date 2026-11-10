@@ -3,6 +3,7 @@ import { observedFootY } from '../../spatial/land-search.ts';
 import { travelStore } from '../../travel/store.ts';
 import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSkill, type NavOutcome, type Skill, type SkillResult } from '../types.ts';
 import { navigateTo } from './navigate.ts';
+import { findMovementSession } from './session.ts';
 
 type TravelTarget =
   | { x: number; y?: number; z: number }
@@ -146,7 +147,12 @@ export const travelTo: Skill<TravelToArgs> = {
     }
 
     const requestedY = point.y !== undefined;
-    let goalY = point.y;
+    const resumed = args.sessionId === undefined ? undefined : findMovementSession(args.sessionId);
+    // 无 y 目标的首次解析高度属于冻结意图；续接不能随新站位/证据另选一层。
+    // 原坐标、到达条件与 scope 仍由 Coordinator 统一校验，不能靠这里的复用绕过。
+    const frozenY = resumed?.intent.kind === 'navigate' && resumed.intent.arrival?.metric === 'horizontal'
+      ? resumed.intent.to.y : undefined;
+    let goalY = point.y ?? frozenY;
     const resolvedTarget = { x: point.x, ...(requestedY ? { y: point.y } : {}), z: point.z };
 
     // 原到达条件只在实测边界使用：无 y 按水平格距、有 y 按三维格距。
@@ -169,7 +175,7 @@ export const travelTo: Skill<TravelToArgs> = {
       const displacement = { horizontal: round1(Math.hypot(end.x - start.x, end.z - start.z)), vertical: round1(end.y - start.y) };
       return {
         requestedTarget: resolvedTarget, resolvedTarget, label,
-        ...(goalY === undefined ? {} : { targetFootY: goalY, targetYSource: requestedY ? 'requested' : 'voxel_observed' }),
+        ...(goalY === undefined ? {} : { targetFootY: goalY, targetYSource: requestedY ? 'requested' : frozenY === undefined ? 'voxel_observed' : 'frozen_session' }),
         backend, delegate: 'navigate_to' as const,
         position: end, displacement,
         remaining: { horizontal: round1(flat(end)), ...(requestedY ? { vertical: Math.floor(point.y!) - Math.floor(end.y) } : {}) },
@@ -191,7 +197,7 @@ export const travelTo: Skill<TravelToArgs> = {
     }
 
     // 开始前已满足原到达条件：这是实测事实，不是用请求坐标冒充到达。
-    if (arrived(start, s0.onGround)) {
+    if (args.sessionId === undefined && arrived(start, s0.onGround)) {
       return receipt(ok(`已在 ${label} 的到达范围内：实测 ${at(start)}，距离 ${round1(gap(start))} 格 ≤ range ${args.range}；没有移动`, {
         ...facts(), outcome: 'ARRIVED' as const, alreadyWithinRange: true,
       }), 'ARRIVED');
@@ -263,6 +269,10 @@ export const travelTo: Skill<TravelToArgs> = {
         summary: `${moved.summary}；travel_to 原目标 ${JSON.stringify(resolvedTarget)} 未改变`,
         data: { ...(moved.data ?? {}), ...routeFacts, outcome: 'CANCELLED' as const },
       }, 'CANCELLED');
+    }
+    // 实测进入范围不能授权一个被拒绝的会话/意图，也不能覆盖身体或作用域失效。
+    if (moved.failureCode === 'BAD_ARGS' || moved.failureCode === 'WRONG_DIMENSION' || moved.failureCode === 'NOT_CONNECTED') {
+      return receipt({ ...moved, data: { ...routeFacts, outcome: 'FAILED' as const } }, 'FAILED');
     }
     if (arrived(end, endState.onGround)) {
       const effects = moved.status === 'succeeded' ? '' : '；VoxelMap A* 没有报成功，但实测位置满足原到达条件';
