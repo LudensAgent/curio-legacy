@@ -3,6 +3,7 @@ import { observedFootY } from '../../spatial/land-search.ts';
 import { travelStore } from '../../travel/store.ts';
 import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSkill, type NavOutcome, type Skill, type SkillResult } from '../types.ts';
 import { navigateTo } from './navigate.ts';
+import type { SegmentReceipt } from './segment.ts';
 import { findMovementSession } from './session.ts';
 
 type TravelTarget =
@@ -184,11 +185,13 @@ export const travelTo: Skill<TravelToArgs> = {
         ...(trace.length > 1 ? { trace: trace.slice(-24).map((p) => ({ ...p })) } : {}),
       };
     };
-    const receipt = (r: SkillResult, outcome: NavOutcome) => {
+    const receipt = (r: SkillResult, outcome: NavOutcome, settlementFailed = false) => {
       const state = adapter.state();
+      const arrival = arrivalAt(state.pos, state.onGround);
       return navReceipt(r, {
         backend, originalRequest: request, resolvedTarget, outcome,
-        position: { ...state.pos }, trace, arrival: arrivalAt(state.pos, state.onGround),
+        position: { ...state.pos }, trace, arrival: settlementFailed
+          ? { ...arrival, satisfied: false, measured: { ...arrival.measured, settled: false } } : arrival,
       });
     };
 
@@ -269,6 +272,10 @@ export const travelTo: Skill<TravelToArgs> = {
         summary: `${moved.summary}；travel_to 原目标 ${JSON.stringify(resolvedTarget)} 未改变`,
         data: { ...(moved.data ?? {}), ...routeFacts, outcome: 'CANCELLED' as const },
       }, 'CANCELLED');
+    }
+    if ((moved.data?.lastSegment as SegmentReceipt | undefined)?.stopCode === 'settlement_failed') {
+      const outcome = moved.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED';
+      return receipt({ ...moved, data: { ...routeFacts, outcome } }, outcome, true);
     }
     // 实测进入范围不能授权一个被拒绝的会话/意图，也不能覆盖身体或作用域失效。
     if (moved.failureCode === 'BAD_ARGS' || moved.failureCode === 'WRONG_DIMENSION' || moved.failureCode === 'NOT_CONNECTED') {

@@ -137,7 +137,7 @@ export interface MovementSession {
   lastSegment?: unknown;
   lastSearch?: unknown;
   lastObservation?: unknown;
-  /** 已做过定向观察的边界键；同一 session 内同一边界最多观察一次。 */
+  /** 已检查的阻挡或观察后没有新证据的边界；有实际更新的未知边界仍受原观察预算约束。 */
   observedBoundaries?: string[];
   stop?: StopReceipt;
 

@@ -436,6 +436,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
         break;
       }
+      if (segment.stopCode === 'settlement_failed') {
+        stop = stopOf(segment.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'PHYSICAL_FAILURE',
+          segment.detail ?? '已松开运动键，但未确认身体停稳；保留实测位置');
+        break;
+      }
       // 段内的实测位置已经达到冻结意图时，先按实测收工；剩余边界只说明“再往后未知”，
       // 不能推翻已经真实完成的沿方向/到达条件。横向超授权仍由 closeReasonOf 先拦。
       const closeAfterSegment = closeReasonOf(
@@ -661,10 +666,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           };
           session.lastObservation = observation;
         }
-        if (boundaryReceipt !== undefined) {
+        // 相关证据有实际变化时，有限探测可能只补齐了一部分身体/扫掠格。
+        // 剩余缺口仍可使用原观察预算；未取得新证据的站位才需要去重。
+        if (boundaryReceipt !== undefined && !boundaryReceipt.relatedChanged) {
           session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey!];
         }
-        if (currentReceipt !== undefined && currentKey !== undefined) {
+        if (currentReceipt !== undefined && !currentReceipt.relatedChanged && currentKey !== undefined) {
           session.observedBoundaries = [...(session.observedBoundaries ?? []), currentKey];
         }
         session.updatedAt = Date.now();

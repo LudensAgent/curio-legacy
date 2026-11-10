@@ -101,3 +101,18 @@ test('ongoing perception can resolve a search boundary before explicit observati
   assert.equal(counters.searches, 2);
   assert.equal(counters.observations, 0);
 });
+
+test('a partial but useful observation leaves the remaining stale contact eligible within budget', async (t) => {
+  const { adapter, ctx, observe } = setup();
+  t.after(() => ctx.memory.close());
+  let reads = 0;
+  ctx.senses.observeBlocks = (positions) => {
+    reads += 1;
+    // 第一次有界观察（含定向后再看）只看见部分格，下一次才看见落脚支撑。
+    return positions.filter((pos) => reads > 2 || !(pos.x === 1 && pos.y === 63 && pos.z === 0)).map((pos) => observe(pos));
+  };
+  const result = await navigateTo.run(ctx, { ...args, maxObservations: 2 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 });
+  assert.equal((result.data?.counters as { observations: number }).observations, 2);
+});

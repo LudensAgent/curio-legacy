@@ -123,6 +123,33 @@ test('travel_to 在原目标范围内按格距验收，停在第一处已站稳�
   assert.deepEqual(intent.arrival, { radius: 2, metric: '3d' });
 });
 
+test('连续移动实测提前进入 range，但释放控制后停稳超时不算到达', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.9375, y: 64, z: 0.5 };
+  const move = t.mock.method(adapter, 'moveTo', async (target, opts) => {
+    assert.equal(opts.settleAtTarget, false);
+    assert.equal(target.kind, 'feet');
+    // 原计划的中间点 x=1.9375 在范围外；身体实际多走 0.08，进入 x=2 的范围边缘。
+    adapter.pos = { x: target.x + 0.08, y: target.y, z: target.z };
+  });
+  const settle = t.mock.fn(async () => { throw new Error('TIMEOUT: no stop confirmation'); });
+  Object.assign(adapter, { settleMovement: settle });
+  const target = { x: 3, y: 64, z: 0 };
+  const result = await travelTo.run(ctx, argsOf({ to: target, range: 1 }, adapter));
+  assert.equal(move.mock.callCount(), 1);
+  assert.equal(settle.mock.callCount(), 1);
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'TIMEOUT');
+  assert.equal(result.data?.stopReason, 'TIMEOUT');
+  assert.equal((result.data?.lastSegment as { stopCode: string }).stopCode, 'settlement_failed');
+  assert.deepEqual(result.data?.requestedTarget, target);
+  const arrival = result.data?.arrival as { satisfied: boolean; measured: unknown };
+  assert.equal(arrival.satisfied, false);
+  assert.deepEqual(arrival.measured, { position: adapter.pos, distance: 1, onGround: true, settled: false });
+  assert.equal((result.data?.nav as { confirmed: boolean }).confirmed, false);
+});
+
 test('目标格受阻但当前已证实前缀可进入 range 时，走到范围内并保留原目标', async (t) => {
   const { adapter, map, ctx } = voxelNavigationFixture(4);
   t.after(() => ctx.memory.close());
