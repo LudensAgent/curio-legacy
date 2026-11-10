@@ -7,7 +7,7 @@
  * observation time, provenance and gone/revoked state. It never carries
  * inventories. This module is the host boundary that:
  *
- * - narrows the library `FactStore` to the ten-method `HostFactsPort` the
+ * - narrows the library `FactStore` to the narrow `HostFactsPort` the
  *   semantic/travel stores depend on;
  * - classifies real host nodes by `metadata.curio.type` first and only falls
  *   back to `tag`/`kind` for nodes that never had curio metadata;
@@ -19,6 +19,7 @@
  */
 import { InMemoryFactStore } from 'curio-minecraft-3d-memory';
 import type {
+  JsonObject,
   ContainerAnchorFact,
   FactGoneEvidence,
   FactLocation,
@@ -71,6 +72,7 @@ export type HostFactsPort = Pick<
   | 'revokeResource'
   | 'markContainerGone'
   | 'updateResourceSource'
+  | 'updateHostData'
   | 'places'
   | 'resources'
   | 'containers'
@@ -441,13 +443,51 @@ export function convertHostSemanticNode(
   const legacyId = nonEmpty(node.legacyId) ?? id;
   const gone = node.gone === true;
   const goneAt = finite(node.goneAt) ? node.goneAt : undefined;
+  // Preserve only host business fields; inventory remains in ContainerLedger.
+  const hostData: JsonObject = {
+    kind: role,
+    ...(curio?.type === undefined ? {} : { type: curio.type }),
+    ...(curioTypes(curio).length ? { types: curioTypes(curio) } : {}),
+  };
+  const primary = curio?.primary ?? record?.primary;
+  if (typeof primary === 'boolean') hostData.primary = primary;
+  if (finite(record?.count)) hostData.count = record.count;
+  if (typeof record?.detail === 'string') hostData.detail = record.detail;
+  if (role === 'farm' && Array.isArray(record?.cells)) {
+    const cells = record.cells.filter((cell): cell is Vec3Like =>
+      isRecord(cell) && finite(cell.x) && finite(cell.y) && finite(cell.z));
+    if (cells.length === record.cells.length) {
+      hostData.farm = {
+        cells: cells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z })),
+        ...(finite(record.harvests) ? { harvests: record.harvests } : {}),
+        ...(finite(record.plantedAt) ? { plantedAt: record.plantedAt } : {}),
+      };
+    }
+  }
+  if (role === 'hazard' && record !== undefined) {
+    hostData.hazard = {
+      ...(typeof record.kind === 'string' ? { kind: record.kind } : {}),
+      ...(finite(record.count) ? { count: record.count } : {}),
+      ...(finite(record.firstTs) ? { firstTs: record.firstTs } : {}),
+      ...(typeof record.during === 'string' ? { during: record.during } : {}),
+      ...(typeof record.note === 'string' ? { note: record.note } : {}),
+    };
+  }
+  if (role === 'container') {
+    const block = nonEmpty(curio?.block) ?? nonEmpty(record?.block);
+    hostData.subtype = curioTypes(curio).includes('furnace')
+      || block === 'furnace' || block === 'blast_furnace' || block === 'smoker'
+      ? 'furnace' : 'chest';
+    if (block !== undefined) hostData.block = block;
+    if (node.label !== undefined) hostData.label = node.label;
+  }
 
   if (role === 'container') {
     const pos = exactCellOf(node, record);
     if ('reason' in pos) return { kind: 'gap', gap: { ...pos, role } };
     const ledgerKey = containerLedgerKey(worldId, dim, pos);
     const externalRef = nonEmpty(node.externalRef) ?? nonEmpty(record?.externalRef) ?? ledgerKey;
-    const ledgerRef = nonEmpty(node.ledgerRef) ?? nonEmpty(record?.ledgerRef) ?? externalRef;
+    const ledgerRef = nonEmpty(node.ledgerRef) ?? nonEmpty(record?.ledgerRef) ?? ledgerKey;
     const goneEvidence = gone ? goneSourceProvenance(observedGoneReason(node, record), source) : undefined;
     return {
       kind: 'fact',
@@ -468,6 +508,7 @@ export function convertHostSemanticNode(
         // The host ledger is keyed by world+dim+cell for both chests and furnaces.
         ledgerRef,
         legacyId,
+        hostData,
       },
     };
   }
@@ -497,6 +538,7 @@ export function convertHostSemanticNode(
         ...(gone && goneAt !== undefined ? { revokedAt: goneAt } : {}),
         ...(revokedSource === undefined ? {} : { revokedSource }),
         legacyId,
+        hostData,
       },
     };
   }
@@ -544,6 +586,7 @@ export function convertHostSemanticNode(
       ...(gone && goneAt !== undefined ? { goneAt } : {}),
       ...(goneEvidence === undefined ? {} : { goneSource: goneEvidence }),
       legacyId,
+      hostData,
     },
   };
 }
@@ -611,6 +654,7 @@ const locationsEqual = (a: FactLocation, b: FactLocation): boolean =>
       : false;
 
 const sameFact = (a: SemanticFact, b: SemanticFact): boolean => {
+  if (JSON.stringify(a.hostData) !== JSON.stringify(b.hostData)) return false;
   if (isPlaceFact(a) && isPlaceFact(b)) {
     return a.id === b.id && a.worldId === b.worldId && a.dim === b.dim && a.kind === b.kind
       && a.label === b.label && locationsEqual(a.location, b.location) && a.gone === b.gone && a.goneAt === b.goneAt;

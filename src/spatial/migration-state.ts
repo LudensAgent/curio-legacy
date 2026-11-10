@@ -14,6 +14,8 @@ const nonEmpty = (value: unknown) => {
 };
 
 export interface MigrationGateInput {
+  legacyFactsMigrationVersion?: number;
+  hasFacts?: boolean;
   topology: TopologyStore;
   history: FragmentStore;
   ledger: LedgerStore;
@@ -25,7 +27,7 @@ export interface MigrationGateInput {
 
 export interface MigrationGateResult {
   ok: boolean;
-  reason?: 'legacy_files' | 'unmarked_store' | 'pending_patch';
+  reason?: 'legacy_files' | 'unmarked_store' | 'pending_patch' | 'facts_migration_required';
   details: {
     legacyKeys: string[];
     travelFile: boolean;
@@ -78,6 +80,10 @@ export function checkMigrationGate(input: MigrationGateInput): MigrationGateResu
   ].join(' ');
   if (patchFile) return { ok: false, reason: 'pending_patch', details, command };
   if (legacyKeys.length || travelFile || placedFile) return { ok: false, reason: 'legacy_files', details, command };
-  if (storeRecords > 0 && !marker) return { ok: false, reason: 'unmarked_store', details, command };
+  if (input.legacyFactsMigrationVersion !== undefined && input.legacyFactsMigrationVersion < 1 && (marker || storeRecords > 0 || input.hasFacts)) {
+    return { ok: false, reason: 'facts_migration_required', details,
+      command: 'node --import tsx scripts/spatial-facts-cutover.ts --database=' + JSON.stringify(input.databasePath) + ' --world-id=' + JSON.stringify(input.worldId) + ' --execute' };
+  }
+  if (input.legacyFactsMigrationVersion === undefined && storeRecords > 0 && !marker) return { ok: false, reason: 'unmarked_store', details, command };
   return { ok: true, details };
 }

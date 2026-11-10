@@ -16,7 +16,7 @@
  *
  * 路线/片段/拓扑查询（fragments/traversals/historyRoute/components/segments/edges）已不再是
  * 导航依据；宿主在入口返回结构化 unsupported + reason:"route_retired"，不调用库、也不返回
- * 空列表冒充“没有记录”。语义锚点（resourceAnchors/containerAnchors/anchors/portals）保留。
+ * 空列表冒充“没有记录”。语义查询 nodes/resourceAnchors/containerAnchors 只读 facts；传送门端点用 nodes tag:portal，旧路线锚点和旧 portal edges 查询退役。
  */
 import type { SpatialQueryResult, SpatialQueryStatus } from 'curio-minecraft-3d-memory';
 import { fail, ok, type Skill } from './types.ts';
@@ -57,10 +57,10 @@ const HOST_COMPOSED_CAPABILITIES = {
     nodes: true,
     edges: false,
     historyRoute: false,
-    anchors: true,
+    anchors: false,
     components: false,
     segments: false,
-    portals: true,
+    portals: false,
     resourceAnchors: true,
     containerAnchors: true,
     containerContents: false,
@@ -99,7 +99,7 @@ const HOST_COMPOSED_CAPABILITIES = {
 export type SpatialQueryArgs = Record<string, unknown>;
 
 /** 已退役的路线/片段/拓扑查询 kind；返回结构化 unsupported，不返回空列表冒充无记录。 */
-const RETIRED_QUERY_KINDS = new Set(['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges']);
+const RETIRED_QUERY_KINDS = new Set(['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges', 'anchor', 'portals']);
 
 function kindOf(request: Record<string, unknown>): string {
   return typeof request.kind === 'string' ? request.kind : '未知 kind';
@@ -128,22 +128,21 @@ function summaryOf(kind: string, result: SpatialQueryResult): string {
 export const spatialQuery: Skill<SpatialQueryArgs> = {
   name: 'spatial_query',
   description:
-    '只读查询共享空间记忆的契约端口（契约 §5）：cells、nodes、anchor、portals、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
-    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges）已退役，返回结构化 unsupported + reason:"route_retired"，不返回空列表冒充无记录；导航请用 navigate_to/advance。'
+    '只读查询共享空间记忆的契约端口（契约 §5）：cells、nodes、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
+    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges、anchor、portals）已退役，返回结构化 unsupported + reason:"route_retired"，不返回空列表冒充无记录；导航请用 navigate_to/advance。'
     + '返回契约 SpatialQueryResult 信封（status/contract/worldId/dim/sessionId/computedAt/readOnly:true/executable:false/data/problem/total/nextAfter）；data 是库的原样分页/投影，不再由宿主改写。'
     + '历史几何与最近观测都不代表当前可通行、可执行或在线观察；不观察、不移动、不加载 Section、不刷新证据时间、不写库。'
-    + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；containerAnchors 由宿主分类器识别 exact 位置的容器/熔炉锚点，contents 仍由宿主精确账本回答。resourceAnchors 默认排除已标 gone 的资源；需要历史记录时显式 includeGone:true。'
+    + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；containerAnchors 只读 facts 中未消失的精确容器/熔炉锚点，contents 仍由宿主精确账本回答。resourceAnchors 默认排除已标 gone 的资源；需要历史记录时显式 includeGone:true。'
     + '分页统一用 after/limit；旧 fragment/route/historyRoute 查询已随路线片段读面退役。'
     + 'kind==="capabilities" 时，库报告原样在信封的 data.capabilities；信封顶层另加 hostComposed（与信封 data 同级、owner:"host_composed"）列出宿主真实能力。',
   argsDoc:
     '所有字段/枚举/未知字段/上限（列表默认 100、最大 1000；cells 最多 4096 个整数坐标）由库 validator 校验，非法请求返回 invalid_request（技能映射为 BAD_ARGS）。'
     + '{"kind":"cells","dim":"overworld","positions":[{"x":0,"y":64,"z":0}]}  // observed 为 false 时看 residency/unobservedReason/gap\n'
     + '{"kind":"nodes","dim":"overworld","tag":"base|...|portal","label":"x","source":"agent|program","after":"cursor","limit":100}  // 语义节点；旧路线节点不作为导航依据\n'
-    + '{"kind":"anchor","dim":"overworld","here":{"x":0,"y":64,"z":0},"order":"surface|deepest","near":6}  // null 是有效答案\n'
-    + '{"kind":"portals","after":"cursor","limit":100}\n'
-    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges）已退役，传入会返回 unsupported；导航请用 navigate_to/advance。\n'
+    + '{"kind":"nodes","tag":"portal","after":"cursor","limit":100}  // 传送门端点，不推断连接\n'
+    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges、anchor、portals）已退役，传入会返回 unsupported；导航请用 navigate_to/advance。\n'
     + '{"kind":"resourceAnchors","dim":"overworld","tag":"...","label":"x","includeGone":false,"after":"cursor","limit":100}  // 默认排除 gone；includeGone:true 才返回历史\n'
-    + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // exact 容器/熔炉锚点；gone 项仍需调用方检查\n'
+    + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // exact 容器/熔炉锚点；默认排除 gone\n'
     + '{"kind":"containerContents","dim":"overworld"}  // 固定 unsupported + host_ledger，无 data\n'
     + '{"kind":"snapshot"}\n'
     + '{"kind":"capabilities"}  // 技能结果 data.data.capabilities 是库报告；技能结果 data.hostComposed（信封顶层，与信封 data 同级）是宿主组合报告（owner:"host_composed"）\n'

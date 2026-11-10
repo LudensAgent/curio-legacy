@@ -44,6 +44,9 @@ test('WorldMemory 从 library fragments/nodes/ledger 读写语义记录', () => 
   assert.equal(second.chests(D)[0]?.contents?.items.find((item) => item.name === 'dirt')?.count, 12);
   assert.equal(second.furnaces(D)[0]?.burning, true);
   assert.equal(second.farms()[0]?.crop, 'wheat');
+  assert.deepEqual(second.farms()[0]?.cells, [at(10, 64, 10), at(11, 64, 10)]);
+  assert.equal(second.farms()[0]?.harvests, 2);
+  assert.equal(second.farms()[0]?.plantedAt, 30);
   assert.equal(second.hazards(D)[0]?.kind, 'lava');
   assert.equal(second.goneNear(D, at(9, 40, 9), 1)[0]?.label, 'iron_ore');
   assert.equal(second.getPlaced(at(6, 64, 6)), 'torch');
@@ -155,4 +158,18 @@ test('nearbyPaths 把相连的记录片段并成一条路，报最近处与通�
   assert.deepEqual(old.nearest, at(0, 64, 6));
   assert.deepEqual(old.far, at(40, 64, 6), '两段相接的片段算同一条路，通到最远的那格');
   assert.deepEqual([...old.kinds].sort(), ['bridge', 'walked']);
+});
+
+test('farm updates preserve planting evidence and persist business changes across reconstruction', () => {
+  const { memory, stores, containers } = semanticMemory(W);
+  const cells = [at(10, 64, 10), at(11, 64, 10)];
+  memory.addFarm({ id: 'field', dim: D, crop: 'wheat', cells, plantedAt: 123, harvests: 2 });
+  const before = stores.facts.places({ worldId: W }).items.find((fact) => fact.id === 'field')!;
+  memory.updateFarm('field', { harvests: 3 });
+  const after = stores.facts.places({ worldId: W }).items.find((fact) => fact.id === 'field')!;
+  assert.equal(after.observedAt, before.observedAt, 'a counter update is not a new terrain observation');
+  const reopened = memoryFrom(stores, containers, W).memory;
+  assert.deepEqual(reopened.farms()[0]?.cells, cells);
+  assert.equal(reopened.farms()[0]?.harvests, 3);
+  assert.equal(reopened.farms()[0]?.plantedAt, 123);
 });

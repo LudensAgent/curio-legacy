@@ -216,18 +216,11 @@ function effectiveHazard(z: Hazard, now = Date.now()): Hazard | null {
   return radius < 3 ? null : { ...z, radius };
 }
 
-/**
- * Host-only business fields that the frozen fact schema cannot carry (herd
- * counts, farm cell lists, hazard repeat counters, base selection). They are a
- * host view cache keyed by fact id: positions, scope, observation times and
- * gone state all come from facts; this map never outlives the process and is
- * never a second spatial authority. Facts rebuilt on restart still answer every
- * query, with the documented lossy fallbacks.
- */
+/** Host-owned business fields persisted with each fact, without container contents. */
 interface HostPlaceRecord {
   /** Exact host landmark kind (facts only have coarse place kinds). */
   kind?: LandmarkKind;
-  /** Base selection is host policy, not an observed fact. */
+  /** Persisted host policy; selecting a base does not re-date its observation. */
   primary?: boolean;
   /** herd */
   count?: number;
@@ -235,9 +228,10 @@ interface HostPlaceRecord {
   /** hazard */
   hazard?: { kind: HazardKind; count: number; firstTs: number; during?: string; note?: string };
   /** farm */
-  farm?: { cells: Vec3Like[]; harvests: number };
+  farm?: { cells: Vec3Like[]; harvests: number; plantedAt: number };
 }
 interface HostContainerRecord {
+  subtype?: 'chest' | 'furnace';
   block?: string;
   /** View label for a container that disappeared from the legacy landmark view. */
   label?: string;
@@ -282,6 +276,8 @@ export class SpatialSemanticStore {
     places: PlaceFact[];
     resources: ResourceAnchorFact[];
     containers: ContainerAnchorFact[];
+    placesById: Map<string, PlaceFact>;
+    containersById: Map<string, ContainerAnchorFact>;
   } | null = null;
 
   private invalidate(): void {
@@ -300,50 +296,63 @@ export class SpatialSemanticStore {
     return out;
   }
 
-  private snapshot(): { places: PlaceFact[]; resources: ResourceAnchorFact[]; containers: ContainerAnchorFact[] } {
+  private snapshot(): NonNullable<SpatialSemanticStore['cache']> {
     const now = Date.now();
     if (this.cache !== null && now - this.cache.at <= SEMANTIC_RESCAN_MS) return this.cache;
     const places = this.page((after) => this.session.facts.places({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const resources = this.page((after) => this.session.facts.resources({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const containers = this.page((after) => this.session.facts.containers({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
-    this.cache = { at: now, places, resources, containers };
+    this.cache = { at: now, places, resources, containers,
+      placesById: new Map(places.map((fact) => [fact.id, fact])),
+      containersById: new Map(containers.map((fact) => [fact.id, fact])),
+    };
     return this.cache;
   }
 
   // ------------------------------------------------------------- business state
 
-  private readonly placeRecords = new Map<string, HostPlaceRecord>();
-  private readonly containerRecords = new Map<string, HostContainerRecord>();
-
   private placeRecord(id: string): HostPlaceRecord | undefined {
-    return this.placeRecords.get(id);
+    return this.snapshot().placesById.get(id)?.hostData as HostPlaceRecord | undefined;
+  }
+
+  private containerRecord(id: string): HostContainerRecord | undefined {
+    return this.snapshot().containersById.get(id)?.hostData as HostContainerRecord | undefined;
   }
 
   private notePlaceRecord(id: string, patch: Partial<HostPlaceRecord>): void {
-    this.placeRecords.set(id, { ...(this.placeRecords.get(id) ?? {}), ...patch });
+    const fact = this.snapshot().places.find((candidate) => candidate.id === id);
+    if (fact === undefined) return;
+    this.session.facts.updateHostData('place', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
+    this.invalidate();
   }
 
   private noteContainerRecord(id: string, patch: Partial<HostContainerRecord>): void {
-    this.containerRecords.set(id, { ...(this.containerRecords.get(id) ?? {}), ...patch });
+    const fact = this.snapshot().containers.find((candidate) => candidate.id === id);
+    if (fact === undefined) return;
+    this.session.facts.updateHostData('container', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
+    this.invalidate();
   }
 
   // --------------------------------------------------------------- write paths
 
   private upsertPlace(fact: PlaceFact): PlaceFact {
-    const result = this.session.facts.upsertPlace(fact);
+    const hostData = fact.hostData ?? this.snapshot().places.find((existing) => existing.id === fact.id)?.hostData;
+    const result = this.session.facts.upsertPlace(hostData === undefined ? fact : { ...fact, hostData });
     this.invalidate();
     return result.record;
   }
 
   private upsertResource(fact: ResourceAnchorFact): ResourceAnchorFact {
-    const result = this.session.facts.upsertResource(fact);
+    const hostData = fact.hostData ?? this.snapshot().resources.find((existing) => existing.id === fact.id)?.hostData;
+    const result = this.session.facts.upsertResource(hostData === undefined ? fact : { ...fact, hostData });
     this.invalidate();
     this.applyResourceFact(result.record);
     return result.record;
   }
 
   private upsertContainer(fact: ContainerAnchorFact): ContainerAnchorFact {
-    const result = this.session.facts.upsertContainer(fact);
+    const hostData = fact.hostData ?? this.snapshot().containers.find((existing) => existing.id === fact.id)?.hostData;
+    const result = this.session.facts.upsertContainer(hostData === undefined ? fact : { ...fact, hostData });
     this.invalidate();
     return result.record;
   }
@@ -693,7 +702,7 @@ export class SpatialSemanticStore {
       if (container) this.markContainerFactGone(container, now);
       return;
     }
-    const liveContainer = this.liveContainers().find((fact) => this.containerRecords.get(fact.id)?.label === label
+    const liveContainer = this.liveContainers().find((fact) => this.containerRecord(fact.id)?.label === label
       && fact.dim === dim && dist3(fact.pos, at) <= 1);
     if (liveContainer) { this.markContainerFactGone(liveContainer, now); return; }
     const liveResource = this.liveResources().find((fact) => fact.label === label
@@ -748,7 +757,7 @@ export class SpatialSemanticStore {
     }
     for (const fact of this.snapshot().containers) {
       if (!fact.gone || fact.dim !== dim || dist3(fact.pos, at) > radius) continue;
-      const record = this.containerRecords.get(fact.id);
+      const record = this.containerRecord(fact.id);
       push(record?.label ?? (this.containerRole(fact) === 'furnace' ? 'furnace' : 'chest'),
         fact.pos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
     }
@@ -909,9 +918,8 @@ export class SpatialSemanticStore {
 
   base(dim?: string): Landmark | undefined {
     const bases = this.bases(dim);
-    // Selection is host policy and has no fact field; in-session the annotation
-    // wins. After a restart the most recently confirmed base is the documented
-    // fallback (selection bumps its observation time, as the legacy store did).
+    // Selection is persisted independently of evidence time. Old records without
+    // a selection retain the most recently observed base as their fallback.
     return bases.find((base) => base.primary) ?? [...bases].sort((a, b) => b.ts - a.ts)[0];
   }
 
@@ -948,12 +956,11 @@ export class SpatialSemanticStore {
   // --------------------------------------------------------------- containers
 
   private containerRole(fact: ContainerAnchorFact): 'chest' | 'furnace' {
-    if (fact.id.startsWith('furnace:')) return 'furnace';
-    if (fact.id.startsWith('chest:')) return 'chest';
-    const record = this.containerRecords.get(fact.id);
+    const record = this.containerRecord(fact.id);
+    if (record?.subtype !== undefined) return record.subtype;
     const block = record?.block;
     if (block === 'furnace' || block === 'blast_furnace' || block === 'smoker' || block?.endsWith('_furnace')) return 'furnace';
-    return record?.label?.startsWith('furnace') === true ? 'furnace' : 'chest';
+    return record?.label?.startsWith('furnace') === true || fact.id.startsWith('furnace:') ? 'furnace' : 'chest';
   }
 
   private containerFacts(dim?: string): ContainerAnchorFact[] {
@@ -974,7 +981,7 @@ export class SpatialSemanticStore {
     const existing = this.containerFactAt(dim, pos);
     if (existing) {
       this.noteContainerRecord(existing.id, {
-        block,
+        subtype: 'chest', block,
         ...(note ? { label: `chest: ${note}` } : {}),
       });
       return existing;
@@ -993,13 +1000,14 @@ export class SpatialSemanticStore {
       gone: false,
     };
     this.upsertContainer(fact);
-    this.noteContainerRecord(fact.id, { block, ...(note ? { label: `chest: ${note}` } : {}) });
+    this.noteContainerRecord(fact.id, { subtype: 'chest', block, ...(note ? { label: `chest: ${note}` } : {}) });
     return fact;
   }
 
   private refreshContainerObservation(fact: ContainerAnchorFact, observedAt: number): void {
     if (!Number.isFinite(observedAt) || observedAt <= fact.observedAt) return;
-    this.upsertContainer({ ...fact, observedAt });
+    const current = this.snapshot().containers.find((candidate) => candidate.id === fact.id) ?? fact;
+    this.upsertContainer({ ...current, observedAt });
   }
 
   noteChestUse(dim: string, pos: Vec3Like, use: ChestUse): ChestRecord {
@@ -1032,7 +1040,7 @@ export class SpatialSemanticStore {
       if (!entries.has(key)) {
         entries.set(key, {
           worldId: this.worldId, dim: fact.dim, pos: point(fact.pos),
-          block: this.containerRecords.get(fact.id)?.block ?? 'chest', uses: 0,
+          block: this.containerRecord(fact.id)?.block ?? 'chest', uses: 0,
           ts: fact.observedAt, contents: { items: [], observedAt: 0, possiblyStale: true }, nodeId: fact.id,
         } as ChestRecord);
       }
@@ -1064,7 +1072,7 @@ export class SpatialSemanticStore {
     }
     const observedAt = rec.ts ?? Date.now();
     if (node) {
-      this.noteContainerRecord(node.id, { block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
+      this.noteContainerRecord(node.id, { subtype: 'furnace', block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
       this.refreshContainerObservation(node, observedAt);
       return;
     }
@@ -1081,7 +1089,7 @@ export class SpatialSemanticStore {
       gone: false,
     };
     this.upsertContainer(fact);
-    this.noteContainerRecord(fact.id, { block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
+    this.noteContainerRecord(fact.id, { subtype: 'furnace', block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
   }
 
   forgetFurnace(dim: string, pos: Vec3Like) {
@@ -1113,9 +1121,8 @@ export class SpatialSemanticStore {
       gone: false,
     };
     this.upsertPlace(fact);
-    // The coarse fact kind is `station`; the host annotation carries the cells
-    // and harvest counter that have no fact field.
-    this.notePlaceRecord(f.id, { farm: { cells: f.cells.map(point), harvests: f.harvests } });
+    // Farm details remain host-owned and are saved with the station anchor.
+    this.notePlaceRecord(f.id, { farm: { cells: f.cells.map(point), harvests: f.harvests, plantedAt: f.plantedAt } });
   }
 
   private farmRecordOf(fact: PlaceFact): FarmRecord {
@@ -1127,9 +1134,9 @@ export class SpatialSemanticStore {
       dim: fact.dim,
       crop: fact.label.replace(/^farm:\s*/, '') || 'farm',
       cells: annotated ? annotated.cells.map(point) : [{ ...center }],
-      plantedAt: fact.observedAt,
+      plantedAt: annotated?.plantedAt ?? fact.observedAt,
       harvests: annotated?.harvests ?? 0,
-      ...(fact.location.kind === 'area' ? { area: { center: { ...fact.location.center }, radius: fact.location.radius } } : {}),
+      ...(annotated === undefined && fact.location.kind === 'area' ? { area: { center: { ...fact.location.center }, radius: fact.location.radius } } : {}),
     };
   }
 
@@ -1148,10 +1155,11 @@ export class SpatialSemanticStore {
       ...fact,
       label: `farm: ${next.crop}`,
       location: areaOf(next.cells),
-      observedAt: this.observedNow(fact.observedAt),
+      observedAt: next.crop !== current.crop || JSON.stringify(next.cells) !== JSON.stringify(current.cells)
+        ? this.observedNow(fact.observedAt) : fact.observedAt,
     };
     this.upsertPlace(updated);
-    this.notePlaceRecord(id, { farm: { cells: next.cells.map(point), harvests: next.harvests } });
+    this.notePlaceRecord(id, { farm: { cells: next.cells.map(point), harvests: next.harvests, plantedAt: next.plantedAt } });
   }
 
   // ------------------------------------------------------------------ hazards

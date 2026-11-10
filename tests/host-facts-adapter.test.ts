@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { memoryFrom, semanticMemory } from './semantic-fixture.ts';
 import { test } from 'node:test';
 import type { SpatialNode } from 'curio-minecraft-3d-memory';
 import {
@@ -271,4 +272,37 @@ test('markContainerGone keeps the anchor shell and excludes it from default quer
   assert.equal(gone.record.goneAt, 200);
   assert.equal(port.containers().items.length, 0);
   assert.equal(port.containers({ includeGone: true }).items.length, 1);
+});
+
+test('host conversion keeps business fields, role and real ledger key across reconstruction', () => {
+  const { stores, containers } = semanticMemory(W);
+  const furnace = factOf(convertHostSemanticNode({
+    id: 'foreign-furnace-id', worldId: W, dim: D, observedAt: 20, externalRef: 'stable-object-id',
+    location: { kind: 'exact', pos: at(5, 64, 5) }, label: 'workshop furnace',
+    ...curio({ type: 'station', types: ['station', 'furnace'], block: 'blast_furnace', record: { block: 'blast_furnace' } }),
+  })).fact;
+  assert.ok(isContainerFact(furnace));
+  if (!isContainerFact(furnace)) return;
+  assert.equal(furnace.externalRef, 'stable-object-id');
+  assert.equal(furnace.ledgerRef, containerLedgerKey(W, D, at(5, 64, 5)));
+  assert.equal(furnace.hostData?.subtype, 'furnace');
+  assert.deepEqual(furnace.hostData?.types, ['station', 'furnace']);
+  stores.facts.upsertContainer(furnace);
+  const reopened = memoryFrom(stores, containers, W).memory;
+  assert.equal(reopened.chests(D).length, 0, 'a furnace is not projected as an unknown chest');
+  reopened.forgetFurnace(D, at(5, 64, 5));
+  assert.equal(stores.facts.containers({ worldId: W, includeGone: true }).items[0]?.gone, true);
+
+  const farm = factOf(convertHostSemanticNode({
+    id: 'legacy-field', worldId: W, dim: D, observedAt: 99, label: 'farm: wheat',
+    location: { kind: 'region', center: at(10, 64, 10), radius: 2 },
+    ...curio({ type: 'farm', record: { crop: 'wheat', cells: [at(10, 64, 10), at(11, 64, 10)], harvests: 4, plantedAt: 12 } }),
+  })).fact;
+  assert.ok(isPlaceFact(farm));
+  if (!isPlaceFact(farm)) return;
+  stores.facts.upsertPlace(farm);
+  const migrated = memoryFrom(stores, containers, W).memory.farms()[0]!;
+  assert.deepEqual(migrated.cells, [at(10, 64, 10), at(11, 64, 10)]);
+  assert.equal(migrated.harvests, 4);
+  assert.equal(migrated.plantedAt, 12);
 });

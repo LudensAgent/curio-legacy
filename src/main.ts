@@ -159,10 +159,12 @@ try {
   }) + '\n');
   process.exit(1);
 }
-// 只读迁移门禁：旧 JSON/travel/.placed 或没有迁移标记的既有空间记录都拒绝启动。
-// 新世界（空库且无旧文件）允许继续，并在语义层就绪后写入空迁移标记。
+// 只读迁移门禁：旧文件先导入；既有空间记录必须完成离线 facts 迁移并提交回执。
+// 新世界（空库且无旧文件）允许继续，并提交空 facts 快照及迁移回执。
 const worldMemoryPath = path.join(config.dataDir, 'world-memory.json');
 const migrationGate = checkMigrationGate({
+  legacyFactsMigrationVersion: spatial.session.legacyFactsMigrationVersion,
+  hasFacts: [spatial.session.facts.places({ limit: 1 }), spatial.session.facts.resources({ limit: 1 }), spatial.session.facts.containers({ limit: 1 })].some(page => page.total > 0),
   topology: spatial.session.topology,
   history: spatial.session.history,
   ledger: spatial.session.ledger,
@@ -208,7 +210,7 @@ const semantic = new SpatialSemanticStore(spatial.session, containers, {
   sessionId: adapter.state().sessionId,
   worldId: adapter.state().worldId,
 });
-if (!semantic.migrationMarker()) semantic.writeMigrationMarker();
+if (spatial.session.legacyFactsMigrationVersion < 1) await spatial.session.checkpoint({ completeLegacyFactsMigration: true });
 const memory = new WorldMemory(worldMemoryPath, { semantic });
 try {
   memory.setWorld(adapter.state().worldId);

@@ -706,6 +706,7 @@ export class SharedSpatialSession {
     const store = new SpatialMemoryStoreImpl({
       worldId,
       map: session.voxel,
+      facts: session.facts,
       fragments: session.history,
       topology: session.topology,
       query: { now, isContainer },
