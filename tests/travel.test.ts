@@ -73,7 +73,7 @@ test('build_portal allowTower 用显式 pillarUp 站高，不把垫脚交给寻�
   assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
   assert.equal(adapter.blocks.filter((b) => b.name === 'obsidian').length, 10);
   assert.equal(adapter.inv.get('obsidian'), 0);
-  assert.ok(calls.length > 0 && calls.every((c) => c.opts.allowPlace === undefined && c.opts.allowTower === undefined && c.opts.noPlaceAt === undefined), '放置站位不再委托寻路改造地形');
+  assert.ok(calls.length > 0 && calls.every((c) => !Object.hasOwn(c.opts, 'allowPlace') && !Object.hasOwn(c.opts, 'allowTower') && !Object.hasOwn(c.opts, 'noPlaceAt')), '放置站位不再委托寻路改造地形');
   assert.ok(towerStances.length >= 1, '够不到时执行显式垫高');
   const banned = new Set(['3,63,0', '4,63,0', '5,63,0', '6,63,0', '3,64,0', '4,64,0', '5,64,0', '6,64,0', '3,65,0', '4,65,0', '5,65,0', '6,65,0', '3,66,0', '4,66,0', '5,66,0', '6,66,0', '3,67,0', '4,67,0', '5,67,0', '6,67,0']);
   for (const stance of towerStances) {
@@ -243,15 +243,21 @@ test('build_portal 未授权垫脚时不替 Agent 搭柱，够不到就报出那
   adapter.inv.set('obsidian', 10);
   adapter.inv.set('flint_and_steel', 1);
   adapter.inv.set('cobblestone', 4);
-  const moveTo = adapter.moveTo.bind(adapter);
+  const moveTo = adapter.moveTo.bind(adapter), pillarUp = adapter.pillarUp.bind(adapter);
+  const pillars: string[][] = [];
+  t.mock.method(adapter, 'pillarUp', async (names: string[], signal: AbortSignal) => {
+    pillars.push([...names]);
+    return pillarUp(names, signal);
+  });
   t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
-    assert.notEqual(opts.allowTower, true);
+    assert.ok(!Object.hasOwn(opts, 'allowTower'), '未授权时不下发 allowTower');
     if (target.kind === 'place_block' && target.pos.y >= 66) throw new Error('PLACEMENT_NOT_REACHABLE');
     return moveTo(target, opts);
   });
   const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
   assert.equal(outcome.result.status, 'failed');
   assert.match(outcome.result.summary, /PLACEMENT_NOT_REACHABLE.*比脚高 \d+ 格.*allowTower/);
+  assert.equal(pillars.length, 0, '未授权时不执行显式垫高');
 });
 
 test('build_portal 补全上次的残框：角上留下的施工块不算占用，已摆的黑曜石原样复用', async () => {
