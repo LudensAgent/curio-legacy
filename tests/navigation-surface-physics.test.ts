@@ -78,6 +78,7 @@ function setup(direction?: keyof typeof lowStairs, strip = surfaces) {
   const frames: { speed: number; ground: boolean }[] = [];
   const timer = setInterval(() => {
     physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+    bot.emit('physicsTick');
     frames.push({ speed: Math.hypot(entity.velocity.x, entity.velocity.z), ground: entity.onGround });
   }, 50);
   timer.unref();

@@ -65,6 +65,7 @@ function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }
   const frames: { x: number; speed: number; ground: boolean }[] = [];
   const timer = setInterval(() => {
     physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+    bot.emit('physicsTick');
     frames.push({ x: bot.entity.position.x, speed: Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z), ground: bot.entity.onGround });
   }, 50);
   timer.unref();
@@ -197,6 +198,49 @@ test('连续脚位保留 sprint 委托，取消时释放本次运动键', async 
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(writes.length, count);
   assert.ok(Object.values(controls).every(held => !held));
+  assert.equal(bot.listenerCount('physicsTick'), 0);
+});
+
+test('同一调用栈连续物理帧在实际到位帧松键，交接时读取最新脚位', async () => {
+  const { bot, controls } = botAt(0.5, 64, 0.5);
+  const movement = adapterWith(bot).moveTo({ kind: 'feet', x: 1.5, y: 64, z: 0.5 }, {
+    ...opts(), settleAtTarget: false,
+  });
+  bot.entity.position.x = 1.421;
+  bot.entity.velocity.x = 0.118;
+  bot.emit('physicsTick');
+  assert.equal(controls.forward, false, '必须在第一帧同步松键，等待 Promise 会错过窗口');
+  bot.entity.position.x += controls.forward ? 0.216 : bot.entity.velocity.x;
+  bot.emit('physicsTick');
+  await movement;
+  assert.ok(Math.abs(bot.entity.position.x - 1.539) < 1e-9);
+  assert.equal(bot.listenerCount('physicsTick'), 0);
+});
+
+test('松键后实际停在纠偏窗外，立即报告过冲', async () => {
+  const { bot, controls } = botAt(0.5, 64, 0.5);
+  const original = bot.setControlState;
+  bot.setControlState = (name: string, value: boolean) => {
+    original(name, value);
+    if (name === 'forward') {
+      bot.entity.position.x = value ? 1.85 : 2.109;
+      bot.entity.velocity.x = value ? 0.2 : 0;
+    }
+  };
+  await assert.rejects(adapterWith(bot).moveTo({ kind: 'feet', x: 1.5, y: 64, z: 0.5 }, { ...opts(), timeoutMs: 800 }), /越过了连续脚位目标/);
+  assert.equal(controls.forward, false);
+  assert.equal(bot.listenerCount('physicsTick'), 0);
+});
+
+test('经过检查点后又被移出容差时，不能用旧物理帧确认到达', async () => {
+  const { bot } = botAt(0.5, 64, 0.5);
+  const moved = adapterWith(bot).moveTo({ kind: 'feet', x: 1.5, y: 64, z: 0.5 }, { ...opts(), settleAtTarget: false });
+  bot.entity.position.x = 1.421;
+  bot.emit('physicsTick');
+  bot.entity.position.x = 2.109;
+  bot.emit('physicsTick');
+  await assert.rejects(moved, /越过了连续脚位目标/);
+  assert.equal(bot.listenerCount('physicsTick'), 0);
 });
 
 for (const drop of [0, -1]) {

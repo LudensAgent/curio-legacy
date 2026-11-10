@@ -1375,11 +1375,26 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const EDGE = 0.2; // 身体中心离开原支撑、脚高开始变化的点：方块半宽 0.5 − 身体半宽 0.3
     let closest = dist();
     let overshot = false;
+    let crossedCheckpoint = false;
+    let wake: (() => void) | undefined;
+    const stopWaiting = () => wake?.();
+    const onPhysicsTick = () => {
+      if (crossedCheckpoint || signal.aborted || !ownsControls() || !settled()) return;
+      // Mineflayer 可在同一调用栈补跑多个物理帧。第一帧确实落地到位时立即松键，
+      // 让下一帧按真实惯性前进；异步控制恢复后还会重新检查最新脚位。
+      crossedCheckpoint = true;
+      b.setControlState('forward', false);
+      b.setControlState('jump', false);
+      b.setControlState('sprint', false);
+      stopWaiting();
+    };
+    if (mode === 'feet') b.on?.('physicsTick', onPhysicsTick);
+    signal.addEventListener('abort', stopWaiting, { once: true });
     try {
       // 水平推进：按当前速度与「地面→下落」的状态变化估算制动距离，只有当身体会停在目标列内才松键。
       // 下降时身体离开支撑、水平速度在空中衰减更慢，须更早松键，让速度在到达边缘时降到能靠空中滑行落到中心。
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
-      while (!settled() && Date.now() < deadline) {
+      while (!crossedCheckpoint && !settled() && Date.now() < deadline) {
         check();
         checkPosition();
         if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
@@ -1398,10 +1413,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const overshootLimit = horizontalJump ? initialDistance + 0.75 : 1.5;
         if (d > closest + 0.05 || d > overshootLimit) { overshot = true; break; }
         closest = Math.min(closest, d);
-        await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
+        await this.afterAction(() => new Promise<void>(resolve => {
+          const timer = setTimeout(finish, Math.min(50, Math.max(1, deadline - Date.now())));
+          function finish() {
+            clearTimeout(timer);
+            wake = undefined;
+            resolve();
+          }
+          wake = finish;
+        }), check);
         checkPosition();
       }
     } finally {
+      if (mode === 'feet') b.removeListener?.('physicsTick', onPhysicsTick);
+      signal.removeEventListener('abort', stopWaiting);
       if (ownsControls()) {
         try { b.setControlState('forward', false); } catch { /* ignore */ }
         try { b.setControlState('jump', false); } catch { /* ignore */ }
@@ -1433,6 +1458,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       } else {
         stable = 0;
         const d = dist();
+        if (mode === 'feet' && d > 0.6 && b.entity.onGround && stopped()) return 'overshot';
         if (mode === 'feet' && corrections < 8 && d > 0.02 && d <= 0.6 && b.entity.onGround && stopped()) {
           // 发下一次修正前重新核对动作归属与原期限：剩余 <=0 就不再按键，等待时长也不得超过原期限。
           check();
