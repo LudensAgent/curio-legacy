@@ -695,3 +695,21 @@ test('未知工作面仍然硬停，不把未知当空气挖', async () => {
   assert.equal(world.digs.length, 0);
   assert.equal(world.moves.length, 0);
 });
+
+test('tunnel receipt reports how many steps were already open ground, not just "excavated N"', async () => {
+  // 平地：三格都不用挖、不用补，回执要说清楚“本来就能直接走”，不让“实际挖出 3 格”掩盖这一点。
+  const flat = new ExcavationWorld();
+  const open = await excavationSkill.run(context(flat), args({ mode: 'tunnel', steps: 3 }));
+  assert.equal(open.status, 'succeeded', open.summary);
+  assert.equal(open.data?.openSteps, 3);
+  assert.match(open.summary, /3 格里挖掉 0 块、补了 0 处支撑、3 格本来就能直接走/);
+
+  // 一格实心工作面、一格缺支撑、一格平地：三类分别计数。
+  const mixed = new ExcavationWorld();
+  for (const y of [64, 65]) mixed.setBlock({ x: 1, y, z: 0 }, 'netherrack');
+  mixed.setBlock({ x: 2, y: 63, z: 0 }, 'air');
+  mixed.inv.set('netherrack', 5);
+  const r = await excavationSkill.run(context(mixed), args({ mode: 'tunnel', steps: 3, fill: 'netherrack' }));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.match(r.summary, /3 格里挖掉 2 块、补了 1 处支撑、1 格本来就能直接走/);
+});

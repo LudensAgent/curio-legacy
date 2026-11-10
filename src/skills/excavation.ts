@@ -6,6 +6,7 @@ import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable,
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
+import { pageFragments } from '../spatial/fragments.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 export interface ExcavationArgs {
@@ -330,6 +331,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const { adapter, senses, signal } = ctx;
   const origin = adapter.state();
   let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, noDropBlocks = 0, filled = 0, fillTried = false;
+  /** 既没挖也没补就迈过去的格数：这些格本来就能直接走。 */
+  let openSteps = 0;
+  const runStartedAt = Date.now();
   /** 风险与邻格未知作为数据返回，成功/失败都带；不让它们只活在错误文本里。 */
   const ledger: RiskLedger = { risks: [], unknownAdjacent: [], riskKeys: new Set(), unknownKeys: new Set() };
   const path: { pos: Vec3Like; observationId: number }[] = [];
@@ -345,6 +349,20 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     : '';
   const noDropNote = () => noDropBlocks ? `（其中 ${noDropBlocks} 格没有掉落）` : '';
   const startChunks = ctx.memory.visitedChunkCount;
+  // 这一段实际做了什么：开挖是固定方向直线施工，平地上也是一格一格迈；按实数报，不让“挖出 N 格”掩盖其实没挖。
+  const workNote = () => completed ? `（${completed} 格里挖掉 ${excavated} 块、补了 ${filled} 处支撑、${openSteps} 格本来就能直接走）` : '';
+  // 补过支撑时：直线两侧几格内有没有以前走过/搭过的记录路径（只是历史几何，不代表现在还通；接不接由你定）。
+  const nearbyPathNote = () => {
+    if (!filled || ctx.spatial === undefined) return '';
+    const dir = DIRECTIONS[args.direction], from = origin.pos, len = completed + 2;
+    const scan = pageFragments(ctx.spatial, { dim: origin.dim, maxFragments: 1000, signal, deadline: Date.now() + 800 });
+    const near = scan.items.filter((f) => f.createdAt < runStartedAt && f.geometrySource === 'traversal').flatMap((f) => f.polyline.map((p) => {
+      const rx = p.x - from.x, rz = p.z - from.z;
+      return { p, kind: f.kind, along: rx * dir.x + rz * dir.z, lateral: Math.abs(rz * dir.x - rx * dir.z), dy: p.y - from.y };
+    })).filter((q) => q.along >= -2 && q.along <= len && q.lateral >= 1.5 && q.lateral <= 6 && Math.abs(q.dy) <= 4)
+      .sort((a, b) => a.lateral - b.lateral)[0];
+    return near === undefined ? '' : `；这条直线两侧 6 格内有以前${near.kind === 'bridge' ? '搭过' : near.kind === 'dug' ? '挖过' : '走过'}的记录路径，最近一处 (${Math.floor(near.p.x)},${Math.floor(near.p.y)},${Math.floor(near.p.z)}) 离这条线约 ${Math.round(near.lateral)} 格（历史记录，现在是否还通未确认）`;
+  };
   // 一个新区块都没进时说清楚：挖出来的是新通道，但这一带以前就来过（历史事实，不替它选方向）。
   const visitedNote = () => {
     if (ctx.memory.visitedChunkCount > startChunks) return `，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块`;
@@ -354,7 +372,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
-      excavatedBlocks: excavated, noDropBlocks, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
+      excavatedBlocks: excavated, openSteps, noDropBlocks, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       risks: ledger.risks.map((risk) => ({ ...risk, at: { ...risk.at } })), riskCells: ledger.risks.map((risk) => ({ ...risk.at })), unknownAdjacent: ledger.unknownAdjacent.map((at) => ({ ...at })),
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
@@ -419,6 +437,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     }
     const direction = DIRECTIONS[args.direction];
     for (let step = 0; step < args.steps; step++) {
+      const dugBefore = excavated, filledBefore = filled;
       const current = assertSession(ctx, origin), here = voxel(current.pos);
       if (!current.onGround) throw new ExcavationStop('ERROR', '尚未站稳，不能继续开挖下一格');
       standingCell(ctx, current.pos, ledger, args);
@@ -564,6 +583,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       preflightColumn(ctx, next, height, ledger, args);
       standingCell(ctx, next, ledger, args);
       completed++;
+      if (excavated === dugBefore && filled === filledBefore) openSteps++;
       path.push({ pos: { ...landed.pos }, observationId: landed.observationId });
       assertSession(ctx, origin);
       checkpointId = ctx.memory.transaction(() => {
@@ -579,7 +599,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
       }
     }
-    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${workNote()}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}${nearbyPathNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。
@@ -627,7 +647,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。',
+  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。固定方向、固定层的直线施工：不会改走旁边现成的路面、旧桥或已挖好的巷道，也不按代价挑路；要让辅助在现成地面/旧路与挖、垫之间按代价选路，用 travel_to/explore_toward 并授权 allowDig/allowPlace。',
   argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe（不掉落也会挖开并回报 noDrop）","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;
