@@ -1010,10 +1010,11 @@ export class SharedSpatialSession {
   }
 
   /**
-   * 已确认通道证据：fragment、逐确认段 traversal、路由节点与有向边通过库的
+   * 已确认通道证据的显式/兼容写入入口：fragment、逐确认段 traversal、路由节点与有向边通过库的
    * `writeConfirmedCorridor` 一次原子写入；任一步失败回滚全部，不留下
    * fragment/traversal/拓扑的前缀半写入。宿主上限超限时只原子写历史前缀并明确
    * 报告 topology skipped。站点标记（voxel）在历史写成功后单独写入。
+   * v0.11 B5.4 起普通 Perception 移动不调用本方法，只调用 `markTraversed`。
    * `coordinate:'cell'` 是显式拓扑坐标规范：节点 id 与实测端点统一到整数格，
    * fragment polyline 仍保留原始实测点。空段只保存 fragment、不写拓扑。不把
    * 未确认段、计划坐标或时间接近补成亲历证据；记忆失败不改身体结果。

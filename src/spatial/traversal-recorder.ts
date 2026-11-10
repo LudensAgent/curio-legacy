@@ -104,9 +104,12 @@ const dugOnPath = (dug: TraversalObservation['dug'], points: readonly Vec3Like[]
   dug?.some((entry) => points.some((point) => d3(entry.pos, point) <= DUG_PROXIMITY)) ?? false;
 
 /**
- * 统一的空间记忆记录器：把身体实际走过的连续位移写成共享会话的 fragment +
+ * 历史几何的显式记录器：把身体实际走过的连续位移写成共享会话的 fragment +
  * traversal + topology。walked / dug / bridge 只是路径来源标签，不决定规划或执行；
  * 规划只看几何、拓扑边和时间证据。
+ *
+ * 兼容说明：v0.11 B5.4 起，普通 Perception 移动不再使用本类，只写实测到访位
+ * （见 `TraversalVisitRecorder`）。本类保留给显式历史/兼容写入及其测试。
  *
  * 不记录瞬移、断线/换维/换会话、水里/岩浆/骑乘位移，也不把计划点当实测。
  */

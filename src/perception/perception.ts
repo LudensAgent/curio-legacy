@@ -12,7 +12,7 @@ import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type V
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
-import { TraversalRecorder, type TraversalWriteReceipt } from '../spatial/traversal-recorder.ts';
+import { TraversalVisitRecorder, type TraversalVisitReceipt } from '../spatial/traversal-visit-recorder.ts';
 import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
@@ -25,7 +25,6 @@ export const DIRS: Record<string, [number, number]> = {
 
 /** 一次感知更新里最多记多少处地标（资源/危险，按同类同片去重后）。 */
 const LANDMARK_NOTES_PER_UPDATE = 12;
-const supportKey = (pos: Vec3Like) => `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`;
 const DANGER = new Set(['lava', 'spawner']);
 const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnace']);
 /** 功能方块地标的标签（'工作台' 或 '我的工作台'）：拆掉/消失后也要从记忆里清掉 */
@@ -191,15 +190,12 @@ export type OwnBuiltLookup = (pos: Vec3Like, block: string) => { name: string } 
 export class Perception {
   /** 判断“围着我的是不是自己盖的墙”，用来区分屋里和坑里 */
   ownBuilt?: OwnBuiltLookup;
-  /** 统一写入共享空间记忆的实测位移；没有共享会话时只感知、不记录。 */
-  private readonly traversal: TraversalRecorder | null;
+  /** 普通移动只把实测到访位写进共享空间记忆；不生成 Fragment/拓扑路线。 */
+  private readonly traversal: TraversalVisitRecorder | null;
   /** 共享空间会话：用于把当前站位的脚/头/支撑作为本地重扫证据。 */
   private readonly spatial?: SharedSpatialSession;
   private lastStanceAt = 0;
   private lastStanceKey = '';
-  /** 自放方块的支撑格缓存；只用于给 fragment 标 bridge 来源，不参与导航。 */
-  private placedSupports = new Set<string>();
-  private placedSupportsAt = 0;
   /** 效率账本的挖掘游标：不依赖 where，任何环境都能推进 */
   private lastDugAt = 0;
   /** 空间记账（矿点失效、放置方块移除）的挖掘游标：where 未知时先不消费，等能判断环境再补 */
@@ -218,9 +214,8 @@ export class Perception {
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision, spatial?: SharedSpatialSession) {
     this.spatial = spatial;
-    this.traversal = spatial === undefined ? null : new TraversalRecorder(spatial, Date.now,
-      (message) => bus.publish('spatial_traversal_error', 'P2', message),
-      (message) => bus.publish('spatial_path_retention', 'P3', message));
+    this.traversal = spatial === undefined ? null : new TraversalVisitRecorder(spatial, Date.now,
+      (message) => bus.publish('spatial_traversal_error', 'P2', message));
     // 做完的事有没有留住：扔掉的东西被捡回来了，身体当场就知道
     const effects = new EffectWatch(bus);
     adapter.on?.('recollected', (r: { item: string; count: number }) => effects.recollected(r.item, r.count));
@@ -328,14 +323,13 @@ export class Perception {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
-    this.traversal?.flush();
   }
 
   /**
-   * 最近有界空间记忆写入回执（旧→新）。只用于证据链观察/报告
-   * `recordWalkCorridor` 的真实结局，不重试、不回滚身体结果、不写计划点。
+   * 最近有界实测到访写入回执（旧→新）。只报告 `markTraversed` 的真实结局；
+   * 普通移动不写 Fragment/traversal/拓扑，也不重试、不回滚身体结果。
    */
-  traversalReceipts(limit?: number): readonly TraversalWriteReceipt[] {
+  traversalReceipts(limit?: number): readonly TraversalVisitReceipt[] {
     return this.traversal?.receipts(limit) ?? [];
   }
 
@@ -717,20 +711,13 @@ export class Perception {
           // 只有确认目标格出现请求材料的记录才是世界修改；attempted 只推进游标，不写空间记忆。
           for (const p of placed.filter((entry) => entry.status === 'confirmed')) {
             this.memory.putPlaced(p.pos, p.name, s.dim);
-            this.placedSupports.add(supportKey(p.pos));
           }
         }
         for (const d of dug) this.memory.removePlaced(d.pos, s.dim);
-        // 共享空间记忆是唯一的历史位移记录；walked/dug/bridge 只是证据来源标签。
-        if (Date.now() - this.placedSupportsAt > 2000) {
-          this.placedSupports = new Set(this.memory.placedBlocks().map((p) => supportKey(p.pos)));
-          this.placedSupportsAt = Date.now();
-        }
+        // 普通移动只记录实测到访位；不再把走过的轨迹写成 Fragment/历史路线。
         this.traversal?.observe({
           worldId: s.worldId, dim: s.dim, sessionId: s.sessionId, pos: s.pos,
           inWater: s.inWater, inLava: s.inLava, riding: !!s.riding, onGround: s.onGround,
-          dug,
-          onPlacedSupport: (support) => this.placedSupports.has(supportKey(support)),
         });
       }
     } catch { /* 记不下来不影响感知 */ }

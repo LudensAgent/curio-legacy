@@ -101,7 +101,7 @@ function planData(plan: RoutePlan, result: WalkPathResult) {
     lastObservation: result.lastObservation ?? null,
     trace: result.trace,
     problem: result.problem ?? null,
-    // 已确认位移由统一的 TraversalRecorder 写共享空间记忆；walk_path 不再另建 fragment。
+    // 普通移动由 Perception 只写实测到访位；walk_path 不再另建 fragment/traversal/拓扑。
     memoryWrite: result.memoryWrite ?? null,
     confirmedSegments: result.confirmedSegments,
     remainingPoints: result.remainingPoints,
@@ -449,7 +449,7 @@ export const walkPath: Skill<WalkArgs> = {
       ctx.signal.removeEventListener('abort', onParentAbort);
     });
     if (hostFailure !== null) return hostFailure;
-    // 已确认位移由统一的 TraversalRecorder 写共享空间记忆；这里只返回身体结果。
+    // 普通移动由 Perception 只写实测到访位；这里只返回身体结果。
     // 父任务取消先于库终态时仍以取消返回，保留库已记录的部分位移；注册表拒绝没有计划可报。
     if (consumedPlan !== null && ctx.signal.aborted && result.outcome !== 'CANCELLED') {
       return { status: 'cancelled', summary: 'walk_path 被父任务取消', data: planData(consumedPlan, result) };
