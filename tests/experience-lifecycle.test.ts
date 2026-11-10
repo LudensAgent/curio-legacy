@@ -55,6 +55,54 @@ test('旧的无签名未验证窍门仍可召回，但排在有应用证据的�
   assert.ok(picked.some((k) => k.id === stale.id), '仍可因高度相关被想起，不自动删除');
 });
 
+test('失败、条件收工和中止应用不会仅因新增记录或更新时间提高窍门排序', () => {
+  for (const feedback of [
+    { outcome: 'stuck' },
+    { outcome: 'done', completion: 'condition' },
+    { outcome: 'interrupted' },
+    { outcome: 'abandoned' },
+  ] as const) {
+    const self = new SelfModel(null);
+    const neutral = self.learn('follow northern passage', { source: 'reflection', kind: 'explore' })!;
+    const applied = self.learn('follow southern passage', { source: 'reflection', kind: 'explore' })!;
+    const old = Date.now() - 60 * 60_000;
+    neutral.createdAt = neutral.updatedAt = old;
+    applied.createdAt = applied.updatedAt = old;
+    const picked = () => self.relevantKnowHow('follow passage', 'explore', 2);
+    assert.deepEqual(picked().map((k) => k.id), [neutral.id, applied.id], '起初相关性和证据相同');
+    Array.from({ length: feedback.outcome === 'stuck' ? 5 : 1 }).forEach((_, index) => self.record(record({
+      id: `recent-application-${index}`, applying: applied.id, applyingText: applied.text,
+      summary: '应用后没有确认目标完成', ...feedback,
+    })));
+    assert.equal(picked()[0]?.id, neutral.id, `${feedback.outcome} 不应把未验证结论提升到中性条目前`);
+    assert.ok(picked().some((k) => k.id === applied.id), '失败条目仍可因相关性召回供反思');
+    assert.equal(applied.unverified, true);
+    assert.equal(applied.wins, 0, '条件收工不记成功');
+    assert.equal(applied.createdAt, old, '保留结论原始时间');
+    assert.ok(applied.updatedAt > old, '仍如实记录应用更新时间，检索不拿它当支持证据');
+    assert.equal(applied.applications?.[0]?.outcome, feedback.outcome);
+  }
+});
+
+test('非成功反馈不能靠更新时间提升已有签名的窍门；真实成功仍提高同等相关条目的排序', () => {
+  const self = new SelfModel(null);
+  const neutral = self.learn('follow northern passage', { source: 'reflection', kind: 'explore', signature: 'navigate_to' })!;
+  const applied = self.learn('follow southern passage', { source: 'reflection', kind: 'explore', signature: 'travel_to' })!;
+  const old = Date.now() - 60 * 60_000;
+  neutral.createdAt = neutral.updatedAt = old;
+  applied.createdAt = applied.updatedAt = old;
+  // 签名兼容记录没有显式应用列表，失败更新也不能换成“最近可用”的优先权。
+  self.record(record({ id: 'condition-only', outcome: 'done', completion: 'condition', summary: '仅收工条件成立' }));
+  assert.equal(self.relevantKnowHow('follow passage', 'explore', 2)[0]?.id, neutral.id);
+  assert.equal(applied.wins, 0);
+  assert.equal(applied.applications, undefined);
+  self.record(record({ id: 'actual-success', outcome: 'done', summary: '实际完成移动目标' }));
+  assert.equal(applied.wins, 1, '保持旧签名反馈关联');
+  assert.equal(neutral.wins, 0);
+  assert.equal(self.relevantKnowHow('follow passage', 'explore', 2)[0]?.id, applied.id, '相同相关性下成功反馈仍提高排序');
+  assert.equal(applied.unverified, true, '一次应用不自动判定规则已验证');
+});
+
 test('反思输入保留来源、未验证、应用证据和失败动作的真实参数', () => {
   const memory = new WorldMemory(null), self = new SelfModel(null);
   const k = self.learn('在矿道里卡住时先朝上坡方向开巷', { source: 'reflection', kind: 'explore' })!;

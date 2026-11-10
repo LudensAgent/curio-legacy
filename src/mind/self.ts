@@ -535,10 +535,9 @@ export class SelfModel {
     return this.data.knowHow.map((h) => {
       const rel = overlap(keywords(h.text), k) + h.tags.filter((t) => k.has(t)).length * 2 + (kind && h.kind === kind ? 2 : 0);
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
-      // 既没动作签名、又没显式应用证据的未验证条目只是暂定结论：仍可因高度相关而召回，但排在
-      // 有证据的条目之后，避免旧的一次性推断长期占满窍门名额。不自动删除、不自动改判。
-      const noEvidence = h.unverified === true && !h.signature && !(h.applications?.length);
-      return { h, score: (rel * (0.5 + trust) + (Date.now() - h.updatedAt < 20 * 60_000 ? 0.5 : 0)) * (h.unverified ? (noEvidence ? 0.25 : 0.5) : 1) };
+      // 未验证结论统一降权；成败只通过 trust 影响排序。签名或应用记录的存在不代表支持证据，
+      // updatedAt 也包含失败/中止，不能用“最近更新”加分。相关失败仍可召回供反思，不自动删除或改判。
+      return { h, score: rel * (0.5 + trust) * (h.unverified ? 0.25 : 1) };
     }).filter((e) => e.score > 0.6).sort((a, b) => b.score - a.score).slice(0, n).map((e) => e.h);
   }
 
