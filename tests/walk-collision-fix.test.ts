@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
 
-const noNeighbors = { cell: (x: number, y: number, z: number) => ({ kind: 'unknown' as const, pos: { x, y, z } }) };
+const noNeighbors = { cell: (x: number, y: number, z: number) => ({ kind: 'unobserved' as const, pos: { x, y, z } }) };
 const resolve = (name: string, properties: Record<string, string> = {}) =>
   walkCollisionProvider.resolve({ name, properties }, { x: 0, y: 0, z: 0 }, noNeighbors);
 
