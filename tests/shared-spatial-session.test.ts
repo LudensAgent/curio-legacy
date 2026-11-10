@@ -20,7 +20,7 @@ import type {
 } from 'curio-minecraft-3d-memory';
 import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SnapshotLimits } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { MAX_OBSERVED_CELLS, SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
 
@@ -917,4 +917,28 @@ test('a cancel callback fault is surfaced after gating and retained through shut
     }
   }
   cleanup(dir, result);
+});
+
+test('checkpoint keeps only the newest MAX_OBSERVED_CELLS observed cells; older ones read as unknown again', async () => {
+  const { svc, dir } = await openShared();
+  let result: ShutdownResult | null = null;
+  try {
+    svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
+    const total = MAX_OBSERVED_CELLS + 100;
+    const cells = Array.from({ length: total }, (_, i) => block({
+      pos: { x: i % 64, y: Math.floor(i / 4096), z: Math.floor(i / 64) % 64 }, observedAt: 1 + i, observationId: 1 + i,
+    }));
+    for (let i = 0; i < cells.length; i += 1000) svc.observe(cells.slice(i, i + 1000));
+    assert.equal(svc.session.voxel.checkpointCounts().observedCells, total);
+
+    await svc.checkpoint();
+    assert.equal(svc.session.voxel.checkpointCounts().observedCells, MAX_OBSERVED_CELLS);
+    assert.equal(svc.session.voxel.cellAt('overworld', 0, 0, 0).observed, false, '最早观测的格回到未知');
+    const last = cells.at(-1)!.pos;
+    assert.equal(svc.session.voxel.cellAt('overworld', last.x, last.y, last.z).observed, true, '最近观测的格保留');
+    result = await svc.shutdown();
+    assertCleanClose(result);
+  } finally {
+    cleanup(dir, result ?? await svc.shutdown());
+  }
 });

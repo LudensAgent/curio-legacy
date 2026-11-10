@@ -70,6 +70,9 @@ export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 /** 路径片段上限（整个世界、各维度合计）。不往上调：travel_to via:"history"、spatial_extrema 每次最多扫 1000 片，
  *  调大只会让它们看不全；写满时由 recordCorridor 腾位。 */
 export const MAX_PATH_FRAGMENTS = 1000;
+/** 体素观测只保留最近观测的这么多格（每次落盘前修剪），更早的格回到未知；不修剪的话观测格只增不减，
+ *  线上约 4 小时就超过快照上限 maxObservedCells(1,000,000)，此后每次保存都失败、再也落不了盘。 */
+export const MAX_OBSERVED_CELLS = 25_600;
 /** 写满时一次腾出的片数：腾位要整表扫描片段和边，按批摊薄。 */
 const FRAGMENT_PRUNE_BATCH = 50;
 
@@ -1398,7 +1401,14 @@ export class SharedSpatialSession {
     if (this.closingFlag) {
       return Promise.reject(new PersistenceError('closing', 'shared spatial session is closing; checkpoint is rejected'));
     }
+    this.retainObservations();
     return this.session.checkpoint();
+  }
+
+  /** 落盘前修剪体素观测：只留最近 MAX_OBSERVED_CELLS 格。按需驻留时库无法和未驻留区段统一排序，不修剪。 */
+  private retainObservations(): void {
+    if (this.session.voxelLoading === 'manual') return;
+    this.session.voxel.retainNewestObservedCells(MAX_OBSERVED_CELLS);
   }
 
   getPersistenceState(): SpatialPersistenceState {
@@ -1466,6 +1476,7 @@ export class SharedSpatialSession {
 
       // 捕获最终 checkpoint 并核对实际返回值与已确认状态。
       try {
+        this.retainObservations();
         checkpoint = await this.session.checkpoint();
         const state = this.session.getPersistenceState();
         if (
