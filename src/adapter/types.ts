@@ -200,7 +200,11 @@ export interface MoveOpts {
    * 仅连续脚位（feet）身体控制消费：实测身体位置到原 origin→bearing 轴线的横向距离不得超过 maxLateral。
    * 超出即停止本动作、保留实测位置并返回事实；不用 FEET_ARRIVAL_TOLERANCE 当作横向授权，也不把身体挪回走廊。
    */
-  corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
+  corridor?: {
+    origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number;
+    /** 仅方向委托的末点需要：实测沿冻结轴线的进度达到此距离后才算停稳到位。 */
+    minimumAlong?: number;
+  };
   signal: AbortSignal;
   timeoutMs: number;
   /**

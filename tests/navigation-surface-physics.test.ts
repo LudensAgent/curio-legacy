@@ -16,6 +16,7 @@ import { runNavigationSegment } from '../src/skills/movement/segment.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
+import { AbortedError } from '../src/util.ts';
 
 const require = createRequire(import.meta.url);
 const data = require('minecraft-data')('1.20.1');
@@ -39,7 +40,7 @@ const lowStairs = {
 
 function setup(direction?: keyof typeof lowStairs, strip = surfaces) {
   const low = direction === undefined ? undefined : lowStairs[direction];
-  const from = low?.from ?? { x: -20.37, y: 64, z: -2.44 };
+  const from = low?.from ?? { x: -20.37, y: 63 + strip[0]!.top, z: -2.44 };
   const world = {
     getBlock(position: Vec3) {
       const p = position.floored();
@@ -83,7 +84,7 @@ function setup(direction?: keyof typeof lowStairs, strip = surfaces) {
   }, 50);
   timer.unref();
   const stops: Vec3Like[] = [];
-  const dispatches: { continuous: boolean; speed: number; ground: boolean; frameStart: number }[] = [];
+  const dispatches: { continuous: boolean; speed: number; ground: boolean; frameStart: number; minimumAlong?: number }[] = [];
   class SurfaceAdapter extends FakeAdapter {
     async settleMovement(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>) { await driver.settleMovement(opts); }
     override state() { return { ...super.state(), pos: { ...entity.position }, onGround: entity.onGround }; }
@@ -99,7 +100,8 @@ function setup(direction?: keyof typeof lowStairs, strip = surfaces) {
       await driver.moveTo(target, opts);
       this.pos = { ...entity.position };
       stops.push({ ...this.pos });
-      dispatches.push({ continuous: opts.settleAtTarget === false, speed: Math.hypot(entity.velocity.x, entity.velocity.z), ground: entity.onGround, frameStart });
+      dispatches.push({ continuous: opts.settleAtTarget === false, speed: Math.hypot(entity.velocity.x, entity.velocity.z), ground: entity.onGround, frameStart,
+        minimumAlong: opts.corridor?.minimumAlong });
     }
   }
   const adapter = new SurfaceAdapter();
@@ -138,6 +140,43 @@ test('travel_to 实际执行链连续经过16格低阶梯平面，中间没有�
   assert.equal(stoppedFrames, 0);
   assert.equal(entity.onGround, true);
   t.diagnostic(`travel_to 16 edges=${Math.round(performance.now() - started)}ms; middle stopped frames=${stoppedFrames}`);
+});
+
+test('explore 在连续半砖跑道只派发16步，只有最后一步必须实测跨过16格线', async (t) => {
+  const { adapter, ctx, timer, from, dispatches, entity } = setup(undefined, [surfaces[3]!]);
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const scan = t.mock.method(lookAround, 'run', async () => ({ status: 'succeeded', summary: 'observed' }));
+  const result = await exploreToward.run(ctx, { direction: 'E', distance: 16, origin: from, segment: 16,
+    maxLateralDrift: 4, timeoutMs: 120_000 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(dispatches.length, 16);
+  assert.ok(dispatches.slice(0, -1).every(point => point.minimumAlong === undefined && point.continuous));
+  assert.equal(dispatches.at(-1)!.minimumAlong, 16);
+  assert.equal(dispatches.at(-1)!.continuous, false);
+  assert.ok(entity.position.x - from.x >= 16 && entity.position.x - from.x <= 16.12);
+  assert.ok(entity.onGround && Math.hypot(entity.velocity.x, entity.velocity.z) < 0.003);
+  assert.equal(scan.mock.callCount(), 0);
+});
+
+test('方向末点短0.03格就失败或取消时，回执保留位移且不计为确认过线', async (t) => {
+  for (const cancelled of [false, true]) {
+    const { adapter, ctx, timer, from, entity } = setup('E');
+    t.after(() => { clearInterval(timer); ctx.memory.close(); });
+    t.mock.method(adapter, 'moveTo', async (_target, opts) => {
+      assert.equal(opts.corridor?.minimumAlong, 1);
+      entity.position.x = from.x + 0.97;
+      throw cancelled ? new AbortedError('ending cancelled') : new Error('NOT_CONFIRMED: short of finish');
+    });
+    const result = await runNavigationSegment(ctx, {
+      goal: feetGoal({ ...from, x: from.x + 1 }), allowed: ['walk'], historical: false, minimumAlong: 1,
+      corridor: { origin: from, bearing: { x: 1, z: 0 }, maxLateral: 0 }, maxTransitions: 1,
+      allowUnknownCorridor: false, deadline: ctx.deadline, searchBudget: 1,
+    });
+    assert.equal(result.outcome, cancelled ? 'cancelled' : 'physical_failure');
+    assert.equal(result.confirmed.length, 0);
+    assert.equal(result.partialDisplacement?.atTarget, false);
+    assert.equal(result.measuredEnd.x, from.x + 0.97);
+  }
 });
 
 for (const surface of [surfaces[1]!, surfaces[3]!]) {

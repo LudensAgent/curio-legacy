@@ -183,6 +183,24 @@ test('中间点终止时只松键等待实际制动，不回到旧检查点', as
   assert.ok(Object.values(controls).every(held => !held));
 });
 
+for (const bearing of [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }]) {
+  test(`方向终点已在脚位容差内但短0.03格时仍达到冻结投影 ${JSON.stringify(bearing)}`, async (t) => {
+    const { bot, timer, from, controls } = continuousBody(0);
+    t.after(() => clearInterval(timer));
+    const target = { x: from.x + 0.03 * bearing.x, y: from.y, z: from.z + 0.03 * bearing.z };
+    const origin = { x: target.x - 16 * bearing.x, y: target.y, z: target.z - 16 * bearing.z };
+    const corridor = { origin, bearing, maxLateral: 0, minimumAlong: 16 };
+    await adapterWith(bot).moveTo({ kind: 'feet', ...target }, { ...opts(), corridor });
+    const p = bot.entity.position;
+    const along = (p.x - origin.x) * bearing.x + (p.z - origin.z) * bearing.z;
+    assert.ok(along >= 16, `真实投影 ${along} 仍短于16格`);
+    assert.ok(Math.hypot(p.x - target.x, p.z - target.z) <= 0.12);
+    assert.equal(p.y, target.y);
+    assert.ok(bot.entity.onGround && Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
+    assert.ok(Object.values(controls).every(held => !held));
+  });
+}
+
 test('连续脚位保留 sprint 委托，取消时释放本次运动键', async (t) => {
   const { bot, timer, from, controls, writes } = continuousBody(0);
   t.after(() => clearInterval(timer));

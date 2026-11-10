@@ -47,6 +47,8 @@ export type SegmentRequest = {
   goal: NavigationGoal;
   /** 方向推进的临时列按水平距离评估；普通目的地保留三维距离。 */
   goalMetric?: '3d' | 'horizontal';
+  /** 方向委托的冻结总距离。只给计划端点已到这条线的地面身体动作增加终点条件。 */
+  minimumAlong?: number;
   allowed: MoveMode[];
   historical: boolean;
   /** 本段最多执行多少个已确认 transition。 */
@@ -152,10 +154,14 @@ const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y
 /** Ladder transitions may legitimately end with onGround=false; use the declared body precision. */
 const ladderReached = (to: Vec3Like, point: Vec3Like): boolean =>
   Math.hypot(point.x - to.x, point.z - to.z) <= 0.12 && Math.abs(point.y - to.y) <= 0.05;
-const transitionReached = (transition: LandSearchTransition, point: Vec3Like, onGround: boolean): boolean =>
+const meetsDistance = (request: SegmentRequest, point: Vec3Like): boolean => request.minimumAlong !== undefined && request.corridor !== undefined
+  && (point.x - request.corridor.origin.x) * request.corridor.bearing.x + (point.z - request.corridor.origin.z) * request.corridor.bearing.z >= request.minimumAlong;
+const directionalFinishFor = (request: SegmentRequest, transition: LandSearchTransition): boolean =>
+  (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop' && transition.drop <= 0.6) && meetsDistance(request, transition.to);
+const transitionReached = (request: SegmentRequest, transition: LandSearchTransition, point: Vec3Like, onGround: boolean): boolean =>
   transition.kind === 'ladder'
     ? ladderReached(transition.to, point)
-    : feetReached(transition.to, point, onGround);
+    : feetReached(transition.to, point, onGround) && (!directionalFinishFor(request, transition) || meetsDistance(request, point));
 const centeredXZ = (point: Vec3Like): boolean =>
   Math.abs(point.x - (Math.floor(point.x) + 0.5)) <= 1e-9
   && Math.abs(point.z - (Math.floor(point.z) + 0.5)) <= 1e-9;
@@ -281,7 +287,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
           result.partialDisplacement = {
             from: { ...from }, to: { ...stopped.pos }, horizontal, vertical,
             atTarget: result.transition === undefined ? goalReached(request.goal, stopped.pos, stopped.onGround)
-              : transitionReached(result.transition, stopped.pos, stopped.onGround),
+              : transitionReached(request, result.transition, stopped.pos, stopped.onGround),
           };
         }
         if (ctx.signal.aborted || isAbort(error)) {
@@ -694,7 +700,7 @@ async function runNavigationSegmentInner(
     const stopped = { ...stoppedState.pos };
     // 与普通失败分支同一套“实测端点”谓词：取消发生在身体已经到位之后时，
     // 这段是真实完成的进展，不能因为取消就把已确认的 transition 丢掉。
-    const atTarget = transitionReached(transition, stopped, stoppedState.onGround);
+    const atTarget = transitionReached(request, transition, stopped, stoppedState.onGround);
     const horizontal = Math.hypot(stopped.x - from.x, stopped.z - from.z);
     const vertical = Math.abs(stopped.y - from.y);
     if (atTarget) {
@@ -768,6 +774,7 @@ async function runNavigationSegmentInner(
     }
     const current = ctx.adapter.state();
     const physicalTarget = transition.to;
+    const directionalFinish = directionalFinishFor(request, transition);
     // 授权按真实身体起点和将要到达的物理 endpoint 检查；计划点不能代替实测。
     if (lateralOf(current.pos) > corridorLimit || lateralOf(physicalTarget) > corridorLimit) {
       return receipt('lateral_authorization', {
@@ -871,6 +878,7 @@ async function runNavigationSegmentInner(
       // <=0.6 的地面小落差仍由身体控制落边制动，真实落地到位后才交接。
       // 前视用下一段计划几何，交接时仍会以上方实测起点再次复验，不能跳过未知格。
       const continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
+        && !directionalFinish
         && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 0.6)
         && (transition.kind !== 'drop' || drop <= 0.6)
         && transition.to.x - transition.from.x === next.to.x - next.from.x
@@ -887,7 +895,7 @@ async function runNavigationSegmentInner(
             timeoutMs: Math.min(6000, Math.floor(remaining)),
             ...(continuous ? { settleAtTarget: false } : {}),
             ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
-            ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
+            ...(request.corridor === undefined ? {} : { corridor: directionalFinish ? { ...request.corridor, minimumAlong: request.minimumAlong } : request.corridor }),
           },
         );
         execution.handedOver = continuous;
@@ -899,7 +907,7 @@ async function runNavigationSegmentInner(
 
     if (actionError !== null) {
       const stopped = { ...ctx.adapter.state().pos };
-      const atTarget = transitionReached(transition, stopped, ctx.adapter.state().onGround);
+      const atTarget = transitionReached(request, transition, stopped, ctx.adapter.state().onGround);
       const partial = {
         from: { ...current.pos }, to: stopped,
         horizontal: Math.hypot(stopped.x - current.pos.x, stopped.z - current.pos.z),
@@ -943,7 +951,7 @@ async function runNavigationSegmentInner(
 
     const arrived = ctx.adapter.state();
     // 所有地面 transition 都必须在原计划连续端点落稳，格内位置不能顶替它。
-    const reached = transitionReached(transition, arrived.pos, arrived.onGround);
+    const reached = transitionReached(request, transition, arrived.pos, arrived.onGround);
     if (!reached) {
       return {
         ...receipt('physical_failure', {
@@ -983,6 +991,7 @@ async function runNavigationSegmentInner(
     }
     // 与既有导航回执一致：每确认一步就上报进度并让出事件循环。
     ctx.progress(executed / Math.max(1, planned.length), `segment ${executed}/${planned.length}`);
+    if (directionalFinish) return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点达到冻结方向的 ${request.minimumAlong} 格距离` });
     if (request.goal.arrival !== undefined && goalReached(request.goal, arrived.pos, arrived.onGround)) {
       return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点满足原目标的到达范围` });
     }

@@ -386,7 +386,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
         goal,
-        ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const } : {}),
+        ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const, minimumAlong: session.intent.distance } : {}),
         allowed: session.intent.allowed,
         historical: session.intent.historical,
         ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),

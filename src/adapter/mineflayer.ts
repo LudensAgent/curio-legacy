@@ -1289,7 +1289,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private async driveToFeet(
     target: { x: number; y: number; z: number }, deadline: number,
     check: (() => void) & { signal?: AbortSignal }, mode: 'cell' | 'feet',
-    corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number },
+    corridor?: MoveOpts['corridor'],
     horizontalJump = false,
     sprint = false,
     maxDropDown = 1,
@@ -1312,7 +1312,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const tx = mode === 'cell' ? Math.floor(target.x) + 0.5 : target.x;
     const tz = mode === 'cell' ? Math.floor(target.z) + 0.5 : target.z;
     const fx = Math.floor(target.x), fz = Math.floor(target.z);
-    const settled = () => {
+    const atEndpoint = () => {
       const p = b.entity.position;
       if (!b.entity.onGround) return false;
       if (mode === 'cell') {
@@ -1321,6 +1321,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return Math.hypot(p.x - target.x, p.z - target.z) <= FEET_ARRIVAL_TOLERANCE.horizontal
         && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
     };
+    const alongRemaining = () => {
+      if (corridor?.minimumAlong === undefined) return 0;
+      const p = b.entity.position;
+      return corridor.minimumAlong - ((p.x - corridor.origin.x) * corridor.bearing.x + (p.z - corridor.origin.z) * corridor.bearing.z);
+    };
+    const settled = () => atEndpoint() && alongRemaining() <= 0;
     const p0 = b.entity.position;
     const p0y = p0.y;
     const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
@@ -1379,7 +1385,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let wake: (() => void) | undefined;
     const stopWaiting = () => wake?.();
     const onPhysicsTick = () => {
-      if (crossedCheckpoint || signal.aborted || !ownsControls() || !settled()) return;
+      if (crossedCheckpoint || signal.aborted || !ownsControls() || !atEndpoint()) return;
       // Mineflayer 可在同一调用栈补跑多个物理帧。第一帧确实落地到位时立即松键，
       // 让下一帧按真实惯性前进；异步控制恢复后还会重新检查最新脚位。
       crossedCheckpoint = true;
@@ -1394,7 +1400,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 水平推进：按当前速度与「地面→下落」的状态变化估算制动距离，只有当身体会停在目标列内才松键。
       // 下降时身体离开支撑、水平速度在空中衰减更慢，须更早松键，让速度在到达边缘时降到能靠空中滑行落到中心。
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
-      while (!crossedCheckpoint && !settled() && Date.now() < deadline) {
+      while (!crossedCheckpoint && !atEndpoint() && Date.now() < deadline) {
         check();
         checkPosition();
         if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
@@ -1459,7 +1465,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         stable = 0;
         const d = dist();
         if (mode === 'feet' && d > 0.6 && b.entity.onGround && stopped()) return 'overshot';
-        if (mode === 'feet' && corrections < 8 && d > 0.02 && d <= 0.6 && b.entity.onGround && stopped()) {
+        const shortOfFinish = alongRemaining() > 0 && atEndpoint();
+        if (mode === 'feet' && corrections < 8 && (d > 0.02 || shortOfFinish) && d <= 0.6 && b.entity.onGround && stopped()) {
           // 发下一次修正前重新核对动作归属与原期限：剩余 <=0 就不再按键，等待时长也不得超过原期限。
           check();
           if (deadline - Date.now() <= 0) break;
@@ -1468,14 +1475,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // 每次释放后仍重新测量停稳与原目标，不把“按过键”当作纠正完成。
           corrections += 1;
           const p = b.entity.position;
-          const dx = target.x - p.x, dz = target.z - p.z;
+          // 已在原脚位容差内但尚差少量投影时，沿冻结方向低速点按，避免一个普通步幅跨过整个末点精度窗。
+          const dx = shortOfFinish ? corridor!.bearing.x : target.x - p.x;
+          const dz = shortOfFinish ? corridor!.bearing.z : target.z - p.z;
           const forward = -dx * Math.sin(heading) - dz * Math.cos(heading);
           const right = dx * Math.cos(heading) - dz * Math.sin(heading);
-          const keys: ('forward' | 'back' | 'left' | 'right')[] = [
+          const fineFinish = corridor?.minimumAlong !== undefined && d <= FEET_ARRIVAL_TOLERANCE.horizontal * 2;
+          const keys: ('forward' | 'back' | 'left' | 'right' | 'sneak')[] = [
+            ...(fineFinish ? ['sneak' as const] : []),
             ...(Math.abs(forward) > 0.02 ? [forward > 0 ? 'forward' as const : 'back' as const] : []),
             ...(Math.abs(right) > 0.02 ? [right > 0 ? 'right' as const : 'left' as const] : []),
           ];
-          const tapMs = Math.min(120, Math.max(50, Math.round(d / 0.2) * 50), deadline - Date.now());
+          const tapMs = Math.min(fineFinish ? 50 : 120, Math.max(50, Math.round(d / 0.2) * 50), deadline - Date.now());
           if (tapMs <= 0) break;
           try {
             for (const key of keys) b.setControlState(key, true);
