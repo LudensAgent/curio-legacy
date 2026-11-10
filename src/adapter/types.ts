@@ -210,7 +210,7 @@ export interface MoveOpts {
   allowSwimming?: boolean;
   /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路（逃离也一样，要跑就写 true） */
   sprint?: boolean;
-  /** 明确落点的单步下行上限，含支撑格；仅用于相邻 xyz 目标，禁止改地形和绕行。 */
+  /** 明确落点的单步下行上限（1–32 整数）；feet 按实测落差，xyz 旧接口含支撑格。仅相邻落点，禁止改地形和绕行；feet 省略时最多下落 1 格。 */
   maxDropDown?: number;
 }
 

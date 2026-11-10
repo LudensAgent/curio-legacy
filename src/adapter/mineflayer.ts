@@ -992,6 +992,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         opts.corridor,
         opts.horizontalJump === true,
         sprint,
+        opts.maxDropDown,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
@@ -1290,6 +1291,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number },
     horizontalJump = false,
     sprint = false,
+    maxDropDown = 1,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
@@ -1325,7 +1327,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // feet height. It never changes the target, climbs, or bridges terrain.
     const maxStartDistance = horizontalJump ? 4.2 : 1.2;
     if (dist() > maxStartDistance) return 'blocked';
-    if (Math.abs(p0y - target.y) > (horizontalJump ? 0.01 : 1)) return 'blocked';
+    if (!Number.isInteger(maxDropDown) || maxDropDown < 1 || maxDropDown > 32) throw new Error('BAD_ARGS: 明确下行需要 1–32 格上限');
+    if (horizontalJump ? Math.abs(p0y - target.y) > 0.01 : target.y - p0y > 1 || p0y - target.y > maxDropDown) return 'blocked';
     const initialDistance = dist();
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
@@ -1336,7 +1339,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const corridorLateral = () => activeCorridor === undefined ? 0
       : Math.abs((b.entity.position.x - activeCorridor.origin.x) * activeCorridor.bearing.z
         - (b.entity.position.z - activeCorridor.origin.z) * activeCorridor.bearing.x);
-    const checkCorridor = () => {
+    const checkPosition = () => {
+      if (p0y - b.entity.position.y > maxDropDown + FEET_ARRIVAL_TOLERANCE.vertical) {
+        throw new Error(`NOT_CONFIRMED: 实测下落超过授权 ${maxDropDown} 格，未改走其他落点`);
+      }
       if (activeCorridor === undefined) return;
       const measured = corridorLateral();
       if (measured <= corridorLimit) return;
@@ -1345,8 +1351,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       throw new Error(`CORRIDOR_VIOLATION: 连续脚位实测横向 ${measured.toFixed(2)} 格，超出授权 ${activeCorridor.maxLateral} 格；实际位于 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，已停止`);
     };
     check();
-    checkCorridor();
-    if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - p0.x), -(tz - p0.z)), 0, true); } catch { /* ignore */ } }
+    checkPosition();
+    const heading = Math.atan2(-(tx - p0.x), -(tz - p0.z));
+    if (typeof b.look === 'function') { try { b.look(heading, 0, true); } catch { /* ignore */ } }
     b.clearControlStates();
     b.setControlState('forward', true);
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
@@ -1372,7 +1379,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
       while (!settled() && Date.now() < deadline) {
         check();
-        checkCorridor();
+        checkPosition();
         if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
         const d = dist();
         const v = b.entity.velocity;
@@ -1388,7 +1395,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (d > closest + 0.05 || d > overshootLimit) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
-        checkCorridor();
+        checkPosition();
       }
     } finally {
       if (ownsControls()) {
@@ -1397,7 +1404,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         try { b.setControlState('sprint', false); } catch { /* ignore */ }
       }
     }
-    checkCorridor();
+    checkPosition();
     // 连续脚位允许有限次低速修正：制动估计偏差可能让身体停在目标外几厘米，
     // 格心模式仍保留旧的越段即停语义。
     if (overshot && (mode === 'cell' || dist() > 0.6)) return 'overshot';
@@ -1411,7 +1418,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let corrections = 0;
     while (Date.now() < deadline) {
       check();
-      checkCorridor();
+      checkPosition();
       if (settled() && stopped()) {
         if (++stable >= 2) return 'arrived';
       } else {
@@ -1421,26 +1428,31 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // 发下一次修正前重新核对动作归属与原期限：剩余 <=0 就不再按键，等待时长也不得超过原期限。
           check();
           if (deadline - Date.now() <= 0) break;
-          checkCorridor();
-          // 朝真实目标方向点按一次前进；短脉冲后释放并重新测量，不用到达容差冒充停稳。
+          checkPosition();
+          // 保持本段朝向，用前后/侧移短脉冲纠正真实偏差；越过落点几厘米不必转身。
+          // 每次释放后仍重新测量停稳与原目标，不把“按过键”当作纠正完成。
           corrections += 1;
           const p = b.entity.position;
-          if (typeof b.look === 'function') {
-            try { b.look(Math.atan2(-(target.x - p.x), -(target.z - p.z)), 0, true); } catch { /* ignore */ }
-          }
+          const dx = target.x - p.x, dz = target.z - p.z;
+          const forward = -dx * Math.sin(heading) - dz * Math.cos(heading);
+          const right = dx * Math.cos(heading) - dz * Math.sin(heading);
+          const keys: ('forward' | 'back' | 'left' | 'right')[] = [
+            ...(Math.abs(forward) > 0.02 ? [forward > 0 ? 'forward' as const : 'back' as const] : []),
+            ...(Math.abs(right) > 0.02 ? [right > 0 ? 'right' as const : 'left' as const] : []),
+          ];
           const tapMs = Math.min(120, Math.max(50, Math.round(d / 0.2) * 50), deadline - Date.now());
           if (tapMs <= 0) break;
           try {
-            b.setControlState('forward', true);
+            for (const key of keys) b.setControlState(key, true);
             await this.afterAction(() => sleep(tapMs, signal), check);
           } finally {
-            if (ownsControls()) b.setControlState('forward', false);
+            if (ownsControls()) for (const key of keys) b.setControlState(key, false);
           }
-          checkCorridor();
+          checkPosition();
         }
       }
       await this.afterAction(() => sleep(Math.min(40, Math.max(1, deadline - Date.now())), check.signal), check);
-      checkCorridor();
+      checkPosition();
     }
     return 'timeout';
   }

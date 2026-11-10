@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createRequire } from 'node:module';
 import { test } from 'node:test';
 import { Vec3 } from 'vec3';
 import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
@@ -35,6 +36,129 @@ function adapterWith(bot: any) {
 function opts(signal = new AbortController().signal): MoveOpts {
   return { signal, timeoutMs: 3000 };
 }
+
+function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }, repeated = false) {
+  const require = createRequire(import.meta.url);
+  const data = require('minecraft-data')('1.20.1');
+  const Block = require('prismarine-block')(data);
+  const { Physics, PlayerState } = require('prismarine-physics');
+  const surfaceBlock = Block.fromProperties(surface.name, surface.props, 0);
+  const top = Math.max(...surfaceBlock.shapes.map((shape: number[]) => shape[4]!));
+  const from = { x: -494.37228723784824, y: 99 + top, z: -291.4394734980101 };
+  const world = {
+    getBlock(position: Vec3) {
+      const p = position.floored();
+      const surfaceY = p.x <= -495 ? 99 : 99 - drop * (repeated ? p.x + 495 : 1);
+      const stateId = p.y === surfaceY ? surfaceBlock.stateId : data.blocksByName[p.y < surfaceY ? 'stone' : 'air'].defaultState;
+      const block = Block.fromStateId(stateId, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const { bot, controls, writes } = botAt(from.x, from.y, from.z);
+  Object.assign(bot.entity, { effects: {}, attributes: {}, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false });
+  Object.assign(bot, { version: '1.20.1', jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] }, blockAt: world.getBlock });
+  const looks: number[] = [];
+  bot.look = async (yaw: number, pitch: number) => { looks.push(yaw); bot.entity.yaw = yaw; bot.entity.pitch = pitch; };
+  const physics = Physics(data, world);
+  const timer = setInterval(() => physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot), 50);
+  timer.unref();
+  return { bot, controls, writes, looks, timer, from, to: { x: from.x + 1, y: from.y - drop, z: from.z } };
+}
+
+for (const surface of [
+  { name: 'dirt_path', props: {} },
+  { name: 'oak_slab', props: { type: 'bottom', waterlogged: false } },
+  { name: 'snow', props: { layers: 4 } },
+]) {
+  test(`feet 的显式多格下落保留负坐标和 ${surface.name} 连续落点，真实碰撞形状落稳`, async (t) => {
+    const { bot, controls, writes, timer, to } = continuousBody(2, surface);
+    t.after(() => clearInterval(timer));
+    await adapterWith(bot).moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000, maxDropDown: 2 });
+    assert.ok(Math.hypot(bot.entity.position.x - to.x, bot.entity.position.z - to.z) <= 0.12, `实测 ${bot.entity.position}`);
+    assert.equal(bot.entity.position.y, to.y);
+    assert.equal(bot.entity.onGround, true);
+    assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
+    assert.equal(controls.forward, false);
+    assert.ok(!writes.includes('jump:true'));
+  });
+}
+
+test('feet 默认拒绝多格下落；显式下落上限不扩大上行和水平跳跃能力', async () => {
+  for (const [dy, extra] of [[-2, {}], [2, { maxDropDown: 4 }], [-2, { maxDropDown: 4, horizontalJump: true }]] as const) {
+    const { bot, writes } = botAt(-494.37, 99.9375, -291.44);
+    await assert.rejects(adapterWith(bot).moveTo({ kind: 'feet', x: -493.37, y: 99.9375 + dy, z: -291.44 }, { ...opts(), ...extra }), /NOT_CONFIRMED/);
+    assert.ok(!writes.includes('forward:true'));
+  }
+});
+
+test('连续多格下落取消后松开控制，保留空中实测位置', async () => {
+  const { bot, controls, writes } = botAt(-494.37, 99.9375, -291.44);
+  const controller = new AbortController();
+  const original = bot.setControlState;
+  bot.setControlState = (name: string, value: boolean) => {
+    original(name, value);
+    if (name === 'forward' && value) setTimeout(() => {
+      bot.entity.position = new Vec3(-493.6, 99.2, -291.44);
+      bot.entity.onGround = false;
+      controller.abort();
+    }, 25);
+  };
+  await assert.rejects(adapterWith(bot).moveTo({ kind: 'feet', x: -493.37, y: 97.9375, z: -291.44 }, { ...opts(controller.signal), maxDropDown: 2 }), { name: 'AbortedError' });
+  assert.equal(bot.entity.position.y, 99.2);
+  assert.equal(controls.forward, false);
+  const count = writes.length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(writes.length, count);
+});
+
+for (const drop of [0, -1]) {
+  test(`连续四步 dirt_path ${drop === 0 ? '步行' : '上台阶'}：微调实测越位时不转身，保持落稳`, async (t) => {
+    const { bot, timer, from, looks, writes, controls } = continuousBody(drop, undefined, true);
+    t.after(() => clearInterval(timer));
+    const adapter = adapterWith(bot);
+    for (let step = 1; step <= 4; step++) {
+      const to = { x: from.x + step, y: from.y - drop * step, z: from.z };
+      await adapter.moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000 });
+      assert.ok(Math.hypot(bot.entity.position.x - to.x, bot.entity.position.z - to.z) <= 0.12);
+      assert.equal(bot.entity.position.y, to.y);
+      assert.equal(bot.entity.onGround, true);
+    }
+    assert.equal(looks.length, 4, '每段只定向一次，不为制动后的微调反复转向');
+    assert.ok(looks.every((yaw) => Math.abs(yaw + Math.PI / 2) < 0.01), `朝向 ${looks}`);
+    if (drop === 0) assert.ok(writes.includes('back:true'), '真实越位仍经过后退短脉冲纠正');
+    assert.ok(Object.values(controls).every((pressed) => !pressed));
+  });
+}
+
+test('真实越位的后退微调被取消时释放本次按键且不再转向', async (t) => {
+  const { bot, timer, controls, writes, looks, to } = continuousBody(0);
+  t.after(() => clearInterval(timer));
+  const controller = new AbortController();
+  const original = bot.setControlState;
+  bot.setControlState = (name: string, value: boolean) => {
+    original(name, value);
+    if (name === 'back' && value) setTimeout(() => controller.abort(), 10);
+  };
+  await assert.rejects(adapterWith(bot).moveTo({ kind: 'feet', ...to }, { ...opts(controller.signal), timeoutMs: 6000 }), { name: 'AbortedError' });
+  assert.ok(writes.includes('back:true'));
+  assert.ok(Object.values(controls).every((pressed) => !pressed));
+  const count = writes.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(writes.length, count);
+  assert.equal(looks.length, 1);
+});
+
+test('实测侧向惯性用侧移纠正，保持初始朝向与原目标', async (t) => {
+  const { bot, timer, controls, writes, looks, to } = continuousBody(0);
+  t.after(() => clearInterval(timer));
+  bot.entity.velocity = new Vec3(0, 0, 0.02);
+  await adapterWith(bot).moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000 });
+  assert.ok(writes.includes('left:true'), '面东时向南的惯性应由左移纠正');
+  assert.ok(Math.hypot(bot.entity.position.x - to.x, bot.entity.position.z - to.z) <= 0.12);
+  assert.equal(looks.length, 1);
+  assert.ok(Object.values(controls).every((pressed) => !pressed));
+});
 
 test('没有绑定导航委托时非本地 moveTo 明确失败，不直走或回退旧后端', async () => {
   const { bot } = botAt(0.5, 64, 0.5);

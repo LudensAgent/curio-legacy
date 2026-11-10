@@ -12,7 +12,7 @@ import {
 import type { LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
 import { feetCell } from '../../perception/local.ts';
 import { codeFromError, isAbort, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult } from '../types.ts';
-import { anchorOf, cellReached, feetReached } from './goal.ts';
+import { anchorOf, cellReached, feetReached, goalReached } from './goal.ts';
 import type { NavigationGoal } from './goal.ts';
 import type { PrimitiveProblemKind } from './receipt.ts';
 import { descendTo } from './descend.ts';
@@ -45,6 +45,8 @@ export type SegmentOutcome =
 export type SegmentRequest = {
   /** 本段冻结目标；格目标与连续脚位的完成语义不同。 */
   goal: NavigationGoal;
+  /** 方向推进的临时列按水平距离评估；普通目的地保留三维距离。 */
+  goalMetric?: '3d' | 'horizontal';
   allowed: MoveMode[];
   historical: boolean;
   /** 本段最多执行多少个已确认 transition。 */
@@ -153,9 +155,7 @@ const ladderReached = (to: Vec3Like, point: Vec3Like): boolean =>
 const transitionReached = (transition: LandSearchTransition, point: Vec3Like, onGround: boolean): boolean =>
   transition.kind === 'ladder'
     ? ladderReached(transition.to, point)
-    : transition.kind === 'drop' && transition.drop > 1
-      ? cellReached(transition.to, point, onGround)
-      : feetReached(transition.to, point, onGround);
+    : feetReached(transition.to, point, onGround);
 const centeredXZ = (point: Vec3Like): boolean =>
   Math.abs(point.x - (Math.floor(point.x) + 0.5)) <= 1e-9
   && Math.abs(point.z - (Math.floor(point.z) + 0.5)) <= 1e-9;
@@ -205,11 +205,6 @@ function problemKindOf(data: Record<string, unknown> | undefined): PrimitiveProb
   const kind = (data?.problem as { kind?: unknown } | undefined)?.kind;
   return typeof kind === 'string' ? kind as PrimitiveProblemKind : undefined;
 }
-
-const BLOCKING_PROBLEMS = new Set<PrimitiveProblemKind>([
-  'TARGET_BLOCKED', 'HEAD_BLOCKED', 'UNSUPPORTED_STEP_HEIGHT', 'TARGET_LIQUID',
-  'UNSUPPORTED_ENVIRONMENT', 'NOT_ADJACENT',
-]);
 
 /** 非 BLOCKED 的搜索终态 → 段结局；NO_PATH_IN_MEMORY 不冒充已观测阻挡。 */
 function outcomeOfStatus(status: LandSearchStatus): SegmentOutcome {
@@ -294,6 +289,7 @@ async function runNavigationSegmentInner(
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
     goal: request.goal, allowed: request.allowed, maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
+    ...(request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
     ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
     ...(request.searchLimits?.maxNodes === undefined ? {} : { maxNodes: request.searchLimits.maxNodes }),
     ...(request.searchLimits?.maxEdges === undefined ? {} : { maxEdges: request.searchLimits.maxEdges }),
@@ -702,9 +698,7 @@ async function runNavigationSegmentInner(
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限耗尽：已执行 ${executed}/${planned.length} 段` });
     }
     const current = ctx.adapter.state();
-    const physicalTarget = transition.kind === 'drop' && transition.drop > 1
-      ? { x: Math.floor(transition.to.x) + 0.5, y: transition.to.y, z: Math.floor(transition.to.z) + 0.5 }
-      : transition.to;
+    const physicalTarget = transition.to;
     // 授权按真实身体起点和将要到达的物理 endpoint 检查；计划点不能代替实测。
     if (lateralOf(current.pos) > corridorLimit || lateralOf(physicalTarget) > corridorLimit) {
       return receipt('lateral_authorization', {
@@ -739,7 +733,6 @@ async function runNavigationSegmentInner(
     if (Date.now() >= request.deadline) {
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
     }
-    let step: SkillResult | null = null;
     let actionError: unknown = null;
     if (transition.kind === 'jump') {
       const remaining = request.deadline - Date.now();
@@ -788,42 +781,18 @@ async function runNavigationSegmentInner(
         if (isAbort(error)) return cancelledHere(index, transition, current.pos);
         actionError = error;
       }
-    } else if (transition.kind === 'drop' && transition.drop > 1 && request.goal.kind === 'feet') {
-      // 连续精确目标不能被多格下落的格心落点执行；前面已确认的段保留。
-      return receipt('unsupported', {
-        stopCode: 'unsupported_drop_endpoint',
-        detail: `第 ${index + 1} 段是 ${transition.drop.toFixed(2)} 格下落，现有 descend_to 只按目标格心落地，不能保证精确连续 endpoint；没有执行这段`,
-        failureCode: 'BAD_ARGS', stepIndex: index, transition,
-      });
-    } else if (transition.kind === 'drop' && transition.drop > 1) {
-      // descend_to 只按目标格心落地；只有计划 endpoint 就是该格心时，单步复验才证明了
-      // 实际将要发生的下落。非格心起点不能靠格心落点冒充连续 endpoint。
-      const centered = Math.abs(transition.to.x - (Math.floor(transition.to.x) + 0.5)) <= 1e-9
-        && Math.abs(transition.to.z - (Math.floor(transition.to.z) + 0.5)) <= 1e-9;
-      if (!centered) {
-        return receipt('unsupported', {
-          stopCode: 'unsupported_centered_drop',
-          detail: `第 ${index + 1} 段是多格下落，但计划 endpoint 不是目标格心；descend_to 的格心落点无法被连续复验，未执行`,
-          failureCode: 'BAD_ARGS', stepIndex: index, transition,
-        });
-      }
-      const to = cell(transition.to);
-      const validated = validateSkill(descendTo, {
-        target: { x: to.x, y: transition.to.y, z: to.z },
-        ...(request.allowUnknownCorridor ? { allowUnknownCorridor: true } : {}),
-      }, ctx.adapter);
-      if (!validated.ok) {
-        return receipt('unsupported', { stopCode: 'invalid_step', detail: `descend_to 参数无效：${validated.error}`, failureCode: 'BAD_ARGS', stepIndex: index, transition });
-      }
-      // nested 动作也必须遵守本段的绝对期限，不能沿用更宽的 ctx.deadline。
-      const nestedCtx = { ...ctx, deadline: Math.min(ctx.deadline, request.deadline) };
-      try {
-        step = await runSkill(nestedCtx, descendTo, validated.args);
-      } catch (error) {
-        if (!isAbort(error)) throw error;
-        return cancelledHere(index, transition, current.pos);
-      }
     } else {
+      const drop = current.pos.y - transition.to.y;
+      if (transition.kind === 'drop' && transition.drop > 1) {
+        // 保留原多格下落的保守生命余量条件；路线几何已用当前实测起点复验。
+        const estimatedDamageUpperBound = Math.ceil(drop) + 2;
+        if (!Number.isFinite(current.hp) || current.hp - estimatedDamageUpperBound < 4) {
+          return receipt('physical_failure', {
+            stopCode: 'step_failed', failureCode: 'LOW_HP', stepIndex: index, transition,
+            detail: `当前生命 ${current.hp} 不足以保守承受这次约 ${drop.toFixed(1)} 格落差并保留余量`,
+          });
+        }
+      }
       const remaining = request.deadline - Date.now();
       if (remaining < 1) {
         return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
@@ -835,6 +804,7 @@ async function runNavigationSegmentInner(
             signal: ctx.signal,
             // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。
             timeoutMs: Math.min(6000, Math.floor(remaining)),
+            ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
           },
         );
@@ -888,72 +858,8 @@ async function runNavigationSegmentInner(
       };
     }
 
-    if (step !== null && step.status !== 'succeeded') {
-      const stopped = { ...ctx.adapter.state().pos };
-      // 多格下落由 descend_to 落到格心：格目标的完成谓词按格验收；连续目标已在上面拒绝。
-      const atTarget = transitionReached(transition, stopped, ctx.adapter.state().onGround);
-      const partial = {
-        from: { ...current.pos }, to: stopped,
-        horizontal: Math.hypot(stopped.x - current.pos.x, stopped.z - current.pos.z),
-        vertical: Math.abs(stopped.y - current.pos.y),
-        atTarget,
-      };
-      if (partial.atTarget) {
-        executed += 1;
-        const path = partial.horizontal + partial.vertical;
-        confirmed.push({
-          transition, measuredFrom: partial.from, measuredTo: partial.to,
-          measuredHorizontal: partial.horizontal, measuredVertical: partial.vertical, pathLength: path,
-        });
-        pathLength += path;
-      }
-      if (step.status === 'cancelled') {
-        return {
-          ...receipt('cancelled', { stopCode: 'step_failed', detail: step.summary, stepIndex: index, transition, partialDisplacement: partial }),
-          measuredEnd: stopped,
-        };
-      }
-      const kind = problemKindOf(step.data);
-      const outcome: SegmentOutcome = kind !== undefined && BLOCKING_PROBLEMS.has(kind) ? 'blocked'
-        : kind === 'UNKNOWN_GEOMETRY' ? 'unknown_boundary' : 'physical_failure';
-      const { local: _local, around: _around, ...nestedData } = (step.data ?? {}) as Record<string, unknown>;
-      if (lateralOf(stopped) > corridorLimit) {
-        return {
-          ...receipt('lateral_authorization', {
-            stopCode: 'lateral_authorization',
-            partialDisplacement: partial,
-            detail: `第 ${index + 1} 段在实测横向 ${lateralOf(stopped).toFixed(2)} 格处停下，超出授权 ${request.corridor?.maxLateral ?? 0} 格；不再发出后续动作`,
-            nested: { code: step.failureCode ?? 'ERROR', summary: step.summary, data: nestedData },
-            stepIndex: index, transition, failureCode: 'PATH_NOT_FOUND',
-          }),
-          measuredEnd: stopped,
-        };
-      }
-      return {
-        ...receipt(outcome, {
-          stopCode: 'step_failed',
-          partialDisplacement: partial,
-          detail: `第 ${index + 1} 段 ${transition.kind} 停下：${step.summary}${partial.horizontal > 0.05 || partial.vertical > 0.05 ? `；实测已发生水平 ${partial.horizontal.toFixed(2)} / 垂直 ${partial.vertical.toFixed(2)} 格位移，位置保留` : ''}`,
-          nested: { code: step.failureCode ?? 'ERROR', summary: step.summary, data: nestedData },
-          stepIndex: index, transition,
-          ...(step.failureCode === undefined ? {} : { failureCode: step.failureCode }),
-          ...(kind === undefined ? {} : { problemKind: kind }),
-          ...(kind === 'TARGET_BLOCKED' || kind === 'HEAD_BLOCKED'
-            ? {
-                blocker: {
-                  index, transition, status: 'BLOCKED', problem: kind,
-                  ...(step.data?.targetCell === undefined ? { cell: { ...cell(transition.to) } } : { cell: step.data.targetCell as Vec3Like }),
-                  ...(step.data?.remediation === undefined ? {} : { remediation: step.data.remediation }),
-                },
-              }
-            : {}),
-        }),
-        measuredEnd: stopped,
-      };
-    }
-
     const arrived = ctx.adapter.state();
-    // 多格下落的 descend_to 按格落地；其余 transition 必须连续到位。
+    // 所有地面 transition 都必须在原计划连续端点落稳，格内位置不能顶替它。
     const reached = transitionReached(transition, arrived.pos, arrived.onGround);
     if (!reached) {
       return {
@@ -994,6 +900,9 @@ async function runNavigationSegmentInner(
     }
     // 与既有导航回执一致：每确认一步就上报进度并让出事件循环。
     ctx.progress(executed / Math.max(1, planned.length), `segment ${executed}/${planned.length}`);
+    if (request.goal.arrival !== undefined && goalReached(request.goal, arrived.pos, arrived.onGround)) {
+      return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点满足原目标的到达范围` });
+    }
   }
 
   if (truncated) {
@@ -1024,7 +933,7 @@ function directDropCancelled(
   const measuredHorizontal = Math.hypot(end.x - dropStart.x, end.z - dropStart.z);
   const measuredVertical = Math.abs(end.y - dropStart.y);
   // descend_to 按目标格心落地，计划 transition 的 to 是该格坐标；取消后仍要用
-  // 与多格下落普通失败分支相同的“实测脚在目标格且着地”谓词验收。
+  // 与直接下落成功路径相同的“实测脚在目标格且着地”谓词验收。
   const atTarget = cellReached(transition.to, end, onGround);
   return {
     waypoint: { ...request.goal.requested }, outcome: 'cancelled', measuredStart: { ...start }, measuredEnd: { ...end },
