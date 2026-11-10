@@ -62,7 +62,7 @@
   "dependencies": {
     "@vectorize-io/hindsight-client": "1.1.0",
     "better-sqlite3": "^12.11.1",
-    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-9e9ff07.tgz",
+    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-1e4fa89.tgz",
     "curio-observer": "file:../CurioObserver",
     "gridstack": "12.3.3",
     "minecraft-data": "^3.60.0",

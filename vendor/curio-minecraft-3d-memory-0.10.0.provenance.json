@@ -3,24 +3,35 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.10.0"
   },
-  "sourceHEAD": "0737f300c6cea3831d0e2dc1ff349257fa536be8",
-  "artifactSHA256": "a2ddad1e811284bacd13cc0a9072eba097bafe214fcce84be7acdab491c0a19c",
-  "npmIntegrity": "sha512-HIeOAusSBpKGrbnIEDC0IsoWVAmvnHa3qRSqvhaoxpC+2yqcVcLxmwbUN0bnQrAn3+Shv1bMusHpbaCKp1Kj+w==",
+  "sourceHEAD": "1e4fa89df667ec0072096ce7868d19f4b3febdb0",
+  "artifactSHA256": "4ac9f3a94871ee26806cd060e92e66bcd97b46aef68277e3722e0cf1b3379f2b",
+  "npmIntegrity": "sha512-7qY++kD0m9VzVkYLT84QqGowODnzngW+EUT6WeRaxxnMjU+m7OQVEb+XiAF8VeWTO7buOvVv5D80nToo8tq2kQ==",
+  "artifact": "curio-minecraft-3d-memory-1e4fa89.tgz",
+  "artifactSize": 718071,
   "sourceBinding": {
     "clean": true,
-    "head": "0737f300c6cea3831d0e2dc1ff349257fa536be8",
-    "note": "Package inputs were clean. A pre-existing unstaged docs/spatial-memory-library-design.md change is not a build/package input."
+    "head": "1e4fa89df667ec0072096ce7868d19f4b3febdb0",
+    "branch": "feat/dirty-batch-rotation",
+    "base": "9e9ff07 (B8 ladder/entry/jump library line)",
+    "note": "Packed from the clean feat/dirty-batch-rotation worktree at sourceHEAD: one dirty-batch fairness commit on top of 9e9ff07. node_modules was junctioned from the main library checkout; the package version stays 0.10.0."
   },
   "verification": {
-    "unitTests": {
+    "build": {
       "status": "PASS",
-      "command": "npx vitest run tests",
-      "passed": 968,
-      "failed": 0
+      "command": "npm run build"
     },
-    "typecheck": "PASS",
-    "consumerRuntime": "NOT_RUN",
-    "consumerNodeNextTypes": "NOT_RUN"
+    "typecheck": {
+      "status": "PASS",
+      "command": "tsc -p tsconfig.build.json --noEmit"
+    },
+    "focusedTests": {
+      "status": "PASS",
+      "command": "npx vitest run tests/spatial-checkpoint-batch-backlog.test.ts tests/spatial-checkpoint-incremental.test.ts (36 passed)"
+    },
+    "fullTests": {
+      "status": "NOT_RUN",
+      "command": "npx vitest run"
+    }
   },
-  "notes": "Adds opaque metadata/externalRef on PathFragment, durable/metadata on SpatialNode, SQLite schema v7, and unattributed placed-ledger imports. Real Minecraft/mineflayer integration was not run for this artifact."
+  "notes": "Round-robin bounded dirty-batch selection so a persistently re-dirtied head cannot starve the tail; per-key version confirmation and removed-section semantics unchanged."
 }
