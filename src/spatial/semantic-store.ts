@@ -264,6 +264,14 @@ export class SpatialSemanticStore {
   private semanticIds: Set<string> | null = null;
   private semanticIdsAt = 0;
   /**
+   * Incremented only when the periodic external scan discovers a different
+   * semantic-id set. Ordinary topology revisions (walk nodes, edge writes) do
+   * not invalidate the resource index; this class updates it by node id.
+   */
+  private semanticIdsVersion = 0;
+  /** Full resource-index rebuilds; own node writes update buckets without one. */
+  private resourceIndexRebuilds = 0;
+  /**
    * 按拓扑 revision 缓存的语义节点拷贝。getNode 每次都深拷贝 metadata；感知一帧里会按视野方块逐格
    * 调 landmarks()/addLandmark()，不缓存就是「视野方块数 × 语义节点数」次深拷贝（下界岩浆多时
    * 每次感知 100–200ms，画面周期性顿一下）。任何写入都会推进 revision，缓存随之失效。
@@ -272,44 +280,89 @@ export class SpatialSemanticStore {
   private nodesCache: { revision: number; nodes: SpatialNode[] } | null = null;
   /**
    * Resource anchors projected by 16³ Section bucket for bounded near queries.
-   * Rebuilt only when the topology revision changes; it is a derived index over
-   * persisted/current nodes, never a second authority over their facts.
+   * Its authority is the topology nodes. This class updates one id at a time on
+   * its own writes; a full rebuild happens only when the periodic external scan
+   * finds a different semantic-id set. Never a second authority over node facts.
    */
   private resourceIndex: {
-    revision: number;
+    semanticIdsVersion: number;
     buckets: Map<string, string[]>;
     nodes: Map<string, SpatialNode>;
   } | null = null;
   private getResourceIndex(): {
-    revision: number;
+    semanticIdsVersion: number;
     buckets: Map<string, string[]>;
     nodes: Map<string, SpatialNode>;
   } {
-    const revision = this.session.topology.revision;
-    if (this.resourceIndex?.revision === revision) return this.resourceIndex;
+    this.refreshSemanticIds();
+    if (this.resourceIndex?.semanticIdsVersion === this.semanticIdsVersion) return this.resourceIndex;
     const buckets = new Map<string, string[]>();
     const nodes = new Map<string, SpatialNode>();
-    for (const node of this.allNodes()) {
-      if (node.tag !== 'resource' || node.gone || node.location.kind !== 'exact') continue;
-      const p = node.location.pos;
-      const key = `${node.dim}|${Math.floor(p.x / 16)}|${Math.floor(p.y / 16)}|${Math.floor(p.z / 16)}`;
-      const list = buckets.get(key);
-      if (list === undefined) buckets.set(key, [node.id]);
-      else list.push(node.id);
+    for (const id of this.semanticIds ?? []) {
+      const node = this.session.topology.getNode(id);
+      if (node === null || !this.isResourceAnchor(node)) continue;
+      this.addResourceBucket(buckets, node);
       nodes.set(node.id, node);
     }
-    this.resourceIndex = { revision, buckets, nodes };
+    this.resourceIndex = { semanticIdsVersion: this.semanticIdsVersion, buckets, nodes };
+    this.resourceIndexRebuilds += 1;
     return this.resourceIndex;
+  }
+  private refreshSemanticIds(): void {
+    const topology = this.session.topology;
+    if (this.semanticIds !== null && Date.now() - this.semanticIdsAt <= SEMANTIC_RESCAN_MS) return;
+    const next = new Set(allNodes(topology)
+      .filter((node) => node.tag !== undefined || metaOf(node) !== undefined)
+      .map((node) => node.id));
+    const previous = this.semanticIds;
+    const changed = previous === null
+      || previous.size !== next.size
+      || [...next].some((id) => !previous.has(id));
+    this.semanticIds = next;
+    this.semanticIdsAt = Date.now();
+    if (changed) {
+      this.semanticIdsVersion += 1;
+      this.nodesCache = null;
+    }
+  }
+  private isResourceAnchor(node: SpatialNode): boolean {
+    return node.tag === 'resource' && !node.gone && node.location.kind === 'exact';
+  }
+  private resourceBucketKey(node: SpatialNode): string {
+    if (node.location.kind !== 'exact') return '';
+    const p = node.location.pos;
+    return `${node.dim}|${Math.floor(p.x / 16)}|${Math.floor(p.y / 16)}|${Math.floor(p.z / 16)}`;
+  }
+  private addResourceBucket(buckets: Map<string, string[]>, node: SpatialNode): void {
+    const key = this.resourceBucketKey(node);
+    const list = buckets.get(key);
+    if (list === undefined) buckets.set(key, [node.id]);
+    else list.push(node.id);
+  }
+  private applyResourceIndexNode(id: string, node: SpatialNode | null): void {
+    const index = this.resourceIndex;
+    if (index === null) return;
+    const previous = index.nodes.get(id);
+    if (previous !== undefined) {
+      const key = this.resourceBucketKey(previous);
+      const list = index.buckets.get(key);
+      if (list !== undefined) {
+        const at = list.indexOf(id);
+        if (at >= 0) list.splice(at, 1);
+        if (list.length === 0) index.buckets.delete(key);
+      }
+      index.nodes.delete(id);
+    }
+    if (node !== null && this.isResourceAnchor(node)) {
+      this.addResourceBucket(index.buckets, node);
+      index.nodes.set(id, node);
+    }
   }
   private allNodes(): SpatialNode[] {
     const topology = this.session.topology;
-    if (this.semanticIds === null || Date.now() - this.semanticIdsAt > SEMANTIC_RESCAN_MS) {
-      this.semanticIds = new Set(allNodes(topology).filter((node) => node.tag !== undefined || metaOf(node) !== undefined).map((node) => node.id));
-      this.semanticIdsAt = Date.now();
-      this.nodesCache = null;
-    }
+    this.refreshSemanticIds();
     if (this.nodesCache?.revision !== topology.revision) {
-      const ids = this.semanticIds;
+      const ids = this.semanticIds!;
       const nodes = [...ids].sort().flatMap((id) => {
         const node = topology.getNode(id);
         if (!node) { ids.delete(id); return []; }
@@ -325,6 +378,7 @@ export class SpatialSemanticStore {
     this.session.topology.saveNode(node);
     this.semanticIds?.add(node.id);
     this.nodesCache = null;
+    this.applyResourceIndexNode(node.id, node);
   }
   private allFragments(): PathFragment[] { return allFragments(this.session.history); }
 
@@ -378,11 +432,11 @@ export class SpatialSemanticStore {
     const existing = this.session.topology.getNode(node.id);
     if (!existing) { this.saveTracked(node); return; }
     if (existing.source !== node.source) {
-      this.session.topology.forgetNode(node.id);
+      this.forgetNode(node.id);
       this.saveTracked(node);
       return;
     }
-    this.session.topology.updateNode(node.id, {
+    this.updateNode(node.id, {
       kind: node.kind,
       tag: node.tag,
       label: node.label,
@@ -395,7 +449,16 @@ export class SpatialSemanticStore {
   }
 
   private updateNode(id: string, changes: Parameters<TopologyStore['updateNode']>[1]) {
-    return this.session.topology.updateNode(id, changes);
+    const result = this.session.topology.updateNode(id, changes);
+    if (result.status === 'updated') this.applyResourceIndexNode(id, this.session.topology.getNode(id));
+    return result;
+  }
+
+  private forgetNode(id: string): void {
+    this.session.topology.forgetNode(id);
+    this.semanticIds?.delete(id);
+    this.nodesCache = null;
+    this.applyResourceIndexNode(id, null);
   }
 
   private mergeMeta(node: SpatialNode, patch: Partial<CurioMeta>): CurioMeta {
@@ -507,7 +570,7 @@ export class SpatialSemanticStore {
       delete next.view;
       this.updateNode(node.id, { metadata: metadata(next) });
     } else {
-      this.session.topology.forgetNode(node.id);
+      this.forgetNode(node.id);
     }
   }
 
@@ -517,7 +580,7 @@ export class SpatialSemanticStore {
       - ((metaOf(b)?.record as { ts?: number } | undefined)?.ts ?? b.observedAt ?? 0);
     const forgetOldest = (list: SpatialNode[]) => {
       const oldest = [...list].sort(byTs)[0];
-      if (oldest) this.session.topology.forgetNode(oldest.id);
+      if (oldest) this.forgetNode(oldest.id);
     };
     for (const [label, group] of Object.entries(nodes.filter((n) => n.tag === 'discovery').reduce<Record<string, SpatialNode[]>>((groups, node) => {
       (groups[node.label ?? ''] ??= []).push(node);
@@ -536,7 +599,7 @@ export class SpatialSemanticStore {
     ];
     for (const tier of tiers) {
       const candidate = nodes.filter(tier).sort(byTs)[0];
-      if (candidate) { this.session.topology.forgetNode(candidate.id); return; }
+      if (candidate) { this.forgetNode(candidate.id); return; }
     }
   }
 
@@ -552,6 +615,7 @@ export class SpatialSemanticStore {
         this.updateNode(live.id, { metadata: metadata({ ...meta, record: { ...meta.record, now, ts: observedAt } }) });
       }
       this.session.topology.markGone(live.id, evidence);
+      this.applyResourceIndexNode(live.id, this.session.topology.getNode(live.id));
       return;
     }
     const id = `gone:${this.worldId}:${dim}:${keyOf(at)}:${label}`;
@@ -559,7 +623,10 @@ export class SpatialSemanticStore {
     const record = { worldId: this.worldId, dim, label, pos: at, now, ts: observedAt };
     if (existing) {
       this.updateNode(id, { observedAt, metadata: metadata({ v: 2, type: 'gone', record: jsonRecord(record) }) });
-      if (!existing.gone) this.session.topology.markGone(id, { sessionId: this.sessionId, observedAt: Math.max(observedAt, existing.observedAt ?? 0), source: 'program', reason: now });
+      if (!existing.gone) {
+        this.session.topology.markGone(id, { sessionId: this.sessionId, observedAt: Math.max(observedAt, existing.observedAt ?? 0), source: 'program', reason: now });
+        this.applyResourceIndexNode(id, this.session.topology.getNode(id));
+      }
       return;
     }
     this.saveTracked({
@@ -579,7 +646,7 @@ export class SpatialSemanticStore {
     const gone = this.allNodes().filter((node) => this.hasType(node, 'gone') && node.gone);
     if (gone.length > GONE_CAP) {
       const oldest = gone.sort((a, b) => (a.goneAt ?? 0) - (b.goneAt ?? 0))[0];
-      if (oldest) this.session.topology.forgetNode(oldest.id);
+      if (oldest) this.forgetNode(oldest.id);
     }
   }
 
@@ -603,7 +670,7 @@ export class SpatialSemanticStore {
     if (this.hasType(node, 'container') || this.hasType(node, 'furnace')) {
       this.dropLandmarkView(node);
     } else {
-      this.session.topology.forgetNode(id);
+      this.forgetNode(id);
     }
     return true;
   }
@@ -619,7 +686,7 @@ export class SpatialSemanticStore {
     }
     if (this.hasType(node, 'container')) this.containerLedgerStore.forgetChest(node.dim, pos);
     if (this.hasType(node, 'furnace')) this.containerLedgerStore.forgetFurnace(node.dim, pos);
-    this.session.topology.forgetNode(id);
+    this.forgetNode(id);
     return view ?? null;
   }
 
@@ -636,7 +703,7 @@ export class SpatialSemanticStore {
       return this.landmarkView(this.session.topology.getNode(near.id)!)!;
     }
     const herds = this.allNodes().filter((node) => !node.gone && node.tag === 'herd').sort((a, b) => (a.observedAt ?? 0) - (b.observedAt ?? 0));
-    if (herds.length >= HERD_CAP) this.session.topology.forgetNode(herds[0]!.id);
+    if (herds.length >= HERD_CAP) this.forgetNode(herds[0]!.id);
     const id = shortId('herd_');
     this.saveTracked({
       id, kind: 'place', source: 'program', tag: 'herd', label, worldId: this.worldId, dim,
@@ -655,11 +722,18 @@ export class SpatialSemanticStore {
    * full world scan. It never claims completeness: an empty near query only means
    * no recorded anchor matched.
    */
-  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number } {
+  resourceIndexStatus(): {
+    complete: false;
+    reason: string;
+    resourceAnchors: number;
+    /** Full rebuilds since construction; per-node writes do not increment this. */
+    rebuilds: number;
+  } {
     return {
       complete: false,
       reason: 'derived from recorded resource anchors; this is not a complete world resource scan',
       resourceAnchors: this.getResourceIndex().nodes.size,
+      rebuilds: this.resourceIndexRebuilds,
     };
   }
 
@@ -698,7 +772,7 @@ export class SpatialSemanticStore {
     if (!near && this.landmarks().length >= LANDMARK_CAP) {
       const disposable = this.landmarks().filter((landmark) => ['herd', 'resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.ts - b.ts)[0];
       if (!disposable) throw new Error('地标档案已满；保留所有重要地点，无法新增基地');
-      this.session.topology.forgetNode(disposable.id);
+      this.forgetNode(disposable.id);
     }
     if (near) {
       const node = this.session.topology.getNode(near.id)!;
@@ -828,13 +902,13 @@ export class SpatialSemanticStore {
     const node = this.containerNodeAt(dim, pos);
     if (!node) return;
     const meta = metaOf(node);
-    if (!meta) { this.session.topology.forgetNode(node.id); return; }
+    if (!meta) { this.forgetNode(node.id); return; }
     if (meta.view) {
       const types = meta.types?.filter((type) => type !== 'container');
       const next: CurioMeta = { ...meta, types, type: types?.[0] ?? 'landmark' };
       this.updateNode(node.id, { metadata: metadata(next) });
     } else {
-      this.session.topology.forgetNode(node.id);
+      this.forgetNode(node.id);
     }
   }
 
@@ -885,7 +959,7 @@ export class SpatialSemanticStore {
       this.containerLedgerStore.forgetFurnace(rec.dim, rec.pos);
       if (!node) return;
       const meta = metaOf(node);
-      if (!meta?.view) { this.session.topology.forgetNode(node.id); return; }
+      if (!meta?.view) { this.forgetNode(node.id); return; }
       this.updateNode(node.id, { metadata: metadata({ ...meta, types: meta.types?.filter((type) => type !== 'furnace'), type: meta.types?.find((type) => type !== 'furnace') ?? 'landmark' }) });
       return;
     }
@@ -914,7 +988,7 @@ export class SpatialSemanticStore {
       && dist3(candidate.location.kind === 'exact' ? candidate.location.pos : candidate.location.center, pos) <= 2);
     if (!node) return;
     const meta = metaOf(node);
-    if (!meta?.view) { this.session.topology.forgetNode(node.id); return; }
+    if (!meta?.view) { this.forgetNode(node.id); return; }
     this.updateNode(node.id, { metadata: metadata({ ...meta, types: meta.types?.filter((type) => type !== 'furnace'), type: meta.types?.find((type) => type !== 'furnace') ?? 'landmark' }) });
   }
 
@@ -971,7 +1045,7 @@ export class SpatialSemanticStore {
     const now = Date.now();
     const records = this.hazardRecords();
     for (const { node, record } of records) {
-      if (!effectiveHazard(record, now - 40 * 60_000)) this.session.topology.forgetNode(node.id);
+      if (!effectiveHazard(record, now - 40 * 60_000)) this.forgetNode(node.id);
     }
     const live = this.hazardRecords();
     const old = live.find(({ record }) => record.dim === h.dim && record.kind === h.kind
@@ -1004,7 +1078,7 @@ export class SpatialSemanticStore {
     const hazards = this.hazardRecords();
     if (hazards.length > HAZARD_CAP) {
       const oldest = hazards.sort((a, b) => a.record.ts - b.record.ts)[0];
-      if (oldest) this.session.topology.forgetNode(oldest.node.id);
+      if (oldest) this.forgetNode(oldest.node.id);
     }
     return clone(hazard);
   }

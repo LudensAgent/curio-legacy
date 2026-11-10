@@ -45,6 +45,22 @@ test('采集看不见目标时，说出长期记得的矿点，不再说"记忆�
   } finally { memory.close(); }
 });
 
+test('远处有矿但不在 256 格查询内时，不声称长期记忆里没有', async () => {
+  const w = new TestWorld();
+  const memory = new WorldMemory(null);
+  memory.setWorld(w.state().worldId);
+  // Far outside the bounded near-memory query used by gather.
+  memory.addLandmark('resource', 'iron_ore', 'overworld', { x: 1000, y: 56, z: 0 });
+  const ctx = makeCtx(w, { memory });
+  try {
+    const r = await gather.run(ctx, { block: 'iron_ore', count: 2 } as any);
+    assert.equal(r.status, 'failed');
+    assert.doesNotMatch(r.summary, /长期记忆里也没记过/);
+    assert.match(r.summary, /附近 256 格内也没记过哪里有 iron_ore/);
+    assert.match(r.summary, /更远处未查询，不代表其他地点没有/);
+  } finally { memory.close(); }
+});
+
 test('回想：中文说"挖铁"也能想起记下的铁矿点', () => {
   const memory = memoryWithOres('default');
   const r = recallLocal('下矿挖铁，凑够粗铁', { self: new SelfModel(null), memory });

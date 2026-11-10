@@ -575,7 +575,7 @@ export class WorldMemory {
   }
 
   /** 资源索引只是已记录锚点的派生投影；complete=false，不是全图资源结论。 */
-  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number } {
+  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number; rebuilds: number } {
     return this.semantic.resourceIndexStatus();
   }
 

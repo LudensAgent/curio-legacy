@@ -287,13 +287,16 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         const ownNote = ownSkipped.size ? `；另有 ${ownSkipped.size} 块是自己房子上的，没拆（拆了还得补）` : '';
         const manMadeNote = manMade ? `；其中 ${manMade} 块${MAN_MADE_NOTE}` : '';
         const manMadeCaveat = manMade ? `采集到的 ${manMade} 块 ${args.block} 是人造建材，可能是村庄或别人房子的一部分（不是自然地形，也不是你的矿道）；拆了可能破坏建筑，拆不拆你自己定` : undefined;
-        // 眼前看不见，但长期记着别处有：说出在哪（去不去由心智定）；“记忆里没有”只在真没记过时才说
+        // 眼前看不见时只查询附近 256 格：不能说“长期记忆里没记过”，因为更远处
+        // 的资源没有进入本次查询。否定结论必须写明本次覆盖半径和未知范围。
         const spots = names.some((n) => isResourceBlock(n))
           ? oreSpotsNear(ctx.memory.resourceLandmarksAround(s.dim, s.pos, 256), { worldId: s.worldId, dim: s.dim, pos: s.pos }, { only: names, excludeWithin: 6 }).slice(0, 3)
           : [];
         const remembered = spots.length
           ? `；不过记得别处有 ${args.block}：${spots.map((o) => o.text).join('；')}——要去就先用 travel_to 走到跟前再 gather`
-          : !unconfirmed.length && isResourceBlock(args.block) ? `；长期记忆里也没记过哪里有 ${args.block}` : '';
+          : !unconfirmed.length && isResourceBlock(args.block)
+            ? `；附近 256 格内也没记过哪里有 ${args.block}（更远处未查询，不代表其他地点没有）`
+            : '';
         return dug > 0
           ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) }, manMadeCaveat)
           : fail('NOT_FOUND', skipped

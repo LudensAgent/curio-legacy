@@ -39,6 +39,25 @@ test('resource index answers near/name queries from Section buckets and tracks u
   assert.equal(reopened.resourceLandmarksAround(D, at(0, 64, 0), 25).length, 3);
 });
 
+test('resource index updates one source cell without a global rebuild', () => {
+  const { memory } = semanticMemory(`${W}-incremental`);
+  memory.addLandmark('resource', 'iron_ore', D, at(0, 64, 0), 1);
+  const first = memory.resourceIndexStatus();
+  assert.equal(first.resourceAnchors, 1);
+
+  memory.addLandmark('resource', 'iron_ore', D, at(20, 64, 0), 1);
+  memory.addLandmark('resource', 'coal_ore', D, at(0, 64, 20), 1);
+  assert.equal(memory.resourceLandmarksAround(D, at(0, 64, 0), 25).length, 3);
+  assert.equal(memory.resourceIndexStatus().rebuilds, first.rebuilds,
+    'own writes update buckets without rebuilding the whole resource index');
+
+  memory.markGone('iron_ore', D, at(0, 64, 0), 'stone');
+  assert.equal(memory.resourceLandmarksAround(D, at(0, 64, 0), 25)
+    .some((landmark) => landmark.label === 'iron_ore' && landmark.pos.x === 0), false);
+  assert.equal(memory.resourceIndexStatus().rebuilds, first.rebuilds,
+    'a gone source cell is removed in place, not by rebuilding every bucket');
+});
+
 test('resource index rejects invalid radii and does not claim completeness', () => {
   const { memory } = semanticMemory(W);
   assert.throws(() => memory.resourceLandmarksAround(D, at(0, 64, 0), -1), /radius/);
