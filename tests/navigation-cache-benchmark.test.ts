@@ -268,8 +268,14 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
     const cold = await navigateLeg('cold-outbound', shared, adapter, { x: X_MAX, y: 64, z: 0 }, {
       checkpointAfterCalls: 3,
     });
+    assert.equal(cold.resultStatus, 'succeeded', `冷读 512 格应到达：${cold.stopReasons.join(',')}`);
+    assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [X_MAX, 64, 0], '冷读到达须满足原目标脚格');
     const warmReturn = await navigateLeg('warm-return', shared, adapter, { x: 0, y: 64, z: 0 });
+    assert.equal(warmReturn.resultStatus, 'succeeded', `热缓存返程应到达：${warmReturn.stopReasons.join(',')}`);
+    assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [0, 64, 0], '热缓存返程须满足原目标脚格');
     const coldAgain = await navigateLeg('cross-cold-outbound', shared, adapter, { x: X_MAX, y: 64, z: 0 });
+    assert.equal(coldAgain.resultStatus, 'succeeded', `再次跨冷区应到达：${coldAgain.stopReasons.join(',')}`);
+    assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [X_MAX, 64, 0], '再次跨冷区须满足原目标脚格');
 
     // 相关体素变化：把返回路径上的一格改成石头，重新规划并观察搜索/加载成本。
     const changed = { x: X_MAX - 4, y: 64, z: 0 };
@@ -278,6 +284,10 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
     const replan = await navigateLeg('after-voxel-change', shared, adapter, { x: X_MAX - 8, y: 64, z: 0 }, {
       maxCalls: 8,
     });
+    assert.equal(replan.stopReasons.at(-1), 'UNKNOWN_BOUNDARY', `侧路未知时应停止：${replan.stopReasons.join(',')}`);
+    assert.notEqual(replan.resultStatus, 'succeeded', '新增阻挡后不能虚报到达');
+    assert.ok(Math.floor(adapter.pos.x) > changed.x, '实测脚格必须留在新增石块东侧，不能越过阻挡');
+    assert.deepEqual([adapter.pos.y, Math.floor(adapter.pos.z)], [64, 0], '未观察的侧路不能成为执行绕行');
 
     const summary = {
       finalX: Math.floor(adapter.pos.x),
@@ -285,7 +295,6 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
       memory: process.memoryUsage(),
     };
     console.log(`CACHE_BENCH ${JSON.stringify(summary)}`);
-    assert.equal(cold.resultStatus, 'succeeded', `冷读 512 格应到达：${cold.stopReasons.join(',')}`);
     assert.ok(cold.transitions >= 500, `冷读应执行几乎整段：${cold.transitions}`);
     assert.ok(cold.loadSections > 0, '冷读必须真实加载已保存页面');
     assert.ok(warmReturn.hitSections > 0 || coldAgain.hitSections > 0, '再次访问应命中已有驻留页面');
