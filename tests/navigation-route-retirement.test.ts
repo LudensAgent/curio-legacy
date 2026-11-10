@@ -98,7 +98,8 @@ test('travel_to 只沿体素证据移动，不查询 historyRoute/fragments', as
   assert.equal(r.data?.backend, 'voxel_astar');
   assert.ok(adapter.actions.some((a) => a.startsWith('moveTo:feet')));
   assert.ok(!adapter.actions.some((a) => /^moveTo:(xz|near|advance)/.test(a)));
-  assert.equal(Math.floor(adapter.pos.x), 6);
+  assert.equal(Math.floor(adapter.pos.x), 5, 'range=1 在第一处满足原到达条件的位置停止');
+  assert.deepEqual(r.data?.requestedTarget, at(6, 64, 0), '范围验收保留原目的地');
 });
 
 test('代码技能 api.moveTo 直接使用 navigate_to 并到达精确目标', async (t) => {

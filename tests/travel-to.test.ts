@@ -123,6 +123,27 @@ test('travel_to 在原目标范围内按格距验收，停在第一处已站稳�
   assert.deepEqual(intent.arrival, { radius: 2, metric: '3d' });
 });
 
+test('目标格受阻但当前已证实前缀可进入 range 时，走到范围内并保留原目标', async (t) => {
+  const { adapter, map, ctx } = voxelNavigationFixture(4);
+  t.after(() => ctx.memory.close());
+  let sequence = 10000;
+  for (let x = 5; x <= 8; x++) for (let z = -1; z <= 1; z++) for (let y = 63; y <= 66; y++) {
+    map.observe({
+      worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId, observedAt: Date.now(), sequence: sequence++,
+      source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: y === 63 || (x === 6 && z === 0 && y <= 65) ? 'minecraft:stone' : 'minecraft:air', properties: {} },
+      pos: { x, y, z },
+    });
+  }
+  const target = { x: 6, y: 64, z: 0 };
+  const result = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.pos, { x: 4.5, y: 64, z: 0.5 });
+  assert.equal(adapter.actions.filter(action => action.startsWith('moveTo:feet')).length, 4);
+  assert.deepEqual(result.data?.requestedTarget, target);
+  assert.deepEqual((result.data?.navigation as Record<string, unknown>)?.requestedTarget, target);
+});
+
 test('无 y 的移动范围保持水平格距，不被推导脚高改成三维距离', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(8);
   t.after(() => ctx.memory.close());

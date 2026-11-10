@@ -346,9 +346,13 @@ async function runNavigationSegmentInner(
   let historical: LandSearchResult | null = null;
   // 当前证据已有可执行前缀时先走前缀，不再为“完整历史路线”消耗一次长搜索；
   // 前缀走到边界后由 Coordinator 观察/重搜。历史候选只在前缀不可用时兜底。
+  // 范围委托可以在阻挡之前完成：这里只判断当前已验证前缀是否包含合法候选，
+  // 不把计划位置当成身体到达；执行时仍逐步当前复验并按实测站稳位置收工。
+  const prefixReachesArrival = request.goal.arrival !== undefined
+    && strict.prefix?.transitions.some((transition) => goalReached(request.goal, transition.to, true)) === true;
   const currentPrefixUsable = strict.prefix !== undefined
     && strict.prefix.transitions.length > 0
-    && strict.prefix.knownBlockerAhead === undefined;
+    && (strict.prefix.knownBlockerAhead === undefined || prefixReachesArrival);
   if (chosen === null && !currentPrefixUsable && request.historical && request.searchBudget - searches > 0) {
     historical = await search({ ...base, evidenceMode: 'remembered', ...searchWindow() });
     if (historical.status === 'CANCELLED') return cancelledReceipt(historical, request, start, searches);
@@ -358,7 +362,7 @@ async function runNavigationSegmentInner(
 
   // 1×1 平台/柱顶没有普通 A* 路线：格目标、明确允许 drop 且目标就在相邻列时，直接尝试一次 descend_to。
   // 连续精确脚位不走这条格心化回退，避免把附近格冒充原目标。
-  if (chosen === null && request.goal.kind === 'cell') {
+  if (chosen === null && !prefixReachesArrival && request.goal.kind === 'cell') {
     const dropStart = { ...ctx.adapter.state().pos };
     const from = feetCell(dropStart);
     const dropTo = { x: Math.floor(request.goal.requested.x), y: request.goal.requested.y, z: Math.floor(request.goal.requested.z) };
@@ -492,11 +496,11 @@ async function runNavigationSegmentInner(
     }
   }
 
-  // 2. 没有完整路线：只有“证据缺口”前缀值得先走过去观察；朝目标方向已观测
-  // BLOCKED/UNSUPPORTED 时前进不会带来新证据，交回前缀端点 + blocker。
+  // 2. 没有完整路线：执行证据缺口前缀，或能够完成显式范围委托的当前前缀。
+  // 其余 BLOCKED/UNSUPPORTED 前缀交回端点 + blocker，不自动靠近阻挡。
   const reachable = strict.prefix;
   const blockerAhead = reachable?.knownBlockerAhead;
-  if (chosen === null && (reachable === undefined || reachable.transitions.length === 0 || blockerAhead !== undefined)) {
+  if (chosen === null && (reachable === undefined || reachable.transitions.length === 0 || (blockerAhead !== undefined && !prefixReachesArrival))) {
     // 历史几何搜索的预算耗尽是真实终态，不能被 strict 的“证据不足”覆盖成普通未知边界。
     const historicalBudget = blockerAhead === undefined && chosen === null && historical?.status === 'BUDGET_EXHAUSTED'
       ? historical : null;
