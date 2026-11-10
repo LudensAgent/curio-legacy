@@ -38,6 +38,7 @@ import {
 } from '../src/spatial/shared-session.ts';
 import type { Arbiter } from '../src/arbiter/arbiter.ts';
 import type { TaskInfo, TaskOutcome } from '../src/arbiter/arbiter.ts';
+import { FEET_ARRIVAL_TOLERANCE } from '../src/adapter/types.ts';
 import type { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import type { Rcon } from '../src/observer/rcon.ts';
 import type { Vision } from '../src/perception/vision.ts';
@@ -1409,7 +1410,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   let arbiter: Arbiter | null = null;
   let rcon: Rcon | null = null;
   let adapter: MineflayerAdapter | null = null;
-  let library: typeof import('curio-minecraft-3d-memory') | null = null;
   let doneListener: ((outcome: TaskOutcome) => void) | null = null;
   let disconnectListener: (() => void) | null = null;
   let spawnListener: (() => void) | null = null;
@@ -1677,7 +1677,10 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     if (arbiter === null) throw new Error('walk leg requested before arbiter is ready');
     if (runScope === null) throw new Error('walk leg requested before runtime scope is ready');
     if (stopping) throw new Error('run is stopping; refusing navigate_to');
-    const tolerance = { ...library!.GROUNDED_ARRIVAL_DEFAULTS, horizontalTolerance: SOAK_ARRIVAL_RADIUS };
+    const tolerance = {
+      horizontalTolerance: SOAK_ARRIVAL_RADIUS,
+      feetTolerance: FEET_ARRIVAL_TOLERANCE.vertical,
+    };
     const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
     // leg-start/leg-result 共用同一个真实派发时刻，不用 deadline 反推。
     const startedAt = Date.now();
@@ -1752,7 +1755,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     const { WorldMemory: WorldMemoryClass } = await import('../src/memory/store.ts');
     const { Arbiter: ArbiterClass } = await import('../src/arbiter/arbiter.ts');
     const { Rcon: RconClass } = await import('../src/observer/rcon.ts');
-    library = await import('curio-minecraft-3d-memory');
 
     // full 只有在真实 manual API 存在时才可能通过；缺失时在连接前显式失败，
     // 绝不先跑一小时再报告 pending。

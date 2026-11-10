@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 // 当前 v0.11 运行时值导出：voxel + facts + navigation search。
-import { GROUNDED_ARRIVAL_DEFAULTS, InMemoryFactStore, VoxelMap, createVoxelFactsQueryPort, searchLandRoute } from 'curio-minecraft-3d-memory';
+import { InMemoryFactStore, VoxelMap, createVoxelFactsQueryPort, searchLandRoute } from 'curio-minecraft-3d-memory';
 // 类型导出：只 import type，不当运行时对象。
 import type { ChangeReport, NavProblem, NavResult, Observation, SpatialQueryPort } from 'curio-minecraft-3d-memory';
 
@@ -10,7 +10,6 @@ test('空间库公开包入口可导入当前运行时值与类型', () => {
   assert.equal(typeof InMemoryFactStore, 'function', 'InMemoryFactStore 是运行时类');
   assert.equal(typeof createVoxelFactsQueryPort, 'function', 'voxel+facts 查询组合是运行时函数');
   assert.equal(typeof searchLandRoute, 'function', 'voxel land search 是运行时函数');
-  assert.equal(typeof GROUNDED_ARRIVAL_DEFAULTS.horizontalTolerance, 'number', '默认容差是运行时常量');
 });
 
 test('voxel+facts 查询组合只报告当前查询 kind', () => {
@@ -30,6 +29,5 @@ test('voxel+facts 查询组合只报告当前查询 kind', () => {
 });
 
 // 这些类型变量只在编译期使用，运行时无对应导出；仅用于类型检查。
-const _arrival = GROUNDED_ARRIVAL_DEFAULTS;
 const _types: { r?: ChangeReport; o?: Observation; n?: NavResult; pr?: NavProblem } = {};
-void _arrival; void _types;
+void _types;

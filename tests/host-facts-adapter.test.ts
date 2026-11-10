@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { memoryFrom, semanticMemory } from './semantic-fixture.ts';
 import { test } from 'node:test';
-import type { SpatialNode } from 'curio-minecraft-3d-memory';
 import {
   applyHostSemanticMigration,
   containerLedgerKey,
@@ -26,12 +25,6 @@ function factOf(conversion: ReturnType<typeof convertHostSemanticNode>) {
   if (conversion.kind !== 'fact') throw new Error('expected fact');
   return conversion;
 }
-
-test('real library topology nodes are accepted as host migration input', () => {
-  const accept = (nodes: readonly HostSemanticNode[]) => nodes;
-  const nodes: SpatialNode[] = [];
-  assert.deepEqual(accept(nodes), []);
-});
 
 test('chest nodes become container anchors with stable identity, ledger ref and provenance', () => {
   const node: HostSemanticNode = {

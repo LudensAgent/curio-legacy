@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import type { TaskInfo, TaskOutcome } from '../src/arbiter/arbiter.ts';
-import type { Vec3Like } from '../src/adapter/types.ts';
+import { FEET_ARRIVAL_TOLERANCE, type Vec3Like } from '../src/adapter/types.ts';
 import type { Rcon } from '../src/observer/rcon.ts';
 import type { SharedSpatialSession as SharedSpatialSessionType, ShutdownResult } from '../src/spatial/shared-session.ts';
 import { CONTRACT_VERSION } from 'curio-minecraft-3d-memory';
@@ -410,9 +410,11 @@ async function main() {
   const { SharedSpatialSession } = await import('../src/spatial/shared-session.ts');
   const { Rcon } = await import('../src/observer/rcon.ts');
   const shutdownMod = await import('../src/spatial/host-shutdown.ts');
-  const library = await import('curio-minecraft-3d-memory');
   const storage = await import('curio-minecraft-3d-memory/storage/sqlite');
-  const tolerance = library.GROUNDED_ARRIVAL_DEFAULTS;
+  const tolerance = {
+    horizontalTolerance: FEET_ARRIVAL_TOLERANCE.horizontal,
+    feetTolerance: FEET_ARRIVAL_TOLERANCE.vertical,
+  };
 
   try { evidence.metadata = collectMetadata(repoRoot, scriptPath); }
   catch (e) { evidence.metadata = { status: 'FAIL', error: shutdownMod.errorFacts(e) }; fatal = new Error(`metadata unavailable: ${errorText(e)}`); writeEvidence(); }
