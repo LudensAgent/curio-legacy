@@ -108,6 +108,41 @@ test('下落初期的短下降帧不把空中位置写成到访', async () => {
   });
 });
 
+test('长距离连续下落按相邻采样保留落地到访；离地断开则不标记', async () => {
+  const clock = new FixtureClock(0);
+  await withSharedSession(clock.now, async (session) => {
+    session.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
+    const recorder = new TraversalVisitRecorder(session, clock.now);
+    const step = (
+      x: number, y: number, z: number,
+      extra: Partial<{ onGround: boolean }> = {},
+      advanceMs = 1,
+    ) => {
+      clock.set(clock.now() + advanceMs);
+      recorder.observe({ worldId: WORLD, dim: DIM, sessionId: SESSION_1, pos: at(x, y, z), onGround: true, ...extra });
+    };
+
+    // 累计 36 格的真实下落，每 700ms 一个连续样本：必须标记落地格。
+    step(0.5, 100, 0.5);
+    for (const y of [96, 90, 82, 72]) step(0.5, y, 0.5, { onGround: false }, 700);
+    step(0.5, 64, 0.5, {}, 700);
+    assert.equal(session.session.voxel.historyAt(DIM, 0, 64, 0).traversed, true, '真实长下落必须保留落地到访');
+    assert.equal(session.session.voxel.historyAt(DIM, 0, 96, 0).traversed, false, '空中位置不是到访');
+
+    // 第一帧就横移瞬移：即使落地与上一帧相邻，也不能标记。
+    step(0.5, 80, 0.5);
+    step(100.5, 78, 0.5, { onGround: false });
+    step(100.5, 76, 0.5);
+    assert.equal(session.session.voxel.historyAt(DIM, 100, 76, 0).traversed, false, '下落中横移瞬移不标记');
+
+    // 纯竖直 100 格瞬移，样本只隔 1ms：超过重力上限，不标记。
+    step(200.5, 176, 0.5);
+    step(200.5, 76, 0.5, { onGround: false });
+    step(200.5, 76, 0.5);
+    assert.equal(session.session.voxel.historyAt(DIM, 200, 76, 0).traversed, false, '超重力竖直瞬移不标记');
+  });
+});
+
 test('下落期间瞬移/远距横移落地不标记目的地', async () => {
   const clock = new FixtureClock(0);
   await withSharedSession(clock.now, async (session) => {
