@@ -93,6 +93,8 @@ export const exploreToward: Skill<ExploreArgs> = {
           }
         }
         if (last.status === 'succeeded' || outcome.stop.reason !== 'BUDGET_EXHAUSTED') return last;
+        // 单次搜索的节点/边/几何等硬预算不是身体窗口；原地图和参数不变时重跑不会推进。
+        if (outcome.segments.at(-1)?.outcome === 'search_budget') return last;
         if (outcome.session.counters.searches >= outcome.session.budget.maxSearches || outcome.session.counters.confirmedTransitions >= outcome.session.budget.maxTransitions || before === 0) return last;
       }
       return last ?? fail('ERROR', '探索未产生执行结果', extra);

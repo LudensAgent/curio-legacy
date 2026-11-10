@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import { lookAround } from '../src/skills/movement.ts';
+import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
 
@@ -92,6 +93,33 @@ test('零推进或执行中途失败时没有无目标扫描', async (t) => {
     assert.equal(scans, 0, '移动已经失败，不能追加与目标无关的扫描');
     scan.mock.restore();
   }
+});
+
+test('单次搜索硬预算耗尽后保留失败，不把同一静态地图反复搜索到累计预算用完', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(40);
+  t.after(() => ctx.memory.close());
+  const resolve = walkCollisionProvider.resolve.bind(walkCollisionProvider);
+  // 真实进入库的单次 geometry 工作上限，避免为测试硬预算而穷举数千节点。
+  t.mock.method(walkCollisionProvider, 'resolve', (...args: Parameters<typeof resolve>) => {
+    const result = resolve(...args);
+    return result.kind === 'shape' && result.shape.boxes.length > 0
+      ? { ...result, shape: { ...result.shape, boxes: Array.from({ length: 4097 }, () => result.shape.boxes[0]!) } }
+      : result;
+  });
+  const controller = new AbortController();
+  let invocations = 0, scans = 0;
+  t.mock.method(lookAround, 'run', async () => { scans++; return { status: 'succeeded', summary: '已扫视' }; });
+  const result = await exploreToward.run({ ...ctx, signal: controller.signal, setStationaryWait: (waiting) => {
+    // 限制旧实现的错误重试，避免回归测试真的重复几十次重搜索。
+    if (waiting && ++invocations > 1) controller.abort();
+  } }, argsOf({ direction: 'E', distance: 48, segment: 32, maxLateralDrift: 24 }, adapter));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal((result.data?.lastSegment as { outcome: string }).outcome, 'search_budget');
+  assert.equal((result.data?.stop as { reason: string }).reason, 'BUDGET_EXHAUSTED');
+  assert.equal(invocations, 1, '搜索硬预算不是身体窗口，不自动续接同参数搜索');
+  assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 0);
+  assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(scans, 0);
 });
 
 test('until 在短未知前沿仍能通过本轮扫描发现目标', async (t) => {
