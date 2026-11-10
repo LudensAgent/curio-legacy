@@ -212,6 +212,8 @@ export interface MoveOpts {
   sprint?: boolean;
   /** 明确落点的单步下行上限（1–32 整数）；feet 按实测落差，xyz 旧接口含支撑格。仅相邻落点，禁止改地形和绕行；feet 省略时最多下落 1 格。 */
   maxDropDown?: number;
+  /** 内部连续路线的中间 feet 点可 false：实测落地到位后交接，保留速度；调用方负责下一段当前几何复验。末点默认等到完全停稳。 */
+  settleAtTarget?: boolean;
 }
 
 /**
@@ -447,6 +449,8 @@ export interface GameAdapter {
   listItems?(): string[];
 
   moveTo(target: MoveTarget, opts: MoveOpts): Promise<void>;
+  /** 连续路线终止时释放运动键并异步等待实际落稳；不前进、倒车或改写目标。 */
+  settleMovement?(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>): Promise<void>;
   /**
    * 在 run 的异步生命周期内绑定非本地导航委托；嵌套技能会重新绑定自己的委托。
    * 绑定范围覆盖 runSkill 内部及适配器私有方法发起的全部 moveTo 调用。

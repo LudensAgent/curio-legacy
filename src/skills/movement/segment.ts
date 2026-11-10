@@ -256,16 +256,50 @@ function emptySearch(goal: NavigationGoal, status: LandSearchStatus, detail: str
  */
 export async function runNavigationSegment(ctx: SkillCtx, request: SegmentRequest): Promise<SegmentReceipt> {
   const leases: RouteResidency[] = [];
+  const execution = { handedOver: false };
+  let result: SegmentReceipt | undefined;
   try {
-    return await runNavigationSegmentInner(ctx, request, leases);
+    result = await runNavigationSegmentInner(ctx, request, leases, execution);
+    return result;
   } finally {
+    if (execution.handedOver) {
+      const remaining = request.deadline - Date.now();
+      const error = !ctx.signal.aborted && remaining > 0 && ctx.adapter.settleMovement !== undefined
+        ? await ctx.adapter.settleMovement({ signal: ctx.signal, timeoutMs: Math.min(2000, remaining) }).then(() => null, (error: unknown) => error)
+        : null;
+      const stopped = ctx.adapter.state();
+      if (result !== undefined) {
+        const from = result.partialDisplacement?.from ?? result.confirmed.at(-1)?.measuredTo ?? result.measuredStart;
+        const horizontal = Math.hypot(stopped.pos.x - from.x, stopped.pos.z - from.z);
+        const vertical = Math.abs(stopped.pos.y - from.y);
+        result.measuredEnd = { ...stopped.pos };
+        if (result.partialDisplacement !== undefined || horizontal > 0.001 || vertical > 0.001) {
+          result.partialDisplacement = {
+            from: { ...from }, to: { ...stopped.pos }, horizontal, vertical,
+            atTarget: result.transition === undefined ? goalReached(request.goal, stopped.pos, stopped.onGround)
+              : transitionReached(result.transition, stopped.pos, stopped.onGround),
+          };
+        }
+        if (error !== null && result.outcome !== 'cancelled') {
+          result.outcome = isAbort(error) ? 'cancelled' : 'physical_failure';
+          result.arrived = false;
+          result.failureCode = codeFromError(error);
+          result.detail = `${result.detail ?? '连续移动停止'}；释放控制后的停稳确认失败：${(error as Error).message}`;
+        } else if (result.arrived && request.goalMetric !== 'horizontal' && !goalReached(request.goal, stopped.pos, stopped.onGround)) {
+          result.outcome = 'physical_failure';
+          result.arrived = false;
+          result.failureCode = 'EFFECT_NOT_CONFIRMED';
+          result.detail = '连续移动释放控制后，实测停点不再满足原目标；保留实际位移';
+        }
+      }
+    }
     const spatial = ctx.spatial;
     if (spatial !== undefined) for (const residency of leases) releaseRouteResidency(spatial, residency);
   }
 }
 
 async function runNavigationSegmentInner(
-  ctx: SkillCtx, request: SegmentRequest, leases: RouteResidency[],
+  ctx: SkillCtx, request: SegmentRequest, leases: RouteResidency[], execution: { handedOver: boolean },
 ): Promise<SegmentReceipt> {
   const spatial = ctx.spatial;
   const state = ctx.adapter.state();
@@ -341,6 +375,20 @@ async function runNavigationSegmentInner(
   const strict = await search({ ...base, ...searchWindow() });
   if (strict.status === 'CANCELLED') {
     return cancelledReceipt(strict, request, start, searches);
+  }
+  const localStale = strict.status === 'INSUFFICIENT_EVIDENCE'
+    && (strict.prefix?.atStart === true || strict.prefix === undefined && strict.transitions.length === 0)
+    ? boundaryAfter(strict.boundaries.filter((boundary) => boundary.status === 'STALE'
+      && boundary.from.x === start.x && boundary.from.y === start.y && boundary.from.z === start.z), start, anchorOf(request.goal))
+    : undefined;
+  if (localStale !== undefined) {
+    return {
+      waypoint, outcome: 'unknown_boundary', measuredStart: start, measuredEnd: { ...ctx.adapter.state().pos },
+      chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+      evidenceMode: 'current', searches, planned: [], confirmed: [], remaining: [], pathLength: 0,
+      arrived: false, directDrop: false, boundarySummary: summarizeBoundaries(strict.boundaries), boundary: localStale,
+      stopCode: 'current_geometry', detail: '当前站位的局部边界证据已过期；先观察恢复当前证据，没有扫描历史候选或执行移动',
+    };
   }
   let chosen: LandSearchResult | null = strict.status === 'FOUND' ? strict : null;
   let historical: LandSearchResult | null = null;
@@ -528,7 +576,8 @@ async function runNavigationSegmentInner(
       : `；驻留加载失败（${residencyFailure.reason}）：${residencyFailure.message}`;
     return {
       waypoint, outcome, stopCode: residencyFailure !== null ? 'residency_gap' : blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
-      chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+      chosen: null, search: historicalBudget ?? strict,
+      searchStatus: (historicalBudget ?? strict).status, searchReason: (historicalBudget ?? strict).reason,
       evidenceMode: 'current', searches,
       planned: reachable?.transitions ?? [], confirmed: [], remaining: reachable?.transitions ?? [],
       pathLength: 0, arrived: false, directDrop: false, boundarySummary,
@@ -801,17 +850,29 @@ async function runNavigationSegmentInner(
       if (remaining < 1) {
         return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
       }
+      const next = transitions[index + 1];
+      // 只有已证实的同向 walk/step 链才保留中间速度；转向、下落、边界和末点仍停车。
+      // 前视用下一段计划几何，交接时仍会以上方实测起点再次复验，不能跳过未知格。
+      const continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
+        && (transition.kind === 'walk' || transition.kind === 'step') && (next.kind === 'walk' || next.kind === 'step')
+        && transition.to.x - transition.from.x === next.to.x - next.from.x
+        && transition.to.z - transition.from.z === next.to.z - next.from.z
+        && !goalReached(request.goal, transition.to, true)
+        && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
       try {
+        execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(
           { kind: 'feet', x: transition.to.x, y: transition.to.y, z: transition.to.z },
           {
             signal: ctx.signal,
             // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。
             timeoutMs: Math.min(6000, Math.floor(remaining)),
+            ...(continuous ? { settleAtTarget: false } : {}),
             ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
           },
         );
+        execution.handedOver = continuous;
       } catch (error) {
         if (isAbort(error)) return cancelledHere(index, transition, current.pos);
         actionError = error;

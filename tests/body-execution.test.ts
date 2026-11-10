@@ -61,9 +61,14 @@ function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }
   const looks: number[] = [];
   bot.look = async (yaw: number, pitch: number) => { looks.push(yaw); bot.entity.yaw = yaw; bot.entity.pitch = pitch; };
   const physics = Physics(data, world);
-  const timer = setInterval(() => physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot), 50);
+  for (let tick = 0; tick < 2; tick++) physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+  const frames: { x: number; speed: number; ground: boolean }[] = [];
+  const timer = setInterval(() => {
+    physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+    frames.push({ x: bot.entity.position.x, speed: Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z), ground: bot.entity.onGround });
+  }, 50);
   timer.unref();
-  return { bot, controls, writes, looks, timer, from, to: { x: from.x + 1, y: from.y - drop, z: from.z } };
+  return { bot, controls, writes, looks, timer, frames, from, to: { x: from.x + 1, y: from.y - drop, z: from.z } };
 }
 
 for (const surface of [
@@ -131,9 +136,99 @@ for (const drop of [0, -1]) {
   });
 }
 
-test('真实越位的后退微调被取消时释放本次按键且不再转向', async (t) => {
-  const { bot, timer, controls, writes, looks, to } = continuousBody(0);
+test('16 格连续脚位没有中间停车帧，并与同世界持续前进对照', async (t) => {
+  const route = continuousBody(0);
+  t.after(() => clearInterval(route.timer));
+  const adapter = adapterWith(route.bot);
+  const started = performance.now();
+  let beforeFinal = 0;
+  for (let step = 1; step <= 16; step++) {
+    if (step === 16) beforeFinal = route.frames.length;
+    await adapter.moveTo({ kind: 'feet', x: route.from.x + step, y: route.from.y, z: route.from.z }, {
+      ...opts(), timeoutMs: 6000, settleAtTarget: step === 16,
+    });
+  }
+  const routeMs = performance.now() - started;
+  const stoppedMiddleFrames = route.frames.slice(0, beforeFinal).filter(frame => frame.speed < 0.003).length;
+  assert.equal(stoppedMiddleFrames, 0, '中间点不能再经过速度归零再起步');
+  clearInterval(route.timer);
+
+  const native = continuousBody(0);
+  t.after(() => clearInterval(native.timer));
+  const nativeAdapter = adapterWith(native.bot);
+  await native.bot.look(-Math.PI / 2, 0);
+  const nativeStarted = performance.now();
+  native.bot.setControlState('forward', true);
+  while (native.bot.entity.position.x - native.from.x < 16 && performance.now() - nativeStarted < 10_000) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  await nativeAdapter.settleMovement({ ...opts(), timeoutMs: 2000 });
+  assert.ok(native.bot.entity.position.x - native.from.x >= 16);
+  t.diagnostic(`16-block route=${Math.round(routeMs)}ms, held-forward=${Math.round(performance.now() - nativeStarted)}ms including final stop; middle stopped frames=${stoppedMiddleFrames}`);
+});
+
+test('中间点终止时只松键等待实际制动，不回到旧检查点', async (t) => {
+  const { bot, timer, from, to, controls, writes } = continuousBody(0);
   t.after(() => clearInterval(timer));
+  const adapter = adapterWith(bot);
+  await adapter.moveTo({ kind: 'feet', ...to }, { ...opts(), settleAtTarget: false });
+  const checkpoint = bot.entity.position.x;
+  const count = writes.length;
+  await adapter.settleMovement({ ...opts(), timeoutMs: 2000 });
+  assert.ok(bot.entity.position.x > checkpoint + 0.05, `制动位移 ${bot.entity.position.x - checkpoint}`);
+  assert.ok(bot.entity.position.x < from.x + 1.5);
+  assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
+  assert.ok(writes.slice(count).every(event => event.endsWith(':false')), '收尾不主动倒车或重新前进');
+  assert.ok(Object.values(controls).every(held => !held));
+});
+
+test('连续脚位保留 sprint 委托，取消时释放本次运动键', async (t) => {
+  const { bot, timer, from, controls, writes } = continuousBody(0);
+  t.after(() => clearInterval(timer));
+  const adapter = adapterWith(bot);
+  await adapter.moveTo({ kind: 'feet', x: from.x + 1, y: from.y, z: from.z }, { ...opts(), sprint: true, settleAtTarget: false });
+  assert.ok(writes.includes('sprint:true'));
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 60);
+  await assert.rejects(adapter.moveTo({ kind: 'feet', x: from.x + 2, y: from.y, z: from.z }, {
+    ...opts(controller.signal), sprint: true, settleAtTarget: false,
+  }), { name: 'AbortedError' });
+  const count = writes.length;
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(writes.length, count);
+  assert.ok(Object.values(controls).every(held => !held));
+});
+
+for (const drop of [0, -1]) {
+  test(`连续路线中间${drop === 0 ? '步行' : '台阶'}点落地后保留速度交接，最后一点才停稳`, async (t) => {
+    const { bot, timer, from, controls, looks } = continuousBody(drop, undefined, true);
+    t.after(() => clearInterval(timer));
+    const adapter = adapterWith(bot);
+    const started = performance.now();
+    const checkpoints: { speed: number; ground: boolean; x: number }[] = [];
+    for (let step = 1; step <= 4; step++) {
+      const to = { x: from.x + step, y: from.y - drop * step, z: from.z };
+      await adapter.moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000, settleAtTarget: step === 4 });
+      checkpoints.push({ speed: Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z), ground: bot.entity.onGround, x: bot.entity.position.x });
+      assert.ok(Math.hypot(bot.entity.position.x - to.x, bot.entity.position.z - to.z) <= 0.12, `checkpoint ${step}: ${bot.entity.position}`);
+      assert.equal(bot.entity.position.y, to.y);
+    }
+    assert.ok(checkpoints.slice(0, -1).every((point) => point.ground && point.speed > 0.003), JSON.stringify(checkpoints));
+    assert.ok(checkpoints.at(-1)!.ground && checkpoints.at(-1)!.speed < 0.003);
+    assert.equal(looks.length, 4);
+    assert.ok(Object.values(controls).every((held) => !held));
+    t.diagnostic(`${drop === 0 ? 'walk' : 'step'} 4 blocks ${Math.round(performance.now() - started)}ms; checkpoint speeds ${checkpoints.map(point => point.speed.toFixed(4)).join(',')}`);
+  });
+}
+
+test('后退微调被取消时释放本次按键且不再转向', async () => {
+  const { bot, controls, writes } = botAt(-494.37, 99.9375, -291.44);
+  const to = { x: -493.37, y: 99.9375, z: -291.44 };
+  const looks: number[] = [];
+  // 固定复现“首段制动后越过目标 .2 格”的测量序列，不依赖计时器恰好采到哪一帧。
+  bot.look = async (yaw: number) => { looks.push(yaw); bot.entity.position = new Vec3(to.x + 0.2, to.y, to.z); };
+  let velocityReads = 0;
+  Object.defineProperty(bot.entity, 'velocity', { get: () => new Vec3(++velocityReads === 1 ? 0.1 : 0, 0, 0) });
   const controller = new AbortController();
   const original = bot.setControlState;
   bot.setControlState = (name: string, value: boolean) => {

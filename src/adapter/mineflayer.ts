@@ -993,6 +993,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         opts.horizontalJump === true,
         sprint,
         opts.maxDropDown,
+        opts.settleAtTarget !== false,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
@@ -1292,6 +1293,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     horizontalJump = false,
     sprint = false,
     maxDropDown = 1,
+    settleAtTarget = true,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
@@ -1390,7 +1392,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           : target.y < p0y
             ? EDGE + Math.max(0, speed - EDGE / AIR_STOP) * GROUND_STOP // 下降：地面减速到边缘速度，再空中滑到中心
             : speed * GROUND_STOP;                                     // 平走/上行：地面减速
-        if (d <= stopDist) { b.setControlState('forward', false); break; }
+        if (settleAtTarget && d <= stopDist) { b.setControlState('forward', false); break; }
         const overshootLimit = horizontalJump ? initialDistance + 0.75 : 1.5;
         if (d > closest + 0.05 || d > overshootLimit) { overshot = true; break; }
         closest = Math.min(closest, d);
@@ -1405,10 +1407,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     checkPosition();
+    // 已复验的连续路线中间点只确认真实落地/端点，不把每格都当作最终停车点。
+    // 上面的 finally 仍释放本次控制；宿主同步复验下一段后可立即接续而不等速度归零。
+    if (!settleAtTarget && settled()) return 'arrived';
     // 连续脚位允许有限次低速修正：制动估计偏差可能让身体停在目标外几厘米，
     // 格心模式仍保留旧的越段即停语义。
     if (overshot && (mode === 'cell' || dist() > 0.6)) return 'overshot';
-    // 落地确认：所有成功都经统一的连续稳定验收——站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住
+    // 末点/独立动作的落地确认：站稳 + 列一致 + 脚高相符 + 水平速度已衰减到接近停住；
+    // 已复验路线的中间点只在真实落地到位后交接速度。
     // （低于物理的 negligibleVelocity 0.003，之后速度被置零、身体不再滑动），不因单帧 settled 提前返回。
     const stopped = () => {
       const v = b.entity.velocity;
@@ -1419,6 +1425,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     while (Date.now() < deadline) {
       check();
       checkPosition();
+      if (!settleAtTarget && settled()) return 'arrived';
       if (settled() && stopped()) {
         if (++stable >= 2) return 'arrived';
       } else {
@@ -1459,6 +1466,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   withNavigation<T>(delegate: NavigationDelegate, run: () => Promise<T>): Promise<T> {
     return this.navigationDelegate.run(delegate, run);
+  }
+
+  async settleMovement(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>): Promise<void> {
+    const check = this.actionCheckpoint(opts.signal);
+    check();
+    if (!this.ready) throw new Error('NOT_CONNECTED');
+    const b = this.bot;
+    const deadline = Date.now() + Math.max(0, opts.timeoutMs);
+    for (const key of ['forward', 'back', 'left', 'right', 'jump', 'sprint'] as const) b.setControlState(key, false);
+    let stable = 0;
+    while (Date.now() < deadline) {
+      check();
+      const e = b.entity;
+      if (e.onGround && Math.hypot(e.velocity.x, e.velocity.z) < 0.003) {
+        if (++stable >= 2) return;
+      } else stable = 0;
+      await this.afterAction(() => sleep(Math.min(40, Math.max(1, deadline - Date.now())), opts.signal), check);
+    }
+    throw Object.assign(new Error('TIMEOUT: 运动键已释放，但身体尚未实测停稳'), { name: 'Timeout' });
   }
 
   stopAll() {

@@ -11,6 +11,8 @@ import { EventBus } from '../src/events.ts';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { lookAround } from '../src/skills/movement.ts';
+import { feetGoal } from '../src/skills/movement/goal.ts';
+import { runNavigationSegment } from '../src/skills/movement/segment.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -71,10 +73,13 @@ function setup(direction?: keyof typeof lowStairs) {
   driver.mcData = data;
   Reflect.set(driver, 'connectedFlag', true);
   const physics = Physics(data, world);
+  // Establish actual gravity/support contact before navigation can read onGround.
+  for (let tick = 0; tick < 2; tick++) physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
   const timer = setInterval(() => physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot), 50);
   timer.unref();
   const stops: Vec3Like[] = [];
   class SurfaceAdapter extends FakeAdapter {
+    async settleMovement(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>) { await driver.settleMovement(opts); }
     override state() { return { ...super.state(), pos: { ...entity.position }, onGround: entity.onGround }; }
     override blockAt(pos: Vec3Like) { return world.getBlock(new Vec3(pos.x, pos.y, pos.z)).name as string; }
     override blockStateAt(pos: Vec3Like) {
@@ -108,8 +113,31 @@ function setup(direction?: keyof typeof lowStairs) {
   const ctx = { ...makeCtx(adapter, { deadlineMs: 120_000 }), spatial: {
     worldId: adapter.worldId, session: { voxel: map }, closing: false,
   } as unknown as SharedSpatialSession };
-  return { adapter, ctx, timer, controls, stops, looks, from };
+  return { adapter, ctx, timer, controls, stops, looks, from, map, entity };
 }
+
+test('连续路线下一步证据失效后，回执采样实际制动终点而非交接旧位置', async (t) => {
+  const { adapter, ctx, timer, controls, stops, from, map, entity } = setup('E');
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const original = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target, opts) => {
+    assert.equal(opts.settleAtTarget, false);
+    await original(target, opts);
+    map.markStale(adapter.dim, 'observation_gap');
+  });
+  const result = await runNavigationSegment(ctx, {
+    goal: feetGoal({ ...from, x: from.x + 6 }), allowed: ['walk', 'step'], historical: false,
+    maxTransitions: 8, allowUnknownCorridor: false, deadline: ctx.deadline, searchBudget: 1,
+  });
+  assert.equal(result.outcome, 'unknown_boundary', result.detail);
+  assert.equal(result.confirmed.length, 1);
+  assert.equal(stops.length, 1, '不能向失效后的下一段继续发控制');
+  assert.ok(result.measuredEnd.x > stops[0]!.x + 0.05, '失败回执须包含松键后的真实惯性位移');
+  assert.deepEqual(result.measuredEnd, { ...entity.position });
+  assert.deepEqual(result.partialDisplacement?.to, result.measuredEnd);
+  assert.ok(Math.hypot(entity.velocity.x, entity.velocity.z) < 0.003);
+  assert.ok(Object.values(controls).every(held => !held));
+});
 
 for (const direction of ['N', 'E', 'S', 'W'] as const) {
   test(`travel_to walks ${direction} along actual stair lower faces at y=63.5 without climbing the high half`, async (t) => {
