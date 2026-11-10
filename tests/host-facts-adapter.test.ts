@@ -267,6 +267,110 @@ test('markContainerGone keeps the anchor shell and excludes it from default quer
   assert.equal(port.containers({ includeGone: true }).items.length, 1);
 });
 
+const markerRecord = (type: string) => ({
+  id: `marker-${type}`,
+  type,
+  label: `${type} site`,
+  dim: D,
+  pos: at(8, 63, 8),
+  ts: 700,
+  detail: 'from map export',
+  archiveStatus: 'historical',
+  snapshotAt: 900,
+  source: { file: 'curio-map-data/data.json', pointer: `/markers/${type}` },
+  snapshotSources: [
+    { file: 'backup.json', pointer: `/markers/${type}`, snapshotAt: 800 },
+    { file: 'curio-map-data/data.json', pointer: `/markers/${type}` },
+  ],
+  count: 64,
+  contents: { items: [{ name: 'diamond', count: 3 }] },
+  inventory: ['diamond'],
+});
+
+const expectedMarker = (type: string) => ({
+  id: `marker-${type}`,
+  type,
+  label: `${type} site`,
+  dim: D,
+  pos: at(8, 63, 8),
+  ts: 700,
+  detail: 'from map export',
+  archiveStatus: 'historical',
+  snapshotAt: 900,
+  source: { file: 'curio-map-data/data.json', pointer: `/markers/${type}` },
+  snapshotSources: [
+    { file: 'backup.json', pointer: `/markers/${type}`, snapshotAt: 800 },
+    { file: 'curio-map-data/data.json', pointer: `/markers/${type}` },
+  ],
+});
+
+const markerNode = (type: string, tag: string): HostSemanticNode => ({
+  id: `legacy:map-marker:marker-${type}`, kind: 'place', tag, label: `${type} site`,
+  worldId: W, dim: D, location: { kind: 'exact', pos: at(8, 63, 8) },
+  observedAt: 4242, source: 'agent',
+  ...curio({ v: 2, type: 'mapMarker', record: markerRecord(type) }),
+});
+
+test('historical resource markers keep their exact cell and archival payload', () => {
+  const conversion = factOf(convertHostSemanticNode(markerNode('resource', 'discovery')));
+  assert.equal(conversion.role, 'resource');
+  assert.equal(conversion.classifiedBy, 'curio');
+  assert.ok(isResourceFact(conversion.fact));
+  if (!isResourceFact(conversion.fact)) return;
+  assert.deepEqual(conversion.fact.sourceCell, at(8, 63, 8));
+  assert.deepEqual(conversion.fact.hostData?.types, ['mapMarker']);
+  assert.equal(conversion.fact.observedAt, 4242, 'node observation time, not record.ts or snapshotAt');
+  assert.equal(conversion.fact.source.source, 'agent');
+  assert.deepEqual(conversion.fact.hostData?.legacyMapMarker, expectedMarker('resource'));
+  assert.equal(JSON.stringify(conversion.fact.hostData).includes('"contents"'), false);
+  assert.equal(JSON.stringify(conversion.fact.hostData).includes('"inventory"'), false);
+  assert.equal(JSON.stringify(conversion.fact.hostData).includes('"count":64'), false);
+});
+
+test('death, hazard and container markers classify by record type, not tag', () => {
+  const death = factOf(convertHostSemanticNode(markerNode('death', 'discovery')));
+  assert.equal(death.role, 'death');
+  assert.ok(isPlaceFact(death.fact));
+  if (isPlaceFact(death.fact)) assert.equal(death.fact.kind, 'death');
+
+  const hazard = factOf(convertHostSemanticNode(markerNode('hazard', 'discovery')));
+  assert.equal(hazard.role, 'hazard', 'record.type wins over a discovery tag');
+  assert.ok(isPlaceFact(hazard.fact));
+  if (isPlaceFact(hazard.fact)) {
+    assert.equal(hazard.fact.kind, 'hazard');
+    assert.equal(hazard.fact.observedAt, 4242);
+  }
+
+  const container = factOf(convertHostSemanticNode(markerNode('container', 'resource')));
+  assert.equal(container.role, 'container');
+  assert.ok(isContainerFact(container.fact));
+  if (isContainerFact(container.fact)) {
+    assert.deepEqual(container.fact.pos, at(8, 63, 8));
+    assert.equal(container.fact.observedAt, 4242);
+    assert.deepEqual(container.fact.hostData?.legacyMapMarker, expectedMarker('container'));
+  }
+});
+
+test('unknown marker record types remain unclassifiable without tag fallback', () => {
+  const conversion = convertHostSemanticNode(markerNode('reference', 'resource'));
+  assert.equal(conversion.kind, 'gap');
+  if (conversion.kind === 'gap') assert.equal(conversion.gap.reason, 'unclassifiable');
+});
+
+test('markers with no node observation time stay missing_observation despite ts and snapshotAt', () => {
+  for (const ts of [700, null]) {
+    const node: HostSemanticNode = {
+      id: `legacy:map-marker:no-time-${String(ts)}`, kind: 'place', tag: 'resource',
+      label: 'container site', worldId: W, dim: D,
+      location: { kind: 'exact', pos: at(8, 63, 8) },
+      ...curio({ v: 2, type: 'mapMarker', record: { ...markerRecord('container'), ts } }),
+    };
+    const conversion = convertHostSemanticNode(node);
+    assert.equal(conversion.kind, 'gap');
+    if (conversion.kind === 'gap') assert.equal(conversion.gap.reason, 'missing_observation');
+  }
+});
+
 test('host conversion keeps business fields, role and real ledger key across reconstruction', () => {
   const { stores, containers } = semanticMemory(W);
   const furnace = factOf(convertHostSemanticNode({

@@ -309,6 +309,12 @@ interface Classification {
 const classify = (node: HostSemanticNode, curio: HostCurioMeta | undefined): Classification | HostFactGap => {
   const types = curioTypes(curio);
   if (types.length > 0) {
+    // Historical map-export wrappers carry the real marker role only in their
+    // record; an unrecognized marker type stays a gap instead of using its tag.
+    if (types.includes('mapMarker')) {
+      const role = roleFromRecordKind(recordOf(curio)?.type);
+      return role ? { role, classifiedBy: 'curio' } : { reason: 'unclassifiable', id: node.id };
+    }
     // Curio metadata is authoritative: never let `tag:"resource"` re-role a farm.
     const found = ROLE_PRIORITY.find((role) => types.some((type) => CURIO_ROLE[type] === role));
     if (found) {
@@ -449,9 +455,56 @@ export function convertHostSemanticNode(
     ...(curio?.type === undefined ? {} : { type: curio.type }),
     ...(curioTypes(curio).length ? { types: curioTypes(curio) } : {}),
   };
+  const legacyMapMarker = curioTypes(curio).includes('mapMarker');
+  if (legacyMapMarker && record !== undefined) {
+    // White-list the marker's archival provenance. Inventory/contents and any
+    // unknown record fields stay in the source export, never in the fact.
+    const markerId = nonEmpty(record.id);
+    const markerType = nonEmpty(record.type);
+    const markerLabel = nonEmpty(record.label);
+    const markerDim = nonEmpty(record.dim);
+    const rawPos = isRecord(record.pos) ? record.pos : undefined;
+    const markerPos = rawPos !== undefined && finite(rawPos.x) && finite(rawPos.y) && finite(rawPos.z)
+      ? { x: rawPos.x, y: rawPos.y, z: rawPos.z }
+      : undefined;
+    const markerDetail = nonEmpty(record.detail);
+    const markerArchiveStatus = nonEmpty(record.archiveStatus);
+    const rawSource = isRecord(record.source) ? record.source : undefined;
+    const markerSourceFile = nonEmpty(rawSource?.file);
+    const markerSourcePointer = nonEmpty(rawSource?.pointer);
+    hostData.legacyMapMarker = {
+      ...(markerId === undefined ? {} : { id: markerId }),
+      ...(markerType === undefined ? {} : { type: markerType }),
+      ...(markerLabel === undefined ? {} : { label: markerLabel }),
+      ...(markerDim === undefined ? {} : { dim: markerDim }),
+      ...(markerPos === undefined ? {} : { pos: markerPos }),
+      ...(finite(record.ts) ? { ts: record.ts } : {}),
+      ...(markerDetail === undefined ? {} : { detail: markerDetail }),
+      ...(markerArchiveStatus === undefined ? {} : { archiveStatus: markerArchiveStatus }),
+      ...(finite(record.snapshotAt) ? { snapshotAt: record.snapshotAt } : {}),
+      ...(markerSourceFile === undefined && markerSourcePointer === undefined ? {} : {
+        source: {
+          ...(markerSourceFile === undefined ? {} : { file: markerSourceFile }),
+          ...(markerSourcePointer === undefined ? {} : { pointer: markerSourcePointer }),
+        },
+      }),
+      ...(Array.isArray(record.snapshotSources) ? {
+        snapshotSources: record.snapshotSources.filter(isRecord).flatMap((snapshot) => {
+          const file = nonEmpty(snapshot.file);
+          const pointer = nonEmpty(snapshot.pointer);
+          if (file === undefined && pointer === undefined) return [];
+          return [{
+            ...(file === undefined ? {} : { file }),
+            ...(pointer === undefined ? {} : { pointer }),
+            ...(finite(snapshot.snapshotAt) ? { snapshotAt: snapshot.snapshotAt } : {}),
+          }];
+        }),
+      } : {}),
+    };
+  }
   const primary = curio?.primary ?? record?.primary;
   if (typeof primary === 'boolean') hostData.primary = primary;
-  if (finite(record?.count)) hostData.count = record.count;
+  if (!legacyMapMarker && finite(record?.count)) hostData.count = record.count;
   if (typeof record?.detail === 'string') hostData.detail = record.detail;
   if (role === 'farm' && Array.isArray(record?.cells)) {
     const cells = record.cells.filter((cell): cell is Vec3Like =>
@@ -464,7 +517,7 @@ export function convertHostSemanticNode(
       };
     }
   }
-  if (role === 'hazard' && record !== undefined) {
+  if (!legacyMapMarker && role === 'hazard' && record !== undefined) {
     hostData.hazard = {
       ...(typeof record.kind === 'string' ? { kind: record.kind } : {}),
       ...(finite(record.count) ? { count: record.count } : {}),
