@@ -66,10 +66,11 @@ if (!Number.isFinite(maxResidentMb) || maxResidentMb <= 0 || maxResidentMb > 102
   throw new Error(`SPATIAL_MAX_RESIDENT_MB 必须是 (0,1024] 内的数字，收到：${maxResidentMb}`);
 }
 const maxResidentBytes = Math.round(maxResidentMb * 1024 * 1024);
-// 单次空间快照的序列化字节上限。库默认 64MiB；长期世界已实际达到 ~73MiB，
-// 超过后 checkpoint 会以 capacity 失败、dirty 一直留着。这里只放宽“能否落盘”的
-// 容量，不改变驻留上限或游戏规则；可用 SPATIAL_SNAPSHOT_MAX_MB 调整。
-const snapshotMaxMb = num('SPATIAL_SNAPSHOT_MAX_MB', 192);
+// 整库已提交体素的容量上限（不是单批上限）。库默认 64MiB；长期世界已超过它，
+// 4M distinct 格的实测 committed payload 约 506–530MiB。默认 1024MiB 为该验收
+// 留出帧/历史/属性开销余量；单批仍由 SPATIAL_VOXEL_BATCH_MB 限制。只放宽“能否落盘”，
+// 不改变驻留上限或游戏规则；可用 SPATIAL_SNAPSHOT_MAX_MB 调整。
+const snapshotMaxMb = num('SPATIAL_SNAPSHOT_MAX_MB', 1024);
 if (!Number.isFinite(snapshotMaxMb) || snapshotMaxMb <= 0 || snapshotMaxMb > 4096) {
   throw new Error(`SPATIAL_SNAPSHOT_MAX_MB 必须是 (0,4096] 内的数字，收到：${snapshotMaxMb}`);
 }
