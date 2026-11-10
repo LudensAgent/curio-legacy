@@ -148,11 +148,11 @@ export function boundaryProbeCells(
   return { cells: [...cells, ...landingCells].slice(0, limit), landingCells: landingCells.slice(0, limit) };
 }
 
-/** 一格当前证据的版本签名：未观测、观测 id、revision、freshness 共同决定。 */
-function signatureOf(voxel: VoxelMap, dim: string, cell: Vec3Like): string {
+/** 内容变化或过期证据恢复才是新依据；仍有效的同内容刷新不触发重复搜索。 */
+function signatureOf(voxel: VoxelMap, dim: string, cell: Vec3Like, now: number): string {
   const view = voxel.cellAt(dim, cell.x, cell.y, cell.z);
   if (!view.observed) return 'unknown';
-  return `${view.evidence.revision}:${view.evidence.freshness}:${view.evidence.observation.state.name}`;
+  return `${view.evidence.revision}:${view.evidence.freshness}:${view.evidence.validUntil >= now}:${view.evidence.observation.sessionId}`;
 }
 
 function yawTo(dx: number, dz: number): number {
@@ -172,7 +172,8 @@ export async function observeBoundary(
     (corridor === undefined || withinCorridor(option.target, corridor))
     && option.clearance !== 'blocked' && option.corridor !== 'blocked').slice(0, 4);
   const { cells, landingCells } = boundaryProbeCells(opts.boundary, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings);
-  const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell)]));
+  const now = Date.now();
+  const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell, now)]));
   const base = {
     boundary: opts.boundary, cells, attempted: false, observed: 0, newObservedCells: 0,
     relatedCells: [] as Vec3Like[], relatedChanged: false, turned: false,
@@ -196,10 +197,15 @@ export async function observeBoundary(
   const observeOnce = () => ctx.senses.observeBlocks!(cells);
   let observed = observeOnce();
   let turned = false;
-  // 当前视角没有取得相关格时，朝边界方向最多转一次头再观察一次；不做无界扫描。
-  if (!observed.some((block) => cells.some((cell) => cell.x === block.pos.x && cell.y === block.pos.y && cell.z === block.pos.z))) {
+  // 看见邻近的新鲜格不代表补齐了边界：对仍未知/过期的相关格最多定向一次。
+  // cells 是整数方块格；不能给 boundary.to 的连续脚位再加半格当作观察目标。
+  const target = cells.find((cell) => {
+    const view = voxel.cellAt(state.dim, cell.x, cell.y, cell.z);
+    return !view.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < now
+      || view.evidence.observation.sessionId !== state.sessionId || !view.evidence.observation.stateComplete;
+  });
+  if (target !== undefined) {
     const eye = ctx.adapter.eye();
-    const target = opts.boundary.to;
     if (eye !== null) {
       const dx = target.x + 0.5 - eye.x, dy = target.y + 0.5 - eye.y, dz = target.z + 0.5 - eye.z;
       await ctx.adapter.look(yawTo(dx, dz), Math.atan2(dy, Math.hypot(dx, dz)), ctx.signal);
@@ -208,7 +214,7 @@ export async function observeBoundary(
     }
   }
 
-  const relatedCells = cells.filter((cell) => signatureOf(voxel, state.dim, cell) !== before.get(keyOf(cell)));
+  const relatedCells = cells.filter((cell) => signatureOf(voxel, state.dim, cell, now) !== before.get(keyOf(cell)));
   return {
     ...base,
     attempted: true,
