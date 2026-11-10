@@ -26,19 +26,27 @@ test('方向探索保留距离，明确拒绝不支持的对角/施工能力与�
   assert.equal(exploreToward.validate({ direction: 'E', distance: 40, make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
 
-test('方向探索以同一体素 session 分段推进并扫视，预算累计', async (t) => {
+test('方向探索跨四个窗口沿冻结方向推进 64 格，扫描次数有界且不改变方向', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(80);
   t.after(() => ctx.memory.close());
   let scans = 0;
-  t.mock.method(lookAround, 'run', async () => { scans++; return { status: 'succeeded', summary: '已扫视' }; });
-  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 48, segment: 16 }, adapter));
+  t.mock.method(lookAround, 'run', async (scanCtx, args) => {
+    scans++;
+    assert.equal(args.direction, 'E');
+    await scanCtx.adapter.look(Math.PI, -0.05);
+    return { status: 'succeeded', summary: '已扫视，当前面朝南' };
+  });
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, segment: 16 }, adapter));
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.planner, 'voxel_astar');
   assert.equal(result.data?.backend, 'land-search');
-  assert.equal((result.data?.intent as { distance: number }).distance, 48);
-  assert.ok((result.data?.progress as { along: number }).along >= 48);
-  assert.ok((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions >= 48);
-  assert.ok(scans >= 3);
+  assert.equal((result.data?.intent as { distance: number; direction: string }).distance, 64);
+  assert.equal((result.data?.intent as { direction: string }).direction, 'E');
+  assert.deepEqual(result.data?.frozenOrigin, { x: 0.5, y: 64, z: 0.5 });
+  assert.deepEqual(adapter.pos, { x: 64.5, y: 64, z: 0.5 });
+  assert.equal((result.data?.progress as { along: number }).along, 64);
+  assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 64);
+  assert.equal(scans, 4, '只在四个完整窗口后扫描，不在64个单步之后扫描');
   assert.ok(adapter.actions.every((action) => !/^moveTo:(xz|near|advance)/.test(action)));
 });
 
@@ -51,6 +59,57 @@ test('until 只根据段后本轮扫视停止，不将其报为走完全部距�
   assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
   assert.ok(adapter.pos.x < 64);
   assert.equal((result.data?.intent as { distance: number }).distance, 64);
+});
+
+test('已做定向观察的短前沿不再追加广角扫描', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(3);
+  t.after(() => ctx.memory.close());
+  let scans = 0;
+  t.mock.method(lookAround, 'run', async () => { scans++; return { status: 'succeeded', summary: '已扫视' }; });
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 48, segment: 16 }, adapter));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal((result.data?.stop as { reason: string }).reason, 'UNKNOWN_BOUNDARY');
+  assert.ok((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions > 0);
+  assert.ok((result.data?.counters as { observations: number }).observations > 0);
+  assert.equal(scans, 0, '未知前沿已有定向观察，不能在返回失败前再扫五个视角');
+});
+
+test('零推进或执行中途失败时没有无目标扫描', async (t) => {
+  for (const successfulSteps of [0, 1]) {
+    const { adapter, ctx } = voxelNavigationFixture(40);
+    t.after(() => ctx.memory.close());
+    const moveTo = adapter.moveTo.bind(adapter);
+    let moves = 0, scans = 0;
+    t.mock.method(adapter, 'moveTo', async (...args: Parameters<FakeAdapter['moveTo']>) => {
+      if (moves++ >= successfulSteps) throw new Error('本次身体执行失败');
+      return moveTo(...args);
+    });
+    const scan = t.mock.method(lookAround, 'run', async () => { scans++; return { status: 'succeeded', summary: '已扫视' }; });
+    const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 32, segment: 16 }, adapter));
+    assert.equal(result.status, 'failed', result.summary);
+    assert.equal((result.data?.stop as { reason: string }).reason, 'PHYSICAL_FAILURE');
+    assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, successfulSteps);
+    assert.equal(scans, 0, '移动已经失败，不能追加与目标无关的扫描');
+    scan.mock.restore();
+  }
+});
+
+test('until 在短未知前沿仍能通过本轮扫描发现目标', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(3);
+  t.after(() => ctx.memory.close());
+  let scans = 0;
+  t.mock.method(lookAround, 'run', async (_ctx, args) => {
+    scans++;
+    assert.equal(args.direction, 'E');
+    assert.equal(args.for, 'log');
+    return { status: 'succeeded', summary: '本轮看见原木', data: { found: 'oak_log' } };
+  });
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 48, segment: 16, until: 'log' }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
+  assert.equal(scans, 1);
+  assert.ok((result.data?.progress as { along: number }).along < 16);
+  assert.equal(result.data?.arrived, false, '看到目标不冒充完成原距离');
 });
 
 test('未知边界停止，取消保留实测进度，均不转直接寻路', async (t) => {

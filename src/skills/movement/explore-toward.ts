@@ -20,7 +20,7 @@ export const MAX_EXPLORE_DISTANCE = 512;
 /** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；每段后朝该方向扫视，until 在本轮视野看见时停止。距离 16–512 格，不缩短原目标。只执行已确认的 walk/step/drop；未知前沿先做一次有界合法观察，相关证据变化才继续，否则返回边界。不挖放、不下水。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；完整身体窗口后朝该方向扫视，已做前沿定向观察时不重复广角扫描；有 until 时在实际推进后扫视目标，本轮视野看见就停止。距离 16–512 格，不缩短原目标。只执行已确认的 walk/step/drop；未知前沿先做一次有界合法观察，相关证据变化才继续，否则返回边界。不挖放、不下水。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
   argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（单次身体窗口最多32步）,"maxLateralDrift"?:16（4-64）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z}}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/make，未知参数会被拒绝；until 只认当前扫视。',
   timeoutMs: 600000,
   movement: true,
@@ -75,7 +75,15 @@ export const exploreToward: Skill<ExploreArgs> = {
         sessionId = outcome.session.id;
         if (last.status === 'cancelled' || Date.now() >= deadline) return last;
         const before = outcome.segments.length;
-        if (before > 0) {
+        const confirmed = outcome.segments.reduce((count, part) => count + part.confirmed.length, 0);
+        const progressed = confirmed > 0 || outcome.segments.some((part) =>
+          Math.hypot(part.measuredEnd.x - part.measuredStart.x, part.measuredEnd.z - part.measuredStart.z)
+            + Math.abs(part.measuredEnd.y - part.measuredStart.y) > 0.05);
+        const fullWindow = confirmed >= stepBudget && outcome.observation === undefined
+          && (last.status === 'succeeded' || outcome.stop.reason === 'BUDGET_EXHAUSTED');
+        // 短前沿已有协调器的定向观察；无进展/终止失败不再为扫描而转头。
+        // until 是显式搜索目标，即使推进停在未知边界，也保留本轮发现它的机会。
+        if (progressed && (args.until !== undefined || fullWindow)) {
           const glance = await runSkill({ ...ctx, deadline }, lookAround, { seconds: 2, direction: args.direction, ...(args.until ? { for: args.until } : {}) });
           if (glance.status === 'cancelled') return { ...glance, data: { ...last.data, ...glance.data, ...extra, position: { ...ctx.adapter.state().pos } } };
           if (args.until && glance.status === 'succeeded') {
