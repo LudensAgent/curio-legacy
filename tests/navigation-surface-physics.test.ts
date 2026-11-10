@@ -28,13 +28,24 @@ const surfaces = [
   { name: 'oak_stairs', props: { half: 'bottom', facing: 'east', shape: 'straight', waterlogged: false }, top: 1 },
 ];
 
-function setup() {
-  const from = { x: -20.37, y: 64, z: -2.44 };
+const lowStairs = {
+  N: { from: { x: -20.19, y: 63.5, z: -2.44 }, bearing: { x: 0, z: -1 }, facing: 'west' },
+  E: { from: { x: -20.37, y: 63.5, z: -2.19 }, bearing: { x: 1, z: 0 }, facing: 'north' },
+  S: { from: { x: -20.81, y: 63.5, z: -2.44 }, bearing: { x: 0, z: 1 }, facing: 'east' },
+  W: { from: { x: -20.37, y: 63.5, z: -2.81 }, bearing: { x: -1, z: 0 }, facing: 'south' },
+};
+
+function setup(direction?: keyof typeof lowStairs) {
+  const low = direction === undefined ? undefined : lowStairs[direction];
+  const from = low?.from ?? { x: -20.37, y: 64, z: -2.44 };
   const world = {
     getBlock(position: Vec3) {
       const p = position.floored();
       const surface = surfaces[Math.max(0, p.x + 21) % surfaces.length]!;
-      const block = p.y === 63 ? Block.fromProperties(surface.name, surface.props, 0)
+      const stairColumn = low !== undefined && (low.bearing.x === 0 ? p.x === Math.floor(from.x) : p.z === Math.floor(from.z));
+      const block = p.y === 63 ? low === undefined ? Block.fromProperties(surface.name, surface.props, 0)
+        : stairColumn ? Block.fromProperties('oak_stairs', { half: 'bottom', facing: low.facing, shape: 'straight', waterlogged: false }, 0)
+          : Block.fromStateId(data.blocksByName.air.defaultState, 0)
         : Block.fromStateId(data.blocksByName[p.y < 63 ? 'stone' : 'air'].defaultState, 0);
       block.position = p;
       return block;
@@ -82,7 +93,13 @@ function setup() {
   adapter.pos = { ...from };
   const map = new VoxelMap(adapter.worldId, { validityWindowMs: 600_000 });
   let sequence = 0;
-  for (let x = -23; x <= 2; x++) for (let z = -5; z <= 0; z++) for (let y = 60; y <= 68; y++) {
+  const bounds = low === undefined ? { x0: -23, x1: 2, z0: -5, z1: 0 } : {
+    x0: Math.floor(from.x) + Math.min(0, low.bearing.x * 8) - 2,
+    x1: Math.floor(from.x) + Math.max(0, low.bearing.x * 8) + 2,
+    z0: Math.floor(from.z) + Math.min(0, low.bearing.z * 8) - 2,
+    z1: Math.floor(from.z) + Math.max(0, low.bearing.z * 8) + 2,
+  };
+  for (let x = bounds.x0; x <= bounds.x1; x++) for (let z = bounds.z0; z <= bounds.z1; z++) for (let y = 60; y <= 68; y++) {
     const pos = { x, y, z }, block = adapter.blockStateAt(pos);
     map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
       observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
@@ -92,6 +109,32 @@ function setup() {
     worldId: adapter.worldId, session: { voxel: map }, closing: false,
   } as unknown as SharedSpatialSession };
   return { adapter, ctx, timer, controls, stops, looks, from };
+}
+
+for (const direction of ['N', 'E', 'S', 'W'] as const) {
+  test(`travel_to walks ${direction} along actual stair lower faces at y=63.5 without climbing the high half`, async (t) => {
+    const { adapter, ctx, timer, controls, stops, looks, from } = setup(direction);
+    t.after(() => { clearInterval(timer); ctx.memory.close(); });
+    const { bearing } = lowStairs[direction];
+    const result = await travelTo.run(ctx, {
+      to: { x: from.x + bearing.x * 6, y: 63.5, z: from.z + bearing.z * 6 },
+      range: 1, timeoutMs: 120_000,
+    });
+
+    assert.equal(result.status, 'succeeded', result.summary);
+    assert.ok(stops.length >= 4, `must traverse several lower faces, got ${stops.length} edges`);
+    assert.ok(stops.every((point) => Math.abs(point.y - 63.5) < 0.01), `must land on the low face: ${JSON.stringify(stops)}`);
+    assert.ok(stops.every((point, index) => {
+      const previous = stops[index - 1] ?? from;
+      return (point.x - previous.x) * bearing.x + (point.z - previous.z) * bearing.z > 0;
+    }), 'the same narrow lower face must remain traversable along the selected direction');
+    assert.ok(stops.every((point) => Math.abs((point.x - from.x) * bearing.z - (point.z - from.z) * bearing.x) <= 0.01),
+      'the body must stay clear of the high stair half rather than moving to another surface');
+    const heading = Math.atan2(-bearing.x, -bearing.z);
+    assert.ok(looks.every((yaw) => Math.abs(Math.atan2(Math.sin(yaw - heading), Math.cos(yaw - heading))) < 0.01));
+    assert.equal(adapter.state().onGround, true);
+    assert.ok(Object.values(controls).every((held) => !held));
+  });
 }
 
 for (const skill of ['travel_to', 'explore_toward'] as const) {
