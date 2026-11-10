@@ -308,10 +308,9 @@ test('mind：同一 key 的工具事实不每念重复，key 变化后再说', (
   memory.close();
 });
 
-test('提示词：附近自己走过/挖过的路（含归档旧记录）不看打算措辞都提，只报位置/深度与当前未确认，远处的不提', () => {
+test('提示词不再宣传旧 passage/附近路径', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
-  // perception.update() 先把记忆切到身体所在的世界，再写通道
   const percept = perception.update();
   const state = adapter.state();
   const passage = (id: string, x: number, deepestY: number) => ({
@@ -323,16 +322,10 @@ test('提示词：附近自己走过/挖过的路（含归档旧记录）不看�
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self: new SelfModel(null),
     memory, activity: createActivity({ what: '下矿找钻石，下到 y=-50', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', state),
     suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
-  const line = decisionReminders(ctx).find((r) => r.startsWith('记得自己走过/挖过的路'));
-  assert.ok(line, decisionReminders(ctx).join('\n'));
-  assert.match(line, /psg_near/);
-  assert.doesNotMatch(line, /psg_far/);
-  assert.match(line, /记录最深 y=-40/);
-  assert.match(line, /现在是否还通没确认/);
-  assert.equal(decisionReminders({ ...ctx, tier: 'glance' }).some((r) => r.startsWith('记得自己走过/挖过的路')), false, '瞥一眼不重复');
-  // 打算里没有「下矿/找矿」字样（回传送门、找要塞）也照样提：沿旧路走不限于下矿
+  const text = decisionReminders(ctx).join('\n');
+  assert.doesNotMatch(text, /记得自己走过|psg_near|psg_far/, '旧 passage/nearby_paths 不再进入提示词');
   const portalTrip = { ...ctx, activity: createActivity({ what: '回传送门门厅，再去下界找要塞', why: '测试', kind: 'explore', repeat: 1, steps: [] }, '', 'llm', state) };
-  assert.ok(decisionReminders(portalTrip).some((r) => r.startsWith('记得自己走过/挖过的路') && r.includes('psg_near')));
+  assert.doesNotMatch(decisionReminders(portalTrip).join('\n'), /记得自己走过|psg_near|psg_far/);
   memory.close();
 });
 

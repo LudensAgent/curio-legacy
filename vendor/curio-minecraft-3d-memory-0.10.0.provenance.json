@@ -3,35 +3,11 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.10.0"
   },
-  "sourceHEAD": "1e4fa89df667ec0072096ce7868d19f4b3febdb0",
-  "artifactSHA256": "4ac9f3a94871ee26806cd060e92e66bcd97b46aef68277e3722e0cf1b3379f2b",
-  "npmIntegrity": "sha512-7qY++kD0m9VzVkYLT84QqGowODnzngW+EUT6WeRaxxnMjU+m7OQVEb+XiAF8VeWTO7buOvVv5D80nToo8tq2kQ==",
-  "artifact": "curio-minecraft-3d-memory-1e4fa89.tgz",
-  "artifactSize": 718071,
+  "sourceHEAD": "a9ac37c6f5c1d8f1eaa9d7b271672d2734b9a2b4",
+  "artifactSHA256": "4d9727215ecc2a26bf4e0720bc677b8f5b1d8322a3ba2ba31b1d34654f34a9e1",
+  "npmIntegrity": "sha512-eLdRfN4igM7wWgO9mGxbVJzR49gdN9F4YaWgVZ5swEw3xytJgE85w24gajk2dQnJZ38FBQTU3xUJLu814BHPew==",
   "sourceBinding": {
     "clean": true,
-    "head": "1e4fa89df667ec0072096ce7868d19f4b3febdb0",
-    "branch": "feat/dirty-batch-rotation",
-    "base": "9e9ff07 (B8 ladder/entry/jump library line)",
-    "note": "Packed from the clean feat/dirty-batch-rotation worktree at sourceHEAD: one dirty-batch fairness commit on top of 9e9ff07. node_modules was junctioned from the main library checkout; the package version stays 0.10.0."
-  },
-  "verification": {
-    "build": {
-      "status": "PASS",
-      "command": "npm run build"
-    },
-    "typecheck": {
-      "status": "PASS",
-      "command": "tsc -p tsconfig.build.json --noEmit"
-    },
-    "focusedTests": {
-      "status": "PASS",
-      "command": "npx vitest run tests/spatial-checkpoint-batch-backlog.test.ts tests/spatial-checkpoint-incremental.test.ts (36 passed)"
-    },
-    "fullTests": {
-      "status": "NOT_RUN",
-      "command": "npx vitest run"
-    }
-  },
-  "notes": "Round-robin bounded dirty-batch selection so a persistently re-dirtied head cannot starve the tail; per-key version confirmation and removed-section semantics unchanged."
+    "head": "a9ac37c6f5c1d8f1eaa9d7b271672d2734b9a2b4"
+  }
 }

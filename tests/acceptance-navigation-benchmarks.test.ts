@@ -167,20 +167,21 @@ test('基准4：路线中阻挡 upcoming 段：立即停、保留实测进度、
   }, '', 'llm', adapter.state());
   const nav = activity.navigation!;
 
-  // 夹具模拟服务器在已确认 3 步后放下墙；地图证据尚未更新（Agent 还没观察）。
-  let executedProgress = 0;
-  const wallCtx = {
-    ...ctx,
-    progress() {
-      executedProgress += 1;
-      if (executedProgress === 3) {
-        adapter.blocks.push({ name: 'stone', pos: { x: 4, y: 64, z: 0 } }, { name: 'stone', pos: { x: 4, y: 65, z: 0 } });
-      }
-    },
+  // 夹具模拟服务器在已确认 3 步后放下墙，并在同一次观察中让 Agent 看见它；
+  // voxel A* 只按当前证据决策，不能靠未观察的物理墙让它“凭空”停下。
+  const originalMoveTo = adapter.moveTo.bind(adapter);
+  let executedMoves = 0;
+  adapter.moveTo = async (moveTarget, opts) => {
+    await originalMoveTo(moveTarget, opts);
+    executedMoves += 1;
+    if (executedMoves === 3) {
+      adapter.blocks.push({ name: 'stone', pos: { x: 4, y: 64, z: 0 } }, { name: 'stone', pos: { x: 4, y: 65, z: 0 } });
+      observe(map, 'minecraft:stone', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }]);
+    }
   };
   const firstStep = nextStep(activity)!;
   noteNavigationDispatch(activity, activity.steps[0]!, adapter.state());
-  const blocked = await navigateTo.run(wallCtx, navArgs(target, { maxSteps: 16 }));
+  const blocked = await navigateTo.run(ctx, navArgs(target, { maxSteps: 16 }));
   assert.equal(blocked.status, 'failed');
   assert.equal(blocked.data?.executed, 3, '在阻挡前立即停，保留 3 段实测进度');
   assert.deepEqual(adapter.pos, { x: 3.5, y: 64, z: 0.5 }, '身体停在最后实测位置');
