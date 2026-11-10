@@ -226,6 +226,21 @@ export class Perception {
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
 
   /**
+   * 刚观察到的格在共享体素图里的实际证据版本与时间。
+   *
+   * 没有共享会话、该格未驻留或本轮尚未写入体素图时，明确不返回版本（缺口），
+   * 不用 Date.now/0/批次号代替。只读 cellAt，不加载 Section、不刷新证据。
+   */
+  private resourceEvidence(dim: string, pos: Vec3Like): { sourceCellVersion?: number; observedAt?: number } {
+    const cell = this.spatial?.session.voxel.cellAt(dim, pos.x, pos.y, pos.z);
+    if (cell === undefined || !cell.observed) return {};
+    return {
+      sourceCellVersion: cell.evidence.revision,
+      observedAt: cell.evidence.observation.observedAt,
+    };
+  }
+
+  /**
    * 身体正接触的脚/头/支撑格是实时事实：它们不依赖视锥，也不会因为 camera/遮挡
    * 而看不见。把它们作为 local_rescan 证据刷新，避免 plan_route 因为“自己脚下”
    * 超过新鲜度窗口而卡在 STALE。只写这三格，不挖、不选路。
@@ -492,7 +507,9 @@ export class Perception {
         if (!name) continue;
         if (this.memory.markSeen('blocks', name)) this.bus.publish('discovery', 'P2', `首次看见方块：${name}（刚挖开的邻面）`, { category: 'block', name, pos });
         if (DANGER.has(name)) this.memory.addLandmark('danger', name, s.dim, pos);
-        if (isResourceBlock(name) && name !== 'lava') this.memory.addLandmark('resource', name, s.dim, pos);
+        if (isResourceBlock(name) && name !== 'lava') {
+          this.memory.addLandmark('resource', name, s.dim, pos, 24, this.resourceEvidence(s.dim, pos));
+        }
       }
     }
   }
@@ -558,6 +575,9 @@ export class Perception {
       if (flowing || now && oreKind(now) !== oreKind(l.label) && !(l.label === 'lava' && /lava/.test(now))) {
         this.memory.removeLandmark(l.id);
         this.memory.markGone(l.label, l.dim, l.pos, flowing ? 'lava（流动，非源方块）' : now!);
+      } else if (l.kind === 'resource' && now && oreKind(now) === oreKind(l.label)) {
+        // 同一格同一类资源重新看见：只有更新的体素版本才刷新锚点时间/版本。
+        this.memory.refreshResourceSource(l.id, this.resourceEvidence(l.dim, l.pos));
       }
     }
     for (const c of boxes) {
@@ -610,7 +630,7 @@ export class Perception {
         const key = `${kind}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
         if (noted.has(key) || noted.size >= LANDMARK_NOTES_PER_UPDATE) return;
         noted.add(key);
-        this.memory.addLandmark(kind, name, s.dim, pos);
+        this.memory.addLandmark(kind, name, s.dim, pos, 24, kind === 'resource' ? this.resourceEvidence(s.dim, pos) : undefined);
       };
       for (const b of v.visibleNow.values()) {
         if (!NOTABLE.has(b.name)) continue;

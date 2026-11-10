@@ -19,10 +19,27 @@ import {
   type ContainerAnchorFact,
   type FactGoneEvidence,
   type FactLocation,
+  type FactProvenance,
   type HostFactsPort,
   type PlaceFact,
   type ResourceAnchorFact,
 } from './facts-adapter.ts';
+
+/**
+ * Optional real observation evidence for a landmark write.
+ *
+ * `sourceCellVersion` is the library `CellEvidence.revision` of the exact
+ * world/dim/cell. Callers pass it only when they actually read that cell from
+ * the shared voxel map; otherwise it stays undefined (an explicit gap), never
+ * `Date.now()`, a save batch or `0`.
+ */
+export interface LandmarkObservation {
+  sourceCellVersion?: number;
+  /** Real observation time from the same voxel evidence. */
+  observedAt?: number;
+  /** Provenance of this observation; defaults to the landmark writer. */
+  source?: FactProvenance;
+}
 
 /**
  * The library domains the semantic layer actually consumes. World identity is
@@ -406,12 +423,19 @@ export class SpatialSemanticStore {
     complete: false;
     reason: string;
     resourceAnchors: number;
+    withSourceVersion: number;
+    withoutSourceVersion: number;
     rebuilds: number;
   } {
+    const index = this.getResourceIndex();
+    const withSourceVersion = [...index.facts.values()]
+      .filter((fact) => fact.sourceCellVersion !== undefined).length;
     return {
       complete: false,
       reason: 'derived from recorded resource anchors; this is not a complete world resource scan',
-      resourceAnchors: this.getResourceIndex().facts.size,
+      resourceAnchors: index.facts.size,
+      withSourceVersion,
+      withoutSourceVersion: index.facts.size - withSourceVersion,
       rebuilds: this.resourceIndexRebuilds,
     };
   }
@@ -449,13 +473,32 @@ export class SpatialSemanticStore {
     else this.upsertResource({ ...fact, observedAt });
   }
 
-  addLandmark(kind: LandmarkKind, label: string, dim: string, pos: Vec3Like, dedupeRadius = 24): Landmark | null {
+  addLandmark(
+    kind: LandmarkKind,
+    label: string,
+    dim: string,
+    pos: Vec3Like,
+    dedupeRadius = 24,
+    observation: LandmarkObservation = {},
+  ): Landmark | null {
     const radius = kind === 'discovery' && isContainerLandmark(label) ? 0.1 : dedupeRadius;
     const at = point(pos);
     const nearPlace = kind === 'resource' ? undefined : this.findNearLivePlace(kind, label, dim, at, radius);
     const nearResource = kind === 'resource' ? this.findNearLiveResource(label, dim, at, radius) : undefined;
     const near = nearPlace ?? nearResource;
     if (near) {
+      // A real newer source-cell version is the only thing that may update a
+      // resource anchor's version/time. Same/older versions are ignored.
+      if (kind === 'resource' && isResourceFact(near)) {
+        if (observation.sourceCellVersion !== undefined) {
+          this.refreshResourceSource(near.id, observation);
+          return null;
+        }
+        // Legacy callers carry no version: keep the historical refresh policy.
+        if (Date.now() - near.observedAt < LANDMARK_REFRESH_MS) return null;
+        this.touchFact(near);
+        return null;
+      }
       // 每帧都会重复看见同一处资源/危险：最近刚确认过就不再写。
       if (Date.now() - near.observedAt < LANDMARK_REFRESH_MS) return null;
       this.touchFact(near);
@@ -494,9 +537,12 @@ export class SpatialSemanticStore {
         dim,
         label,
         sourceCell: at,
-        observedAt: Date.now(),
-        source: { source, sessionId: this.sessionId },
+        observedAt: observation.observedAt ?? Date.now(),
+        source: observation.source ?? { source, sessionId: this.sessionId },
         revoked: false,
+        ...(observation.sourceCellVersion === undefined
+          ? {}
+          : { sourceCellVersion: observation.sourceCellVersion }),
       };
       this.upsertResource(fact);
       this.enforceLandmarkCaps();
@@ -518,6 +564,32 @@ export class SpatialSemanticStore {
     this.notePlaceRecord(id, { kind });
     this.enforceLandmarkCaps();
     return this.landmarkView(fact) ?? null;
+  }
+
+  /**
+   * Explicit same-cell refresh after the host actually re-observed a resource
+   * source cell. This is never called from a query path.
+   *
+   * Only a strictly newer source-cell version updates the anchor's version and
+   * observation time; same/older versions are ignored. An absent version is a
+   * gap and never clears a known one. Replacement/removal stays on the existing
+   * revocation path.
+   */
+  refreshResourceSource(id: string, observation: LandmarkObservation): ResourceAnchorFact | null {
+    const version = observation.sourceCellVersion;
+    if (version === undefined) return null;
+    const fact = this.snapshot().resources.find((candidate) => candidate.id === id && !candidate.revoked);
+    if (fact === undefined) return null;
+    if (fact.sourceCellVersion !== undefined && version <= fact.sourceCellVersion) return null;
+    const observedAt = observation.observedAt !== undefined && observation.observedAt > fact.observedAt
+      ? observation.observedAt
+      : this.observedNow(fact.observedAt);
+    return this.upsertResource({
+      ...fact,
+      observedAt,
+      sourceCellVersion: version,
+      ...(observation.source === undefined ? {} : { source: observation.source }),
+    });
   }
 
   private retireLandmark(id: string, reason: 'capacity' | 'replaced'): void {
