@@ -184,17 +184,41 @@ test('travel_to 直走没到时回报记录里有没有沿走过的路通往目�
   const query = (q: { kind: string }) => q.kind === 'fragments' ? { status: 'ok', data: { kind: 'fragments', items: [fragment] } } : { status: 'ok', data: null };
   const h = harness({ blocked: () => true });
   (h.ctx as { spatial?: unknown }).spatial = { query };
-  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 29, z: 0 } }, h.adapter));
+  const r = await travelTo.run(h.ctx, argsOf({ to: { x: 29, z: 0 }, via: 'direct' }, h.adapter));
   assert.equal(r.status, 'failed');
-  assert.ok(h.calls.every(({ target }) => target.kind !== 'near'), '没有擅自沿历史路点走');
+  assert.ok(h.calls.every(({ target }) => target.kind !== 'near'), '明确写 direct 时没有擅自沿历史路点走');
   assert.deepEqual((r.data?.recordedRoute as { fragments: string[] }).fragments, ['psg_walk']);
   assert.match(r.summary, /记录里有从你附近出发.*via:"history" 会沿它走/);
 
   const none = harness({ blocked: () => true });
   (none.ctx as { spatial?: unknown }).spatial = { query: () => ({ status: 'ok', data: { kind: 'fragments', items: [] } }) };
-  const n = await travelTo.run(none.ctx, argsOf({ to: { x: 29, z: 0 } }, none.adapter));
+  const n = await travelTo.run(none.ctx, argsOf({ to: { x: 29, z: 0 }, via: 'direct' }, none.adapter));
   assert.equal(n.data?.recordedRoute, undefined);
   assert.doesNotMatch(n.summary, /记录里有从你附近/);
+});
+
+test('travel_to 不写 via 时按 auto：记录路线算上离路代价更省就按它的路点走，不省就直接走', async () => {
+  const cells = Array.from({ length: 30 }, (_, i) => ({ x: i, y: 64, z: 0 }));
+  const links = cells.slice(1).map((b, i) => ({ a: cells[i]!, b }));
+  const road = { id: 'psg_walk', worldId: 'w', dim: 'overworld', kind: 'walked', entrances: [], polyline: [cells[0]!, cells.at(-1)!], geometrySource: 'legacy', links, deepestY: 64, createdAt: 1, lastUsedAt: 1, uses: 1 };
+  const spatialWith = (items: unknown[]) => ({ query: (q: { kind: string }) => q.kind === 'fragments' ? { status: 'ok', data: { kind: 'fragments', items } } : { status: 'ok', data: null } });
+  const parsed = travelTo.validate({ to: { x: 29, z: 0 } }, harness().adapter);
+  assert.ok(parsed.ok && parsed.args.via === 'auto', '默认 auto');
+
+  const along = harness();
+  (along.ctx as { spatial?: unknown }).spatial = spatialWith([road]);
+  const r = await travelTo.run(along.ctx, argsOf({ to: { x: 29, z: 0 } }, along.adapter));
+  assert.equal((r.data?.history as { found: boolean }).found, true);
+  assert.ok(along.calls.some(({ target }) => target.kind === 'near'), '按记录的路点分跳');
+
+  // 记录方向与目标相反：沿它走不省，直接走，不被带偏。
+  const backwards = Array.from({ length: 30 }, (_, i) => ({ x: -i, y: 64, z: 0 }));
+  const away = { ...road, id: 'psg_away', polyline: [backwards[0]!, backwards.at(-1)!], links: backwards.slice(1).map((b, i) => ({ a: backwards[i]!, b })) };
+  const direct = harness();
+  (direct.ctx as { spatial?: unknown }).spatial = spatialWith([away]);
+  const d = await travelTo.run(direct.ctx, argsOf({ to: { x: 29, z: 0 } }, direct.adapter));
+  assert.equal((d.data?.history as { found: boolean }).found, false);
+  assert.ok(direct.calls.every(({ target }) => target.kind !== 'near'), '不按反方向的记录路点走');
 });
 
 test('travel_to/explore_toward 的 tool 原样交给寻路挖掘；需要 allowDig、背包里得有', async () => {

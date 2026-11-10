@@ -32,7 +32,8 @@ type TravelToArgs = {
    * direct = 朝目标直线分跳；history = 先查自己走过的历史路线（拓扑没有就用记录过的路径片段），
    * 按其路点分跳；{fragment} = 只沿 Agent 指定的那条片段走。都仍由 pathfinder 逐跳实测。
    */
-  via: 'direct' | 'history' | { fragment: string };
+  /** auto（默认）：记录路线算上离路代价更省就沿它走，否则直接走；direct 只走直线；history 先查拓扑历史路线。 */
+  via: 'auto' | 'direct' | 'history' | { fragment: string };
 };
 
 /** 每跳的水平长度：pathfinder 每次只在附近已加载区块里搜一小段，到了再按实测位置规划下一跳。 */
@@ -125,8 +126,8 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。目标在 64 格内时直接以目标为寻路终点（找已加载区块里最短的可达路线），更远时按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、绕回之前到过的位置、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块与工具耐久），回执逐项列出；寻路挖掘默认用手上能挖的工具、其次你挑过的那类，tool 指定后只用那件。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。via:"history" 时先查自己走过的历史路线，按其路点分跳（仍逐跳实测；某路点走不通就放弃剩余历史路点并在回执列出）；默认 direct 没走到时，回执会说明记录里有没有从你附近通往目标的走过的路（recordedRoute），不会自动改走。',
-  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短；到达看射线终点附近） | {"heading":"E","distance":150,"corridor"?:16}（同上；写 corridor 时沿方向推进够距离、横向偏离 ≤ corridor 的任意站位都算到，不要求射线上那个点；寻路也按推进找路） | "地标名" | "base"（首选基地，不一定是最近的那个） | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"direct"|"history"|{"fragment":"<片段 id>"}（默认 direct；history 先查拓扑历史路线，没有就在记录过的路径片段〔含旧矿道〕里找从你附近 8 格内到目标附近的连续记录，目标不在同一片记录里就沿记录走到离目标最近处再直线分跳；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
+  description: '已加载区块行走辅助（后端 pathfinder）：走向你给的坐标、方向+距离、记得的地标/base/死亡点/已记录传送门。目标在 64 格内时直接以目标为寻路终点（找已加载区块里最短的可达路线），更远时按 ≤24 格分跳，每跳实测验收；正前方走不通时在附近偏转绕行，连续 3 轮不更近、绕回之前到过的位置、无路或超时就停，回执报实测位置、位移、剩余距离、停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）、绕开岩浆块/仙人掌/浆果丛等伤身方块；allowDig/allowPlace/allowTower 授权后可能挖掉或放下方块（消耗背包方块与工具耐久），回执逐项列出；寻路挖掘默认用手上能挖的工具、其次你挑过的那类，tool 指定后只用那件。不搜索方块名，不报告规划出的路径；“没找到路”只表示辅助在已加载区块里没找到，不说明没看见的地形。sprint 更快但耗饥饿。默认 via:"auto"：先在自己走过/搭过/挖过的记录路径里算“上路→沿记录走→下路”，不在记录上的那段按 3 倍距离计（往上另加），这样算比直接过去省就按记录的路点分跳（离记录 24 格内可上路、两片记录相距 ≤16 格可跨过去），不省就直接走；via:"history" 另外先查拓扑历史路线；路点仍逐跳实测，某路点走不通就放弃剩余历史路点并在回执列出。via:"direct" 只朝目标直线分跳，没走到时回执会说明记录里有没有从你附近通往目标的走过的路（recordedRoute），不会自动改走。',
+  argsDoc: '{"to": {"x":0,"z":0} | {"x":0,"y":64,"z":0} | "x,z" | "x,y,z" | "E 150"（方向 N/NE/E/SE/S/SW/W/NW + 格数，≤200，超出拒绝不缩短；到达看射线终点附近） | {"heading":"E","distance":150,"corridor"?:16}（同上；写 corridor 时沿方向推进够距离、横向偏离 ≤ corridor 的任意站位都算到，不要求射线上那个点；寻路也按推进找路） | "地标名" | "base"（首选基地，不一定是最近的那个） | "death" | "portal:<id>", "range"?:2（到达半径 1–16；无 y 按水平、带 y 按三维）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowTower"?:false（需 allowPlace）, "allowHazard"?:false（true 时不额外绕开伤身方块；岩浆与火始终绕开）, "avoid"?:["方块名"], "sprint"?:false, "timeoutMs"?:180000（10000–600000）, "via"?:"auto"|"direct"|"history"|{"fragment":"<片段 id>"}（默认 auto：记录路径〔含旧矿道、搭过的桥〕算上离路代价更省就沿它走，否则直接走；direct 只走直线；history 先查拓扑历史路线，再按 auto 的口径查记录片段；{fragment} 只沿那一条片段走；路点只是提示，每跳仍实测，走不通的路点会放弃并在回执 history 里列出）}',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
@@ -149,8 +150,8 @@ export const travelTo: Skill<TravelToArgs> = {
       if (!adapter.state().inventory.some((i) => i.name === a.tool && i.count > 0)) return { ok: false, error: `TOOL_MISSING：背包里没有 ${a.tool}，没有移动` };
     }
     const viaFragment = obj(a.via).fragment;
-    if (a.via !== undefined && a.via !== 'direct' && a.via !== 'history' && !(typeof viaFragment === 'string' && viaFragment.trim())) {
-      return { ok: false, error: 'via 只能是 "direct"、"history" 或 {"fragment":"<片段 id>"}（id 来自 spatial_query fragments / spatial_extrema 回执）' };
+    if (a.via !== undefined && a.via !== 'auto' && a.via !== 'direct' && a.via !== 'history' && !(typeof viaFragment === 'string' && viaFragment.trim())) {
+      return { ok: false, error: 'via 只能是 "auto"、"direct"、"history" 或 {"fragment":"<片段 id>"}（id 来自 spatial_query fragments / spatial_extrema 回执）' };
     }
     return {
       ok: true,
@@ -160,7 +161,7 @@ export const travelTo: Skill<TravelToArgs> = {
         allowSwim: a.allowSwim === true, allowHazard: a.allowHazard === true,
         avoid: [...new Set((a.avoid ?? []) as string[])], sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 180000,
         ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
-        via: typeof viaFragment === 'string' ? { fragment: viaFragment.trim() } : (a.via as 'direct' | 'history' | undefined) ?? 'direct',
+        via: typeof viaFragment === 'string' ? { fragment: viaFragment.trim() } : (a.via as 'auto' | 'direct' | 'history' | undefined) ?? 'auto',
       },
     };
   },

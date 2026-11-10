@@ -734,7 +734,7 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
-    ...(paths.length ? { nearby_paths: [...paths, '以上是自己以前亲历的路径记录，不代表现在还通；沿记录走可用 travel_to 目标坐标并写 via:"history"'] } : {}),
+    ...(paths.length ? { nearby_paths: [...paths, '以上是自己以前亲历的路径记录，不代表现在还通；travel_to 默认（via:"auto"）在沿记录走更省时会按记录的路点走'] } : {}),
     ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${dirName(b.pos.x - here[0], b.pos.z - here[2])} ${Math.round(b.dist)}格，自己放的）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
