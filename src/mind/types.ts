@@ -157,6 +157,23 @@ export interface Activity {
   navigation?: NavigationProgress;
 }
 
+/** 一次采集的结构化回执：数量来自实际物品差量，不是挖掉的方块数。 */
+export interface CollectionReceipt {
+  block: string;
+  items: string[];
+  initial: number;
+  target: number;
+  final: number;
+  gained: number;
+  /** 实际挖掉的方块数；掉落没进背包时与 gained 不相等。 */
+  dug: number;
+  targetMet: boolean;
+  lost?: number;
+}
+
+/** 写进活动记录的历史回执快照：带上产生它的动作、参数与时间，不代表当前背包。 */
+export type CollectionRecord = CollectionReceipt & { skill: string; args?: unknown; at: number };
+
 export type ActivityOutcome = 'done' | 'unmet' | 'stuck' | 'abandoned' | 'interrupted' | 'replaced';
 
 export interface ActivityRecord {
@@ -169,6 +186,8 @@ export interface ActivityRecord {
   operationCompleted?: boolean;
   /** 资源型活动的定位/取得/上层目标状态；从执行回执和背包变化算，不靠模型口述。 */
   resource?: { intent: boolean; located: boolean; acquired: boolean; goalIncomplete: boolean };
+  /** 最近一次采集回执的历史快照（不代表当前背包）；供活动结束后的最近记录与回想使用。 */
+  collection?: CollectionRecord;
   /** 实测探索覆盖：位置来自每步回执，不来自活动标题。 */
   exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
@@ -271,7 +290,8 @@ export interface MindDecision {
   monologue: string;
   say?: string;
   activity?: ActivityDraft;
-  next?: ActivityDraft;
+  /** 预排的下一段；requires 是它开始前的前置条件，不是当前活动的收工条件。 */
+  next?: NextDraft;
   agenda?: { add: { text: string; kind: AgendaItem['kind']; horizon: AgendaItem['horizon'] }[]; done: string[]; drop: string[]; focus?: string };
   learned?: string | { revise: string; text: string };
   hypothesis?: string;
@@ -312,3 +332,6 @@ export interface ActivityDraft {
   /** 写了但没法执行、被丢掉的步骤（让心智知道它们根本没做） */
   dropped?: string[];
 }
+
+/** 预排的下一段：requires 只决定它能否开始，不是当前活动的收工条件。 */
+export type NextDraft = ActivityDraft & { requires?: Condition };

@@ -36,7 +36,7 @@ const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
  * Mind 用它决定前景思考的档位，Thinker 用它拒绝在思考中途升级为更慢的一轮。
  */
 export const LOW_AIR_OXYGEN = 10;
-import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision } from './types.ts';
+import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision, type NextDraft } from './types.ts';
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 
@@ -160,6 +160,12 @@ function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
   }
 }
 
+/** next.requires 只能在下一段开始前按当前状态验收；exploration 依赖上一段活动的实测回执，不能用于这里。 */
+function containsExploration(condition: Condition): boolean {
+  return condition.type === 'exploration'
+    || (condition.type === 'all_of' || condition.type === 'any_of') && condition.conditions.some(containsExploration);
+}
+
 /** 校验一段活：必需步骤必须可执行，可选步骤写错则丢掉并记录原因。 */
 export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldMemory, notes: string[], label = 'activity'): ActivityDraft | { error: string } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: `${label} 必须是对象` };
@@ -266,11 +272,15 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   let kind: DecisionKind = DECISION_KINDS.includes(o.decision) ? o.decision : (o.activity ? 'new' : 'continue');
   if (!DECISION_KINDS.includes(o.decision) && o.decision !== undefined) notes.push(`decision "${String(o.decision)}" 不认识，按 ${kind} 处理`);
   const monologue = str(o.monologue ?? o.thought, 200);
-  // continue 和另一段活含义冲突：让模型说明是继续、修改当前活还是安排下一段。
-  if (kind === 'continue' && hasActivity && currentWhat && o.activity && Array.isArray(o.activity.steps) && o.activity.steps.length
-    && typeof o.activity.what === 'string' && o.activity.what.trim() && o.activity.what.trim() !== currentWhat.trim()
-    && (!currentSkills || o.activity.steps.map((st: any) => String(st?.skill ?? '')).join('>') !== currentSkills.join('>'))) {
-    return { error: `decision=continue 但 activity 写了另一段活「${str(o.activity.what, 40)}」：继续当前活请省略 activity；要修改当前活请明确用 adjust；要排在当前活之后请写 next` };
+  // requires 只属于 next（下一段开始前的前置条件）。activity 上的同名字段不会被 validateDraft 执行，
+  // 必须显式拒绝，避免模型以为自己给当前活动加了守卫。
+  if (o.activity && typeof o.activity === 'object' && !Array.isArray(o.activity) && o.activity.requires !== undefined) {
+    return { error: 'activity.requires 不是受支持的字段：requires 只用于 next.requires（下一段开始前按当时状态验收的前置条件），不会让当前活动带守卫。请把条件移到 next.requires；若现在就要做这段，删掉 activity.requires 并明确用 decision=new/adjust/detour/switch 写 activity' };
+  }
+  // continue 只表示原样执行原 routine。写着 activity（哪怕同名、同样技能、只改了参数）时执行哪一套
+  // 含糊不清，退回去让它说明：改做法用 adjust/detour/switch + steps，排下一段用 next。
+  if (kind === 'continue' && hasActivity && o.activity && Array.isArray(o.activity.steps) && o.activity.steps.length) {
+    return { error: `decision=continue 但 activity 写了内容「${str(o.activity.what, 40)}」：继续当前活请省略 activity；continue 只会按原 routine「${currentWhat ?? '当前活动'}」照原参数继续，同名或同样动作里改了参数也不会被执行；要现在改做法请用 adjust（同一件事改 routine）/ detour / switch 并写出 steps，要排在当前活之后请写 next` };
   }
   let activity: ActivityDraft | undefined;
   if (o.activity !== undefined && o.activity !== null && kind !== 'continue') {
@@ -285,20 +295,49 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   }
   if (NEEDS_ACTIVITY.has(kind) && !activity) return { error: `decision=${kind} 需要给出 activity（what/steps）` };
   let promotedNext = false;
+  let idleGuardedNext = false;
   if (kind === 'continue' && !hasActivity) {
-    // 手上没活却写了 continue：把写好的 activity（或 next）当成新的一段
-    const candidate = o.activity ?? o.next;
-    const v = candidate ? validateDraft(candidate, adapter, memory, notes, o.activity ? 'activity' : 'next') : null;
-    if (v && !('error' in v)) { activity = v; kind = 'new'; promotedNext = !o.activity; notes.push('手上没活，continue 按 new 处理'); }
-    else if (v && 'error' in v) return { error: v.error };
-    else return { error: '手上没有正在做的活，不能 continue：请给出 decision=new 和一段 activity' };
+    const nextObj = o.next && typeof o.next === 'object' && !Array.isArray(o.next) ? o.next : null;
+    // 带 requires 的 next（requires:null 也算写了，它是无效值）保留为排队 next，
+    // 走和正常预排相同的 scope/epoch + 前置条件消费路径，不提升成无守卫的新活动。
+    idleGuardedNext = !o.activity && !!nextObj && nextObj.requires !== undefined;
+    if (!idleGuardedNext) {
+      // 手上没活却写了 continue：把写好的 activity（或 next）当成新的一段。
+      const candidate = o.activity ?? o.next;
+      const v = candidate ? validateDraft(candidate, adapter, memory, notes, o.activity ? 'activity' : 'next') : null;
+      if (v && !('error' in v)) { activity = v; kind = 'new'; promotedNext = !o.activity; notes.push('手上没活，continue 按 new 处理'); }
+      else if (v && 'error' in v) return { error: v.error };
+      else return { error: '手上没有正在做的活，不能 continue：请给出 decision=new 和一段 activity' };
+    } else if (!Array.isArray(nextObj.steps) || !nextObj.steps.length) {
+      return { error: '手上没有正在做的活，continue 的 next 带 requires 但没有可执行 steps：请给出 decision=new 和 activity，或在 next 里补上 1–6 个动作' };
+    } else {
+      notes.push('手上没活；带 requires 的 next 先排队，开始前按当时状态验收前置条件');
+    }
   }
   if (kind === 'adjust' && !hasActivity) kind = 'new';
   if (kind === 'experiment' && activity) activity.kind = 'experiment';
-  let next: ActivityDraft | undefined;
+  let next: NextDraft | undefined;
   if (o.next && !promotedNext && Array.isArray(o.next.steps) && o.next.steps.length) {
     const v = validateDraft(o.next, adapter, memory, notes, 'next');
-    if ('error' in v) notes.push(`next 已忽略：${v.error}`); else next = v;
+    if ('error' in v) {
+      if (idleGuardedNext) return { error: `continue 的 next 无法执行：${v.error}。请修正 steps/requires，或改用 decision=new 和 activity` };
+      notes.push(`next 已忽略：${v.error}`);
+    }
+    else {
+      // requires 是“轮到这段 next 时先验收”的前置条件，不是当前活动的收工条件；
+      // 不套 doneWhenGap——下一段本来可以先去准备它需要的东西。无效条件不能悄悄丢掉后放行。
+      let requires: Condition | undefined;
+      if (o.next.requires !== undefined) {
+        try { requires = validateCondition(normalizeDoneWhen(o.next.requires), adapter, memory, adapter.state()); }
+        catch (e) {
+          return { error: `next.requires 无效：${e instanceof Error ? e.message : String(e)}。要保留前置判断就改正这个条件；确实要无条件接上这一段，请在 next 里明确删掉 requires（不能用无效条件排一段没有守卫的活）` };
+        }
+        if (containsExploration(requires)) {
+          return { error: 'next.requires 不能使用 exploration：exploration 依赖本段活动的实测探索回执（位移/新区块/看见目标），下一段开始前没有“这一次探索”可验收。请改用当前状态条件（inventory_min、location_near、self_state、equipment、inventory_full 等），或不写 requires' };
+        }
+      }
+      next = { ...v, ...(requires ? { requires } : {}) };
+    }
   }
   let agenda: MindDecision['agenda'];
   if (o.agenda && typeof o.agenda === 'object') {

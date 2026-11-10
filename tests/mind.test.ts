@@ -1156,8 +1156,9 @@ test('说着 continue 却写了一段新的活：要求澄清', () => {
   const adapter = new FakeAdapter();
   const d = parseDecision({ decision: 'continue', monologue: '趁空做点别的', activity: { what: '做木板', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, true, '在坑里等到天亮');
   assert.ok('error' in d && /continue.*adjust.*next/.test(d.error));
-  const same = parseDecision({ decision: 'continue', monologue: '接着等', activity: { what: '在坑里等到天亮', steps: [{ skill: 'look_around', args: { seconds: 3 } }] } }, adapter, memory, true, '在坑里等到天亮');
-  assert.ok(!('error' in same) && same.kind === 'continue');
+  // 同名同技能也不行：continue 只按原 routine 原参数执行，写 activity（哪怕只改了参数）会让执行哪一套含糊。
+  const same = parseDecision({ decision: 'continue', monologue: '接着等', activity: { what: '在坑里等到天亮', steps: [{ skill: 'look_around', args: { seconds: 9 } }] } }, adapter, memory, true, '在坑里等到天亮');
+  assert.ok('error' in same && /省略 activity.*adjust/.test(same.error));
 });
 
 test('写错被丢掉的步骤会记下来，心智看得到它们根本没做', () => {
