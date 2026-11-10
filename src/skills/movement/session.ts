@@ -10,8 +10,12 @@ import type { NavigationTargetKind } from './goal.ts';
  * session.expiresAt 只控制“还能不能续接”，累计预算跨调用保留、不因续接重置。
  */
 
-export type MoveMode = 'walk' | 'step' | 'drop' | 'ladder';
-export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop', 'ladder'];
+export type MoveMode = 'walk' | 'step' | 'drop' | 'jump' | 'ladder';
+/**
+ * Default modes for advance. Ladder and jump body control remain opt-in; the
+ * skill-specific KINDS arrays validate explicit requests.
+ */
+export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop'];
 
 /** Phase 1 只开放四方向；对角线必须先验证 corner clearance（设计 D19）。 */
 export type CardinalDirection = 'N' | 'E' | 'S' | 'W';

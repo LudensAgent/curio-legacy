@@ -1030,7 +1030,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 旧的 move_step 仍走下方 xyz/adjacentStep 路径，保持格心语义不变。
     if (target.kind === 'feet') {
       const deadline = Date.now() + opts.timeoutMs;
-      const outcome = await this.driveToFeet({ x: target.x, y: target.y, z: target.z }, deadline, check, 'feet', opts.corridor);
+      const outcome = await this.driveToFeet(
+        { x: target.x, y: target.y, z: target.z },
+        deadline,
+        check,
+        'feet',
+        opts.corridor,
+        opts.horizontalJump === true,
+      );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
       if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 连续脚位没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
@@ -1667,6 +1674,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     target: { x: number; y: number; z: number }, deadline: number,
     check: (() => void) & { signal?: AbortSignal }, mode: 'cell' | 'feet',
     corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number },
+    horizontalJump = false,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
@@ -1698,7 +1706,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const p0y = p0.y;
     const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
     if (Date.now() >= deadline) return 'timeout';
-    if (dist() > 1.2 || Math.abs(p0y - target.y) > 1) return 'blocked';
+    // A horizontal jump is a single, already-proved gap crossing at the same
+    // feet height. It never changes the target, climbs, or bridges terrain.
+    const maxStartDistance = horizontalJump ? 4.2 : 1.2;
+    if (dist() > maxStartDistance) return 'blocked';
+    if (Math.abs(p0y - target.y) > (horizontalJump ? 0.01 : 1)) return 'blocked';
+    const initialDistance = dist();
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
     // 连续脚位可选走廊：只按实测身体位置到原 origin→bearing 轴线的横向距离判定，不用 0.12 到达容差冒充横向授权。
@@ -1722,8 +1735,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     b.clearControlStates();
     b.setControlState('forward', true);
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
+    // 同脚高但超过相邻格的距离由调用方证实的水平 jump 消耗一次起跳。
     // 只在这段身体控制里补一次跳跃；目标/落点仍由调用方决定。
-    const needsJump = target.y > p0y + 0.6;
+    const needsJump = target.y > p0y + 0.6 || (horizontalJump && initialDistance > 1.2);
     if (needsJump) b.setControlState('jump', true);
     const jumpReleaseAt = Date.now() + 180;
     // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍（停稳系数 ≈ 1/(1-0.546) ≈ 2.2），
@@ -1744,11 +1758,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const d = dist();
         const v = b.entity.velocity;
         const speed = v ? Math.hypot(v.x, v.z) : 0;
-        const stopDist = target.y < p0y
-          ? EDGE + Math.max(0, speed - EDGE / AIR_STOP) * GROUND_STOP // 下降：地面减速到边缘速度，再空中滑到中心
-          : speed * GROUND_STOP;                                     // 平走/上行：地面减速
+        const stopDist = horizontalJump && !b.entity.onGround
+          // 空中无法用地面摩擦估计制动距离；保持前进，落地后再按目标列制动。
+          ? 0
+          : target.y < p0y
+            ? EDGE + Math.max(0, speed - EDGE / AIR_STOP) * GROUND_STOP // 下降：地面减速到边缘速度，再空中滑到中心
+            : speed * GROUND_STOP;                                     // 平走/上行：地面减速
         if (d <= stopDist) { b.setControlState('forward', false); break; }
-        if (d > closest + 0.05 || d > 1.5) { overshot = true; break; }
+        const overshootLimit = horizontalJump ? initialDistance + 0.75 : 1.5;
+        if (d > closest + 0.05 || d > overshootLimit) { overshot = true; break; }
         closest = Math.min(closest, d);
         await this.afterAction(() => sleep(Math.min(50, Math.max(1, deadline - Date.now())), check.signal), check);
         checkCorridor();

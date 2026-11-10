@@ -189,6 +189,12 @@ export interface MoveOpts {
   /** 只执行一个相邻格：绕过 pathfinder 的整段搜索，直接用身体控制走/跳/下；仅 move_step 使用。 */
   adjacentStep?: boolean;
   /**
+   * feet 目标：允许一次同脚高的水平起跳跨越已证实的空腔。目标必须与实测
+   * 脚高相同；身体控制只在原地起跳可覆盖的有限距离内尝试，不改变目标或
+   * 自动搭桥。
+   */
+  horizontalJump?: boolean;
+  /**
    * 仅连续脚位（feet）身体控制消费：实测身体位置到原 origin→bearing 轴线的横向距离不得超过 maxLateral。
    * 超出即停止本动作、保留实测位置并返回事实；不用 FEET_ARRIVAL_TOLERANCE 当作横向授权，也不把身体挪回走廊。
    */

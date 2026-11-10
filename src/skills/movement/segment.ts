@@ -132,7 +132,7 @@ export interface SegmentReceipt {
   detail?: string;
 }
 
-const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'ladder'];
+const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
 
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
@@ -619,7 +619,27 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     }
     let step: SkillResult | null = null;
     let actionError: unknown = null;
-    if (transition.kind === 'ladder') {
+    if (transition.kind === 'jump') {
+      const remaining = request.deadline - Date.now();
+      if (remaining < 1) {
+        return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出跳跃控制前耗尽：已执行 ${executed}/${planned.length} 段` });
+      }
+      try {
+        await ctx.adapter.moveTo(
+          { kind: 'feet', x: transition.to.x, y: transition.to.y, z: transition.to.z },
+          {
+            signal: ctx.signal,
+            timeoutMs: Math.min(6000, Math.floor(remaining)),
+            allowTerrainChanges: false,
+            horizontalJump: true,
+            ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
+          },
+        );
+      } catch (error) {
+        if (isAbort(error)) return cancelledHere(index, transition, current.pos);
+        actionError = error;
+      }
+    } else if (transition.kind === 'ladder') {
       // Ladder body control uses the explicit xyz target and requires the
       // measured start/endpoint to be cell-centered; a continuous offset would
       // be silently moved by the cell-centered adapter and is not executable.
