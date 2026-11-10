@@ -273,6 +273,8 @@ export interface PostSaveEviction {
   evictedSections: number;
   rejectedSections: number;
   capacity: string | null;
+  /** Capacity target actually applied; null when the attempt failed before it. */
+  target: { sections?: number; bytes?: number } | null;
   sample: SectionKey[];
   error?: unknown;
 }
@@ -951,6 +953,7 @@ export class SharedSpatialSession {
             evictedSections: free.result.evicted.length,
             rejectedSections: free.result.evictionRejected.length,
             capacity: free.result.capacity?.kind ?? null,
+            target: this.coordinator.lastFreeTarget(),
             sample: free.result.evicted.slice(0, 8).map((key) => ({ ...key })),
           }
         : {
@@ -958,6 +961,7 @@ export class SharedSpatialSession {
             evictedSections: 0,
             rejectedSections: 0,
             capacity: null,
+            target: null,
             sample: [],
             error: free.error,
           };

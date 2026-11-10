@@ -51,6 +51,8 @@ const HOST_COMPOSED_CAPABILITIES = {
     fragments: false,
     traversals: false,
     nodes: true,
+    // 地点专用有界分页；由事实权威回答（pageSource:"memory"），不是持久化冷读。
+    places: true,
     edges: false,
     historyRoute: false,
     anchors: false,
