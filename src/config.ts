@@ -59,6 +59,14 @@ if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
   throw new Error(`SPATIAL_VOXEL_LOADING 必须为 eager 或 manual，收到：${voxelLoadingRaw}`);
 }
 const voxelLoading: 'eager' | 'manual' = voxelLoadingRaw;
+// 历史/拓扑加载模式。默认 eager 保持现有地标与路线；none 只验证已提交基线，
+// 不把旧 Fragment/Topology 解码进主会话，也不能用未加载的空集覆盖旧域。
+// 新主会话切换 none 仍需 B9 的显式迁移，不能在这里静默丢地标。
+const historyLoadingRaw = str('SPATIAL_HISTORY_LOADING', 'eager').toLowerCase();
+if (historyLoadingRaw !== 'eager' && historyLoadingRaw !== 'none') {
+  throw new Error(`SPATIAL_HISTORY_LOADING 必须为 eager 或 none，收到：${historyLoadingRaw}`);
+}
+const historyLoading: 'eager' | 'none' = historyLoadingRaw;
 // manual 工作集的字节上限。residentBytes 是库的解码体素估算，不是进程 RSS；
 // 32MiB 在已被探索的密集矿道里会长期贴边，只比上限高一点也永远腾不出空间。
 const maxResidentMb = num('SPATIAL_MAX_RESIDENT_MB', 64);
@@ -197,6 +205,8 @@ export const config = {
      * 进程 RSS，也不是整个系统的内存上限。
      */
     voxelLoading,
+    /** 历史/拓扑加载模式；none 不恢复旧域，但需要显式迁移后才能写回。 */
+    historyLoading,
     /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
     maxResidentMb,
     maxResidentBytes,

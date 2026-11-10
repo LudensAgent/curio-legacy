@@ -105,6 +105,7 @@ try {
     worldId: adapter.state().worldId,
     databasePath: config.spatial.databasePath,
     voxelLoading: config.spatial.voxelLoading,
+    historyLoading: config.spatial.historyLoading,
     // 快照序列化容量是宿主配置，不是库的固定规则；长期世界超过库默认 64MiB 后
     // checkpoint 会一直 capacity 失败。上限只决定一次保存能否完成，不改变驻留。
     snapshotLimits: {

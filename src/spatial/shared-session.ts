@@ -130,6 +130,8 @@ export interface SharedSpatialOpenOptions {
   snapshotLimits?: SnapshotLimits;
   /** 体素加载模式；默认 eager。manual 时才构造宿主工作集协调器。 */
   voxelLoading?: VoxelLoading;
+  /** 历史/拓扑加载模式；none 不恢复旧域，且拒绝用未加载空集覆盖旧域。 */
+  historyLoading?: 'eager' | 'none';
   /** manual 模式的运行时驻留上限；透传库的 ResidencyLimits。 */
   residencyLimits?: ResidencyLimits;
   /** 单次 checkpoint 的体素 dirty 批次字节上限；省略时沿用快照 maxBytes。 */
@@ -781,6 +783,7 @@ export class SharedSpatialSession {
       databasePath: options.databasePath,
       voxelOptions: { now, validityWindowMs: options.voxelValidityWindowMs ?? config.spatial.voxelValidityWindowMs },
       ...(options.voxelLoading === undefined ? {} : { voxelLoading: options.voxelLoading }),
+      ...(options.historyLoading === undefined ? {} : { historyLoading: options.historyLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       ...(options.voxelBatchMaxBytes === undefined ? {} : { voxelBatchMaxBytes: options.voxelBatchMaxBytes }),
       timeoutMs,
@@ -1526,12 +1529,20 @@ export class SharedSpatialSession {
       // 或达到有界批数。最后一批的版本可能低于已确认的最大版本，最终以 state 核对。
       try {
         this.retainObservations();
-        checkpoint = await this.session.checkpoint();
+        // All final batches share one absolute shutdown window. A batch never
+        // gets a fresh per-request timeout that could extend the total drain.
+        const finalDeadline = Date.now() + this.operationTimeoutMs;
+        checkpoint = await this.session.checkpoint({ deadlineMs: finalDeadline });
         let state = this.session.getPersistenceState();
-        for (let batch = 1; batch < MAX_FINAL_CHECKPOINT_BATCHES && state.dirty; batch++) {
-          checkpoint = await this.session.checkpoint();
+        for (
+          let batch = 1;
+          batch < MAX_FINAL_CHECKPOINT_BATCHES && state.dirty && Date.now() < finalDeadline;
+          batch++
+        ) {
+          checkpoint = await this.session.checkpoint({ deadlineMs: finalDeadline });
           state = this.session.getPersistenceState();
         }
+        const expired = Date.now() >= finalDeadline;
         if (
           state.dirty ||
           state.lastConfirmedCheckpointId !== checkpoint.checkpointId ||
@@ -1539,7 +1550,12 @@ export class SharedSpatialSession {
           state.fragmentRevision !== state.confirmedFragmentRevision ||
           state.topologyRevision !== state.confirmedTopologyRevision
         ) {
-          capture(new PersistenceError('data', 'final checkpoint did not confirm clean state'));
+          capture(new PersistenceError(
+            expired && state.dirty ? 'timeout' : 'data',
+            expired && state.dirty
+              ? 'final checkpoint window expired with remaining dirty state; confirmed batches are preserved'
+              : 'final checkpoint did not confirm clean state',
+          ));
         }
       } catch (err) {
         capture(err);
