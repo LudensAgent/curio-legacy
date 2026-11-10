@@ -7,165 +7,74 @@
  * observation time, provenance and gone/revoked state. It never carries
  * inventories. This module is the host boundary that:
  *
- * - defines the narrow `HostFactsPort` the semantic/travel stores depend on
- *   (structural copy of the frozen interface so a lagging package artifact does
- *   not leak into host code);
+ * - narrows the library `FactStore` to the ten-method `HostFactsPort` the
+ *   semantic/travel stores depend on;
  * - classifies real host nodes by `metadata.curio.type` first and only falls
  *   back to `tag`/`kind` for nodes that never had curio metadata;
  * - rehearses/applies the migration of real host semantic nodes (never a
  *   tag-only generic shape) and reports gaps instead of dropping them.
  *
- * `createInMemoryHostFactsPort` is the test/non-persistent implementation. It
- * wraps the library `InMemoryFactStore`; the only host-managed state is
- * container-gone, which the frozen library artifact does not type yet.
+ * `createInMemoryHostFactsPort` is the test/non-persistent implementation and
+ * returns the library `InMemoryFactStore` directly.
  */
 import { InMemoryFactStore } from 'curio-minecraft-3d-memory';
+import type {
+  ContainerAnchorFact,
+  FactGoneEvidence,
+  FactLocation,
+  FactPage,
+  FactProvenance,
+  FactQuery,
+  FactStore,
+  FactWriteOutcome,
+  FactWriteResult,
+  PlaceFact,
+  PlaceKind,
+  ResourceAnchorFact,
+  ResourceFactQuery,
+  ResourceSourceUpdate,
+  SemanticFact,
+} from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../adapter/types.ts';
 
 /* ------------------------------------------------------------------ facts */
 
-/** How a fact was observed. Opaque to the library. */
-export interface FactProvenance {
-  /** Caller-supplied provenance label. */
-  source: string;
-  /** Session the observation actually happened in, when known. */
-  sessionId?: string;
-  /** Host observation ids that support this record, when available. */
-  observationIds?: readonly string[];
-}
-
-export type PlaceKind = 'place' | 'base' | 'death' | 'portal' | 'station' | 'hazard';
-
-export type FactLocation =
-  | { kind: 'exact'; pos: Vec3Like }
-  | { kind: 'area'; center: Vec3Like; radius: number };
-
-export interface PlaceFact {
-  id: string;
-  kind: PlaceKind;
-  label: string;
-  worldId: string;
-  dim: string;
-  location: FactLocation;
-  /** Real observation time in milliseconds; never a save batch or receipt time. */
-  observedAt: number;
-  source: FactProvenance;
-  /** The place was observed no longer present; the record is retained. */
-  gone: boolean;
-  /** Real disappearance observation time; absent when legacy data lacked one. */
-  goneAt?: number;
-  /** Provenance of the disappearance observation, separate from `source`. */
-  goneSource?: FactProvenance;
-  /** Compatibility-source id, preserved verbatim during a migration. */
-  legacyId?: string;
-}
-
-export interface ResourceAnchorFact {
-  id: string;
-  worldId: string;
-  dim: string;
-  /** Resource identity within the source cell (e.g. `iron_ore`). */
-  label: string;
-  /** Optional host resource classification; never inferred from the label. */
-  resourceType?: string;
-  /** Exact cell the resource was observed in. Area locations are not resources. */
-  sourceCell: Vec3Like;
-  observedAt: number;
-  source: FactProvenance;
-  /** The resource was observed removed or replaced; the record is retained. */
-  revoked: boolean;
-  revokedAt?: number;
-  revokedSource?: FactProvenance;
-  legacyId?: string;
-}
-
-export interface ContainerAnchorFact {
-  id: string;
-  worldId: string;
-  dim: string;
-  /** Exact block cell. Region centers are never promoted to container targets. */
-  pos: Vec3Like;
-  /**
-   * Stable host identity (e.g. a chest key). The same `worldId` + `dim` +
-   * `externalRef` is one anchor even when re-observed.
-   */
-  externalRef: string;
-  /** Real observation time of the shell in milliseconds. */
-  observedAt: number;
-  source: FactProvenance;
-  /** The container shell was observed no longer present; the record is retained. */
-  gone: boolean;
-  /** Real disappearance observation time; absent when legacy data lacked one. */
-  goneAt?: number;
-  /** Provenance of the disappearance observation, separate from `source`. */
-  goneSource?: FactProvenance;
-  /** Opaque reference into the host precise container ledger. */
-  ledgerRef?: string;
-  /** Compatibility-source id, preserved verbatim during a migration. */
-  legacyId?: string;
-}
-
-export type SemanticFact = PlaceFact | ResourceAnchorFact | ContainerAnchorFact;
-
-export interface FactQuery {
-  worldId?: string;
-  dim?: string;
-  /** Include gone/revoked records. Defaults to false. */
-  includeGone?: boolean;
-  /** Exclusive cursor: only ids sorting after this id are returned. */
-  after?: string;
-  /** Page size; bounded by the store's `maxQueryLimit`. */
-  limit?: number;
-}
-
-export interface ResourceFactQuery extends FactQuery {
-  sourceCell?: Vec3Like;
-}
-
-export interface FactPage<T> {
-  items: T[];
-  total: number;
-  nextAfter?: string;
-}
-
-export type FactWriteOutcome = 'inserted' | 'updated' | 'duplicate' | 'conflict';
-
-export interface FactWriteResult<T> {
-  outcome: FactWriteOutcome;
-  record: T;
-}
-
-/** Evidence for a gone/revoked transition. It is not a deletion. */
-export interface FactGoneEvidence {
-  observedAt: number;
-  source: FactProvenance;
-}
-
-/** Re-anchor an existing resource id at a new exact source cell. */
-export interface ResourceSourceUpdate {
-  sourceCell: Vec3Like;
-  label?: string;
-  observedAt: number;
-  source: FactProvenance;
-}
+export type {
+  ContainerAnchorFact,
+  FactGoneEvidence,
+  FactLocation,
+  FactPage,
+  FactProvenance,
+  FactQuery,
+  FactStore,
+  FactWriteOutcome,
+  FactWriteResult,
+  PlaceFact,
+  PlaceKind,
+  ResourceAnchorFact,
+  ResourceFactQuery,
+  ResourceSourceUpdate,
+  SemanticFact,
+};
 
 /**
- * The narrow host port from the frozen first-batch interface (§2). The semantic
- * and travel stores depend on this shape only; the integrator maps it onto the
- * final library `FactStore`/persistent artifact.
+ * The narrow host port from the frozen first-batch interface (§2), projected
+ * from the library `FactStore`. The semantic and travel stores depend on this
+ * shape only.
  */
-export interface HostFactsPort {
-  upsertPlace(place: PlaceFact): FactWriteResult<PlaceFact>;
-  upsertResource(resource: ResourceAnchorFact): FactWriteResult<ResourceAnchorFact>;
-  upsertContainer(container: ContainerAnchorFact): FactWriteResult<ContainerAnchorFact>;
-  markPlaceGone(id: string, evidence: FactGoneEvidence): FactWriteResult<PlaceFact>;
-  revokeResource(id: string, evidence: FactGoneEvidence): FactWriteResult<ResourceAnchorFact>;
-  markContainerGone(id: string, evidence: FactGoneEvidence): FactWriteResult<ContainerAnchorFact>;
-  updateResourceSource(id: string, update: ResourceSourceUpdate): FactWriteResult<ResourceAnchorFact>;
-  places(query?: FactQuery): FactPage<PlaceFact>;
-  resources(query?: ResourceFactQuery): FactPage<ResourceAnchorFact>;
-  containers(query?: FactQuery): FactPage<ContainerAnchorFact>;
-}
+export type HostFactsPort = Pick<
+  FactStore,
+  | 'upsertPlace'
+  | 'upsertResource'
+  | 'upsertContainer'
+  | 'markPlaceGone'
+  | 'revokeResource'
+  | 'markContainerGone'
+  | 'updateResourceSource'
+  | 'places'
+  | 'resources'
+  | 'containers'
+>;
 
 export const semanticFactKind = (fact: SemanticFact): 'place' | 'resource' | 'container' =>
   'sourceCell' in fact ? 'resource' : 'externalRef' in fact ? 'container' : 'place';
@@ -883,130 +792,11 @@ export function applyHostSemanticMigration(
 
 /* ------------------------------------------------- in-memory host fact port */
 
-/** Container disappearance state the frozen library artifact does not type yet. */
-interface ContainerGoneState {
-  goneAt?: number;
-  goneSource?: FactProvenance;
-}
-
-const cloneProvenance = (source: FactProvenance): FactProvenance => ({
-  source: source.source,
-  ...(source.sessionId === undefined ? {} : { sessionId: source.sessionId }),
-  ...(source.observationIds === undefined ? {} : { observationIds: [...source.observationIds] }),
-});
-
-const cloneFactLocation = (location: FactLocation): FactLocation => location.kind === 'exact'
-  ? { kind: 'exact', pos: { ...location.pos } }
-  : { kind: 'area', center: { ...location.center }, radius: location.radius };
-
-const cloneFact = <T extends SemanticFact>(fact: T): T => {
-  if (isPlaceFact(fact)) {
-    return {
-      ...fact,
-      location: cloneFactLocation(fact.location),
-      source: cloneProvenance(fact.source),
-      ...(fact.goneSource === undefined ? {} : { goneSource: cloneProvenance(fact.goneSource) }),
-    } as T;
-  }
-  if (isResourceFact(fact)) {
-    return {
-      ...fact,
-      sourceCell: { ...fact.sourceCell },
-      source: cloneProvenance(fact.source),
-      ...(fact.revokedSource === undefined ? {} : { revokedSource: cloneProvenance(fact.revokedSource) }),
-    } as T;
-  }
-  return {
-    ...fact,
-    pos: { ...fact.pos },
-    source: cloneProvenance(fact.source),
-    ...(fact.goneSource === undefined ? {} : { goneSource: cloneProvenance(fact.goneSource) }),
-  } as T;
-};
-
-const pageAll = <T>(page: (after: string | undefined) => FactPage<T>): T[] => {
-  const out: T[] = [];
-  let after: string | undefined;
-  for (let guard = 0; guard < 10_000; guard++) {
-    const next = page(after);
-    out.push(...next.items);
-    if (next.nextAfter === undefined) break;
-    after = next.nextAfter;
-  }
-  return out;
-};
-
 /**
  * In-memory host facts port for tests and the non-persistent WorldMemory
- * fallback. Place/resource semantics delegate to the library `InMemoryFactStore`;
- * container-gone is tracked here because the frozen artifact predates that
- * field. This is a test seam, not a second spatial authority.
+ * fallback. The library `InMemoryFactStore` already implements the full
+ * ten-method contract, including native container-gone state.
  */
 export function createInMemoryHostFactsPort(): HostFactsPort {
-  const store = new InMemoryFactStore();
-  const containerGone = new Map<string, ContainerGoneState>();
-
-  const overlay = (record: ContainerAnchorFact): ContainerAnchorFact => {
-    const gone = containerGone.get(record.id);
-    return gone ? cloneFact({ ...record, gone: true, ...gone }) : cloneFact({ ...record, gone: record.gone === true });
-  };
-
-  const allContainers = (query: FactQuery): ContainerAnchorFact[] => {
-    // `includeGone: true` is required both by artifacts that filter gone
-    // containers natively and by this wrapper's overlay.
-    const records = pageAll((after) => store.containers({ worldId: query.worldId, dim: query.dim, includeGone: true, after, limit: 1000 }))
-      .map((record) => overlay(record as ContainerAnchorFact));
-    return records.filter((record) => query.includeGone === true || !record.gone);
-  };
-
-  return {
-    upsertPlace: (place) => store.upsertPlace(place),
-    upsertResource: (resource) => store.upsertResource(resource),
-    upsertContainer: (container) => {
-      // The linked artifact's type has no gone field, but it snapshots records
-      // by spread, so the anchor survives; container-gone remains host state.
-      const result = store.upsertContainer(container);
-      if (container.gone) {
-        containerGone.set(container.id, {
-          ...(container.goneAt === undefined ? {} : { goneAt: container.goneAt }),
-          ...(container.goneSource === undefined ? {} : { goneSource: cloneProvenance(container.goneSource) }),
-        });
-      } else {
-        const current = containerGone.get(container.id);
-        if (current !== undefined && container.observedAt >= (current.goneAt ?? -Infinity)) containerGone.delete(container.id);
-      }
-      return { outcome: result.outcome, record: overlay(result.record as ContainerAnchorFact) };
-    },
-    markPlaceGone: (id, evidence) => store.markPlaceGone(id, evidence),
-    revokeResource: (id, evidence) => store.revokeResource(id, evidence),
-    markContainerGone: (id, evidence): FactWriteResult<ContainerAnchorFact> => {
-      const existing = allContainers({ includeGone: true }).find((record) => record.id === id);
-      if (existing === undefined) throw new Error(`unknown container id: ${id}`);
-      if (existing.gone) return { outcome: 'duplicate', record: overlay(existing) };
-      if (evidence.observedAt < existing.observedAt) return { outcome: 'conflict', record: overlay(existing) };
-      containerGone.set(id, {
-        goneAt: evidence.observedAt,
-        goneSource: cloneProvenance(evidence.source),
-      });
-      return { outcome: 'updated', record: overlay(existing) };
-    },
-    updateResourceSource: (id, update) => store.updateResourceSource(id, update),
-    places: (query = {}) => store.places(query),
-    resources: (query = {}) => store.resources(query),
-    containers: (query = {}) => {
-      const records = allContainers(query);
-      const sorted = records.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-      const after = query.after;
-      const start = after === undefined ? 0 : sorted.findIndex((record) => record.id > after);
-      const from = start < 0 ? sorted.length : start;
-      const limit = query.limit === undefined ? 100 : Math.min(Math.max(1, query.limit), 1000);
-      const items = sorted.slice(from, from + limit);
-      const more = from + items.length < sorted.length;
-      return {
-        items,
-        total: sorted.length,
-        ...(more && items.length > 0 ? { nextAfter: items[items.length - 1]!.id } : {}),
-      };
-    },
-  };
+  return new InMemoryFactStore();
 }
