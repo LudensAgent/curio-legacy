@@ -296,7 +296,7 @@ test('自动重试不能超出原委托的材料额度', () => {
 });
 
 test('导航阶段按技能实际报告记录，没有报告的不编造', () => {
-  const walk = activityOf([{ skill: 'walk_path', args: { routeId: 'rt_test' } }]);
+  const walk = activityOf([{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }]);
   const walkStep = nextStep(walk.activity)!;
   afterStep(walk.activity, walkStep, fail('PATH_NOT_FOUND', '被挡住', { nav: { outcome: 'BLOCKED', message: 'x', trace: [] }, position: { x: 0.5, y: 64, z: 0.5 } }), 100, walk.adapter.state());
   assert.equal((walk.activity.results.at(-1) as { stage?: string }).stage, 'BLOCKED');

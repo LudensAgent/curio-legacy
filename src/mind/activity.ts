@@ -4,7 +4,6 @@ import type { Percept } from '../perception/perception.ts';
 import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { evaluateCondition, type ConditionPerception } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
-import { ROUTE_REGISTRY_PROBLEM_KINDS } from '../skills/movement/route.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
@@ -148,7 +147,7 @@ function continuationGuard(a: Activity, step: Step | undefined, state: AgentStat
   return undefined;
 }
 
-/** 技能回执里明确报告的导航阶段（如 walk_path 的 nav.outcome）；没有报告就不编。 */
+/** 技能回执里明确报告的导航阶段（如 navigate_to 的 nav.outcome）；没有报告就不编。 */
 function reportedStage(result: SkillResult): string | undefined {
   const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;
   const data = result.data;
@@ -206,8 +205,8 @@ function digest(text: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** 会把身体带向一个目的地的动作；只有它们参与导航目标。相对 move_step 不在此列。 */
-const NAVIGATION_SKILLS = new Set(['plan_route', 'walk_path', 'navigate_to', 'advance']);
+/** 会让身体走向目的地或为其做只读预览的动作；只有它们参与导航目标。相对 move_step 不在此列。 */
+const NAVIGATION_SKILLS = new Set(['plan_route', 'navigate_to', 'advance']);
 
 type NavPoint = { x: number; y: number; z: number };
 
@@ -242,7 +241,7 @@ const navPoints = (value: unknown): NavPoint[] | undefined => {
   });
 };
 
-/** 回执里已确认的段数：walk_path 报 confirmedSegments，navigate_to 报 executed。 */
+/** 回执里已确认的段数：navigate_to/advance 报 executed，兼容旧的 confirmedSegments 字段。 */
 function confirmedSegmentsOf(data: Record<string, unknown>): number {
   if (typeof data.confirmedSegments === 'number' && Number.isFinite(data.confirmedSegments)) return data.confirmedSegments;
   return typeof data.executed === 'number' && Number.isFinite(data.executed) ? data.executed : 0;
@@ -253,23 +252,10 @@ function adoptDestination(nav: NavigationProgress, target: NavPoint) {
   nav.remaining = [{ ...target }];
 }
 
-/**
- * 路线 handle 已经不能复用的报告：注册表拒绝的六种原因（与 walk.ts 共用 route.ts 的集合）
- * 加上库在执行期报告的三种失效原因。后者不属于注册表问题，放在这里只为统一“旧 handle 不可复用”的判定。
- */
-const ROUTE_HANDLE_PROBLEMS = new Set<string>([
-  ...ROUTE_REGISTRY_PROBLEM_KINDS,
-  'route_invalidated', 'route_start_changed', 'scope_changed',
-]);
-
+/** 已退役的 route handle 不再产生失效报告；只认回执顶层明确给出的失效原因。 */
 function invalidationReasonOf(data: Record<string, unknown>): string | undefined {
   const invalidation = data.invalidation as { reason?: unknown } | undefined;
-  if (typeof invalidation?.reason === 'string' && invalidation.reason) return invalidation.reason;
-  const problem = data.problem as { kind?: unknown } | undefined;
-  if (typeof problem?.kind === 'string' && ROUTE_HANDLE_PROBLEMS.has(problem.kind)) return problem.kind;
-  const unsupported = data.unsupported as { reason?: unknown } | undefined;
-  if (typeof unsupported?.reason === 'string' && ROUTE_HANDLE_PROBLEMS.has(unsupported.reason)) return unsupported.reason;
-  return undefined;
+  return typeof invalidation?.reason === 'string' && invalidation.reason ? invalidation.reason : undefined;
 }
 
 function newNavigation(a: Activity, state: Pick<AgentState, 'pos' | 'worldId' | 'dim'>): NavigationProgress {
@@ -310,18 +296,14 @@ export function noteNavigationDispatch(
   nav.measured = { pos: { ...state.pos }, at: now };
   nav.segmentStart = { ...state.pos };
   if (opts.deadlineMs !== undefined) nav.parentDeadlineMs = opts.deadlineMs;
-  const routeId = (step.args as { routeId?: unknown } | undefined)?.routeId;
-  if (typeof routeId === 'string' && routeId && nav.lastRoute?.id !== routeId) {
-    nav.lastRoute = { id: routeId, source: 'pending', valid: true, confirmed: 0 };
-  }
   nav.phase = step.skill === 'plan_route' ? 'planning' : 'executing';
   nav.updatedAt = now;
   return nav;
 }
 
 /**
- * 把一步的实测回执并入当前导航目标：更新实测位置、已完成段、剩余目标、routeId/来源和失效/失败。
- * 只保留当前委托的一份状态；route 几何、traversal 和体素仍留在共享空间库。
+ * 把一步的实测回执并入当前导航目标：更新实测位置、已完成段、剩余目标、来源和失效/失败。
+ * 只保留当前委托的一份状态；路线几何、traversal 和体素仍留在共享空间库。
  */
 function noteNavigationResult(
   a: Activity, step: Step,
@@ -339,17 +321,9 @@ function noteNavigationResult(
   const requested = navPoint(data.requestedTarget) ?? navPoint(data.to) ?? addressedTarget(step);
   if (!nav.destination && requested) adoptDestination(nav, requested);
   const confirmed = confirmedSegmentsOf(data);
-  const routeId = typeof data.routeId === 'string' && data.routeId ? data.routeId : undefined;
-  const source = [data.source, data.routeKind, data.backend].find((value): value is string => typeof value === 'string' && !!value);
-  const priorRoute = routeId && nav.lastRoute?.id === routeId ? nav.lastRoute : undefined;
-  if (confirmed > (priorRoute?.confirmed ?? 0)) nav.completedSegments += confirmed - (priorRoute?.confirmed ?? 0);
+  const source = [data.source, data.backend].find((value): value is string => typeof value === 'string' && !!value);
+  nav.completedSegments += confirmed;
   const invalidation = invalidationReasonOf(data);
-  if (routeId) nav.lastRoute = {
-    id: routeId,
-    source: source ?? priorRoute?.source ?? 'route',
-    valid: !invalidation,
-    confirmed: Math.max(priorRoute?.confirmed ?? 0, confirmed),
-  };
   const remaining = navPoints(data.remainingPoints) ?? navPoints(data.remaining);
   const position = navPoint(data.position) ?? navPoint(data.lastPosition);
   const outcome = typeof data.outcome === 'string' ? data.outcome : typeof data.navOutcome === 'string' ? data.navOutcome : undefined;
@@ -365,8 +339,7 @@ function noteNavigationResult(
   if (invalidation) {
     nav.phase = 'replanning';
     nav.lastInvalidation = { at: now, reason: clipFeedback(invalidation, 200) };
-    if (routeId && nav.lastRoute) nav.lastRoute.valid = false;
-    // 失效前已确认的段仍是实测进展：保留最后落点与当前计划的剩余目标，别因 handle 失效丢掉。
+    // 失效前已确认的段仍是实测进展：保留最后落点与当前计划的剩余目标，别因失效丢掉。
     if (confirmed > 0) keepProgress(remaining);
   } else if (result.status === 'cancelled') {
     nav.phase = 'cancelled';
@@ -419,15 +392,13 @@ export function retargetNavigation(a: Activity, steps: ActivityStep[]) {
   if (destination && (!nav.destination || !sameNavPoint(nav.destination, destination))) {
     adoptDestination(nav, destination);
     nav.phase = 'planning';
-    // 目标已变：旧目标的 route handle 指向旧终点，不能再被后续 walk_path 复用。
-    if (nav.lastRoute) nav.lastRoute = { ...nav.lastRoute, valid: false };
   }
   if (a.doneWhen) nav.arrivalCondition = a.doneWhen; else delete nav.arrivalCondition;
   nav.updatedAt = now;
   return nav;
 }
 
-/** 换维/死亡/断线/会话失效：保留原目的地与已完成进度，作废旧 route handle，下一段从实测位置重规划。 */
+/** 换维/死亡/断线/会话失效：保留原目的地与已完成进度，下一段从实测位置重新派发。 */
 export function invalidateNavigation(
   a: Activity, reason: string,
   state?: Pick<AgentState, 'pos' | 'worldId' | 'dim'>,
@@ -441,7 +412,6 @@ export function invalidateNavigation(
     nav.measured = { pos: { ...state.pos }, at: now };
   }
   nav.lastInvalidation = { at: now, reason: clipFeedback(reason, 200) };
-  if (nav.lastRoute) nav.lastRoute = { ...nav.lastRoute, valid: false };
   nav.phase = 'replanning';
   nav.updatedAt = now;
   return nav;
@@ -463,7 +433,6 @@ function describeNavigation(nav: NavigationProgress) {
     ...(nav.parentDeadlineMs !== undefined
       ? { parent_deadline_ms: nav.parentDeadlineMs, parent_budget_remaining_ms: Math.max(0, nav.parentDeadlineMs - Date.now()) }
       : {}),
-    ...(nav.lastRoute ? { last_route: { id: nav.lastRoute.id, source: nav.lastRoute.source, valid: nav.lastRoute.valid } } : {}),
     ...(nav.lastConfirmed ? { last_confirmed_position: nav.lastConfirmed.pos } : {}),
     ...(nav.lastInvalidation ? { last_invalidation: nav.lastInvalidation.reason } : {}),
     ...(nav.lastFailure ? { last_failure: nav.lastFailure.summary } : {}),
@@ -601,7 +570,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const baseline = previous?.pos ? previous : a.stepStart;
   const previousPosition = a.results.at(-1)?.pos;
   if (previousPosition && JSON.stringify(feetCell(previousPosition)) !== JSON.stringify(feetCell(state.pos))) delete a.airDigs;
-  // 只记录技能明确报告过的阶段（如 walk_path 的 nav.outcome、
+  // 只记录技能明确报告过的阶段（如 navigate_to 的 nav.outcome、
   // 水面技能的 data.stage）；没有报告的技能保持没有，不由耗时或位置臆造阶段。
   const navStage = reportedStage(result);
   // 只留能判定“定位/取得/位移/覆盖”的回执字段；整份 data（尤其 local 图）不进活动历史。
@@ -701,28 +670,18 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     return { kind: 'continue' };
   }
   if (result.status === 'cancelled') return { kind: 'continue' };
-  // 已确认的导航段是进展，不是这段活的失败：walk_path 的 routeId 单次消费，原样重放只会
-  // 得到 route_consumed；navigate_to 的同类重复调用也不构成新的实测依据。索引照常前进，
-  // 由后续步骤/新一轮路线从实测位置继续，Activity 不按 failed 收尾。
+  // 已确认的导航段是进展，不是这段活的失败：navigate_to/advance 每次从实测位置重新派生，
+  // 原样重放同一参数不构成新的实测依据。索引照常前进，由后续步骤/新一轮路线从实测位置继续，
+  // Activity 不按 failed 收尾。
   if (result.status === 'failed' && NAVIGATION_SKILLS.has(step.skill)) {
     const data = (result.data ?? {}) as Record<string, unknown>;
     const confirmed = confirmedSegmentsOf(data);
     if (confirmed > 0) {
       a.consecutiveFailures = 0;
-      const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；已消费的路线不再原样重放，保留这段实测进展，下一段从实测位置重新规划`;
+      const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；保留这段实测进展，下一段从实测位置重新派发`;
       const reached = conditionReached();
       if (reached) return reached;
       return remainingSteps(a) === 0 ? { kind: 'done', met: false, why } : { kind: 'continue' };
-    }
-    // route handle 被注册表/库判定不可复用：原样重放只会再次失败，不能进通用自动重试。
-    // 只有 walk_path 消费 routeId 并报告顶层 invalidation/problem/unsupported；navigate_to
-    // 每次从实测位置重新规划、不持有 handle（失效字段只嵌在 segment 里），不在此列。
-    const invalidation = invalidationReasonOf(data);
-    if (step.skill === 'walk_path' && invalidation !== undefined && ROUTE_HANDLE_PROBLEMS.has(invalidation)) {
-      return {
-        kind: 'stuck',
-        why: `${step.skill} 报告路线 handle 不可复用（${invalidation}）；不自动重放已消费/过期/换作用域的路线，已确认 ${a.navigation?.completedSegments ?? 0} 段与实测位置保留，下一段请从实测位置重新规划`,
-      };
     }
   }
   if (softMiss(a, step, result)) {
@@ -932,7 +891,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (step.skill === 'travel_to' || step.skill === 'explore_toward') {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；${step.skill} 内部已重试过，原样重放会得到同一结果，交回心智` };
   }
-  if (RETRYABLE.has(code) && !(step.skill === 'walk_path' && code === 'PATH_NOT_FOUND')
+  if (RETRYABLE.has(code)
     && !a.adaptations.includes(retryMark) && retries < autoRetryLimit(code, data) && (retries > 0 || physicallyMoved)) {
     const guard = continuationGuard(a, ownStep(a, step), state);
     if (guard) return { kind: 'stuck', why: guard };
@@ -968,7 +927,7 @@ function searchIntentOf(a: Activity): boolean {
 export function planCoverageGap(a: Activity): string | null {
   const travelIntent = /走远|走一段|远行|远走|探路|探索|找树|找.*(树|木|原木|菌柄|log|wood)|换.*(地方|方向)|过去|走到|前往|搜索|搜寻|search|explore|scout|wander/i.test(a.what);
   const changesPosition = a.steps.some((step) => {
-    if (['move_step', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'approach_visible', 'walk_path', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
+    if (['move_step', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'approach_visible', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
     if (step.skill !== 'press_keys') return false;
     const keys = (step.args as { keys?: Record<string, unknown> } | undefined)?.keys ?? {};
     return ['forward', 'back', 'left', 'right', 'sprint'].some((key) => keys[key] === true);
@@ -1018,7 +977,7 @@ function activityPerception(a: Activity, state: AgentState, percept?: Percept): 
   return { ...(percept as unknown as ConditionPerception), activityExploration: explorationOf(a, state.pos, null) };
 }
 
-const LOCAL_FAILURE_SKILLS = new Set(['move_step', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'walk_path', 'go_near', 'descend_to', 'excavate_run', 'pillar_one', 'place_support', 'place_cell', 'swim_path', 'boat_path']);
+const LOCAL_FAILURE_SKILLS = new Set(['move_step', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near', 'descend_to', 'excavate_run', 'pillar_one', 'place_support', 'place_cell', 'swim_path', 'boat_path']);
 const LOCAL_FAILURE_KINDS = new Set(['FOOT_HEIGHT_MISMATCH', 'UNSUPPORTED_STEP_HEIGHT', 'NO_SUPPORT', 'HEAD_BLOCKED', 'TARGET_BLOCKED', 'POSITION_NOT_CONFIRMED', 'MOVE_REJECTED', 'MOVE_TIMEOUT', 'UNKNOWN_GEOMETRY', 'PATH_NOT_FOUND']);
 
 /** 把一个步骤失败归到“局部动作/落点”层；只有这类失败会阻止无证据换来源。 */

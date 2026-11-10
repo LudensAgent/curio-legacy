@@ -119,7 +119,7 @@ function assertCleanManualClose(result: CloseResult): void {
 
 const point = (x: number, y = 0, z = 0) => ({ x, y, z });
 
-test('spatial_query：validate 只做对象边界，15 kind 由库校验；生命周期检查', async () => {
+test('spatial_query：validate 只做对象边界，支持的 kind 由库校验；退役 kind 结构化 unsupported', async () => {
   assert.equal(spatialQuery.name, 'spatial_query');
   assert.equal(spatialQuery.readOnly, true);
   assert.equal(spatialQuery.movement, false);
@@ -166,14 +166,8 @@ test('spatial_query：validate 只做对象边界，15 kind 由库校验；生�
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
     const requests: Record<string, unknown>[] = [
       { kind: 'cells', dim: DIM, positions: [point(0)] },
-      { kind: 'fragments', dim: DIM, fragmentKind: 'walked', geometrySource: 'traversal', after: 'f1', limit: 1000 },
-      { kind: 'traversals', dim: DIM, fragmentId: 'f1', after: 't1', limit: 2 },
       { kind: 'nodes', dim: DIM, tag: 'base', label: 'home', source: 'agent', after: 'n1', limit: 2 },
-      { kind: 'edges', dim: DIM, from: 'a', to: 'b', type: 'HORIZONTAL', basis: 'traversed', after: 'e1', limit: 2 },
-      { kind: 'historyRoute', dim: DIM, from: point(0), to: point(5), near: 5 },
       { kind: 'anchor', dim: DIM, here: point(0), order: 'surface', near: 3 },
-      { kind: 'components', dim: DIM },
-      { kind: 'segments', fragmentId: 'f1' },
       { kind: 'portals', after: 'p1', limit: 2 },
       { kind: 'resourceAnchors', dim: DIM, tag: 'resource', label: 'iron', after: 'n1', limit: 2 },
       { kind: 'containerAnchors', dim: DIM, after: 'n1', limit: 2 },
@@ -187,13 +181,27 @@ test('spatial_query：validate 只做对象边界，15 kind 由库校验；生�
       assert.notEqual(envelopeOf(result).status, 'invalid_request', `${String(request.kind)} 不应被库拒绝`);
     }
 
-    // 库仍是唯一 schema 边界：非法/旧 kind、未知字段、越界值都结构化拒绝。
+    // 路线/片段/拓扑 kind 在宿主入口直接返回结构化 unsupported，不调用库、不返回空列表。
+    const retired: Record<string, unknown>[] = [
+      { kind: 'fragments', dim: DIM, fragmentKind: 'walked', limit: 1000 },
+      { kind: 'traversals', dim: DIM, fragmentId: 'f1', limit: 2 },
+      { kind: 'edges', dim: DIM, from: 'a', to: 'b', limit: 2 },
+      { kind: 'historyRoute', dim: DIM, from: point(0), to: point(5), near: 5 },
+      { kind: 'components', dim: DIM },
+      { kind: 'segments', fragmentId: 'f1' },
+    ];
+    for (const request of retired) {
+      const result = await spatialQuery.run(ctxFor(svc), request);
+      assert.equal(result.status, 'succeeded', `${String(request.kind)}：${result.summary}`);
+      assert.equal(rec(envelopeOf(result)).status, 'unsupported');
+      assert.equal(rec(envelopeOf(result)).reason, 'route_retired');
+    }
+
+    // 库仍是支持 kind 的 schema 边界：非法/旧 kind、未知字段、越界值都结构化拒绝。
     const rejected: Record<string, unknown>[] = [
       { kind: 'nope' },
       { kind: 'fragment', dim: DIM, fragmentId: 'f1' },
       { kind: 'route', dim: DIM, fromNodeId: 'a', toNodeId: 'b' },
-      { kind: 'fragments', nodeId: 'x' },
-      { kind: 'fragments', limit: 1001 },
       { kind: 'cells', dim: DIM, positions: [{ x: 1.5, y: 0, z: 0 }] },
       { kind: 'containerContents', nodeId: 'chest-1' },
     ];
@@ -348,138 +356,6 @@ test('spatial_query：未驻留 Section 返回 unloaded gap，不隐式加载或
   }
 });
 
-test('spatial_query：fragments/traversals 分页稳定、total/nextAfter 来自库且原记录不变', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'spatial-query-pages-'));
-  const svc = await openSession(dir);
-  let shutdown: ShutdownResult | null = null;
-  try {
-    svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    const history = svc.session.history;
-    for (const [index, name] of ['a', 'b', 'c', 'd', 'e'].entries()) {
-      history.saveFragment({
-        id: `page-${name}`, worldId: WORLD, dim: 'page-dim', kind: 'walked', geometrySource: 'traversal',
-        polyline: [point(index, 64), point(index + 1, 64)],
-        entrances: [], deepestY: 64, createdAt: 2000 + index, lastUsedAt: 3000 + index, uses: index,
-      });
-    }
-    history.saveFragment({
-      id: 'f-main', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
-      polyline: [point(0, 64), point(1, 64), point(2, 64)], entrances: [], deepestY: 64,
-      createdAt: 1000, lastUsedAt: 2000, uses: 3,
-    });
-    for (const [index, id] of ['t-1', 't-2', 't-3'].entries()) {
-      history.addTraversal({
-        id, fragmentId: 'f-main', from: point(index), to: point(index + 1),
-        worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 5000 + index,
-        source: 'confirmed_walk', executionId: `exec-${index}`, mode: 'walk',
-      });
-    }
-
-    const revision = history.revision;
-    const snapshot = history.checkpointSnapshot();
-
-    const firstQuery = { kind: 'fragments', dim: 'page-dim', limit: 2 } as const;
-    const first = await spatialQuery.run(ctxFor(svc), firstQuery);
-    assert.equal(first.status, 'succeeded');
-    const firstEnvelope = envelopeOf(first);
-    assert.equal(firstEnvelope.status, 'ok');
-    assert.equal(firstEnvelope.total, 5);
-    assert.equal(firstEnvelope.nextAfter, 'page-b');
-    const firstData = innerOf(first);
-    assert.equal(firstData.kind, 'fragments');
-    assert.deepEqual(list(firstData.items).map((item) => rec(item).id), ['page-a', 'page-b']);
-    assert.deepEqual(rec(list(firstData.items)[0]).polyline, [point(0, 64), point(1, 64)], '完整几何原样返回');
-
-    const repeated = await spatialQuery.run(ctxFor(svc), firstQuery);
-    assert.deepEqual(envelopeOf(repeated), firstEnvelope, '同一游标重复查询深相等');
-
-    const second = await spatialQuery.run(ctxFor(svc), { kind: 'fragments', dim: 'page-dim', after: 'page-b', limit: 2 });
-    assert.deepEqual(list(innerOf(second).items).map((item) => rec(item).id), ['page-c', 'page-d']);
-    assert.equal(envelopeOf(second).nextAfter, 'page-d');
-
-    const last = await spatialQuery.run(ctxFor(svc), { kind: 'fragments', dim: 'page-dim', after: 'page-d', limit: 2 });
-    assert.deepEqual(list(innerOf(last).items).map((item) => rec(item).id), ['page-e']);
-    assert.equal('nextAfter' in envelopeOf(last), false, '末页无 nextAfter');
-    assert.equal(envelopeOf(last).total, 5);
-
-    const traversalPage = await spatialQuery.run(ctxFor(svc), { kind: 'traversals', dim: DIM, fragmentId: 'f-main', limit: 2 });
-    assert.equal(envelopeOf(traversalPage).total, 3);
-    assert.equal(envelopeOf(traversalPage).nextAfter, 't-2');
-    const records = list(innerOf(traversalPage).items).map(rec);
-    assert.deepEqual(records.map((record) => record.id), ['t-1', 't-2']);
-    assert.equal(records[0]!.sessionId, S1);
-    assert.equal(records[0]!.observedAt, 5000);
-    assert.equal(records[0]!.source, 'confirmed_walk');
-
-    const traversalTail = await spatialQuery.run(ctxFor(svc), { kind: 'traversals', dim: DIM, fragmentId: 'f-main', after: 't-2', limit: 2 });
-    assert.deepEqual(list(innerOf(traversalTail).items).map((record) => rec(record).id), ['t-3']);
-    assert.equal('nextAfter' in envelopeOf(traversalTail), false);
-
-    assert.equal(history.revision, revision, '分页查询不得改写历史');
-    assert.deepEqual(history.checkpointSnapshot(), snapshot);
-  } finally {
-    shutdown = await svc.shutdown();
-    assertCleanClose(shutdown);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('spatial_query：components 只读重算，连续两次 recomputedNodes 一致', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'spatial-query-components-'));
-  const svc = await openSession(dir);
-  let shutdown: ShutdownResult | null = null;
-  try {
-    svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    const history = svc.session.history;
-    const topology = svc.session.topology;
-    history.saveFragment({
-      id: 'f-comp', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
-      polyline: [point(0, 64), point(5, 64)], entrances: [], deepestY: 64,
-      createdAt: 1000, lastUsedAt: 2000, uses: 1,
-    });
-    history.addTraversal({
-      id: 't-ab', fragmentId: 'f-comp', from: point(0, 64), to: point(5, 64),
-      worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 5000, source: 'confirmed_walk',
-    });
-    topology.saveNode({ id: 'n-a', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(0, 64) } });
-    topology.saveNode({ id: 'n-b', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(5, 64) } });
-    topology.saveNode({ id: 'n-c', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(50, 64) } });
-    topology.saveEdge({ id: 'e-ab', from: 'n-a', to: 'n-b', type: 'HORIZONTAL', basis: 'traversed', evidenceIds: ['t-ab'] });
-    topology.saveEdge({ id: 'e-bc', from: 'n-b', to: 'n-c', type: 'HORIZONTAL', basis: 'candidate', evidenceIds: [] });
-
-    // 全新会话、第一次调用 components：没有旧缓存可供读取。
-    const voxelRevision = svc.session.voxel.saveRevision;
-    const historyRevision = history.revision;
-    const historySnapshot = history.checkpointSnapshot();
-    const topologyRevision = topology.revision;
-    const topologySnapshot = topology.checkpointSnapshot();
-
-    const result = await spatialQuery.run(ctxFor(svc), { kind: 'components', dim: DIM });
-    assert.equal(result.status, 'succeeded');
-    const first = innerOf(result);
-    const report = rec(first.report);
-    assert.equal(report.components, 2);
-    assert.equal(report.recomputedNodes, 3);
-    assert.ok((report.recomputedNodes as number) > 0, '首次查询必须真实重算节点，而不是读空缓存');
-    assert.deepEqual(list(report.groups), [['n-a', 'n-b'], ['n-c']]);
-
-    const again = await spatialQuery.run(ctxFor(svc), { kind: 'components', dim: DIM });
-    assert.deepEqual(envelopeOf(again), envelopeOf(result));
-    const repeated = rec(innerOf(again).report);
-    assert.equal(repeated.recomputedNodes, report.recomputedNodes);
-    assert.ok((repeated.recomputedNodes as number) > 0, '第二次查询仍应重算同样多的节点');
-
-    assert.equal(svc.session.voxel.saveRevision, voxelRevision);
-    assert.equal(history.revision, historyRevision);
-    assert.deepEqual(history.checkpointSnapshot(), historySnapshot);
-    assert.equal(topology.revision, topologyRevision, '组件查询不得写拓扑或组件缓存');
-    assert.deepEqual(topology.checkpointSnapshot(), topologySnapshot);
-  } finally {
-    shutdown = await svc.shutdown();
-    assertCleanClose(shutdown);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
 
 test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-query-containers-'));
@@ -527,9 +403,14 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(rec(host.memory).checkpoint, true);
     assert.equal(rec(host.memory).markTraversed, true);
     assert.equal(rec(host.memory).markModified, true);
-    assert.equal(rec(host.memory).saveFragment, true);
+    assert.equal(rec(host.memory).saveFragment, false, '路线片段写入已从宿主组合能力退役');
+    assert.equal(rec(host.memory).addTraversal, false);
     assert.equal(rec(host.query).containerContents, false);
-    assert.equal(rec(host.plan).walkAuto, true);
+    assert.equal(rec(host.query).fragments, false);
+    assert.equal(rec(host.query).historyRoute, false);
+    assert.equal(rec(host.query).edges, false);
+    assert.equal(rec(host.plan).walkAuto, false, '不再有旧路优先或同高 search 规划');
+    assert.equal(rec(host.plan).walkSearch, false);
     assert.equal(rec(host.plan).swim, false);
     assert.equal(rec(host.execute).walk, true);
     assert.equal(rec(host.persistence).sqlite, true);
@@ -557,7 +438,7 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
   }
 });
 
-test('spatial_query：nodes/edges/portals/anchors/historyRoute/segments 原样返回库事实', async () => {
+test('spatial_query：nodes/portals/anchors 原样返回库事实；路线/拓扑 kind 已退役', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'spatial-query-topology-'));
   const svc = await openSession(dir);
   let shutdown: ShutdownResult | null = null;
@@ -587,12 +468,6 @@ test('spatial_query：nodes/edges/portals/anchors/historyRoute/segments 原样�
     const resource = await spatialQuery.run(ctxFor(svc), { kind: 'resourceAnchors', dim: DIM, tag: 'resource' });
     assert.deepEqual(list(innerOf(resource).items).map((node) => rec(node).id), ['n-b']);
 
-    const edges = await spatialQuery.run(ctxFor(svc), { kind: 'edges', dim: DIM, basis: 'traversed' });
-    const edge = rec(list(innerOf(edges).items)[0]);
-    assert.equal(edge.id, 'e-ab');
-    assert.equal(edge.from, 'n-a');
-    assert.equal(edge.to, 'n-b');
-
     const portals = await spatialQuery.run(ctxFor(svc), { kind: 'portals' });
     assert.deepEqual(list(innerOf(portals).items), []);
 
@@ -602,27 +477,20 @@ test('spatial_query：nodes/edges/portals/anchors/historyRoute/segments 原样�
     assert.equal(envelopeOf(otherDim).worldId, WORLD);
     assert.equal(envelopeOf(otherDim).dim, 'nether');
     assert.deepEqual(list(innerOf(otherDim).items), []);
-    const otherDimFragments = await spatialQuery.run(ctxFor(svc), { kind: 'fragments', dim: 'nether' });
-    assert.equal(envelopeOf(otherDimFragments).total, 0);
-    assert.deepEqual(list(innerOf(otherDimFragments).items), []);
-
-    const route = await spatialQuery.run(ctxFor(svc), { kind: 'historyRoute', dim: DIM, from: point(0, 64), to: point(5, 64) });
-    const inspection = rec(innerOf(route).inspection);
-    assert.equal(inspection.historicalGeometry, true);
-    assert.equal(inspection.executable, false);
-    assert.equal(inspection.currentPassability, 'UNKNOWN');
-    assert.ok(['FOUND', 'INSUFFICIENT_EVIDENCE', 'BUDGET_EXHAUSTED'].includes(String(inspection.status)));
 
     const anchor = await spatialQuery.run(ctxFor(svc), { kind: 'anchor', dim: DIM, here: point(0, 64), order: 'surface' });
     assert.equal(rec(innerOf(anchor)).kind, 'anchor');
 
-    const segments = await spatialQuery.run(ctxFor(svc), { kind: 'segments', fragmentId: 'f-main' });
-    assert.equal(rec(innerOf(segments)).kind, 'segments');
-
-    const missing = await spatialQuery.run(ctxFor(svc), { kind: 'segments', fragmentId: 'f-absent' });
-    assert.equal(envelopeOf(missing).status, 'not_found');
-    assert.equal(rec(envelopeOf(missing).problem).kind, 'not_found');
-    assert.equal(envelopeOf(missing).data, undefined);
+    // 旧拓扑/片段读面不再把库数据透传给 Agent：统一结构化 unsupported。
+    for (const kind of ['edges', 'historyRoute', 'segments', 'fragments'] as const) {
+      const retired = await spatialQuery.run(ctxFor(svc), kind === 'segments' || kind === 'fragments'
+        ? { kind, fragmentId: 'f-main', dim: DIM }
+        : kind === 'historyRoute' ? { kind, dim: DIM, from: point(0, 64), to: point(5, 64) } : { kind, dim: DIM });
+      assert.equal(retired.status, 'succeeded', `${kind}：${retired.summary}`);
+      assert.equal(rec(envelopeOf(retired)).status, 'unsupported');
+      assert.equal(rec(envelopeOf(retired)).reason, 'route_retired');
+      assert.equal(envelopeOf(retired).items, undefined, '不返回空列表冒充无记录');
+    }
   } finally {
     shutdown = await svc.shutdown();
     assertCleanClose(shutdown);

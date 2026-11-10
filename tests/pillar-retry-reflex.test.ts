@@ -36,16 +36,16 @@ test('jump failures return control; a head-blocked pillar reports the fact (no i
   assert.equal(afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', '效果未知'), 100, adapter.state()).kind, 'continue');
 });
 
-test('a walk_path blocked by pillar clearance reports the fact and lets the mind decide', () => {
+test('a navigate_to blocked by pillar clearance reports the fact and lets the mind decide', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '往东走', why: '', kind: 'explore', repeat: 1,
-    steps: [{ skill: 'walk_path', args: { routeId: 'rt_e120' } }] }, '', 'llm', adapter.state());
+    steps: [{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
-  activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  activity.stepStart = { pos: { ...adapter.state().pos } };
   const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '前往 E 120 失败：No path: 原地搭柱头顶跳跃空间受阻', { pillarClearance: true }), 100, adapter.state());
   assert.equal(verdict.kind, 'stuck');
   assert.ok(!activity.adaptations.some((item) => item.startsWith('clearance:')));
-  assert.equal(activity.steps[0].skill, 'walk_path');
+  assert.equal(activity.steps[0].skill, 'navigate_to');
 });
 
 test('excavate_run preflight rejection is not auto-retried for another identical gap', () => {
@@ -74,7 +74,7 @@ test('torch habit is opt-in and only runs while idle', () => {
   adapter.blocks.push({ name: 'stone', pos: { x: 0, y: 66, z: 0 } });
   adapter.light = 0;
   const requests: unknown[] = [];
-  let current: { skill: string; progress: number; movement: boolean } | null = { skill: 'walk_path', progress: 0.2, movement: false };
+  let current: { skill: string; progress: number; movement: boolean } | null = { skill: 'navigate_to', progress: 0.2, movement: false };
   const arbiter = { paused: false, info: () => current, start: (...args: unknown[]) => requests.push(args) };
   const senses = { perceivedEntities: () => [] };
   let torchEvery = 0;
@@ -88,7 +88,7 @@ test('torch habit is opt-in and only runs while idle', () => {
   assert.equal(requests.length, 0, 'routine care alone must not consume a torch');
   torchEvery = 8;
   assert.ok(reflex.activeInstincts().includes('torch'));
-  for (const skill of ['walk_path', 'gather', 'look_around']) {
+  for (const skill of ['navigate_to', 'gather', 'look_around']) {
     current = { skill, progress: 0.2, movement: false };
     reflex.tick();
     assert.equal(requests.length, 0, `${skill} must not be interrupted`);

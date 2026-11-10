@@ -431,30 +431,30 @@ test('死亡后放下手上的活，复活后认真想想，并记进日记和�
   assert.match(w.pending[1].messages[1].content, /刚刚死了/);
 });
 
-test('在原地失败、周围也没变化时不原样重试；walk_path 找不到路也不重试', () => {
+test('在原地失败、周围也没变化时不原样重试；navigate_to 找不到路也不重试', () => {
   const adapter = new FakeAdapter();
   const here = { ...adapter.state().pos };
   const a = createActivity({ what: '挖石头', why: '', kind: 'gather', repeat: 1, steps: [{ skill: 'gather', args: { block: 'stone', count: 3 } }] }, '', 'llm', adapter.state());
   const s1 = nextStep(a)!;
   a.stepStart = { pos: here };
   assert.equal(afterStep(a, s1, fail('PATH_NOT_FOUND', '路被挡住'), 100, adapter.state()).kind, 'stuck');
-  const g = createActivity({ what: '回家', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'walk_path', args: { routeId: 'rt_home' } }] }, '', 'llm', adapter.state());
+  const g = createActivity({ what: '回家', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const s2 = nextStep(g)!;
-  g.stepStart = { pos: { x: 99, y: 64, z: 99 } };
+  g.stepStart = { pos: { ...adapter.state().pos } };
   assert.equal(afterStep(g, s2, fail('PATH_NOT_FOUND', '眼前没有可确认的通路'), 100, adapter.state()).kind, 'stuck');
 });
 
 test('顺手的步骤没成不算这段活失败，接着做后面的', () => {
   const adapter = new FakeAdapter();
   const a = createActivity({ what: '往西走，路上见到牛就打', why: '', kind: 'explore', repeat: 1,
-    steps: [{ skill: 'hunt', args: { animal: 'cow' }, optional: true }, { skill: 'walk_path', args: { routeId: 'rt_west' } }] }, '', 'llm', adapter.state());
+    steps: [{ skill: 'hunt', args: { animal: 'cow' }, optional: true }, { skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const s1 = nextStep(a)!;
   const v = afterStep(a, s1, fail('NOT_FOUND', '视野里没有 cow'), 100, adapter.state());
   assert.equal(v.kind, 'continue');
   assert.match((v as any).adapted, /顺手/);
   assert.equal(a.failures, 0);
-  assert.equal(nextStep(a)!.skill, 'walk_path');
-  const v2 = afterStep(a, { skill: 'walk_path', args: {} }, ok('走了 32 格'), 100, adapter.state());
+  assert.equal(nextStep(a)!.skill, 'navigate_to');
+  const v2 = afterStep(a, { skill: 'navigate_to', args: {} }, ok('走了 32 格'), 100, adapter.state());
   assert.deepEqual(v2, { kind: 'done', met: true, why: '这段活的步骤都做完了' });
 });
 

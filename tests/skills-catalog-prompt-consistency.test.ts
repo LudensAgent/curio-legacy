@@ -19,10 +19,10 @@ const oldNameIn = (text: string, name: string) => new RegExp(`(?<![A-Za-z0-9_])$
 const LEGACY_NAME_MAP = new Map<string, string>([
   ['place_at', 'place_cell'], ['dig_at', 'mine_cell'], ['step', 'move_step'], ['climb_up', 'pillar_one'],
   ['descend', 'descend_to'], ['excavate_path', 'excavate_run'], ['swim_to', 'swim_path'],
-  ['goto', 'resolve_target/plan_route/walk_path 或 excavate_run/mine_cell/place_cell/place_support/pillar_one'],
-  ['explore', 'resolve_target/plan_route/walk_path'], ['follow_passage', 'resolve_target/plan_route/walk_path'],
-  ['walk_to', 'resolve_target/plan_route/walk_path'], ['walk_route', 'plan_route/walk_path'],
-  ['walk_known_route', 'plan_route/walk_path'],
+  ['goto', 'resolve_target/navigate_to/advance 或 excavate_run/mine_cell/place_cell/place_support/pillar_one'],
+  ['explore', 'resolve_target/navigate_to/advance'], ['follow_passage', 'resolve_target/navigate_to/advance'],
+  ['walk_to', 'resolve_target/navigate_to/advance'], ['walk_route', 'navigate_to/advance'],
+  ['walk_known_route', 'navigate_to/advance'],
 ]);
 const UNMAPPED = [...LEGACY_NAME_MAP].filter(([name]) => !Object.hasOwn(SKILLS, name)).map(([name]) => name);
 const AMBIGUOUS = ['step', 'descend'];

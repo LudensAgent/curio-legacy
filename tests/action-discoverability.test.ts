@@ -21,12 +21,16 @@ test('general-purpose actions stay discoverable outside the advanced line', () =
   assert.doesNotMatch(advanced, /building_archive|ranged_defend/, '通用能力不塞进阶提醒');
 });
 
-test('空间记忆是 plan_route 的 source，不再是单独的导航技能', () => {
+test('导航执行用 navigate_to/advance；plan_route 只做只读体素预览', () => {
   const catalog = movesCatalog(28);
+  assert.match(catalog, /navigate_to/);
+  assert.match(catalog, /advance/);
   assert.match(catalog, /plan_route/);
+  assert.doesNotMatch(catalog, /walk_path/);
   assert.doesNotMatch(catalog, /plan_memory_route/);
   const directory = moveDirectory();
   assert.match(directory, /- spatial_extrema /);
+  assert.doesNotMatch(directory, /walk_path/);
   assert.doesNotMatch(directory, /plan_memory_route/);
 });
 
@@ -43,31 +47,31 @@ test('approach_visible 在静态指导与目录里可发现，target 三种写�
   for (const marker of ['"target"', '"pos"', '"block"', '"entity"', '"radius"']) assert.ok(details.includes(marker), `缺少 ${marker}`);
 });
 
-test('公开目录说明旧路优先、跟随旧路不施工，换方法要显式 via:direct', () => {
+test('公开目录只说明直接寻路与体素导航，不再宣传旧路优先或 via', () => {
   const catalog = movesCatalog(28);
   assert.match(catalog, /excavate_run .*不会改走旁边/);
-  assert.match(deliberateSystem(''), /默认 auto 先从起点附近实际旧路锚点沿记录路线走/);
+  assert.match(deliberateSystem(''), /navigate_to/);
   assert.match(moveDetails(['excavate_run']), /不会自动绕旁路.*不会改走旁边/);
-  assert.match(moveDetails(['excavate_run']), /默认优先复用实际旧路，跟随旧路时不施工/);
-  assert.match(moveDetails(['excavate_run']), /via:"direct" 是直接按授权寻路的显式入口/);
+  assert.match(moveDetails(['excavate_run']), /travel_to\/explore_toward 只做直接寻路/);
+  assert.match(moveDetails(['excavate_run']), /不查询、不优先复用历史路线或路径片段/);
   const travel = moveDetails(['travel_to']);
-  assert.match(travel, /跟随历史路点时即使授权施工也不挖/);
-  assert.match(travel, /via:"direct" 跳过旧路优先/);
-  assert.match(travel, /现在是否还通需逐跳实测/);
+  assert.match(travel, /不查询、不优先复用历史路线或路径片段/);
+  assert.match(travel, /需要按已记录体素证据 3D 移动/);
+  assert.doesNotMatch(travel, /via:/);
   const explore = moveDetails(['explore_toward']);
   assert.match(explore, /每段始终沿同一条冻结射线推进/);
-  assert.match(explore, /跟随旧路不施工，旧路走不通就停/);
-  assert.match(explore, /仅没有可用旧路或走完记录后的新段，才先按不施工搜索，并在明确 NoPath 且原请求授权施工时重试/);
+  assert.match(explore, /不查询、不优先复用历史路线或路径片段/);
+  assert.match(explore, /明确 NoPath 且原请求授权施工时/);
 });
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
   assert.match(directory, /常用动作.*travel_to/);
-  assert.doesNotMatch(directory.split('\n')[0], /walk_path/, 'walk_path 不再占常用动作的完整参数');
-  assert.match(directory, /walk_path/, '降级的动作仍在目录里，可按需查参数');
+  assert.doesNotMatch(directory, /walk_path/, 'walk_path 已退役，不再出现在目录');
+  assert.match(directory, /navigate_to/, 'navigate_to 是可执行导航入口');
   assert.match(directory, /- equip_armor：/, '没有参数的动作也要给用途');
-  const details = moveDetails(['plan_route', 'walk_path', 'fly_to', 'trade', 'use_gui', 'spatial_query', 'building_archive']);
-  assert.match(details, /- walk_path \{.*deadlineMs/);
+  const details = moveDetails(['plan_route', 'navigate_to', 'fly_to', 'trade', 'use_gui', 'spatial_query', 'building_archive']);
+  assert.match(details, /- navigate_to \{.*sessionId/);
   assert.match(details, /- building_archive /, '第 7 个动作也要查得到，不能静默截断');
   assert.match(details, /- spatial_query /);
 });

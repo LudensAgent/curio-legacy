@@ -352,51 +352,6 @@ test('terminal body must satisfy the same hypot tolerance, grounded/dry/ready sc
   assert.equal(controlReleaseProblems(controls).length, 0);
 });
 
-test('real spatialQuery returns the contract page with full recorded geometry', async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'navigation-acceptance-query-'));
-  const world = 'world-acceptance-query', dim = 'overworld', session = 's1';
-  const svc = await SharedSpatialSession.open({ worldId: world, databasePath: path.join(dir, 'memory.db'), timeoutMs: 5000 });
-  try {
-    svc.beginSession({ worldId: world, dim, sessionId: session });
-    const history = svc.session.history;
-    history.saveFragment({
-      id: 'f-real', worldId: world, dim, kind: 'walked', geometrySource: 'traversal',
-      polyline: [{ x: 200.5, y: 64, z: 216.5 }, { x: 201.5, y: 64, z: 216.5 }, { x: 202.5, y: 64, z: 216.5 }],
-      entrances: [{ x: 200.5, y: 64, z: 216.5 }, { x: 202.5, y: 64, z: 216.5 }],
-      links: [{ a: { x: 200.5, y: 64, z: 216.5 }, b: { x: 201.5, y: 64, z: 216.5 } }],
-      deepestY: 64, createdAt: 1000, lastUsedAt: 2000, uses: 3,
-    });
-    const ctx = { spatial: svc, signal: new AbortController().signal, deadline: Date.now() + 3000, taskId: 'query-test', progress() {} } as unknown as SkillCtx;
-
-    const listingResult = await spatialQuery.run(ctx, { kind: 'fragments', dim, limit: 8 } as const);
-    assert.equal(listingResult.status, 'succeeded');
-    const envelope = listingResult.data as Record<string, unknown>;
-    assert.equal(envelope.status, 'ok');
-    assert.equal(envelope.contract, 'memory-host-contract/1');
-    assert.equal(envelope.worldId, world);
-    assert.equal(envelope.readOnly, true);
-    assert.equal(envelope.executable, false);
-    assert.equal(envelope.total, 1);
-    const listing = envelope.data as Record<string, unknown>;
-    assert.equal(listing.kind, 'fragments');
-    const projection = (listing.items as Record<string, unknown>[]).find((fragment) => fragment.id === 'f-real');
-    assert.ok(projection);
-
-    // 契约返回库原样 PathFragment：完整几何数组，不再由宿主换成点数投影。
-    const typed = history.getFragment('f-real');
-    assert.ok(typed);
-    assert.deepEqual(projection.polyline, typed.polyline);
-    assert.deepEqual(projection.entrances, typed.entrances);
-    assert.equal(projection.geometrySource, 'traversal');
-  } finally {
-    const shutdown = await svc.shutdown();
-    assert.equal(shutdown.close?.completed, true);
-    assert.equal(shutdown.close?.error, null);
-    assert.equal(shutdown.close?.dirty, false);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('spatial query envelope validation keeps raw records and rejects old projections', () => {
   assert.equal(validateQueryPage({}, 'fragments').ok, false);
   const page = {

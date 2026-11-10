@@ -32,7 +32,7 @@ import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
 export { noteGoneSpots } from '../memory/recollection.ts';
 
-const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near', 'walk_path']);
+const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near']);
 
 export interface MindContext {
   tier: 'glance' | 'deliberate';
@@ -145,7 +145,7 @@ function briefOf(d: string, n: number): string {
 
 /** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
 function descOf(s: { name: string; description: string }, chars: number): string {
-  return ['look', 'swim_path', 'boat_path', 'walk_path', 'plan_route', 'excavate_run', 'descend_to'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
+  return ['look', 'swim_path', 'boat_path', 'navigate_to', 'advance', 'travel_to', 'plan_route', 'excavate_run', 'descend_to'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
     : chars ? briefOf(s.description, chars) : '';
 }
 
@@ -246,7 +246,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
-【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有坐标或记得的地标/base/死亡点/传送门，不论远近 → travel_to {"to":{"x":0,"y":64,"z":0}} 或 {"to":"地标名"}（已加载区块寻路，默认走路〔sprint:true 才跑，快但耗饥饿〕、不下水、不挖不放；默认 auto 先从起点附近实际旧路锚点沿记录路线走、跟随旧路时不施工，旧路走不通就停在实测进度并报该路点；没有可用旧路或走到记录末端后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权挖/垫；via:"direct" 才是直接按授权寻路；回执报实测位置与剩余距离）；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要逐格核实的精确站位、或只走空间记忆里看清的格 → navigate_to（几格外没观察就停在边界）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时原样传回 sessionId。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
+【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有绝对坐标或记得的地标/base/死亡点/传送门 → navigate_to {"to":{"x":0,"y":64,"z":0}}（按已观测体素做有界 3D 搜索；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收，不会用格心或附近格顶替；不挖不放，几格外没观察就停在边界并报缺口；回执带 sessionId，仍要完成同一目标时原样传回 sessionId）；只想到某个水平方向走远、或没有可用体素证据时 → travel_to（直接 pathfinder 兜底，不查历史路线；sprint:true 才跑，快但耗饥饿）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要按冻结方向推进一段 → advance；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。上下台阶用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格都空：两格高的隧道/矿道里改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -264,7 +264,7 @@ const CHOOSE = `【选动作】
 - 在坑里或地下想上去 → 看【身边】local 和背包，用 mine_cell / move_step / place_support / pillar_one 自己想办法（怎么上去由你定，背包里有什么用什么）；目标脚下是空腔时，先用 place_support 补它下方的支撑格或先 place_cell；想往下深挖 → excavate_run（从当前站位、显式方向/模式/步数）或 assess_landings + descend_to（手工 mine_cell+move_step 阶梯要自己处理下一级的支撑格）
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- 上不去的高处由你决定用梯子、垫高或另找路；plan_route/walk_path 不挖墙、不垫路、不搭柱，改变地形要显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
+- 上不去的高处由你决定用梯子、垫高或另找路；navigate_to/advance 不挖墙、不垫路、不搭柱，改变地形要显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。内部思考有预算：最多比较两套可行方案，同一事实/同一权衡只评估一次；已有足够信息就停止推理并直接给出能执行的 JSON。不要重算已经给出的背包/箱子/目标，也不要列举用不上的配方、去不了的远处选项或已经排除的方案；卡住时先选一个可验证的下一步，做完再看结果。
@@ -460,25 +460,6 @@ export function decisionReminders(ctx: MindContext): string[] {
       out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；粗矿块 ${rawBlocks} 个（背包+记得的箱子合计）按块计，未折算成粗铁` : ''}`);
     }
   }
-  // 自己挖过/走过的通道：附近记得的几条摆出来（含旧运行时迁移来的记录）；旧几何不代表现在还通，用不用由它定。
-  // 不按打算的措辞（下矿/找矿……）决定给不给：去门、回基地、找要塞时同样可能沿旧巷道走。
-  if (ctx.tier === 'deliberate') {
-    const dist = (a: { x: number; y: number; z: number }) => Math.hypot(a.x - here.x, a.y - here.y, a.z - here.z);
-    const tunnels = ctx.memory.allPassages(p.self.dim)
-      .filter((r) => (r.worldId ?? s.worldId) === s.worldId)
-      .flatMap((r) => {
-        const cells = [...r.path, ...(r.links ?? []).flatMap((l) => [l.a, l.b])];
-        if (!cells.length) return [];
-        const nearest = cells.reduce((a, b) => dist(b) < dist(a) ? b : a);
-        return dist(nearest) <= 128 ? [{ r, nearest, d: dist(nearest) }] : [];
-      })
-      .sort((a, b) => a.d - b.d).slice(0, 2);
-    if (tunnels.length) {
-      const fmt = (v: { x: number; y: number; z: number }) => `(${Math.floor(v.x)},${Math.floor(v.y)},${Math.floor(v.z)})`;
-      const kindName = { dug: '挖的', walked: '走的', bridge: '搭的' } as const;
-      out.push(`记得自己走过/挖过的路：${tunnels.map(({ r, nearest, d }) => `${r.id}（${kindName[r.kind ?? 'dug']}）离你最近处 ${fmt(nearest)} 约 ${Math.round(d)} 格、记录最深 y=${r.deepestY}${r.archivedAt === undefined ? '' : '（旧记录）'}`).join('；')}——历史记录，现在是否还通没确认；沿它走可用 travel_to 的 via:{"fragment":"<id>"}`);
-    }
-  }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
   // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
   if (ctx.tier === 'deliberate') {
@@ -505,13 +486,13 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const revision = planRevisionHint(ctx);
   if (revision) out.push(revision);
-  // 同一位置连续移动/规划失败：不要再把整段活重复成 move_step/plan_route（卡住→整段重写的死循环）
+  // 同一位置连续移动/规划失败：不要再把整段活重复成同一个移动/规划步骤（卡住→整段重写的死循环）
   const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
   if (pathFails.length >= 3) {
     const f = pathFails[0];
     // 失败只说明这几次授权下走不通：没开挖/放时不能断言“地形没有路线”，也要让带施工授权的寻路和手动直线施工并列可见。
     const unbuilt = pathFails.every((x) => { const a = x.args as { allowDig?: unknown; allowPlace?: unknown }; return a.allowDig !== true && a.allowPlace !== true; });
-    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（默认先从起点附近的实际旧路锚点沿连续记录路线走，跟随旧路时不施工；没有可用旧路或走完记录后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权重试；超时、卡住不会升级成挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
+    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写同一个 move_step/navigate_to/advance。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（先按不施工直接寻路，只有明确 noPath 且原请求允许施工才按授权重试；不查询、不优先复用历史路线；超时、卡住不会升级成挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
@@ -520,7 +501,6 @@ export function situationalReminders(ctx: MindContext): string[] {
     }
   }
   const where = p.self.where?.kind;
-  // 旧通道是历史记忆，不保证现在仍然可通。
   if (MINING_INTENT.test(intent)) {
     // 矿在哪一层是版本事实：模型记得的多是老版本（钻石 y12），摆出这个世界的版本对应的分布，下到哪层它自己定
     const layers = oreLayerFacts(config.mc.version, intent);
@@ -719,13 +699,6 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
   const n = tier === 'glance' ? 5 : 10;
   const here = p.self.pos;
   const placed = memory.queryPlacedNear({ x: here[0], y: here[1], z: here[2] }, 8, p.self.dim);
-  // 身边记录过的路：方块图只有 ±4 格、nearby_placed 只列最近 5 块（刚搭的那几块就占满），10 格外自己的旧桥/旧路从来看不到。
-  // 按连成一条的路报最近处和通到哪；只给历史事实，接不接由 Agent 定。
-  const at = { x: here[0], y: here[1], z: here[2] };
-  const where = (c: Vec3Like) => { const d = Math.round(Math.hypot(c.x + 0.5 - at.x, c.z + 0.5 - at.z)), dy = Math.round(c.y - at.y); return `(${c.x},${c.y},${c.z}) ${d ? `${dirName(c.x + 0.5 - at.x, c.z + 0.5 - at.z)} ${d}格` : '就在脚下'}${dy ? `，${dy > 0 ? '高' : '低'} ${Math.abs(dy)} 格` : ''}`; };
-  const KIND = { bridge: '搭过', dug: '挖过', walked: '走过', built: '建过' } as const;
-  const paths = tier === 'deliberate' ? memory.nearbyPaths(p.self.dim, at, 16).slice(0, 3).map((r) =>
-    `${r.kinds.map((k) => KIND[k]).join('/')}的路（${r.cells} 格记录）：${r.onIt ? '你正站在这条上' : `最近处 ${where(r.nearest)}`}；它一直通到 ${where(r.far)}`) : [];
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
@@ -737,7 +710,6 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
-    ...(paths.length ? { nearby_paths: [...paths, '以上是自己以前亲历的路径记录，不代表现在还通；travel_to 默认（via:"auto"）在沿记录走更省时会按记录的路点走'] } : {}),
     ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${dirName(b.pos.x - here[0], b.pos.z - here[2])} ${Math.round(b.dist)}格，自己放的）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),

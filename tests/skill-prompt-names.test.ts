@@ -20,12 +20,12 @@ const LEGACY_NAME_MAP = new Map<string, string>([
   ['excavate_path', 'excavate_run'],
   ['swim_to', 'swim_path'],
   // 导航旧名没有单一注册等价物：原 goto 同时带步行与挖/放能力，按实际能力分别指向两类动作。
-  ['goto', 'resolve_target/plan_route/walk_path 或 excavate_run/mine_cell/place_cell/place_support/pillar_one'],
-  ['explore', 'resolve_target/plan_route/walk_path'],
-  ['follow_passage', 'resolve_target/plan_route/walk_path'],
-  ['walk_to', 'resolve_target/plan_route/walk_path'],
-  ['walk_route', 'plan_route/walk_path'],
-  ['walk_known_route', 'plan_route/walk_path'],
+  ['goto', 'resolve_target/navigate_to/advance 或 excavate_run/mine_cell/place_cell/place_support/pillar_one'],
+  ['explore', 'resolve_target/navigate_to/advance'],
+  ['follow_passage', 'resolve_target/navigate_to/advance'],
+  ['walk_to', 'resolve_target/navigate_to/advance'],
+  ['walk_route', 'navigate_to/advance'],
+  ['walk_known_route', 'navigate_to/advance'],
 ]);
 
 /** 未注册的旧名；文本扫描名单在此基础上排除英文常用词（step/descend），它们只按 SKILLS 精确键检查。 */

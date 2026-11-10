@@ -28,7 +28,7 @@ test('同一位置连续路径失败时，用户提醒要求换动作类而不�
     suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '',
     lastRecord: null, recentActionFailures: failures });
   assert.match(user.content, /【局部恢复】/);
-  assert.match(user.content, /不要只写 move_step\/plan_route\/navigate_to/);
+  assert.match(user.content, /不要只写同一个 move_step\/navigate_to\/advance/);
   assert.match(user.content, /excavate_run/);
   assert.match(user.content, /assess_landings 后再 descend_to/);
   assert.match(user.content, /这几次都没授权挖\/放：只说明不施工时没找到/, '没授权施工的失败不能断言地形没有路线');

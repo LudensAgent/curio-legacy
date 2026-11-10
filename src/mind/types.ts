@@ -69,8 +69,6 @@ export interface NavigationProgress {
   remaining: { x: number; y: number; z: number }[];
   /** 父委托的期限快照，来自现有 beginStep/stepExpiry 账本；这里只读展示，不另设预算。 */
   parentDeadlineMs?: number;
-  /** 最近一次 route handle 与来源；失效后 valid=false，旧 handle 不可复用。 */
-  lastRoute?: { id: string; source: string; valid: boolean; confirmed: number };
   /** 最后确认经过的位置。 */
   lastConfirmed?: { pos: { x: number; y: number; z: number }; at: number };
   /** 最近一次失效/失败，只留最新一条。 */

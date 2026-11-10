@@ -105,33 +105,12 @@ class BudgetRecordingAdapter extends FakeAdapter {
   }
 }
 
-test('plan_route auto 保留体素结果：不查历史拓扑；off-lattice 仍 UNSUPPORTED；显式 memory 才用历史夹具', async (t) => {
-  let historyCalls = 0;
-  const points = [at(0.5, 64, 0.5), at(3.5, 64, 0.5)];
-  const validHistory = {
-    worldId: WORLD, dim: DIM, from: points[0], to: points[1], near: 5, status: 'FOUND',
-    fromNodeId: 'n0', toNodeId: 'n1', points, nodeIds: ['n0', 'n1'], edgeIds: ['e0'],
-    segments: [{
-      edgeId: 'e0', from: 'n0', to: 'n1', type: 'HORIZONTAL', direction: 'forward', evidenceId: 't0',
-      evidence: {
-        id: 't0', fragmentId: 'f', from: points[0], to: points[1],
-        worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: 1,
-        source: 'confirmed_walk', mode: 'walk',
-      },
-    }],
-    gaps: [], message: 'found', historicalGeometry: true, executable: false, currentPassability: 'UNKNOWN',
-  };
-  const query = () => {
-    historyCalls += 1;
-    return { status: 'ok', data: { kind: 'historyRoute', inspection: validHistory } };
-  };
-
-  // 1) off-lattice exact target：只有请求的 3D 体素路径提供该结果。
-  // auto 必须直接返回它的结构化终态，不能落到历史拓扑或同高 search。
+test('plan_route auto/spatial 只保留体素结果；off-lattice 仍 UNSUPPORTED；memory/search 退役', async (t) => {
+  // off-lattice exact target：只有请求的 3D 体素路径提供该结果。
   const offLatticeMap = flatMap(3);
   const offLatticeAdapter = new FakeAdapter();
   offLatticeAdapter.pos = at(0.5, 64, 0.5);
-  const offLatticeCtx = ctxFor(offLatticeAdapter, offLatticeMap, query);
+  const offLatticeCtx = ctxFor(offLatticeAdapter, offLatticeMap);
   t.after(() => offLatticeCtx.memory.close());
   const unsupported = await planRoute.run(offLatticeCtx, {
     to: at(2.8, 64, 0.5), mode: 'walk', source: 'auto', arrival: { kind: 'exact' },
@@ -141,16 +120,15 @@ test('plan_route auto 保留体素结果：不查历史拓扑；off-lattice 仍 
   assert.equal(unsupported.data?.backend, 'spatial_voxel_search');
   assert.equal(unsupported.data?.searchStatus, 'UNSUPPORTED', '体素搜索的 UNSUPPORTED 必须直接保留');
   assert.deepEqual(unsupported.data?.requestedTarget, at(2.8, 64, 0.5), '原目标必须原样保留');
-  assert.equal(unsupported.data?.routeId, undefined, '旧 flat-search routeId 不能盖住体素结果');
-  assert.equal(historyCalls, 0, 'auto 在体素结果后不得查询历史拓扑');
+  assert.equal(unsupported.data?.routeId, undefined, '不再签发 routeId');
 
-  // 2) 只有起点证据：只有请求的体素路径提供该缺口；不落到历史拓扑或同高 search。
+  // 只有起点证据：体素搜索的结构化缺口直接保留。
   const barrenMap = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   observe(barrenMap, 'minecraft:air', [at(0, 64, 0), at(0, 65, 0)]);
   observe(barrenMap, 'minecraft:stone', [at(0, 63, 0)]);
   const barrenAdapter = new FakeAdapter();
   barrenAdapter.pos = at(0.5, 64, 0.5);
-  const barrenCtx = ctxFor(barrenAdapter, barrenMap, query);
+  const barrenCtx = ctxFor(barrenAdapter, barrenMap);
   t.after(() => barrenCtx.memory.close());
   const evidenceGap = await planRoute.run(barrenCtx, {
     to: at(3, 64, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' },
@@ -160,23 +138,13 @@ test('plan_route auto 保留体素结果：不查历史拓扑；off-lattice 仍 
   assert.equal(evidenceGap.data?.backend, 'spatial_voxel_search');
   assert.equal(evidenceGap.data?.searchStatus, 'INSUFFICIENT_EVIDENCE', '缺失当前证据的体素终态必须直接保留');
   assert.deepEqual(evidenceGap.data?.requestedTarget, at(3, 64, 0), '原目标必须原样保留');
-  assert.equal(evidenceGap.data?.routeId, undefined, '证据缺口不能变成旧 flat-search routeId');
-  assert.equal(historyCalls, 0, 'auto 在证据缺口时同样不查询历史拓扑');
+  assert.equal(evidenceGap.data?.routeId, undefined, '证据缺口不能变成 routeId');
 
-  // 3) 显式 source:"memory" 确实消费同一 spy 的有效历史路线，证明 spy 有意义。
-  const memoryAdapter = new FakeAdapter();
-  memoryAdapter.pos = at(0.5, 64, 0.5);
-  const memoryCtx = ctxFor(memoryAdapter, offLatticeMap, query);
-  t.after(() => memoryCtx.memory.close());
-  const memory = await planRoute.run(memoryCtx, {
-    to: at(3, 64, 0), mode: 'walk', source: 'memory', arrival: { kind: 'exact' },
-  });
-  assert.equal(memory.status, 'succeeded', memory.summary);
-  assert.equal(memory.data?.source, 'memory');
-  assert.equal(memory.data?.historicalGeometry, true);
-  assert.equal(memory.data?.executable, false);
-  assert.equal(memory.data?.currentPassability, 'UNKNOWN');
-  assert.equal(historyCalls, 1, '只有显式 memory 选择才调用历史拓扑查询');
+  // 旧 source:"memory"/"search" 入口不再被接受，不能静默映射成体素规划。
+  for (const source of ['memory', 'search'] as const) {
+    const rejected = planRoute.validate({ to: at(3, 64, 0), mode: 'walk', source, arrival: { kind: 'exact' } }, new FakeAdapter());
+    assert.equal(rejected.ok, false, `source:"${source}" 必须被拒绝`);
+  }
 });
 
 test('cell 目标保留 0.01 脚高容差；feet 目标使用 0.12/0.05 且要求 onGround；原请求目标不变', async (t) => {

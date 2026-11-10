@@ -69,14 +69,14 @@ test('普通暂时失败仍保留原有两次复验额度', () => {
   assert.equal(retryCount(activity), 2);
 });
 
-test('walk_path 从不产生 pillarClearance：该字段不再单独阻断重试判定', () => {
-  const { adapter, activity } = activityOf([{ skill: 'walk_path', args: { routeId: 'rt_test' } }]);
+test('navigate_to 从不产生 pillarClearance：该字段不再单独阻断重试判定', () => {
+  const { adapter, activity } = activityOf([{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }]);
   activity.stepStart = { pos: { x: 99, y: 64, z: 99 } };
   const step = nextStep(activity)!;
   const verdict = afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', '只走了一部分', {
     pillarClearance: true, ...positioned(0, 64, 0),
   }), 100, adapter.state());
-  assert.equal(verdict.kind, 'continue', '按 EFFECT_NOT_CONFIRMED 的一次复验处理，不再走 walk_path+pillarClearance 的死分支');
+  assert.equal(verdict.kind, 'continue', '按 EFFECT_NOT_CONFIRMED 的一次复验处理，不再走 navigate_to+pillarClearance 的死分支');
   assert.equal(retryCount(activity), 1);
 });
 

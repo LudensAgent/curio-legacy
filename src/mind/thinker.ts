@@ -95,7 +95,7 @@ export function inferKind(steps: Step[]): ActivityKind {
   if (first.some((s) => ['build', 'repair', 'build_structure'].includes(s))) return 'build';
   if (first.some((s) => ['gather', 'hunt', 'fish', 'collect_seeds', 'forage', 'farm'].includes(s))) return 'gather';
   if (first.some((s) => ['craft', 'smelt'].includes(s))) return 'craft';
-  if (first.some((s) => ['expedition', 'explore_toward', 'plan_route', 'walk_path', 'swim_path', 'boat_path'].includes(s))) return 'explore';
+  if (first.some((s) => ['expedition', 'explore_toward', 'travel_to', 'navigate_to', 'advance', 'swim_path', 'boat_path'].includes(s))) return 'explore';
   if (first.some((s) => ['sleep', 'wait', 'shelter'].includes(s))) return 'rest';
   if (first.some((s) => ['store_items', 'take_items'].includes(s))) return 'tidy';
   if (first.some((s) => ['experiment_method'].includes(s) || s.startsWith('trial:'))) return 'experiment';
@@ -108,7 +108,7 @@ const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已�
 // 只用“已知不会产生物品/不会移动”的技能集合做否定判断；未知的自学/代码技能一律当作可能，
 // 避免把合法的自定义步骤误判成不可能完成。
 const NON_PRODUCING_STEPS = new Set([
-  'look', 'look_around', 'resolve_target', 'plan_route', 'walk_path', 'move_step', 'press_keys',
+  'look', 'look_around', 'resolve_target', 'plan_route', 'navigate_to', 'advance', 'move_step', 'press_keys',
   'descend_to', 'assess_landings', 'find_item', 'observe_portal', 'inspect_block', 'wait', 'sleep',
   'eat', 'store_items', 'toss_item', 'place_cell', 'place_support', 'pillar_one', 'swim_path',
   'boat_path', 'travel_portal', 'recall_portal', 'guard', 'spatial_query', 'spatial_extrema',
@@ -138,7 +138,7 @@ function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
       if (condition.min_distance !== undefined && [...skills].every((skill) => NON_MOVING_STEPS.has(skill))) {
         return `done_when 要求本段实测离起点 ${condition.min_distance} 格，但这几步（${[...skills].join('、') || '无'}）都不会移动；把会实际移动的步骤放进这段活，或改用 find`;
       }
-      const nonObserving = new Set(['move_step', 'navigate_to', 'travel_to', 'approach_visible', 'walk_path', 'press_keys', 'descend_to', 'excavate_run',
+      const nonObserving = new Set(['move_step', 'navigate_to', 'advance', 'travel_to', 'approach_visible', 'press_keys', 'descend_to', 'excavate_run',
         'pillar_one', 'place_cell', 'place_support', 'craft', 'smelt', 'sleep', 'eat', 'wait', 'store_items',
         'travel_portal', 'recall_portal', 'boat_path', 'swim_path', 'resolve_target', 'plan_route', 'assess_landings',
         'find_item', 'remember_place', 'sign_text', 'edit_book']);

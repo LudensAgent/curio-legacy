@@ -25,11 +25,12 @@ test('失败交接保留精确世界目标和限制，不把当前位置或相�
 test('恢复的动作、直接 moveTo 和嵌套技能共用原目标及手段限制', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   const ctx: SkillCtx = { adapter, memory, senses: new Vision(adapter), bus: new EventBus(), signal: new AbortController().signal,
-    deadline: Date.now() + 10000, taskId: 'recovery-test', progress() {}, recovery: { skill: 'walk_path', args: { routeId: 'rt_1', make: false }, target: { x: 2, y: 64, z: 0 } } };
+    deadline: Date.now() + 10000, taskId: 'recovery-test', progress() {}, recovery: { skill: 'navigate_to', args: { to: { x: 2, y: 64, z: 0 }, targetKind: 'cell', make: false }, target: { x: 2, y: 64, z: 0 } } };
   t.after(() => { memory.close(); setBehaviorRegistry(null); setReliableSkills(null); });
   const bridge = makeBridge(ctx);
-  await assert.rejects(bridge('act', ['walk_path', { routeId: 'rt_2' }]), /routeId/);
-  await assert.rejects(bridge('moveTo', [3, 64, 0, 0]), /沿用原导航动作/);
+  await assert.rejects(bridge('act', ['navigate_to', { to: { x: 3, y: 64, z: 0 } }]), /原目标坐标/);
+  await assert.rejects(bridge('moveTo', [3, 64, 0, 0]), /原目标坐标/);
+  await assert.rejects(bridge('act', ['walk_path', { routeId: 'rt_2' }]), /没有 "walk_path"/);
   setReliableSkills(() => null);
   const child = { name: 'wrong-cell', description: '测试错误目标', steps: [{ skill: 'move_step', args: { to: [0, 0, 1], facing: 'N' } }], version: 1 };
   // A step recovery has to keep its resolved cell, even through a reliable child.
@@ -120,7 +121,7 @@ test('恢复沿用水面/载具入口与预算，不能改用原始按键或其�
   assert.equal(constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true }, ms: 50 }).ms, 50);
   assert.throws(() => constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true, jump: true }, ms: 100 }), /新增/);
   assert.throws(() => constrainRecoveryAction(ctx, 'press_keys', { keys: { forward: true }, ms: 200 }), /按压时长/);
-  assert.throws(() => constrainRecoveryAction(ctx, 'walk_path', { routeId: 'rt_1' }), /不能改用/);
+  assert.throws(() => constrainRecoveryAction(ctx, 'navigate_to', { to: { x: 1, y: 64, z: 0 } }), /不能改用/);
 
   ctx.recovery = { skill: 'move_step', args: {}, deadlineMs: Date.now() - 1 };
   assert.throws(() => constrainRecoveryAction(ctx, 'move_step', { to: [0, 0, 1] }), /期限已过/);
@@ -145,19 +146,21 @@ test('恢复不能开启未授权的 make、不能换挖掘目标，也不能自
   assert.throws(() => constrainRecoveryAction(ctx, 'hit_entity', { entity: 8 }), /原实体/);
 });
 
-test('walk_path 恢复保留原 routeId，不能换路线或改用其他导航', () => {
-  const parsed = recoveryContext({ skill: 'walk_path', args: { routeId: 'rt_1' }, target: { x: 1, y: 64, z: 0 } });
+test('navigate_to 恢复保留原目标与目标类型，不能换目标或改用其他导航', () => {
+  const parsed = recoveryContext({ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 }, targetKind: 'cell' }, target: { x: 1, y: 64, z: 0 } });
   assert.ok(!('error' in parsed));
   if ('error' in parsed) return;
   assert.deepEqual(parsed.target, { x: 1, y: 64, z: 0 });
-  assert.equal(parsed.args.routeId, 'rt_1');
+  assert.deepEqual(parsed.args.to, { x: 1, y: 64, z: 0 });
+  assert.equal(parsed.args.targetKind, 'cell');
 
-  const { memory, ctx } = scopeCtx({ skill: 'walk_path', args: { routeId: 'rt_1' }, target: { x: 1, y: 64, z: 0 } });
+  const { memory, ctx } = scopeCtx({ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 }, targetKind: 'cell' }, target: { x: 1, y: 64, z: 0 } });
   try {
-    const same = constrainRecoveryAction(ctx, 'walk_path', { routeId: 'rt_1' });
-    assert.equal(same.routeId, 'rt_1');
-    assert.throws(() => constrainRecoveryAction(ctx, 'walk_path', { routeId: 'rt_2' }), /routeId/);
-    assert.throws(() => constrainRecoveryAction(ctx, 'walk_path', {}), /routeId/);
+    const same = constrainRecoveryAction(ctx, 'navigate_to', { to: { x: 1, y: 64, z: 0 }, targetKind: 'cell' });
+    assert.deepEqual(same.to, { x: 1, y: 64, z: 0 });
+    assert.throws(() => constrainRecoveryAction(ctx, 'navigate_to', { to: { x: 2, y: 64, z: 0 }, targetKind: 'cell' }), /原目标坐标/);
+    assert.throws(() => constrainRecoveryAction(ctx, 'navigate_to', {}), /原目标坐标/);
+    assert.throws(() => constrainRecoveryAction(ctx, 'navigate_to', { to: { x: 1, y: 64, z: 0 }, targetKind: 'feet' }), /目标类型/);
     assert.throws(() => constrainRecoveryAction(ctx, 'plan_route', { to: { x: 1, y: 64, z: 0 } }), /沿用原导航动作/);
     assert.throws(() => constrainRecoveryAction(ctx, 'swim_path', { mode: 'surface' }), /沿用原导航动作/);
   } finally {

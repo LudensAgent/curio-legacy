@@ -9,7 +9,7 @@ import type { Senses } from '../skills/types.ts';
  * 自己的状态、刚才哪个动作失败了），没有透视，也不能执行任意代码。
  *
  *   {"hp_below":8,"hostile":{"name":"skeleton","within":16},"night":true}
- *   {"after_failure":{"skill":"walk_path","code":["PATH_NOT_FOUND","STUCK"]},"cell":{"at":[1,0,0],"is":"solid"}}
+ *   {"after_failure":{"skill":"navigate_to","code":["PATH_NOT_FOUND","STUCK"]},"cell":{"at":[1,0,0],"is":"solid"}}
  *
  * 并列的键都成立才算成立；any / all / not 用来组合。
  */
@@ -132,7 +132,7 @@ export function validatePredicate(raw: unknown, depth = 0): Predicate | { error:
   }
   if (o.after_failure !== undefined) {
     const f = o.after_failure === true ? {} : o.after_failure;
-    if (!f || typeof f !== 'object') return { error: 'after_failure 写 {"skill"?:"walk_path","code"?:["PATH_NOT_FOUND","STUCK"]}' };
+    if (!f || typeof f !== 'object') return { error: 'after_failure 写 {"skill"?:"navigate_to","code"?:["PATH_NOT_FOUND","STUCK"]}' };
     const skill = f.skill === undefined ? undefined : list(f.skill);
     const code = f.code === undefined ? undefined : (Array.isArray(f.code) ? f.code : String(f.code).split('|')).map((x: unknown) => String(x).trim().toUpperCase()).filter(Boolean);
     if (f.skill !== undefined && !skill) return { error: 'after_failure.skill 写动作名' };

@@ -10,10 +10,13 @@
  * 观测证据都不代表当前可通行性；容器内容永远不进入空间库。
  *
  * Frontier（D-V4-026）：库 0.10.1-workflow.8 的 validator 已接受 additive `frontiers`，
- * 但宿主没有 `frontierSource` 注入点，也没有 `WalkSearchSnapshot` 生产者
- * （`plan_route` 的 `WalkRouteSearch` 是调用内局部变量）。因此宿主能力位固定 false，
- * `{kind:"frontiers"}` 得到库的结构化 unsupported（精确缺失能力），而不是候选或空列表；
- * 宿主不建影子地图/索引，也不在查询内启动搜索。真实接线见 DECISIONS。
+ * 但宿主没有 `frontierSource` 注入点，也没有 `WalkSearchSnapshot` 生产者。因此宿主能力位
+ * 固定 false，`{kind:"frontiers"}` 得到库的结构化 unsupported（精确缺失能力），而不是候选
+ * 或空列表；宿主不建影子地图/索引，也不在查询内启动搜索。
+ *
+ * 路线/片段/拓扑查询（fragments/traversals/historyRoute/components/segments/edges）已不再是
+ * 导航依据；宿主在入口返回结构化 unsupported + reason:"route_retired"，不调用库、也不返回
+ * 空列表冒充“没有记录”。语义锚点（resourceAnchors/containerAnchors/anchors/portals）保留。
  */
 import type { SpatialQueryResult, SpatialQueryStatus } from 'curio-minecraft-3d-memory';
 import { fail, ok, type Skill } from './types.ts';
@@ -36,12 +39,11 @@ const HOST_COMPOSED_CAPABILITIES = {
     markStale: true,
     markTraversed: true,
     markModified: true,
-    saveFragment: true,
-    addTraversal: true,
-    recordNode: true,
-    // 宿主边写入经 SharedSpatialSession.session.topology.saveEdge（保留 directed/modes）；
-    // MemoryIngest.upsertEdge facade 会丢弃二者，但库 upsertEdge 能力本身可用。
-    upsertEdge: true,
+    // 路线/片段/拓扑写入入口已退役；宿主不再声明这些写能力。
+    saveFragment: false,
+    addTraversal: false,
+    recordNode: false,
+    upsertEdge: false,
     savePortalEdge: false,
     checkpoint: true,
     flush: false,
@@ -49,14 +51,15 @@ const HOST_COMPOSED_CAPABILITIES = {
   },
   query: {
     cells: true,
-    fragments: true,
-    traversals: true,
+    // 路线/片段/拓扑查询不再作为导航依据暴露；宿主在 run 边界返回结构化 unsupported。
+    fragments: false,
+    traversals: false,
     nodes: true,
-    edges: true,
-    historyRoute: true,
+    edges: false,
+    historyRoute: false,
     anchors: true,
-    components: true,
-    segments: true,
+    components: false,
+    segments: false,
     portals: true,
     resourceAnchors: true,
     containerAnchors: true,
@@ -67,9 +70,10 @@ const HOST_COMPOSED_CAPABILITIES = {
     frontiers: false,
   },
   plan: {
-    walkSearch: true,
-    walkHistory: true,
-    walkAuto: true,
+    // 宿主不再用库的 walkSearch/routeId 规划；navigate_to/advance 直接消费 VoxelMap。
+    walkSearch: false,
+    walkHistory: false,
+    walkAuto: false,
     nearArrival: false,
     reachBlockArrival: false,
     digPlaceTower: false,
@@ -93,6 +97,9 @@ const HOST_COMPOSED_CAPABILITIES = {
 } as const;
 
 export type SpatialQueryArgs = Record<string, unknown>;
+
+/** 已退役的路线/片段/拓扑查询 kind；返回结构化 unsupported，不返回空列表冒充无记录。 */
+const RETIRED_QUERY_KINDS = new Set(['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges']);
 
 function kindOf(request: Record<string, unknown>): string {
   return typeof request.kind === 'string' ? request.kind : '未知 kind';
@@ -121,24 +128,20 @@ function summaryOf(kind: string, result: SpatialQueryResult): string {
 export const spatialQuery: Skill<SpatialQueryArgs> = {
   name: 'spatial_query',
   description:
-    '只读查询共享空间记忆的契约端口（契约 §5）：15 种 kind —— cells、fragments、traversals、nodes、edges、historyRoute、anchor、components、segments、portals、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
+    '只读查询共享空间记忆的契约端口（契约 §5）：cells、nodes、anchor、portals、resourceAnchors、containerAnchors、containerContents、snapshot、capabilities。'
+    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges）已退役，返回结构化 unsupported + reason:"route_retired"，不返回空列表冒充无记录；导航请用 navigate_to/advance。'
     + '返回契约 SpatialQueryResult 信封（status/contract/worldId/dim/sessionId/computedAt/readOnly:true/executable:false/data/problem/total/nextAfter）；data 是库的原样分页/投影，不再由宿主改写。'
     + '历史几何与最近观测都不代表当前可通行、可执行或在线观察；不观察、不移动、不加载 Section、不刷新证据时间、不写库。'
     + 'containerContents 固定 unsupported + problem.kind:"host_ledger"（不会用 items:[] 冒充空箱）；containerAnchors 由宿主分类器识别 exact 位置的容器/熔炉锚点，contents 仍由宿主精确账本回答。resourceAnchors 默认排除已标 gone 的资源；需要历史记录时显式 includeGone:true。'
-    + '旧 kind 已移除：fragment 改用 fragments（含完整 polyline），route 改用 historyRoute 或 nodes/edges，ids 模式改用过滤条件 + after/limit。'
+    + '分页统一用 after/limit；旧 fragment/route/historyRoute 查询已随路线片段读面退役。'
     + 'kind==="capabilities" 时，库报告原样在信封的 data.capabilities；信封顶层另加 hostComposed（与信封 data 同级、owner:"host_composed"）列出宿主真实能力。',
   argsDoc:
-    '15 种 kind 与契约 §5.2 相同；所有字段/枚举/未知字段/上限（列表默认 100、最大 1000；cells 最多 4096 个整数坐标）由库 validator 校验，非法请求返回 invalid_request（技能映射为 BAD_ARGS）。'
+    '所有字段/枚举/未知字段/上限（列表默认 100、最大 1000；cells 最多 4096 个整数坐标）由库 validator 校验，非法请求返回 invalid_request（技能映射为 BAD_ARGS）。'
     + '{"kind":"cells","dim":"overworld","positions":[{"x":0,"y":64,"z":0}]}  // observed 为 false 时看 residency/unobservedReason/gap\n'
-    + '{"kind":"fragments","dim":"overworld","fragmentKind":"walked|dug|bridge|built","geometrySource":"traversal|observed_structure|legacy","after":"cursor","limit":100}  // 库原样 PathFragment 页（含 polyline）\n'
-    + '{"kind":"traversals","dim":"overworld","fragmentId":"f1","after":"cursor","limit":100}\n'
-    + '{"kind":"nodes","dim":"overworld","tag":"base|...|portal","label":"x","source":"agent|program","after":"cursor","limit":100}\n'
-    + '{"kind":"edges","dim":"overworld","from":"n1","to":"n2","type":"HORIZONTAL|...","basis":"candidate|traversed","after":"cursor","limit":100}\n'
-    + '{"kind":"historyRoute","dim":"overworld","from":{"x":0,"y":64,"z":0},"to":{"x":10,"y":64,"z":0},"near":5}  // historicalGeometry:true、executable:false、currentPassability:"UNKNOWN"\n'
+    + '{"kind":"nodes","dim":"overworld","tag":"base|...|portal","label":"x","source":"agent|program","after":"cursor","limit":100}  // 语义节点；旧路线节点不作为导航依据\n'
     + '{"kind":"anchor","dim":"overworld","here":{"x":0,"y":64,"z":0},"order":"surface|deepest","near":6}  // null 是有效答案\n'
-    + '{"kind":"components","dim":"overworld"}  // 只读重算，不写组件缓存\n'
-    + '{"kind":"segments","fragmentId":"f1"}  // 未知片段返回 not_found\n'
     + '{"kind":"portals","after":"cursor","limit":100}\n'
+    + '路线/片段/拓扑 kind（fragments、traversals、historyRoute、components、segments、edges）已退役，传入会返回 unsupported；导航请用 navigate_to/advance。\n'
     + '{"kind":"resourceAnchors","dim":"overworld","tag":"...","label":"x","includeGone":false,"after":"cursor","limit":100}  // 默认排除 gone；includeGone:true 才返回历史\n'
     + '{"kind":"containerAnchors","dim":"overworld","after":"cursor","limit":100}  // exact 容器/熔炉锚点；gone 项仍需调用方检查\n'
     + '{"kind":"containerContents","dim":"overworld"}  // 固定 unsupported + host_ledger，无 data\n'
@@ -159,6 +162,13 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
   async run(ctx, args) {
     if (ctx.signal.aborted) return { status: 'cancelled', summary: '空间查询已取消', data: { reason: 'aborted' } };
     if (Date.now() >= ctx.deadline) return fail('TIMEOUT', 'spatial_query 超过调用期限', { reason: 'deadline_exceeded' });
+    // 退役的路线查询在宿主入口明确拒绝，不调用库、也不返回空列表冒充“没有记录”。
+    if (typeof args.kind === 'string' && RETIRED_QUERY_KINDS.has(args.kind)) {
+      return ok(`${args.kind} 查询已退役：路线/片段/拓扑不再作为导航依据；需要移动请用 navigate_to/advance`, {
+        status: 'unsupported', contract: 'memory-host-contract/1', kind: args.kind, reason: 'route_retired',
+        readOnly: true, executable: false,
+      });
+    }
 
     const spatial = ctx.spatial;
     if (!spatial) return fail('ERROR', 'spatial_query 需要宿主共享空间会话（ctx.spatial）', { reason: 'spatial_session_unavailable' });

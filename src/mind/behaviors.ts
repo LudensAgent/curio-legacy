@@ -225,7 +225,7 @@ export function validateBehavior(raw: unknown, adapter?: GameAdapter, opts?: { d
     // 恢复类必须写清是哪个动作失败：什么失败都套用的“万能恢复”会在放方块、睡觉失败时也去乱挖
     const failureOf = (q: Predicate): Predicate['after_failure'] | undefined => q.after_failure ?? q.all?.map(failureOf).find(Boolean);
     const af = failureOf(p);
-    if (af && !af.skill?.length) return { error: 'after_failure 要写清是哪个动作失败（"skill":["walk_path"]），不能什么失败都套用这一套' };
+    if (af && !af.skill?.length) return { error: 'after_failure 要写清是哪个动作失败（"skill":["navigate_to"]），不能什么失败都套用这一套' };
     // 只看状态、条件太宽（比如只写 night:true）会一直打断手上的活：自动技能至少要有一个具体的触发
     if (!isRecovery(p) && Object.keys(p).every((k) => ['night', 'dark', 'on_ground', 'doing', 'not_doing'].includes(k))) {
       return { error: 'skill.when 太宽了：自动做的技能要写清具体情况（血量、怪、身边的方块、失败的动作……）' };

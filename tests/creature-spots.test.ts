@@ -56,7 +56,7 @@ test('hunt 看不见动物：说出记得在哪见过', async () => {
   try {
     const r = await hunt.run(ctx, { animal: 'sheep', count: 1 });
     assert.equal(r.status, 'failed');
-    assert.match(r.summary, /记得别处见过：sheep \(60,64,-20\) 东北?\d+格，3 只（白色×3），刚才看见——要去就 plan_route \{"to":\{"x":60,"y":64,"z":-20\}\} → walk_path，再 hunt/);
+    assert.match(r.summary, /记得别处见过：sheep \(60,64,-20\) 东北?\d+格，3 只（白色×3），刚才看见——要去就 navigate_to \{"to":\{"x":60,"y":64,"z":-20\}\}，再 hunt/);
   } finally { ctx.memory.close(); }
 });
 

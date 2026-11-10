@@ -224,7 +224,7 @@ export const travel: Skill<TravelArgs> = {
     }
     // travel 只声明 place；dig/tower 不是它的施工权限，静默忽略会让调用方误以为已授权。
     for (const flag of ['dig', 'tower'] as const) if (a[flag] !== undefined) {
-      return { ok: false, error: `travel 没有 ${flag} 权限：步行/游泳只提供 place:true 垫脚爬坡；挖墙用 mine_cell，原地搭柱用 pillar_one，指定历史路线用 plan_route {"source":"history"} 再 walk_path` };
+      return { ok: false, error: `travel 没有 ${flag} 权限：步行/游泳只提供 place:true 垫脚爬坡；挖墙用 mine_cell，原地搭柱用 pillar_one，需要按已记录体素证据 3D 移动用 navigate_to/advance` };
     }
     let headingOrigin: Vec3Like | undefined;
     if (heading) {

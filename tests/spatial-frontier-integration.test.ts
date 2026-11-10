@@ -4,7 +4,7 @@
  * 库 0.10.1-workflow.8 的 `SpatialQueryPort` 已接受 additive `frontiers` kind，
  * 但宿主没有注入 `frontierSource`（`SharedSpatialSession` 构造
  * `SpatialMemoryStoreImpl` 时未传），也没有 `WalkSearchSnapshot` 生产者
- * （`plan_route` 的 `WalkRouteSearch` 是调用内局部变量，不登记到共享会话）。
+ * （`plan_route` 只读体素搜索，不登记 routeId 到共享会话）。
  *
  * 因此本文件证明的是宿主当前真实状态，而不是伪造的可用性：
  * - 库与宿主能力位 `query.frontiers` 都是 false；
@@ -127,8 +127,8 @@ test('P25-E：frontier 能力位库/宿主都诚实为 false，宿主说明不�
     assert.equal(hostQuery.frontiers, false, '宿主 frontier 未接线，能力位必须为 false');
     assert.deepEqual(Object.keys(hostQuery).sort(), Object.keys(libraryQuery).sort(), '宿主/库 query 能力键集必须对齐');
 
-    // 工具说明描述的是宿主真实支持的 15 个 kind；接线前不得声称 16 kind。
-    assert.match(spatialQuery.description, /15 种 kind/);
+    // 工具说明列出宿主真实支持的语义 kind，并明确路线/片段/拓扑 kind 已退役；不得声称 16 kind。
+    assert.match(spatialQuery.description, /路线\/片段\/拓扑 kind.*已退役/);
     assert.doesNotMatch(spatialQuery.description, /16\s*种/);
     assert.doesNotMatch(spatialQuery.argsDoc, /"kind":"frontiers"/, '未接线前不把 frontiers 写进宿主参数说明');
   } finally {

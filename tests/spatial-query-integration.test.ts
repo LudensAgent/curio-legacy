@@ -141,32 +141,36 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.deepEqual((nodesData.items as { id: string }[]).map((node) => node.id), ['n-a']);
 
       const first = await arbiterOutcome(arbiter!, 'spatial_query', {
-        kind: 'fragments', dim: DIM, limit: 1,
+        kind: 'nodes', dim: DIM, source: 'agent', limit: 1,
       });
       assert.ok(first !== null);
       assert.equal(first.result.status, 'succeeded');
       const firstEnvelope = rec(first.result.data);
       assert.equal(firstEnvelope.total, 1);
       const firstData = rec(firstEnvelope.data);
-      const firstFragment = rec((firstData.items as unknown[])[0]);
-      assert.equal(firstFragment.id, 'f-integration');
-      assert.deepEqual(firstFragment.polyline, [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }]);
+      const firstNode = rec((firstData.items as unknown[])[0]);
+      assert.equal(firstNode.id, 'n-a');
 
       const second = await arbiterOutcome(arbiter!, 'spatial_query', {
-        kind: 'traversals', dim: DIM, fragmentId: 'f-integration', limit: 1,
+        kind: 'nodes', dim: DIM, source: 'program', limit: 1,
       });
       assert.ok(second !== null);
       const secondEnvelope = rec(second.result.data);
       assert.equal(secondEnvelope.total, 1);
-      const traversal = rec((rec(secondEnvelope.data).items as unknown[])[0]);
-      assert.equal(traversal.id, 't-integration');
-      assert.equal(traversal.sessionId, SESSION);
-      assert.equal(traversal.observedAt, 12_345);
+      const secondNode = rec((rec(secondEnvelope.data).items as unknown[])[0]);
+      assert.equal(secondNode.id, 'n-b');
+
+      // 退役的路线/片段 kind 在宿主入口结构化拒绝，不返回空列表冒充无记录。
+      const retired = await arbiterOutcome(arbiter!, 'spatial_query', { kind: 'fragments', dim: DIM, limit: 1 });
+      assert.ok(retired !== null);
+      const retiredData = rec(retired.result.data);
+      assert.equal(retiredData.status, 'unsupported');
+      assert.equal(retiredData.reason, 'route_retired');
     });
 
     await t.test('代码路径 api.act：保留查询结果、标记 noop、不冒充物理动作', async () => {
       const code = `const a = await api.act("spatial_query", ${JSON.stringify({ kind: 'cells', dim: DIM, positions: [{ x: 0, y: 64, z: 0 }] })});\n`
-        + `const b = await api.act("spatial_query", ${JSON.stringify({ kind: 'traversals', dim: DIM, fragmentId: 'f-integration' })});\n`
+        + `const b = await api.act("spatial_query", ${JSON.stringify({ kind: 'nodes', dim: DIM, source: 'agent', limit: 1 })});\n`
         + 'return { a, b };';
       const behavior = { name: 'query-code', description: '代码只读查询', steps: [], code };
       setBehaviorRegistry({ get: (name) => name === behavior.name ? behavior : undefined, list: () => [{ name: behavior.name }] });
@@ -178,10 +182,9 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(cellEnvelope.status, 'ok');
       const cellData = rec(cellEnvelope.data);
       assert.equal(rec((cellData.cells as unknown[])[0]).observed, true);
-      const travEnvelope = rec(rec(returned.b).data);
-      const travItem = rec((rec(travEnvelope.data).items as unknown[])[0]);
-      assert.equal(travItem.sessionId, SESSION);
-      assert.equal(travItem.observedAt, 12_345);
+      const nodeEnvelope = rec(rec(returned.b).data);
+      const nodeItem = rec((rec(nodeEnvelope.data).items as unknown[])[0]);
+      assert.equal(nodeItem.id, 'n-a');
     });
 
     await t.test('学习步骤：只读步骤不计完成数、保留 stepResults 与查询数据', async () => {
@@ -189,7 +192,7 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
         name: 'query-steps', description: '两步只读查询', version: 1,
         steps: [
           { skill: 'spatial_query', args: { kind: 'cells', dim: DIM, positions: [{ x: 1, y: 64, z: 0 }] } },
-          { skill: 'spatial_query', args: { kind: 'fragments', dim: DIM, limit: 1 } },
+          { skill: 'spatial_query', args: { kind: 'nodes', dim: DIM, source: 'agent', limit: 1 } },
         ],
       };
       setBehaviorRegistry({ get: (name) => name === behavior.name ? behavior : undefined, list: () => [{ name: behavior.name }] });
@@ -200,17 +203,17 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(steps.length, 2);
       const cellEnvelope = rec(rec(steps[0]!.data));
       assert.equal(rec((rec(cellEnvelope.data).cells as unknown[])[0]).observed, true);
-      const fragmentsEnvelope = rec(rec(steps[1]!.data));
-      assert.equal(fragmentsEnvelope.total, 1);
-      assert.equal((rec(fragmentsEnvelope.data).items as unknown[]).length, 1);
+      const nodesEnvelope = rec(rec(steps[1]!.data));
+      assert.equal(nodesEnvelope.total, 1);
+      assert.equal(rec((rec(nodesEnvelope.data).items as unknown[])[0]).id, 'n-a');
     });
 
     await t.test('SkillLibrary 宏：只读元数据、逐页结果与 noop 聚合穿过 api.act', async () => {
       const learned = library.learn({
         name: 'query_macro', description: '分页读取历史片段',
         steps: [
-          { skill: 'spatial_query', args: { kind: 'fragments', dim: DIM, limit: 1 } },
-          { skill: 'spatial_query', args: { kind: 'traversals', dim: DIM, fragmentId: 'f-integration' } },
+          { skill: 'spatial_query', args: { kind: 'nodes', dim: DIM, source: 'agent', limit: 1 } },
+          { skill: 'spatial_query', args: { kind: 'cells', dim: DIM, positions: [{ x: 1, y: 64, z: 0 }] } },
         ],
       });
       assert.ok(learned.ok, learned.ok ? '' : learned.error);
@@ -223,12 +226,11 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(direct.data?.noop, true);
       const directSteps = direct.data?.stepResults as Record<string, unknown>[];
       assert.equal(directSteps.length, 2);
-      const fragmentEnvelope = rec(directSteps[0]!.data);
-      const fragmentItem = rec((rec(fragmentEnvelope.data).items as unknown[])[0]);
-      assert.equal(fragmentItem.id, 'f-integration');
-      assert.equal((fragmentItem.polyline as unknown[]).length, 3);
-      const traversalItem = rec((rec(rec(directSteps[1]!.data).data).items as unknown[])[0]);
-      assert.equal(traversalItem.observedAt, 12_345);
+      const nodeEnvelope = rec(directSteps[0]!.data);
+      const nodeItem = rec((rec(nodeEnvelope.data).items as unknown[])[0]);
+      assert.equal(nodeItem.id, 'n-a');
+      const cellItem = rec((rec(rec(directSteps[1]!.data).data).cells as unknown[])[0]);
+      assert.equal(cellItem.observed, true);
 
       // 宏再被代码包一层：查询数据仍保留，整体仍是 noop。
       const behavior = { name: 'query-macro-code', description: '代码调用只读宏', steps: [], code: 'return await api.act("macro:query_macro", {});' };
@@ -322,7 +324,7 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
 
       // 1) 只读查询代码技能：noop 只计使用/跳过，不记成败、不晋升。
       const queryBehavior = { name: 'query-shaped-candidate', description: '只读查询验证', body: '只读取历史事实。',
-        code: 'const r = await api.act("spatial_query", { kind: "fragments", dim: "overworld", limit: 1 }); return r;',
+        code: 'const r = await api.act("spatial_query", { kind: "nodes", dim: "overworld", limit: 1 }); return r;',
         verify: 'const s = await api.state(); return s.hp > 0 ? true : "dead";' };
       register(queryBehavior);
       const queryResult = await execute(queryBehavior);

@@ -264,8 +264,7 @@ test('START_CHANGED：起点漂移立即停，保留已确认段与实测位置�
   assert.equal(nav.destination?.x, 5, '原目的地保留');
   assert.deepEqual(nav.measured.pos, { x: 2.5, y: 64, z: 0.5 });
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
-  // walk_path 的 route_start_changed handle 失效由 tests/navigation-segments.test.ts
-  // （过期/失效 route handle 不重放）覆盖，本用例只补 navigate_to 的起点漂移分支。
+  // 旧 walk_path route handle 已退役；本用例只补 navigate_to 的起点漂移分支。
 });
 
 test('NOT_CONFIRMED：身体没有实际位移时立即停，不自动重试、不改目标', async (t) => {

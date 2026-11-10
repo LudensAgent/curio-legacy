@@ -179,7 +179,7 @@ export function describeBuildProblems(result: ConstructionResult): string {
     out.push(`还有 ${missingCells} 块没放上${reachNote}`);
   }
   if (d.length) out.push(`具体缺陷：${d.slice(0, 3).map((x) => `${x.kind} @ (${x.pos.x},${x.pos.y},${x.pos.z}) expected=${x.expected}, actual=${x.actual ?? 'unknown'}`).join('；')}${d.length > 3 ? `；其余 ${d.length - 3} 处见 inspection.defects` : ''}`);
-  if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；plan_route → walk_path 只到附近，随后按方位 mine_cell 可能挖到别的墙；处理后用 mode:"inspect" 复验');
+  if (d.some((x) => x.kind === 'obstruction')) out.push('占位先按上述绝对坐标确认方块及归属，再定点处理；navigate_to 只到附近，随后按方位 mine_cell 可能挖到别的墙；处理后用 mode:"inspect" 复验');
   if (d.some((x) => ['missing', 'wrong_block', 'wrong_state'].includes(x.kind))) out.push('缺块/结构错位用 mode:"repair" 按原档案修补；改变布局需同时提交新 spec');
   if (unknown) out.push('走近上述坐标加载区块后，用 mode:"inspect" 重新检查');
   return out.length ? `${out.join('；')}。` : '';
@@ -333,7 +333,7 @@ export const build: Skill<BuildArgs> = {
         if (far > 24) {
           ctx.progress(0.02, `先走到给的 origin 附近（${Math.round(far)} 格）看看地形`);
           try { await ctx.adapter.moveTo({ kind: 'near', pos: origin, range: 6 }, { signal: ctx.signal, timeoutMs: Math.max(3000, Math.min(90000, ctx.deadline - Date.now() - 60000)) }); }
-          catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `给的 origin (${origin.x},${origin.y},${origin.z}) 在 ${Math.round(far)} 格外，走不过去：${(e as Error).message}；先用 resolve_target/plan_route/walk_path 到那附近再 build`); }
+          catch (e) { if (isAbort(e)) throw e; return fail(codeFromError(e), `给的 origin (${origin.x},${origin.y},${origin.z}) 在 ${Math.round(far)} 格外，走不过去：${(e as Error).message}；先用 resolve_target/navigate_to 到那附近再 build`); }
         }
       }
       const own = [...ownStationsAt(ctx).keys()].map((k) => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });

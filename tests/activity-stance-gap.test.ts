@@ -105,7 +105,7 @@ test('viewOf ignores head turn (vision/view and nearby resources), keeping only 
 test('a head turn alone (view change) does not re-try the same gap', () => {
   const adapter = new FakeAdapter();
   const activity = createActivity({ what: '往东走', why: '', kind: 'other', repeat: 1,
-    steps: [{ skill: 'walk_path', args: { routeId: 'rt_test' } }] }, '', 'llm', adapter.state());
+    steps: [{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
   activity.stepStart = { pos: { x: 0, y: 64, z: 0 }, view: '{"around":"contact"}' };
   const percept = { self: { around: 'contact' }, vision: { view: 'turned-around' }, nearby: { resources: [] } };

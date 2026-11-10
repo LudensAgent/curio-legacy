@@ -14,7 +14,7 @@ const drifted = '从 (0.0,40.0,0.0) 到记录点 (4,40,0) 没走到；寻路把�
 
 test('follow_passage 报 offRoute 时，位移不算进展、不自动重试', () => {
   const adapter = new FakeAdapter();
-  const activity = createActivity({ what: '沿旧矿道回入口', why: '', kind: 'other', repeat: 1, steps: [{ skill: 'walk_path', args: { routeId: 'rt_entrance' } }] }, '', 'llm', adapter.state());
+  const activity = createActivity({ what: '沿旧矿道回入口', why: '', kind: 'other', repeat: 1, steps: [{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
   // 身体被寻路抬高 4 格：旧规则会因位移 ≥0.5 允许自动重试。
   activity.stepStart = { pos: { x: 0, y: 40, z: 0 } };
@@ -34,18 +34,18 @@ test('use_skill 声明式步骤嵌套的 offRoute 也不走通用重试', () => 
   activity.stepStart = { pos: { x: 0, y: 40, z: 0 } };
   adapter.pos = { x: 4, y: 44, z: 0 };
 
-  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', `技能「back-to-mine」第 1 步 walk_path 没成：${drifted}`, { ...offRoute }), 1000, adapter.state());
+  const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', `技能「back-to-mine」第 1 步 navigate_to 没成：${drifted}`, { ...offRoute }), 1000, adapter.state());
 
   assert.equal(verdict.kind, 'stuck');
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
 });
 
-test('沿记录段部分推进但没到路点不算 offRoute；walk_path 的 PATH_NOT_FOUND 仍交回心智，不自动重试', () => {
+test('沿记录段部分推进但没到路点不算 offRoute；navigate_to 的 PATH_NOT_FOUND 仍交回心智，不自动重试', () => {
   const adapter = new FakeAdapter();
-  const activity = createActivity({ what: '沿旧矿道回入口', why: '', kind: 'other', repeat: 1, steps: [{ skill: 'walk_path', args: { routeId: 'rt_entrance' } }] }, '', 'llm', adapter.state());
+  const activity = createActivity({ what: '沿旧矿道回入口', why: '', kind: 'other', repeat: 1, steps: [{ skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } } }] }, '', 'llm', adapter.state());
   const step = nextStep(activity)!;
-  activity.stepStart = { pos: { x: 0.5, y: 40, z: 0.5 } };
   adapter.pos = { x: 3, y: 40, z: 0 };
+  activity.stepStart = { pos: { x: 3, y: 40, z: 0 } };
 
   const verdict = afterStep(activity, step, fail('PATH_NOT_FOUND', '从 (2.5,40.0,0.0) 到记录点 (4,40,0) 只推进到 (3.0,40.0,0.0)（仍在记录段上，离记录点 1.0 格）', {
     position: { x: 3, y: 40, z: 0 },
@@ -54,7 +54,7 @@ test('沿记录段部分推进但没到路点不算 offRoute；walk_path 的 PAT
     partialProgress: 2,
   }), 1000, adapter.state());
 
-  assert.equal(verdict.kind, 'stuck', 'walk_path 找不到路时不由调度器原样重试');
+  assert.equal(verdict.kind, 'stuck', 'navigate_to 找不到路时不由调度器原样重试');
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
 });
 
@@ -67,7 +67,7 @@ test('代码技能 lastNavigationFailure 里的 offRoute 同样阻止自动重�
 
   const verdict = afterStep(activity, step, fail('ERROR', `代码技能「code-back」没成：${drifted}`, {
     lastNavigationFailure: {
-      childSkill: 'walk_path', via: 'act',
+      childSkill: 'navigate_to', via: 'act',
       result: { ok: false, code: 'PATH_NOT_FOUND', summary: drifted, data: { ...offRoute } },
     },
     displacement: { horizontal: 4, dy: 4 },

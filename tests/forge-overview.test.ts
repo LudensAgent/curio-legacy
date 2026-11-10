@@ -21,7 +21,7 @@ test('写技能时的一览：在用的全列，墓碑只列和这次沾边的�
     assert.ok(engine.write({ name, description, code: 'return 1;', ...extra }).ok, name);
   add('escape-when-buried', '头被砂砾埋住窒息掉血时挖开头顶');
   add('mine-iron-tunnel', '开一条巷道找铁矿');
-  add('unstick-walk', '寻路卡住时先挖开挡路的方块', { mode: 'recover', when: { after_failure: { skill: 'walk_path', code: ['STUCK'] } } });
+  add('unstick-walk', '寻路卡住时先挖开挡路的方块', { mode: 'recover', when: { after_failure: { skill: 'navigate_to', code: ['STUCK'] } } });
   for (let i = 0; i < 30; i++) add(`craft-thing-${i}`, `合成第 ${i} 种东西`);
   for (let i = 0; i < 30; i++) assert.ok(engine.retire(`craft-thing-${i}`, `技能太多（40 份），它最少派上用场（成 0 败 0）`));
   assert.ok(engine.retire('escape-when-buried', '用了 8 次只成了 1 次，在添乱'));
@@ -29,7 +29,7 @@ test('写技能时的一览：在用的全列，墓碑只列和这次沾边的�
   add('redo-after-dig', '挖不动时换个角度重来', { mode: 'recover', when: { after_failure: { skill: 'mine_cell' } } });
   assert.ok(engine.retire('redo-after-dig', '用了 6 次只成了 1 次，在添乱'));
 
-  const about = '被砂砾埋住了，正在窒息掉血\n[-3s] task_end [llm] walk_path → failed：STUCK\n[-9s] task_end [llm] mine_cell → succeeded';
+  const about = '被砂砾埋住了，正在窒息掉血\n[-3s] task_end [llm] navigate_to → failed：STUCK\n[-9s] task_end [llm] mine_cell → succeeded';
   const lines = engine.forgeOverview(about, '被砂砾埋住了，正在窒息掉血');
   assert.ok(lines.some((l) => l.startsWith('mine-iron-tunnel')), '在用的全列');
   assert.ok(lines.some((l) => l.startsWith('escape-when-buried') && /已收起/.test(l)), '相关墓碑列出');

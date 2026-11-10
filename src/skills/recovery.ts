@@ -4,15 +4,16 @@ import type { SkillCtx } from './types.ts';
 
 export type RecoveryContext = { skill: string; args: Record<string, unknown>; target?: Vec3Like; position?: Vec3Like; entityId?: number; allowPlace?: boolean; allowDig?: boolean; climb?: { height: number; spent: number; startY: number }; deadlineMs?: number };
 
-/** 恢复时只有 walk_path 这个库入口能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
-const NAVIGATION_SKILLS = new Set(['walk_path']);
+/** 恢复时只有 navigate_to/advance 能继承/重做同一导航委托；其他动作不能静默替换目标或完成条件。 */
+const NAVIGATION_SKILLS = new Set(['navigate_to', 'advance']);
 /**
  * 新导航恢复不能用其他直接移动/导航动作绕过原后端、目标与手段。
- * 一个显式有限集合：旧寻路/单步/按键/旧路线，以及会直接改变身体位置或移动方式的
- * 游泳、旅行、沿矿道、下行、攀爬、载具、上浮和下潜。普通非恢复调用不受影响。
+ * 一个显式有限集合：旧路线/单步/按键，以及会直接改变身体位置或移动方式的
+ * 游泳、旅行、沿方向探索、下行、攀爬、载具、上浮和下潜。普通非恢复调用不受影响。
  */
 const NAVIGATION_BYPASS = new Set([
-  'plan_route', 'move_step', 'press_keys', 'pillar_one', 'swim_path', 'boat_path', 'descend_to', 'excavate_run',
+  'walk_path', 'plan_route', 'move_step', 'press_keys', 'pillar_one', 'swim_path', 'boat_path', 'descend_to',
+  'excavate_run', 'travel_to', 'explore_toward', 'go_near', 'approach_visible',
 ]);
 
 /** 组合施工必须由原委托本身授权；其他动作失败不能借恢复自动引入挖放/搭柱组合。 */
@@ -71,6 +72,48 @@ function recoveryDeadline(value: unknown): { ok: true; value?: number } | { ok: 
 
 /** 两个已解析的世界坐标完全相同（全等比较，不加容差）。 */
 const pointEquals = (a: Vec3Like | undefined, b: Vec3Like | undefined) => !!a && !!b && a.x === b.x && a.y === b.y && a.z === b.z;
+/** 恢复只能沿用原授权模式，不能新增原委托没有的移动方式。 */
+const sameOrSubset = (next: unknown, original: unknown): boolean => {
+  if (original === undefined) return true;
+  if (!Array.isArray(next) || !Array.isArray(original)) return false;
+  return next.every((item) => original.includes(item));
+};
+/** 导航恢复沿用的预算键：只能保留原值或更小，不能借恢复重置/扩大。 */
+const NAV_BUDGET_KEYS = [
+  'maxSteps', 'maxSegments', 'maxStepsPerSegment', 'maxTransitions', 'maxSearches',
+  'maxObservations', 'maxObservedCells', 'maxNoProgressSegments', 'maxNodes', 'maxEdges',
+] as const;
+function preserveNavigationBudget(args: Record<string, unknown>, original: Record<string, unknown>, skill: string) {
+  for (const key of NAV_BUDGET_KEYS) {
+    const limit = original[key];
+    if (typeof limit !== 'number') continue;
+    const value = args[key];
+    if (value === undefined) args[key] = limit;
+    else if (typeof value !== 'number' || value > limit) throw new Error(`恢复 ${skill} 不能扩大原委托的 ${key} 预算`);
+  }
+}
+function preserveNavigationScope(
+  args: Record<string, unknown>, original: Record<string, unknown>, skill: string,
+) {
+  if (original.sessionId !== undefined) {
+    if (args.sessionId === undefined) args.sessionId = original.sessionId;
+    else if (args.sessionId !== original.sessionId) throw new Error(`恢复 ${skill} 必须沿用原 sessionId，不能换冻结意图`);
+  }
+  if (original.historical !== undefined && args.historical !== original.historical) {
+    throw new Error(`恢复 ${skill} 必须保留原 historical 证据范围`);
+  }
+  if (!sameOrSubset(args.allowed, original.allowed)) {
+    throw new Error(`恢复 ${skill} 不能新增原委托没有的移动模式`);
+  }
+  if (original.deadlineMs !== undefined) {
+    // recoveryContext 已把原期限写进 scope；这里只限制显式值不能更长。
+    if (args.deadlineMs === undefined) args.deadlineMs = original.deadlineMs;
+    else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > (original.deadlineMs as number)) {
+      throw new Error(`恢复 ${skill} 不能延长原绝对期限`);
+    }
+  }
+  preserveNavigationBudget(args, original, skill);
+}
 
 /** World coordinates only; never guess at/to relative arrays or coerce null into zero. */
 export function worldPoint(value: unknown): Vec3Like | undefined {
@@ -90,13 +133,37 @@ export function recoveryContext(value: unknown): RecoveryContext | { error: stri
   let deadlineMs: number | undefined;
   const providedTarget = worldPoint(raw.target);
   if (raw.target !== undefined && !providedTarget) return { error: 'failure.target 须为明确的世界坐标 {x,y,z}，不能将相对 at/to 当作目标' };
-  if (skill === 'walk_path') {
-    if (typeof args.routeId !== 'string' || !args.routeId.trim()) return { error: 'failure.args.routeId 必须是原 plan_route 返回的路线 ID' };
+  if (skill === 'navigate_to') {
+    // 原委托的目标是冻结语义：必须来自原参数或原动作回执，不能用当前位置或相对坐标猜。
+    const to = worldPoint(args.to) ?? providedTarget;
+    if (!to) return { error: 'failure.args.to 必须是原 navigate_to 的绝对目标 {x,y,z}' };
+    const kind = args.targetKind;
+    if (kind !== undefined && kind !== 'cell' && kind !== 'feet') return { error: 'failure.args.targetKind 只能是 cell 或 feet' };
+    if (args.allowed !== undefined && (!Array.isArray(args.allowed) || args.allowed.some((item) => typeof item !== 'string'))) {
+      return { error: 'failure.args.allowed 必须是移动模式字符串数组' };
+    }
+    if (args.historical !== undefined && typeof args.historical !== 'boolean') return { error: 'failure.args.historical 必须是布尔值' };
+    if (args.sessionId !== undefined && (typeof args.sessionId !== 'string' || !args.sessionId.trim())) return { error: 'failure.args.sessionId 必须是非空字符串' };
     const deadline = recoveryDeadline(args.deadlineMs);
     if (!deadline.ok) return { error: deadline.error };
-    navTarget = providedTarget;
+    navTarget = to;
     deadlineMs = deadline.value;
-    args = { routeId: args.routeId, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+    args = { ...args, to, ...(kind === undefined ? {} : { targetKind: kind }), ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
+  }
+  if (skill === 'advance') {
+    // advance 的委托是方向+距离+横向允许；中间 waypoint 不是新的原目的地。
+    const direction = typeof args.direction === 'string' ? args.direction.toUpperCase() : '';
+    if (!['N', 'E', 'S', 'W'].includes(direction)) return { error: 'failure.args.direction 必须是原 advance 的 N/E/S/W' };
+    if (!Number.isInteger(args.distance) || (args.distance as number) <= 0) return { error: 'failure.args.distance 必须是原 advance 的正整数距离' };
+    if (args.allowed !== undefined && (!Array.isArray(args.allowed) || args.allowed.some((item) => typeof item !== 'string'))) {
+      return { error: 'failure.args.allowed 必须是移动模式字符串数组' };
+    }
+    if (args.historical !== undefined && typeof args.historical !== 'boolean') return { error: 'failure.args.historical 必须是布尔值' };
+    if (args.sessionId !== undefined && (typeof args.sessionId !== 'string' || !args.sessionId.trim())) return { error: 'failure.args.sessionId 必须是非空字符串' };
+    const deadline = recoveryDeadline(args.deadlineMs);
+    if (!deadline.ok) return { error: deadline.error };
+    deadlineMs = deadline.value;
+    args = { ...args, direction, ...(deadlineMs !== undefined ? { deadlineMs } : {}) };
   }
   const target = navTarget ?? providedTarget, position = worldPoint(raw.position);
   if (raw.position !== undefined && !position) return { error: 'failure.position 须为明确的世界坐标' };
@@ -134,12 +201,38 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
   if (NAVIGATION_SKILLS.has(name) && name !== scope.skill) {
     throw new Error(`恢复「${scope.skill}」不能改用 ${name}：缺少等价的原始目标与完成条件`);
   }
-  if (name === 'walk_path') {
-    if (scope.skill !== 'walk_path') throw new Error('恢复 walk_path 只能沿用原导航委托');
-    if (typeof args.routeId !== 'string' || args.routeId !== original.routeId) throw new Error('恢复 walk_path 必须沿用原 routeId，不能换路线');
+  if (name === 'navigate_to' && scope.skill === 'navigate_to') {
+    const originalTo = worldPoint(original.to) ?? scope.target;
+    const nextTo = worldPoint(args.to);
+    if (!originalTo) throw new Error('恢复 navigate_to 缺少原目标坐标');
+    if (!nextTo || !pointEquals(nextTo, originalTo)) throw new Error('恢复 navigate_to 必须保留原目标坐标，不能换目的地');
+    const originalKind = original.targetKind === 'cell' || original.targetKind === 'feet'
+      ? original.targetKind
+      : (Number.isInteger(originalTo.x) && Number.isInteger(originalTo.z) ? 'cell' : 'feet');
+    if (args.targetKind !== undefined && args.targetKind !== originalKind) {
+      throw new Error('恢复 navigate_to 必须保留原目标类型（格/精确脚位），不能用附近格或格心顶替');
+    }
+    preserveNavigationScope(args, original, 'navigate_to');
     if (scope.deadlineMs !== undefined) {
       if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
-      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 walk_path 不能延长原绝对期限');
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 navigate_to 不能延长原绝对期限');
+    }
+  }
+  if (name === 'advance' && scope.skill === 'advance') {
+    const direction = typeof original.direction === 'string' ? original.direction.toUpperCase() : undefined;
+    if (direction === undefined || args.direction !== direction) throw new Error('恢复 advance 必须保留原方向');
+    const distance = original.distance;
+    if (typeof distance === 'number' && (typeof args.distance !== 'number' || args.distance > distance)) {
+      throw new Error(`恢复 advance 不能超过原 ${distance} 格距离额度`);
+    }
+    const drift = original.maxLateralDrift;
+    if (typeof drift === 'number' && (typeof args.maxLateralDrift !== 'number' || args.maxLateralDrift > drift)) {
+      throw new Error(`恢复 advance 不能放宽原 ${drift} 格横向偏离额度`);
+    }
+    preserveNavigationScope(args, original, 'advance');
+    if (scope.deadlineMs !== undefined) {
+      if (args.deadlineMs === undefined) args.deadlineMs = scope.deadlineMs;
+      else if (typeof args.deadlineMs !== 'number' || args.deadlineMs > scope.deadlineMs) throw new Error('恢复 advance 不能延长原绝对期限');
     }
   }
   // 只读观察不改变身体或世界，任何恢复都可先看，不扩大物理委托。

@@ -18,8 +18,8 @@ import type { SandboxHandler } from './sandbox.ts';
 export const READ_RADIUS = 48;
 
 /** 给模型看的 api 说明（写代码技能、后台改进时都用这一份） */
-export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 resolve_target/plan_route 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
-恢复的 target 是世界坐标，不是相对 at/to；原目标、routeId、实体 ID、挖掘/放置范围和液体/坠落风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
+export const API_DOC = `代码是一个 async 函数体，参数 api 和 args 已经给好（args 是 use_skill 的 args；恢复时 args.failure = {skill,args,code,summary,target?,position} 是刚失败的那一步：target 是那一步实际要去/要动的坐标（动作算出来的，比如 resolve_target/navigate_to 的落点），position 是失败时人在哪）。所有 api 调用都要 await，返回普通 JSON。
+恢复的 target 是世界坐标，不是相对 at/to；原目标、目标类型（格/精确脚位）、实体 ID、挖掘/放置范围和液体/坠落风险限制会传给步骤与嵌套技能。不能自行换目标或增加挖掘、合成和探索；超出原委托还需放方块或挖方块时，先交回心智显式调用 use_skill args.allowPlace:true 或 args.allowDig:true。缺少绝对目标就报告缺口，不能拿当前位置猜。
 - api.state() → {pos, feet:{x,y,z}, feetBlock, headBlock, bodyPortal, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}；feetBlock/headBlock/bodyPortal 是触觉事实（adapter 直接读身体占据格，不受视野限制，站在门方块里时为 nether_portal）
 - api.blockAt(x,y,z) → {name, kind}；kind = open（无整身碰撞盒：空气、草、雪层、地毯等）| solid | liquid | unknown；open 不等于空格：雪层、地毯仍占据该格，并可能提供较低的站立顶面；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心。要挖/迈身边的格子，直接用 digAt/stepTo（它们自己会转头、处理遮挡、如实回报），别先 blockAt 预检再因为 unknown 就 throw——紧邻格没转头时 blockAt 常返回 unknown，只代表还没看清，不代表没法处理
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
@@ -27,7 +27,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近候选干地经当前视野确认后返回 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（支撑为实心、上面两格为空气、不是水底）；历史位置或被遮挡的位置不能当作已确认落点，null 不代表四周一定没有陆地
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；一次只迈一格，不能跨多格；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true,fall:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆；fall:true 接受移除脚下支撑后的坠落风险，三项分别显式选择，恢复不能追加原委托未授权的风险）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。同一次代码技能里，api.stepTo 或 api.act("move_step") 失败后，下一步“相对 at”的 mine_cell/place_cell/place_support 会按错误站位解析，会被直接拒绝并提示先确认实际站位；绝对 xyz 的 digAt/placeAt 仍按原目标执行。placeAt 会填空气格，也会替换可替换的植物（草/花/树苗等）和液体；目标格被不可替换的方块（含雪层、地毯、火把、半砖、门）占住时只如实报占用，不把错误材料当完成
-- api.moveTo(x,y,z) 先 plan_route（同高步行搜索）再 walk_path：只走同高步行格，不能换层；目标脚高变化会被规划器拒绝。需要上下层时：相邻一格用 api.stepTo；更大落差先 api.act("assess_landings")，再把返回 options[].target（或 descend.target）原样交给 api.act("descend_to",{target})；更远的多段路线用 api.act("plan_route",{to,source:"spatial"}) 取现有动作 steps 后逐步执行。不要对目标邻格换几个 y 反复 moveTo。精确走到已知坐标，不重新搜索、不换路、不施工；不再支持 range/sprint/avoid → {ok,error?,pos,data?}｜api.act("动作名",{参数}) 用已有动作（plan_route、walk_path、move_step、assess_landings、descend_to、mine_cell、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
+- api.moveTo(x,y,z) 用 navigate_to 走到精确世界坐标：按已观测体素做有界 3D A*（walk/step/drop），整数 x/z 按目标格验收、分数 x/z 按精确连续脚位验收，可上下层；不挖/不放/不搭柱、不换目标。失败回执保留原目标、实测位置和边界缺口；不要对目标邻格换几个 y 反复 moveTo。需要施工或别的移动能力时用 api.act 显式选择。不再支持 range/sprint/avoid → {ok,error?,pos,data?}｜api.act("动作名",{参数}) 用已有动作（navigate_to、advance、plan_route、move_step、assess_landings、descend_to、mine_cell、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
@@ -274,15 +274,11 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (![p.x, p.y, p.z].every(Number.isFinite)) throw new Error('moveTo 要写 x,y,z');
         const o = (a[4] && typeof a[4] === 'object' ? a[4] : {}) as Record<string, unknown>;
         if (o.sprint === true) throw new Error('moveTo 不再支持 sprint；需要跑用 press_keys，或让 Agent 自己选择');
-        if (Array.isArray(o.avoid) && o.avoid.length) throw new Error('moveTo 不再支持 avoid；当前 plan_route 不接受非空 avoid');
-        if (a[3] !== undefined && Number(a[3]) !== 0) throw new Error('moveTo 只支持精确到达，不再接受 range；需要保留距离时先 plan_route 查看落点');
-        // moveTo 的契约是“同高步行 + 返回 routeId 给 walk_path”；memory/spatial 只返回
-        // 路点或现有动作 steps，没有 routeId，不能交给 walk_path。这里显式只走 search。
-        const planned = await runSkill('plan_route', { to: p, mode: 'walk', source: 'search', arrival: { kind: 'exact' } });
-        if (!planned.ok) return { ok: false, error: planned.summary, code: planned.code, pos: ctx.adapter.state().pos };
-        const routeId = (planned.data as { routeId?: unknown } | undefined)?.routeId;
-        if (typeof routeId !== 'string') return { ok: false, error: 'plan_route 没有返回 routeId', pos: ctx.adapter.state().pos };
-        const walked = await runSkill('walk_path', { routeId });
+        if (Array.isArray(o.avoid) && o.avoid.length) throw new Error('moveTo 不再支持 avoid；需要绕行请让 navigate_to 按当前证据规划');
+        if (a[3] !== undefined && Number(a[3]) !== 0) throw new Error('moveTo 只支持精确到达，不再接受 range；需要保留距离时先 api.act("plan_route",{to,source:"spatial"}) 查看落点');
+        // 代码技能的 moveTo 直接使用 navigate_to：目标原样交给 3D 体素 A*，不再经过
+        // plan_route 的 routeId 注册表或 walk_path。整数/分数目标语义由 navigate_to 保持。
+        const walked = await runSkill('navigate_to', { to: p });
         pendingStance = null;
         return walked.ok
           ? { ok: true, pos: ctx.adapter.state().pos, data: walked.data }

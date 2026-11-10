@@ -53,10 +53,10 @@ test('触发条件：只认能感觉到的事，写错给出中文说明；身�
   const vision = new Vision(adapter);
   assert.match((validatePredicate({ teleport: true }) as any).error, /不认识的条件/);
   assert.match((validatePredicate({ cell: { at: [9, 0, 0], is: 'solid' } }) as any).error, /cell\.at/);
-  const p = validatePredicate({ after_failure: { skill: 'walk_path', code: 'PATH_NOT_FOUND|STUCK' }, cell: [{ at: [1, 0, 0], is: 'solid' }, { at: [1, 1, 0], is: 'open' }] });
+  const p = validatePredicate({ after_failure: { skill: 'navigate_to', code: 'PATH_NOT_FOUND|STUCK' }, cell: [{ at: [1, 0, 0], is: 'solid' }, { at: [1, 1, 0], is: 'open' }] });
   assert.ok(!('error' in p));
   if ('error' in p) return;
-  const s = senseNow(adapter, vision, null, { skill: 'walk_path', code: 'STUCK' });
+  const s = senseNow(adapter, vision, null, { skill: 'navigate_to', code: 'STUCK' });
   assert.equal(s.facing, 'E');
   assert.ok(evalPredicate(p, s));
   assert.ok(!evalPredicate(p, senseNow(adapter, vision, null, { skill: 'craft', code: 'STUCK' })), '别的动作失败不算');
@@ -477,7 +477,7 @@ test('写技能：恢复类必须写清是哪个动作失败；技能声明的�
   t.after(() => setBehaviorRegistry(null));
   assert.match((SKILLS.use_skill.validate({ name: 'local-path' }, adapter) as any).error, /args\.target/);
   assert.ok(SKILLS.use_skill.validate({ name: 'local-path', args: { target: '4,64,0' } }, adapter).ok);
-  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'walk_path', args: { routeId: 'rt_1' }, target: { x: 4, y: 64, z: 0 } } }, adapter).ok, '恢复时由失败的那一步提供原参数和绝对目标');
+  assert.ok(SKILLS.use_skill.validate({ name: 'local-path', failure: { skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } }, target: { x: 4, y: 64, z: 0 } } }, adapter).ok, '恢复时由失败的那一步提供原参数和绝对目标');
 });
 
 test('身边方块图附带算好的落脚点和能放方块的格子', async () => {

@@ -66,7 +66,7 @@ export const mergeTools: Skill<{ item: string; station: Station; count: number; 
 
     const zh = STATION_ZH[args.station];
     const found = findStation(ctx, STATION_KINDS[args.station], 48);
-    if (!found) return fail('NOT_FOUND', `附近看不见也不记得有${zh}；先用 craft 或 plan_route → walk_path 弄到工作台或工作站，再 merge_tools`);
+    if (!found) return fail('NOT_FOUND', `附近看不见也不记得有${zh}；先用 craft 或 navigate_to 弄到工作台或工作站，再 merge_tools`);
     // 工作站槽位：工作台产物在 0、合成格 1–9；砂轮/铁砧输入 0/1、产物 2
     const resultSlot = args.station === 'crafting_table' ? 0 : 2;
     const putSlots = args.station === 'crafting_table' ? [1, 2] : [0, 1];

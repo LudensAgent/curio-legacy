@@ -309,7 +309,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
         const st = ctx.adapter.state();
         const want = args.animal ? [args.animal] : [...FOOD_ANIMALS];
         const spots = creatureSpotsNear(ctx.memory.landmarks(), { worldId: st.worldId, dim: st.dim, pos: st.pos }, { only: want, excludeWithin: 12 }).slice(0, 3);
-        const remembered = spots.length ? `；记得别处见过：${spots.map((o) => `${o.label} ${o.text}`).join('；')}——要去就 plan_route {"to":{"x":${spots[0].pos.x},"y":${spots[0].pos.y},"z":${spots[0].pos.z}}} → walk_path，再 hunt` : '';
+        const remembered = spots.length ? `；记得别处见过：${spots.map((o) => `${o.label} ${o.text}`).join('；')}——要去就 navigate_to {"to":{"x":${spots[0].pos.x},"y":${spots[0].pos.y},"z":${spots[0].pos.z}}}，再 hunt` : '';
         return fail('NOT_FOUND', `转头找过了，视野里没有${fishing && deepFish ? `能在浅水够到的 ${what}（看见的都在深水里，不潜下去）` : what}${escaped ? `（有 ${escaped} 只跑出了视线）` : ''}${seen}${remembered || '；动物多在开阔的草地、平原，可以 expedition {"direction":"N|NE|E|SE|S|SW|W|NW"} 换个方向走远点（100–600 格；至少带 3 个熟食，否则 MISSING_MATERIALS），或 forage 摘苹果/浆果'}`, { searched: true, seen: Object.fromEntries(others), ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}) });
       }
       const id = target.id;

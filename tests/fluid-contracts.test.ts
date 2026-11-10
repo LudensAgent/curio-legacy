@@ -84,7 +84,7 @@ test('bucket actions inherit the owner signal and cancel an operation already wa
 
 test('fall opt-in reaches both code entry points and preserves the observed risk receipt', async (t) => {
   assert.match(API_DOC, /api\.digAt\([^\n]+fall:true/);
-  assert.match(API_DOC, /api\.moveTo[^\n]+不能换层/);
+  assert.match(API_DOC, /api\.moveTo[^\n]+navigate_to[^\n]+3D A\*/);
   assert.match(API_DOC, /assess_landings[\s\S]{0,180}descend_to/);
   for (const method of ['digAt', 'act'] as const) await t.test(method, async (t) => {
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
@@ -143,7 +143,7 @@ test('recovery preserves fall authorization through nested step and code skills'
 test('permission to dig during movement recovery does not also authorize falling', async (t) => {
   for (const permission of ['terrain', 'allowDig'] as const) await t.test(permission, async (t) => {
     const adapter = pit(), ctx = makeCtx(adapter, { senses: { observeBlocks: observeAllBlocks(adapter) } });
-    ctx.recovery = { skill: 'walk_path', args: { routeId: 'rt_1' }, ...(permission === 'allowDig' ? { allowDig: true } : {}), target: { x: 2, y: 64, z: 0 } };
+    ctx.recovery = { skill: 'navigate_to', args: { to: { x: 1, y: 64, z: 0 } }, ...(permission === 'allowDig' ? { allowDig: true } : {}), target: { x: 2, y: 64, z: 0 } };
     t.after(() => ctx.memory.close());
     await assert.rejects(makeBridge(ctx)('act', ['mine_cell', { at: [0, -1, 0], facing: 'N', fall: true }]), /fall:true/);
     assert.deepEqual(adapter.actions, []);

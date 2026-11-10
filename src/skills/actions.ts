@@ -623,7 +623,7 @@ export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen:
   async run(ctx, args) {
     const a = ctx.adapter;
     if (!a.diveTo) return fail('ERROR', '当前适配器不会潜水');
-    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 plan_route → walk_path，或逐格 move_step');
+    if (!a.state().inWater) return fail('BAD_ARGS', '不在水里：dive 只管水里游；陆上走路用 navigate_to，或逐格 move_step');
     const d = dist3(a.state().pos, args.xyz);
     if (d > 24) return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 有 ${Math.round(d)} 格远，一口气游不到；先游近一点`);
     try {

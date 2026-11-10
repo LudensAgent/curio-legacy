@@ -69,7 +69,7 @@ const reasonKey = (summary: string) => summary.replace(/-?\d+(\.\d+)?/g, '#').sl
 /** 本来就是在应对怪的动作：挨打时不用叫停 */
 const COMBAT = new Set(['defend', 'flee', 'hunt', 'ranged_defend', 'shelter', 'eat', 'use_skill']);
 /** 正在做/接着要做这类动作时，工具分级事实才和眼下有关（pillar_one 只垫不挖，不算） */
-const DIGGING_SKILLS = new Set(['gather', 'mine_cell', 'excavate_run', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'walk_path', 'swim_path', 'build']);
+const DIGGING_SKILLS = new Set(['gather', 'mine_cell', 'excavate_run', 'search_structure', 'build_portal', 'shelter', 'unstuck', 'swim_path', 'build']);
 
 /** 人在水里时靠这些动作出水/换气：停下就是下沉，不能像砌墙那样被挨打叫停 */
 const WATER_ESCAPE = new Set(['swim_path', 'boat_path', 'press_keys', 'move']);
@@ -120,7 +120,7 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   };
 }
 
-const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near', 'walk_path']);
+const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near']);
 
 export class Mind {
   activity: Activity | null = null;

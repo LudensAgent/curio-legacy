@@ -2,8 +2,7 @@ export { moveStep, mineCell, placeCell, placeSupport, pillarOne, l1Primitives } 
 export { L1_MANIFEST, type PrimitiveContract } from './manifest.ts';
 export { PRIMITIVE_PROBLEM_KINDS, type EffectKind, type PrimitiveProblemKind } from './receipt.ts';
 export { resolveTarget } from './target.ts';
-export { planRoute, consumeRoutePlan, releaseRoutePlan, clearRouteRecords, noteRouteScope } from './route.ts';
-export { walkPath } from './walk.ts';
+export { planRoute } from './route.ts';
 export { navigateTo } from './navigate.ts';
 export { advance } from './advance.ts';
 export { travelTo } from './travel-to.ts';
