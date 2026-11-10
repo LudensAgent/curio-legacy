@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
+import { ObservedGameClock } from '../codeskills/game-clock.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { evaluateCondition, observeCondition, observationReady, validateCondition } from '../projects/conditions.ts';
@@ -54,6 +55,8 @@ export interface MethodDefinition {
   postcondition: unknown;
   status: 'candidate' | 'verified' | 'retired';
   createdAt: number;
+  /** Observed online game ticks since the last trial; old wall-clock history is unknown. */
+  idleTicks: number;
   trials: MethodTrial[];
   scope: { intentId?: string; projectId?: string; worldId?: string; dimension?: string };
 }
@@ -215,35 +218,76 @@ export function flattenProgram(program: Program): SimpleStep[] {
 /** Candidates remain visibly unverified until isolated executions establish their postcondition. */
 export class MethodLibrary {
   private definitions: MethodDefinition[] = [];
+  private unavailable: unknown[] = [];
+  private saveBlocked = false;
   private gaps: AbilityGap[] = [];
   private installed = new Map<string, Skill>();
   private trialWorldIds: Set<string>;
+  private gameClock = new ObservedGameClock();
+  private observationTimer: ReturnType<typeof setInterval> | null = null;
+  private savedAt = 0;
+  private timeDirty = false;
+  private breakObservation = (event: { type: string }) => {
+    if (['paused', 'resumed', 'disconnected', 'death', 'spawn'].includes(event.type)) this.gameClock.resetBaseline();
+  };
 
   constructor(private file: string | null, private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, options: { trialWorldIds?: string[] } = {}) {
     this.trialWorldIds = new Set(options.trialWorldIds ?? []);
+    this.bus.on('event', this.breakObservation);
     if (file && fs.existsSync(file)) {
       try {
-        const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-        this.gaps = Array.isArray(saved.gaps) ? saved.gaps.slice(-100) : [];
-        for (const raw of (Array.isArray(saved.methods) ? saved.methods : []).slice(-100)) {
-          const validated = this.prepare(raw);
-          // Earlier experience mining attached old inventory gains to a different
-          // extracted program. Those synthetic trials never executed this version.
-          const trials = Array.isArray(raw.trials) ? raw.trials.slice(-20).filter((trial: MethodTrial) => trial.sessionId !== 'observed' && trial.observationId !== 'observed') : [];
-          const status = raw.status === 'retired' ? 'retired' : raw.status === 'verified' && this.hasProof(trials) ? 'verified' : 'candidate';
-          const definition: MethodDefinition = { ...validated, version: raw.version, createdAt: raw.createdAt, trials, status, scope: raw.scope ?? {} };
-          this.definitions.push(definition);
-          if (status !== 'retired') this.install(definition);
-        }
-      } catch { /* Keep the source file intact; invalid saved programs never become executable. */ }
+        const saved: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (!saved || typeof saved !== 'object' || !('methods' in saved) || !Array.isArray(saved.methods)) throw new Error('方法库缺少 methods 数组');
+        this.gaps = 'gaps' in saved && Array.isArray(saved.gaps) ? saved.gaps.slice(-100) : [];
+        saved.methods.forEach((raw: unknown) => {
+          try {
+            const validated = this.prepare(raw);
+            const stored = raw as MethodDefinition;
+            if (!Number.isInteger(stored.version) || stored.version < 1 || !Number.isFinite(stored.createdAt)) throw new Error('方法版本或创建时间无效');
+            // Earlier experience mining attached old inventory gains to a different
+            // extracted program. Those synthetic trials never executed this version.
+            const trials = Array.isArray(stored.trials) ? stored.trials.slice(-20).filter((trial) => trial.sessionId !== 'observed' && trial.observationId !== 'observed') : [];
+            const status = stored.status === 'retired' ? 'retired' : stored.status === 'verified' && this.hasProof(trials) ? 'verified' : 'candidate';
+            const idleTicks = Number.isFinite(stored.idleTicks) && stored.idleTicks >= 0 ? stored.idleTicks : 0;
+            const definition: MethodDefinition = { ...validated, version: stored.version, createdAt: stored.createdAt, idleTicks, trials, status, scope: stored.scope ?? {} };
+            this.definitions.push(definition);
+            if (status !== 'retired') this.install(definition);
+          } catch (error) {
+            this.unavailable.push(raw);
+            this.bus.publish('method_load_failed', 'P2', '方法记录暂不可用，保留原始契约：' + (error instanceof Error ? error.message : String(error)));
+          }
+        });
+      } catch (error) {
+        this.saveBlocked = true;
+        this.bus.publish('method_load_failed', 'P2', '方法库无法读取，停止覆盖原文件：' + (error instanceof Error ? error.message : String(error)));
+      }
     }
   }
 
   private save() {
-    if (!this.file) return;
+    if (!this.file || this.saveBlocked) return;
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    fs.writeFileSync(this.file + '.tmp', JSON.stringify({ version: 1, methods: this.definitions, gaps: this.gaps }, null, 1));
+    fs.writeFileSync(this.file + '.tmp', JSON.stringify({ version: 1, methods: [...this.definitions, ...this.unavailable], gaps: this.gaps }, null, 1));
     fs.renameSync(this.file + '.tmp', this.file);
+    this.savedAt = Date.now();
+    this.timeDirty = false;
+  }
+
+  start(paused: () => boolean) {
+    if (this.observationTimer) return;
+    this.observationTimer = setInterval(() => {
+      this.observe(this.adapter.state(), paused());
+      if (this.timeDirty && Date.now() - this.savedAt >= 30_000) this.save();
+    }, 1000);
+    this.observationTimer.unref?.();
+  }
+
+  observe(state: AgentState, paused: boolean, now = Date.now()) {
+    const previousWorld = this.gameClock.worldId, previousTicks = this.gameClock.ticks();
+    this.gameClock.observe(state, paused, now);
+    const elapsed = previousWorld === this.gameClock.worldId ? this.gameClock.ticks() - previousTicks : 0;
+    this.definitions.filter((d) => d.status === 'candidate' && (!d.scope.worldId || d.scope.worldId === this.gameClock.worldId))
+      .forEach((d) => { d.idleTicks += elapsed; if (elapsed > 0) this.timeDirty = true; });
   }
 
   list(): MethodDefinition[] { return structuredClone(this.definitions); }
@@ -328,14 +372,13 @@ export class MethodLibrary {
    * 在库快满时清掉已退役的旧版本，
    * 免得容量上限挡住新的学习。
    */
-  pruneStale(now = Date.now()) {
+  pruneStale() {
     let changed = false;
     for (const d of this.definitions) {
       if (d.status !== 'candidate') continue;
       const counterexamples = d.trials.filter((t) => researchOutcome(t) === 'counterexample').length, verified = d.trials.filter((t) => t.status === 'verified').length;
-      const lastTry = Math.max(d.createdAt, ...d.trials.map((t) => t.ts));
       if (counterexamples >= 3 && verified === 0) { this.retire(d.name, d.version, `当前方法预测在 ${counterexamples} 次有效观测中不成立`); changed = true; }
-      else if (now - lastTry > 3 * 86_400_000) { this.retire(d.name, d.version, '三天没有试用'); changed = true; }
+      else if (d.idleTicks > 3 * 86_400 * 20) { this.retire(d.name, d.version, '已观察在线游戏时间累计 72 小时没有试用'); changed = true; }
     }
     while (this.definitions.length >= 90) {
       const i = this.definitions.findIndex((d) => d.status === 'retired');
@@ -365,7 +408,7 @@ export class MethodLibrary {
       if (this.definitions.length >= 100) throw new Error('方法版本库已满，请先回顾或退役旧版本');
       const version = 1 + Math.max(0, ...this.definitions.filter((d) => d.name === prepared.name).map((d) => d.version));
       const state = this.adapter.state();
-      const definition: MethodDefinition = { ...prepared, version, createdAt: Date.now(), trials: [], status: 'candidate',
+      const definition: MethodDefinition = { ...prepared, version, createdAt: Date.now(), idleTicks: 0, trials: [], status: 'candidate',
         scope: { ...scope, worldId: state.worldId, dimension: state.dim } };
       this.definitions.push(definition);
       this.install(definition);
@@ -443,7 +486,15 @@ export class MethodLibrary {
     this.bus.publish('method_retired', 'P2', `方法 ${name} v${version} 退役：${reason}`);
   }
 
-  dispose() { for (const [name, skill] of this.installed) if (SKILLS[name] === skill) delete SKILLS[name]; this.installed.clear(); }
+  dispose() {
+    if (this.observationTimer) clearInterval(this.observationTimer);
+    this.observationTimer = null;
+    this.gameClock.resetBaseline();
+    this.bus.off('event', this.breakObservation);
+    if (this.timeDirty) this.save();
+    for (const [name, skill] of this.installed) if (SKILLS[name] === skill) delete SKILLS[name];
+    this.installed.clear();
+  }
 
   private install(definition: MethodDefinition) {
     const trialName = `trial:${definition.name}:v${definition.version}`;
@@ -492,6 +543,7 @@ export class MethodLibrary {
         const satisfied = sameSession && after.status === 'satisfied';
         if (trial) {
           const status: MethodTrial['status'] = result.status !== 'succeeded' || !satisfied ? 'failed' : before.status === 'unsatisfied' ? 'verified' : 'uninformative';
+          definition.idleTicks = 0;
           definition.trials.push({ id: shortId('trial_'), ts: Date.now(), worldId: afterState.worldId, dimension: afterState.dim, sessionId: afterState.sessionId, observationId: afterState.observationId,
             contextKey: `${beforeState.worldId}:${beforeState.dim}:${Math.floor(beforeState.pos.x / 16)}:${Math.floor(beforeState.pos.z / 16)}:${JSON.stringify(args.parameters)}`,
             parameters: args.parameters, before: before.actual, after: after.actual, expected: postcondition,

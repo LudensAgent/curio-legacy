@@ -1,6 +1,7 @@
 import { claimEdits } from './edits.ts';
 import fs from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import type { GameAdapter } from '../adapter/types.ts';
 import type { Arbiter, TaskInfo, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { EventBus } from '../events.ts';
@@ -167,8 +168,8 @@ export function emergencyKind(b: { when?: Predicate; overrides?: string[] }): st
   return 'other';
 }
 
-/** 代码技能必须带判定时的说明（写技能、改技能时都用这一句） */
-export const VERIFY_REQUIRED = 'skill.verify：代码技能要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如把一个人从水里弄出来，不能只看一次瞬时的 inWater=false——水面上下浮动时它也会是 false；要确认已经站稳、脚下有支撑，如 const s = await api.state(); return s.inWater ? "还在水里" : s.onGround ? true : "漂在水面上，没有落脚"）';
+/** 执行候选必须带判定时的说明（写技能、改技能时都用这一句） */
+export const VERIFY_REQUIRED = 'skill.verify：步骤和代码技能都要同时写 verify——一段 JavaScript 函数体，做完以后看一眼世界确认真的做成了。参数 api 和 args：args.before 是开工前的 api.state()，args.result 是 code 的返回值，args.args 是调用参数（目标要拿它核对，别拿 args.result 里代码自己算的值）；只能用 api.state/blockAt/region/entities/nearestLand；做成了 return true，没做成 return "原因"（比如把一个人从水里弄出来，不能只看一次瞬时的 inWater=false——水面上下浮动时它也会是 false；要确认已经站稳、脚下有支撑，如 const s = await api.state(); return s.inWater ? "还在水里" : s.onGround ? true : "漂在水面上，没有落脚"）';
 
 const MAX_STEPS = 8;
 type Validated = { name: string; description: string; body: string; behavior: Record<string, unknown>; disable?: boolean };
@@ -311,7 +312,7 @@ export class BehaviorEngine {
   private invalidCandidates = new Map<string, string>();
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private lastHurtAt = 0;
-  /** 自动技能做完后要看“结果”：十几秒后还活着、没再掉多少血才算管用 */
+  /** 自动技能做完后补充事后观测，不把后来受伤或死亡直接归因成技能失败。 */
   private aftermath = new Map<string, { taskId: string; behavior: Behavior; hp: number; at: number; summary?: string; data?: Record<string, unknown>; context: string; pos?: { x: number; y: number; z: number }; interrupted?: string; nearest?: number }>();
   private recoveries = new Map<string, { behavior: Behavior; data?: Record<string, unknown>; ignored?: boolean; invocationRecorded?: boolean }>();
   /** 最近一次记成成功的运行身份（技能、版本、维度、arbiter 任务 id）：调用方事后判定收工条件未满足时，只降级这一条。 */
@@ -580,11 +581,28 @@ export class BehaviorEngine {
   /** 控制台清除自学技能后，删掉它们的统计（含墓碑），让同名技能将来能重新被写，而不是被 2 小时墓碑挡住。 */
   forgetStats(names: Iterable<string>): number {
     let removed = 0;
-    for (const name of names) if (delete this.stats[name]) removed++;
+    for (const name of names) {
+      if (delete this.stats[name]) removed++;
+      this.aftermath.delete(name);
+      this.recoveries.delete(name);
+      this.holds.delete(name);
+      this.waitSaid.delete(name);
+      this.lastFired.delete(name);
+      this.usage = this.usage.filter((entry) => !entry.tag.startsWith(`${name}@`));
+      this.fires = this.fires.filter((entry) => entry.name !== name);
+      if (this.lastCredit?.name === name) this.lastCredit = null;
+    }
     if (removed && this.statsFile) {
       try { fs.mkdirSync(path.dirname(this.statsFile), { recursive: true }); fs.writeFileSync(this.statsFile, JSON.stringify(this.stats, null, 1)); } catch { /* 统计写不进去不影响游玩 */ }
     }
     return removed;
+  }
+
+  /** 物理删除同时移除目录、候选与运行缓存；收起仍保留这些记录。 */
+  delete(name: string): boolean {
+    if (!this.book?.remove(name)) return false;
+    this.forgetStats([name]);
+    return true;
   }
 
   /** 恢复明确指定且状态未变的闲置技能；保留版本与使用历史。 */
@@ -611,12 +629,12 @@ export class BehaviorEngine {
   }
 
   /** 整理：调整优先级（同时满足条件时谁先上） */
-  setPriority(name: string, priority: number): boolean {
-    const k = this.book?.get(name);
+  setPriority(name: string, priority: number, expectedToken?: string): boolean {
+    const k = this.book?.candidate(name) ?? this.book?.get(name);
     if (!k || !this.book || !k.behavior || typeof k.behavior !== 'object') return false;
     const p = Math.max(1, Math.min(90, Math.round(priority)));
     const raw = { ...(k.behavior as Record<string, unknown>), priority: p, code_file: undefined, version: undefined };
-    const w = this.write({ name, description: k.description, body: k.body, ...raw }, { by: 'curator' });
+    const w = this.write({ name, description: k.description, body: k.body, ...raw }, { by: 'curator', ...(expectedToken !== undefined ? { expectedToken } : {}) });
     return w.ok;
   }
 
@@ -668,7 +686,7 @@ export class BehaviorEngine {
   /**
    * 模型写出的版本先存候选，稳定版继续使用；disable 同时拦调度和直接调用。
    */
-  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; restored?: boolean; improving?: boolean; candidate?: boolean } | { ok: false; error: string; gated?: boolean } {
+  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; restored?: boolean; improving?: boolean; candidate?: boolean; unchanged?: boolean } | { ok: false; error: string; gated?: boolean } {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const requestedName = normalizeSkillName(String(o.name ?? ''));
     if (Object.hasOwn(opts, 'expectedToken') && opts.expectedToken !== this.editToken(requestedName)) return { ok: false, error: '技能在生成期间已修订、停用或收起，忽略过期结果', gated: true };
@@ -680,8 +698,14 @@ export class BehaviorEngine {
       const old = current && !current.candidate && Number(this.versionOf(current)) === version ? this.book?.get(requestedName)
         : candidate?.version === version ? this.book?.candidate(requestedName) : this.book?.definitionVersion(requestedName, version);
       if (!old?.behavior || old.source !== 'self') return { ok: false, error: `v${version} 缺少自学技能的完整契约，不能仅凭历史代码生成候选` };
-      return this.write({ ...old.behavior as Record<string, unknown>, name: requestedName, description: old.description, body: old.body,
+      const result = this.write({ ...old.behavior as Record<string, unknown>, name: requestedName, description: old.description, body: old.body,
         version: undefined, candidate: undefined, code_file: undefined }, opts);
+      if (result.ok && result.unchanged && (this.candidateRetirement(requestedName) || this.inactive(requestedName))) {
+        this.touch(requestedName, (st) => { st.candidatePermit = version; st.restoredAt = Date.now(); delete st.candidateRetired; });
+        this.bus.publish('skill_restored', 'P2', `重新开放候选 ${requestedName} v${version} 的显式试用；保留原契约和证据，不启用稳定版`, { name: requestedName, version, candidate: true });
+        return { ...result, restored: true };
+      }
+      return result;
     }
     if (o.restore === true) {
       if (opts.by !== 'mind') return { ok: false, error: '恢复文字技能需要心智明确选择' };
@@ -714,13 +738,24 @@ export class BehaviorEngine {
       return { ok: true, name: v.name, created: false, mode: this.behaviors.get(v.name)?.mode ?? 'manual', disabled: true };
     }
     if (!this.book) return { ok: false, error: '没有技能书，存不下技能' };
-    // 模型新写、改写代码技能（心智、技能工程师、整理）必须带判定：代码跑完不抛错不等于做成了（“脱船”技能人还在船上，也报“做完了”）
-    if (opts.by && v.behavior.code && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
+    // 步骤与代码候选都靠同一验收机制晋级，在保存入口明确要求判定。
+    if (opts.by && !v.behavior.verify) return { ok: false, error: VERIFY_REQUIRED };
+    const pending = this.book.candidate(v.name);
+    if (opts.by && pending && previousCandidate) {
+      const { version: _version, candidate: _candidate, code_file: _codeFile, ...contract } = pending.behavior as Record<string, unknown>;
+      const body = v.body.replace(/```behavior[\s\S]*?```/, '').trim();
+      if (isDeepStrictEqual(v.behavior, contract) && v.description === pending.description && body === previousCandidate.body) {
+        return { ok: true, name: v.name, created: false, mode: previousCandidate.mode, candidate: true, unchanged: true };
+      }
+    }
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
-    if (opts.by === 'forge') {
-      const gate = this.rewriteGate(v.name) ?? this.tombstone(v.name);
-      if (gate) return { ok: false, error: gate, gated: true };
+    if (opts.by === 'forge' || opts.by && opts.by !== 'mind' && previousCandidate) {
+      const gate = this.rewriteGate(v.name) ?? (inheritCandidatePermit ? null : this.tombstone(v.name));
+      if (gate) {
+        this.bus.publish('skill_revision_deferred', 'P2', gate, { name: v.name, version: previousCandidate?.version, by: opts.by });
+        return { ok: false, error: gate, gated: true };
+      }
     }
     const version = this.nextVersion(v.name);
     const w = this.book.write(v.name, v.description, v.body, v.behavior, { candidate: !!opts.by, version, previousVersion: this.get(v.name)?.version });
@@ -833,11 +868,13 @@ export class BehaviorEngine {
   rewriteGate(name: string): string | null {
     const b = this.get(name, true) ?? this.get(name);
     const st = this.stats[name];
-    if (!b || b.source !== 'self' || !st || st.disabled) return null;
+    if (!b || b.source !== 'self' || !st || st.disabled && !b.candidate) return null;
     const cur = this.currentStats(name, !!b.candidate);
     const uses = cur.ok + cur.fail;
     const latest = st.recent?.filter((record) => record.version === b.version).at(-1);
     const codeBroke = latest?.ok === false && /参数错误|SyntaxError|TypeError|ReferenceError/.test(latest.summary);
+    if (b.candidate && uses === 0 && !codeBroke)
+      return `「${name}」候选 v${b.version} 还没用过（成 0 败 0），保留待试用版本；由心智选择试用时机或显式修订`;
     // 刚换上（写下、改进、退回）的版本还没跑过：先让它跑几次（以前退回旧版本生成的新版本号马上又被改）
     if (uses === 0 && st.swappedAt && Date.now() - st.swappedAt < BehaviorEngine.FRESH_MS && !codeBroke)
       return `「${name}」当前版本 ${Math.round((Date.now() - st.swappedAt) / 60_000)} 分钟前才换上，还没用过：先让它跑几次，这次的经过已经记进它的成败`;
@@ -878,6 +915,7 @@ export class BehaviorEngine {
     if (this.inactive(name)) return { ok: false, error: '停用或收起的技能不能由后台回滚重新启用' };
     const old = this.book?.definitionVersion(name, to);
     if (!old?.behavior || !this.book) return { ok: false, error: `v${to} 缺少完整技能快照，不能只退代码并沿用新契约` };
+    if ((old.behavior as Record<string, unknown>).candidate === true) return { ok: false, error: `v${to} 是未启用候选；由心智选择历史版本并重新试用，不能直接回滚启用` };
     const raw = { ...old.behavior as Record<string, unknown>, name, description: old.description, body: old.body, candidate: undefined };
     const checked = validateBehavior(raw, this.adapter);
     if ('error' in checked) return { ok: false, error: checked.error };
@@ -1082,6 +1120,12 @@ export class BehaviorEngine {
     const name = b.name;
     const currentStable = this.get(name);
     const isCurrentStable = !b.candidate && !currentStable?.candidate && currentStable?.version === b.version;
+    // 稳定版被替换时的完整快照构成启用沿革；被覆盖候选不能充当上一稳定版。
+    const previousStable = b.code && isCurrentStable ? this.book?.versions(name).filter((entry) => entry.definition && entry.version < (b.version ?? 1))
+      .reverse().find((entry) => {
+        const saved = this.book?.definitionVersion(name, entry.version);
+        return saved?.behavior && (saved.behavior as Record<string, unknown>).candidate !== true;
+      })?.version : undefined;
     let rollback: { from: number; to: number } | null = null;
     let dim = 'unknown';
     try { dim = this.adapter.state().dim; } catch { /* 状态暂不可用 */ }
@@ -1100,10 +1144,10 @@ export class BehaviorEngine {
       st.recent = [...(st.recent ?? []), entry].slice(-6);
       if (b.code && isCurrentStable) {
         // 新版本跑了几次明显比上一版差：退回上一版（真人改坏了也会改回去）
-        const prev = st.byVersion[String((b.version ?? 1) - 1)];
+        const prev = previousStable === undefined ? undefined : st.byVersion[String(previousStable)];
         const rate = (x: { ok: number; fail: number }) => x.ok / Math.max(1, x.ok + x.fail);
         // 两个版本都要跑够几次才比（以前凭“3 成 0 败”就当标杆，来回退了十几次）
-        if (prev && prev.ok + prev.fail >= BehaviorEngine.MIN_EVIDENCE && per.ok + per.fail >= BehaviorEngine.MIN_EVIDENCE + 1 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: (b.version ?? 1) - 1 };
+        if (prev && previousStable !== undefined && prev.ok + prev.fail >= BehaviorEngine.MIN_EVIDENCE && per.ok + per.fail >= BehaviorEngine.MIN_EVIDENCE + 1 && rate(per) < rate(prev) - 0.25) rollback = { from: b.version ?? 1, to: previousStable };
       }
       // 自己写的技能，当前版本用了几次大多失败：先停用，让心智回头改（同名重写即可）
       if (isCurrentStable && b.source === 'self' && per.ok + per.fail >= 4 && per.ok / (per.ok + per.fail) < 0.25 && !st.disabled) {

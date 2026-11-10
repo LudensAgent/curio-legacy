@@ -135,11 +135,11 @@ test('整理稳定版可保留未收起候选的显式试用，普通收起和�
   assert.match(w.engine.executionError(definition.name, true)!, /已停用或收起/);
 });
 
-test('稳定版收起后获准试用的候选可完成后台改进并延续许可，其他后台和过期结果仍被拒绝', { timeout: 5000 }, async (t) => {
+test('稳定版收起后候选的程序错误可后台修订并延续许可，其他后台和过期结果仍被拒绝', { timeout: 5000 }, async (t) => {
   const w = setup(t);
   assert.ok(w.engine.write({ ...definition, when: { hp_below: 5 } }, { by: 'forge' }).ok);
   assert.ok(w.engine.retire(definition.name, '稳定版已不适用', { preserveCandidate: true }));
-  for (let i = 0; i < 2; i++) w.engine.recordInvocation(definition.name, { status: 'failed', summary: '候选未能离开原位置', data: { version: 2 } });
+  for (let i = 0; i < 2; i++) w.engine.recordInvocation(definition.name, { status: 'failed', summary: 'TypeError: 当前候选读取状态失败', data: { version: 2 } });
   for (const by of ['forge', 'curator'] as const) assert.equal(w.engine.write(definition, { by }).ok, false);
   const expectedToken = w.engine.editToken(definition.name);
   let calls = 0;

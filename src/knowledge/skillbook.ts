@@ -125,6 +125,15 @@ export class SkillBook {
   get(name: string): KnowSkill | undefined { return this.skills.get(name) ?? this.candidates.get(name); }
   candidate(name: string): KnowSkill | undefined { return this.candidates.get(name); }
   pending(): KnowSkill[] { return [...this.candidates.values()]; }
+  /** 删除自己的文件并重载目录，使订阅者同步丢弃已删除契约。 */
+  remove(name: string): boolean {
+    if (!this.selfDir || !NAME.test(name) || (this.skills.get(name) ?? this.candidates.get(name))?.source !== 'self') return false;
+    const root = path.resolve(this.selfDir), directory = path.resolve(root, name);
+    if (path.dirname(directory) !== root) return false;
+    fs.rmSync(directory, { recursive: true, force: true });
+    this.reload();
+    return true;
+  }
   /** 保存过的完整契约和旧代码；只有代码的历史不能当成完整契约。 */
   versions(name: string): { version: number; definition: boolean; code: boolean }[] {
     const skill = this.skills.get(name) ?? this.candidates.get(name);

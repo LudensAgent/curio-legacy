@@ -98,3 +98,20 @@ test('生成请求期间同名技能已出现，旧回复不能覆盖新内容',
   assert.equal(engine.get(observation.name)?.description, '心智已经写下的新观测做法');
   assert.ok(!bus.recent().some((e) => e.type === 'skill_forged'));
 });
+
+
+test('后台改进返回相同完整候选时保留证据，不误报生成新修订', async (t) => {
+  const { engine, bus } = setup(t);
+  const candidate = { name: 'unchanged-repair', description: '观察脚下状态', code: 'const s = await api.state(); return s.feet;', verify: observation.verify };
+  assert.ok(engine.write(candidate, { by: 'mind' }).ok);
+  engine.recordInvocation(candidate.name, { status: 'failed', summary: 'TypeError: 当前代码错误', data: { version: 1 } });
+  const before = structuredClone(engine.statsOf(candidate.name));
+  const planner = { autonomous: true, noteInvalid() {}, async complete() { return { text: JSON.stringify({ skill: candidate }), latencyMs: 1 }; } };
+  const improver = new CodeImprover(planner, engine, bus);
+  assert.equal(improver.consider(candidate.name, 'requested'), null);
+  await flush();
+  assert.equal(engine.get(candidate.name, true)?.version, 1);
+  assert.deepEqual(engine.statsOf(candidate.name), before);
+  assert.ok(bus.recent().some((event) => event.type === 'skill_improve_kept'));
+  assert.ok(!bus.recent().some((event) => event.type === 'skill_improved'));
+});

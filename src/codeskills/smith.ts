@@ -80,10 +80,13 @@ export const reasonOf = (summary: string) => summary.split(/[；;]/).map((seg, i
 
 interface Incident {
   kind: ForgeKind; at: number; headline: string; lines: string[]; context: Record<string, unknown>; note?: string; signal?: LedgerSignal | ConsumeSignal;
+  events?: AgentEvent[];
   /** 这是哪一件事（结构化的：同一个动作同一种失败、同一串动作、同一样东西……），用来认“这事归谁管” */
   key?: string;
   /** 进队列的时刻（攒批用） */
   queuedAt?: number;
+  /** 未处理完的请求保留在队列里，延后重试，不冒充已学过。 */
+  retryAt?: number;
 }
 
 /** 一串动作不管从哪一步数起都是同一串（挖→垫→挖→垫 和 垫→挖→垫→挖）：取字典序最小的那个转法 */
@@ -392,14 +395,15 @@ export class SkillSmith {
   }
 
   report(kind: ForgeKind, at: number, headline: string, windowMs: number, note?: string, journal?: string[], signal?: LedgerSignal | ConsumeSignal, key?: string) {
-    const lines = journal ?? this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90)
+    const events = this.recent.filter((e) => e.ts >= at - windowMs && e.ts <= at + 5000).slice(-90);
+    const lines = journal ?? events
       .map((e) => `[${((e.ts - at) / 1000).toFixed(0)}s] ${e.type} ${e.msg.replace(/\s+/g, ' ').slice(0, 170)}`);
     let st: AgentState | null = null;
     try { st = this.state(); } catch { /* 状态暂不可用 */ }
     // 这件事模型说过归某份技能管：直接交给它，不再请模型
     const owner = this.ownerOf(key);
     if (owner) { this.handOver(kind, headline, owner); return; }
-    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, ...(note ? { note } : {}), ...(signal ? { signal } : {}), ...(key ? { key } : {}), queuedAt: Date.now(),
+    const incident: Incident = { kind, at, headline: headline.slice(0, 300), lines, events, ...(note ? { note } : {}), ...(signal ? { signal } : {}), ...(key ? { key } : {}), queuedAt: Date.now(),
       context: st ? { hp: Math.round(st.hp * 10) / 10, food: st.food, isDay: st.isDay, dim: st.dim, inventory: st.inventory.slice(0, 20).map((i) => `${i.name}×${i.count}`),
         // 穿着的和副手的（盾、护甲）不在背包里：不写出来，写技能时就不知道有盾可用
         ...(st.equipment?.length ? { wearing: st.equipment.map((e) => `${e.slot}:${e.name}`) } : {}) } : {} };
@@ -407,7 +411,7 @@ export class SkillSmith {
     const near = this.queue.find((q) => Math.abs(q.at - at) < 60_000 && (q.kind === kind || (q.kind === 'death' && kind === 'pain')));
     // 还在排队的同一件事又来了：留新的经过
     const same = key ? this.queue.find((q) => q.key === key) : undefined;
-    if (same) { same.at = at; same.headline = incident.headline; same.lines = lines; if (note) same.note = [same.note, note].filter(Boolean).join('；'); }
+    if (same) { same.at = at; same.headline = incident.headline; same.lines = lines; same.events = events; if (note) same.note = [same.note, note].filter(Boolean).join('；'); }
     else if (near) { if (note) near.note = [near.note, note].filter(Boolean).join('；'); }
     else this.queue.push(incident);
     if (this.queue.length > 12) this.queue.splice(0, this.queue.length - 12);
@@ -434,7 +438,15 @@ export class SkillSmith {
     const now = Date.now();
     this.forgedAt = this.forgedAt.filter((t) => now - t < 3_600_000);
     // 死亡和心智点名的先写，回顾最后
-    this.queue.sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+    this.queue.sort((a, b) => Number((a.retryAt ?? 0) > now) - Number((b.retryAt ?? 0) > now) || ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
+    if ((this.queue[0].retryAt ?? 0) > now) {
+      if (!this.retryTimer) {
+        const wait = Math.max(1, Math.min(...this.queue.map((q) => q.retryAt ?? now)) - now);
+        this.retryTimer = setTimeout(() => { this.retryTimer = null; this.next(); }, wait);
+        this.retryTimer.unref?.();
+      }
+      return;
+    }
     // 攒批：除了死亡，等第一件进队几分钟，或者攒够几件，一次请模型看完
     const batchMs = this.limits.batchMs ?? 0;
     if (batchMs > 0 && this.queue[0].kind !== 'death' && this.queue.length < SkillSmith.BATCH_MAX) {
@@ -447,6 +459,7 @@ export class SkillSmith {
     const batch: Incident[] = [];
     while (this.queue.length && batch.length < SkillSmith.BATCH_MAX) {
       const c = this.queue[0];
+      if ((c.retryAt ?? 0) > now) break;
       if (batch.length && c.kind === 'death') break;
       // 一小时的额度用完了：死亡照样看，其余的等额度空出来（排队的事太多时旧的会被挤掉）
       if (!batch.length && c.kind !== 'death' && this.forgedAt.length >= this.limits.maxPerHour) {
@@ -460,7 +473,7 @@ export class SkillSmith {
       }
       this.queue.shift();
       const sig = SkillSmith.signature(c);
-      // 同一件事刚看过（不管当时写没写成）：不再花一次模型调用
+      // 同一件事已有明确结论：不再花一次模型调用；未处理完的请求仍可重试。
       if (c.kind !== 'death' && now - (this.handledAt.get(sig) ?? -Infinity) < this.limits.repeatMs) {
         this.bus.publish('skill_forge_skipped', 'P3', `「${c.headline.slice(0, 60)}」${Math.round(this.limits.repeatMs / 60_000)} 分钟内已经看过一回，这次不再请模型`, { kind: c.kind });
         continue;
@@ -468,8 +481,6 @@ export class SkillSmith {
       // 排队时上一批刚判定它归某份技能管
       const owner = this.ownerOf(c.key, now);
       if (owner) { this.handOver(c.kind, c.headline, owner); continue; }
-      this.handledAt.set(sig, now);
-      if (this.handledAt.size > 200) this.handledAt.delete(this.handledAt.keys().next().value!);
       batch.push(c);
       if (c.kind === 'death') break;
     }
@@ -541,8 +552,9 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
 - reliable_skills 是已经验证可靠的技能（积木）：代码里用 api.useSkill 调用它们，能组合现成的就别从底层动作重写一遍；新技能可以比它们高一层（比如“开一条巷道找铁并带回来”调用挖巷道的那份）。
 - existing_skills 里标“已收起”的是墓碑（只列了和这次沾边的）：写着当时为什么收起。做不好、被合并而收起的，同一种事没有新证据就输出 none，别把它换个样子再写一遍；标着“不是做不好”的，这次确实需要就用同一个名字重写。
-- young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；这次的事归它们管就输出 none（经过已经记进它们的成败）。
-- 因为 existing_skills / young_skills / reliable_skills 里已经有一份技能管着这件事才不写的：none 里写 "covered_by":"那份技能的名字"。以后同一件事直接交给它，不再请你看，直到它失败、被改或被收起。
+- existing_skill_contracts 提供上述技能的完整执行契约及稳定/待验证状态；同名修订以对应版本的契约为依据，不能只凭一览猜旧代码。
+- young_skills 里的技能当前版本还没用够几次，看不出好坏：不要改写它们，也不要换个名字另写一份做同一件事；先输出 none，说明仍待试用。候选不是已覆盖的能力，不能填 covered_by，也不能把本次事件当成它的执行证据。
+- 因为已有一份稳定可用技能管着这件事才不写的：none 里写 "covered_by":"那份技能的名字"。以后同一件事直接交给它，不再请你看，直到它失败、被改或被收起。
 - 不是技能能解决的（纯属运气、应该由思考决定的取舍、缺的是材料不是做法）：输出 {"none":true,"why":"…"}。
 - 先分清失败是“做法不对”还是“身体做不到”：动作接口本身没有这种能力（比如步行寻路不会游泳、某种操作根本没有动作可用、返回的信息里看不到决定成败的那件事），
   在上面写技能打补丁也绕不过去，只会写一份收一份。这种输出 {"none":true,"why":"…","limitation":"一句话：身体缺什么能力 / 看不到什么"}，会报给开发者补上，不要写补丁技能。
@@ -564,6 +576,7 @@ ${API_DOC}`;
       what_happened: `${KIND_LABEL[incident.kind]}：${incident.headline}`,
       ...(incident.note ? { its_own_note: incident.note } : {}),
       [review ? 'recent_activities' : 'episode']: incident.lines.slice(-maxLines),
+      ...(incident.events?.length ? { observed_events: incident.events.slice(-maxLines) } : {}),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
       ...(this.ledger && review ? { harvest_ledger: this.safeLedger(() => this.ledger!.digest(12)) } : {}),
       ...(review && this.chronicShortages().length ? { chronic_shortages: this.chronicShortages() } : {}),
@@ -575,10 +588,17 @@ ${API_DOC}`;
   private skillTables(incidents: Incident[]) {
     const about = incidents.flatMap((i) => [i.headline, i.note ?? '', ...i.lines]).join('\n');
     const focus = incidents.map((i) => `${i.headline}\n${i.note ?? ''}`).join('\n');
+    const overview = this.engine.forgeOverview(about, focus);
+    const contracts = [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)]
+      .filter((b) => overview.some((line) => line.startsWith(`${b.name}［`)));
     return {
-      existing_skills: this.engine.forgeOverview(about, focus),
+      existing_skills: overview,
+      existing_skill_contracts: contracts.map((b) => ({ name: b.name, description: b.description, body: b.body, notes: b.notes,
+        version: b.version, status: b.candidate ? 'candidate_pending_trial' : 'stable', execution_error: this.engine.executionError(b.name, !!b.candidate),
+        evidence: this.engine.currentStats(b.name, !!b.candidate), when: b.when, args: b.needs, priority: b.priority, cooldown_s: b.cooldownMs / 1000,
+        overrides: b.overrides, ...(b.code ? { code: b.code } : { steps: b.steps }), verify: b.verify })),
       reliable_skills: this.engine.reliableList(),
-      young_skills: this.engine.list().filter((b) => this.engine.rewriteGate(b.name)).map((b) => { const c = this.engine.currentStats(b.name); return `${b.name}（这一版成 ${c.ok} 败 ${c.fail}）`; }),
+      young_skills: contracts.filter((b) => this.engine.rewriteGate(b.name)).map((b) => { const c = this.engine.currentStats(b.name, !!b.candidate); return `${b.name} v${b.version ?? 1}（${b.candidate ? '待验证候选，' : ''}这一版成 ${c.ok} 败 ${c.fail}）`; }),
     };
   }
 
@@ -617,71 +637,111 @@ ${this.rules()}
     const label = single ? KIND_LABEL[batch[0].kind] : `一批 ${batch.length} 件`;
     const signal = AbortSignal.timeout(10 * 60_000);
     const settled = new Set<number>();
+    const deferred = new Map<number, 'budget' | 'missing_result' | 'generation_failed'>();
     const out: string[] = [];
     let written = 0;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const c = await this.planner.complete(messages, { label: `skill:总结（${label}）`, tier: 'full', signal, attempt, maxTokensScale: 2 });
-      const incomplete = c.finishReason === 'length' ? '输出被长度上限截断' : !c.text.trim() ? '模型没有返回正文' : null;
-      if (incomplete) {
-        this.planner.noteInvalid('总结技能', incomplete);
-        messages.push({ role: 'user', content: `刚才${incomplete}，没有保存技能或执行动作。缩小为当前证据支持的一份候选或 none，重新输出完整 JSON；不要续写残片。` });
-        continue;
-      }
-      let raw: Record<string, any>;
-      try { raw = extractJson(c.text) as Record<string, any>; } catch (e) {
-        this.planner.noteInvalid('总结技能', (e as Error).message);
-        messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
-        continue;
-      }
-      // 成批的回 results；单件（或者模型没照格式）的整个就是第 1 件的结论
-      const results: Record<string, any>[] = Array.isArray(raw.results) ? raw.results : [{ ...raw, event: 1 }];
-      const errors: string[] = [];
-      for (const r of results) {
-        const idx = Number(r?.event) - 1;
-        const inc = batch[idx];
-        if (!inc || settled.has(idx)) continue;
-        const tag = single ? '' : `第 ${idx + 1} 件`;
-        if (r.none) {
-          settled.add(idx);
-          const why = String(r.why ?? '').slice(0, 160);
-          const by = typeof r.covered_by === 'string' && !this.engine.handlesNow(r.covered_by) ? r.covered_by : null;
-          if (by) this.setOwner(inc, by);
-          const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
-          if (limitation) this.bus.publish('body_limit', 'P2', `模型推断身体可能做不到（尚未验证，报给开发者核对，别当成已确认的能力边界）：${limitation}`, { kind: inc.kind, limitation, confidence: 'inferred', unverified: true, headline: inc.headline.slice(0, 200) });
-          this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，没有写技能：${why}${by ? `（归「${by}」管，同一件事以后直接交给它）` : ''}`, { kind: inc.kind, ...(by ? { coveredBy: by } : {}) });
-          out.push(`${tag}不写：${why}`);
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const c = await this.planner.complete(messages, { label: `skill:总结（${label}）`, tier: 'full', signal, attempt, maxTokensScale: 2 });
+        const incomplete = c.finishReason === 'length' ? '输出被长度上限截断' : !c.text.trim() ? '模型没有返回正文' : null;
+        if (incomplete) {
+          this.planner.noteInvalid('总结技能', incomplete);
+          messages.push({ role: 'user', content: `刚才${incomplete}，没有保存技能或执行动作。缩小为当前证据支持的一份候选或 none，重新输出完整 JSON；不要续写残片。` });
           continue;
         }
-        const drafts = (Array.isArray(r.skills) ? r.skills : [r.skill ?? r]).filter((d: unknown) => d && typeof d === 'object');
-        const gated: string[] = [], bad: string[] = [];
-        let ok = 0;
-        for (const draft of drafts) {
-          if (written >= 2) break;
-          const { event: _e, ...clean } = draft as Record<string, unknown>;
-          const name = typeof clean.name === 'string' ? normalizeSkillName(clean.name) : '';
-          const w = this.engine.write(clean, { by: 'forge', expectedToken: expectedTokens.get(name) });
-          if (!w.ok) { if ('gated' in w && w.gated) gated.push(w.error); else bad.push(w.error); continue; }
-          written++; ok++;
-          if (!w.candidate) this.setOwner(inc, w.name);
-          const desc = (this.engine.get(w.name, true) ?? this.engine.get(w.name))?.description ?? '';
-          out.push(`${tag}${w.candidate ? '待验证候选' : w.created ? '新技能' : '改写'} ${w.name}`);
-          this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[inc.kind]}里${w.candidate ? '写下待验证候选' : w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: inc.kind, mode: w.mode, created: w.created, candidate: !!w.candidate });
-        }
-        if (ok || written >= 2) { settled.add(idx); continue; }
-        if (gated.length && !bad.length) {
-          settled.add(idx);
-          this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，想改的技能证据还不够，先不改：${gated[0].slice(0, 120)}`, { kind: inc.kind, gated: true });
-          out.push(`${tag}不改：${gated.join('；').slice(0, 200)}`);
+        let raw: Record<string, unknown>;
+        try {
+          const parsed = extractJson(c.text);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('需要 JSON 对象');
+          raw = parsed as Record<string, unknown>;
+        } catch (e) {
+          this.planner.noteInvalid('总结技能', (e as Error).message);
+          messages.push({ role: 'user', content: '刚才的回复不是合法 JSON，请只输出一个 JSON 对象。' });
           continue;
         }
-        errors.push(`${tag}${bad.join('；') || '没有可存的技能'}`);
+        // 边界处校验结果对象；漏回、空结果与明确的 none 是不同的结论。
+        const results = (Array.isArray(raw.results) ? raw.results : [{ ...raw, event: 1 }])
+          .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && !Array.isArray(r));
+        const answered = new Set<number>();
+        const errors: string[] = [];
+        for (const r of results) {
+          const idx = Number(r.event) - 1;
+          const inc = batch[idx];
+          if (!inc || settled.has(idx) || deferred.get(idx) === 'budget') continue;
+          answered.add(idx);
+          deferred.delete(idx);
+          const tag = single ? '' : `第 ${idx + 1} 件`;
+          if (r.none === true) {
+            settled.add(idx);
+            const why = String(r.why ?? '').slice(0, 160);
+            const by = typeof r.covered_by === 'string' && !this.engine.handlesNow(r.covered_by) ? r.covered_by : null;
+            if (by) this.setOwner(inc, by);
+            const limitation = typeof r.limitation === 'string' && r.limitation.trim() ? r.limitation.trim().slice(0, 200) : null;
+            if (limitation) this.bus.publish('body_limit', 'P2', `模型推断身体可能做不到（尚未验证，报给开发者核对，别当成已确认的能力边界）：${limitation}`, { kind: inc.kind, limitation, confidence: 'inferred', unverified: true, headline: inc.headline.slice(0, 200) });
+            this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，没有写技能：${why}${by ? `（归「${by}」管，同一件事以后直接交给它）` : ''}`, { kind: inc.kind, ...(by ? { coveredBy: by } : {}) });
+            out.push(`${tag}不写：${why}`);
+            continue;
+          }
+          if (written >= 2) { deferred.set(idx, 'budget'); continue; }
+          const drafts = (Array.isArray(r.skills) ? r.skills : [r.skill ?? r])
+            .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object' && !Array.isArray(d));
+          if (drafts.length > 2 - written) {
+            errors.push(`${tag}还可写 ${2 - written} 份，请缩小本件候选数量`);
+            deferred.set(idx, 'generation_failed');
+            continue;
+          }
+          const gated: string[] = [], bad: string[] = [];
+          let ok = 0;
+          for (const draft of drafts) {
+            const { event: _e, ...clean } = draft;
+            const name = typeof clean.name === 'string' ? normalizeSkillName(clean.name) : '';
+            const w = this.engine.write(clean, { by: 'forge', expectedToken: expectedTokens.get(name) });
+            if (!w.ok) { if (w.gated) gated.push(w.error); else bad.push(w.error); continue; }
+            ok++;
+            if (w.unchanged) {
+              out.push(`${tag}保留原候选 ${w.name}（契约无变化）`);
+              this.bus.publish('skill_forge_unchanged', 'P3', `「${w.name}」契约无变化，保留原版本与试用证据`, { name: w.name, kind: inc.kind });
+              continue;
+            }
+            written++;
+            if (!w.candidate) this.setOwner(inc, w.name);
+            const desc = (this.engine.get(w.name, true) ?? this.engine.get(w.name))?.description ?? '';
+            out.push(`${tag}${w.candidate ? '待验证候选' : w.created ? '新技能' : '改写'} ${w.name}`);
+            this.bus.publish('skill_forged', 'P2', `从${KIND_LABEL[inc.kind]}里${w.candidate ? '写下待验证候选' : w.created ? '总结出新技能' : '改写了技能'}「${w.name}」：${desc}`, { name: w.name, kind: inc.kind, mode: w.mode, created: w.created, candidate: !!w.candidate });
+          }
+          if (ok) { settled.add(idx); continue; }
+          if (gated.length && !bad.length) {
+            settled.add(idx);
+            this.bus.publish('skill_forge_none', 'P3', `看了${KIND_LABEL[inc.kind]}，想改的技能证据还不够，先不改：${gated[0].slice(0, 120)}`, { kind: inc.kind, gated: true });
+            out.push(`${tag}不改：${gated.join('；').slice(0, 200)}`);
+            continue;
+          }
+          deferred.set(idx, 'generation_failed');
+          errors.push(`${tag}${bad.join('；') || '没有可存的技能'}`);
+        }
+        batch.forEach((_inc, idx) => {
+          if (settled.has(idx) || deferred.get(idx) === 'budget' || answered.has(idx)) return;
+          deferred.set(idx, written >= 2 ? 'budget' : 'missing_result');
+          if (written < 2) errors.push(`第 ${idx + 1} 件没有结论`);
+        });
+        if (settled.size === batch.length || !errors.length) break;
+        messages.push({ role: 'assistant', content: c.text.slice(0, 6000) },
+          { role: 'user', content: `仍待处理：${errors.join('；')}。已完成事件不要重复，只补这些事件的完整结论（本批还可写 ${2 - written} 份技能），${single ? '只输出 JSON' : '保留原 event 编号和 results 格式'}。` });
       }
-      if (!errors.length || settled.size === batch.length) break;
-      messages.push({ role: 'assistant', content: c.text.slice(0, 6000) },
-        { role: 'user', content: `技能存不下：${errors.join('；')}。只改正这几份，${single ? '只输出 JSON' : '照同样的 results 格式只输出这几件'}。` });
-      if (attempt === 2 && !out.length) throw new Error('三次都没写出能存下的技能');
+      if (!out.length) throw new Error('三次都没写出能存下的技能或明确结论，未处理事件保留待重试');
+      if (settled.size < batch.length) out.push(`${batch.length - settled.size} 件未处理，已延期重试`);
+      return out.join('；');
+    } finally {
+      const now = Date.now();
+      batch.forEach((inc, idx) => {
+        if (settled.has(idx)) { this.handledAt.set(SkillSmith.signature(inc), now); return; }
+        const reason = deferred.get(idx) ?? 'generation_failed';
+        const retryAt = now + Math.max(60_000, this.limits.repeatMs);
+        this.queue.push({ ...inc, retryAt, queuedAt: now });
+        const why = reason === 'budget' ? '本批写入额度已用完' : reason === 'missing_result' ? '模型没有返回本件结论' : '生成或保存未完成';
+        this.bus.publish('skill_forge_deferred', 'P3', `「${inc.headline.slice(0, 60)}」${why}，保留请求，延期重试`, { kind: inc.kind, headline: inc.headline, reason, retryAt });
+      });
+      while (this.handledAt.size > 200) this.handledAt.delete(this.handledAt.keys().next().value!);
     }
-    if (!out.length) throw new Error('三次都没写出能存下的技能');
-    return out.join('；');
   }
 }

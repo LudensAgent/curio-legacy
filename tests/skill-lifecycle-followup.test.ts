@@ -151,7 +151,8 @@ test('候选执行期间修订成 v3、回执缺版本：只记使用，不按�
   assert.ok(w.engine.write({ ...def, name: 'stuck-skill' }).ok);
   assert.ok(w.engine.write({ ...def, name: 'stuck-skill' }, { by: 'mind' }).ok);
   const startedAt = Date.now() - 1000; // v2 正在执行
-  assert.ok(w.engine.write({ ...def, name: 'stuck-skill' }, { by: 'mind' }).ok); // 执行期间生成 v3
+  assert.ok(w.engine.write({ ...def, name: 'stuck-skill', code: def.code + '\n// 修订执行契约' }, { by: 'mind' }).ok); // 执行期间生成 v3
+  assert.equal(w.engine.get('stuck-skill', true)?.version, 3);
   w.arbiter.emit('done', done('stuck-skill', { trial: true }, { status: 'failed', failureCode: 'STUCK', summary: 'use_skill 卡死' }, 'reflex', startedAt));
   const st = w.engine.statsOf('stuck-skill')!;
   assert.equal(st.uses, 1, '只记一次使用');

@@ -148,7 +148,7 @@ ${API_DOC}
       }
       if (raw.keep) { this.bus.publish('skill_improve_kept', 'P3', `看了「${name}」的记录，代码先不改：${String(raw.why ?? '').slice(0, 160)}`, { name }); return; }
       const change = String(raw.change ?? '依据运行记录修订了技能').slice(0, 120);
-      let saved: { ok: true } | { ok: false; error: string };
+      let saved: { ok: true; unchanged?: boolean } | { ok: false; error: string };
       if (raw.skill !== undefined) {
         if (!raw.skill || typeof raw.skill !== 'object' || Array.isArray(raw.skill)) saved = { ok: false, error: 'skill 须为同名完整技能对象' };
         else {
@@ -170,6 +170,10 @@ ${API_DOC}
         this.planner.noteInvalid(`改进 ${name}`, saved.error);
         messages.push({ role: 'assistant', content: c.text.slice(0, 6000) }, { role: 'user', content: `修订过不了检查：${saved.error}。改正后只输出完整 JSON。` });
         continue;
+      }
+      if (saved.unchanged) {
+        this.bus.publish('skill_improve_kept', 'P3', `「${name}」的完整契约没有变化，保留候选版本与试用证据`, { name });
+        return;
       }
       const version = (this.engine.get(name, true) ?? this.engine.get(name))?.version;
       this.bus.publish('skill_improved', 'P2', `技能「${name}」写下待验证修订${version ? ` v${version}` : ''}：${change}`, { name, version, change, candidate: true });

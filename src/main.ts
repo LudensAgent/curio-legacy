@@ -265,6 +265,7 @@ const coderPlanner = config.llm.provider === 'openai'
 const library = new SkillLibrary(path.join(config.dataDir, 'skill-library.json'), adapter, memory, bus);
 const methods = new MethodLibrary(path.join(config.dataDir, 'method-library.json'), adapter, memory, bus,
   { trialWorldIds: config.learning.testWorldIds });
+methods.start(() => arbiter.paused);
 for (const skill of createMethodSkills(methods, new ResourceKnowledge(config.mc.version))) SKILLS[skill.name] = skill;
 // 从经历里学做法：每一步结束都实测背包增减，真的做成一件东西时提炼做法，两处做成过就采纳为已验证方法
 const experience = new ExperienceMiner(path.join(config.dataDir, 'experience.json'), adapter, memory, methods, bus);
@@ -346,7 +347,7 @@ const onGoalEnd = (status: string) => {
 
 // 技能书（内置的 skills/ 和自己写的 data/skills/）与建筑图纸库
 const skillBook = new SkillBook(BUILTIN_SKILLS_DIR, path.join(config.dataDir, 'skills'));
-/** 行为技能：带触发条件和步骤的技能，模型写下就生效（自动做、失败时先试、或 use_skill 调用） */
+/** 行为技能：保存候选，通过实际验收后按原模式启用 */
 const behaviors = new BehaviorEngine(skillBook, adapter, arbiter, bus, vision, path.join(config.dataDir, 'skill-stats.json'));
 setBehaviorRegistry(behaviors);
 setReliableSkills((name) => behaviors.reliable(name));
@@ -355,7 +356,7 @@ const improver = new CodeImprover(coderPlanner, behaviors, bus, { globalGapMs: c
 /** 从经历里总结新技能：心智点名、定期回顾、吃了比平时大的亏、死亡 */
 const smith = new SkillSmith(coderPlanner, behaviors, skillBook, bus, () => adapter.state(),
   // 回顾用的“这段时间做过的事”（回调执行时 selfModel 已经建好）
-  () => selfModel.history(30).map((r) => `${r.what} → ${r.outcome}（${r.durationSec}s${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}）${r.outcome !== 'done' ? `：${r.summary.slice(0, 80)}` : ''}`),
+  () => selfModel.history(30).map((record) => JSON.stringify(record)),
   { maxPerHour: config.mind.skillForgeMaxPerHour, repeatMs: config.mind.skillForgeRepeatMin * 60_000,
     batchMs: config.mind.skillForgeBatchSec * 1000, ownersFile: path.join(config.dataDir, 'skill-owners.json') });
 smith.start();
@@ -802,9 +803,8 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
   },
   deleteSkill: (name) => {
     if (SKILLS[name]) { setSkillDisabled(name, true); return { ok: true }; }
-    if (!behaviors.get(name)) return { ok: false, error: `没有可删除的自学技能 ${name}` };
-    behaviors.retire(name, '控制台删除');
-    try { rmSync(path.join(config.dataDir, 'skills', name), { recursive: true, force: true }); } catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
+    try { if (!behaviors.delete(name)) return { ok: false, error: `没有可删除的自学技能 ${name}` }; }
+    catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
     return { ok: true };
   },
   forgetPlace: (id) => {
