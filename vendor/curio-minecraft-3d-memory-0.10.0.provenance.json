@@ -3,11 +3,12 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.10.0"
   },
-  "sourceHEAD": "2de4bbeb4f2d76c3792668bce1c085231921334d",
-  "artifactSHA256": "3ef283cdb5594393511cbad13cdb9eae90c4fcc5e92b0741085e95852d4b1210",
-  "npmIntegrity": "sha512-POFa7uKYpsulV3h7NNaXwH3n0xVpzRobIJsv6sMOVD3fcAZS69ELGFltZjDiEpxNGzTWV/fg6hKxclmAp4y0xg==",
+  "sourceHEAD": "66ced6182426532958af1962f54f33531223ed88",
+  "artifactSHA256": "0c0e77141114a25a69404e80b2ba0fa5e36b2396be4802607874ad4e660567e4",
+  "npmIntegrity": "sha512-GUybMDCValBf+F5WjGgYDpcjKEeJ9iWDY1T40Nxm/khYri2vuKqD6BH+ZpTX68K1+ReW5C0JRWbHigbtgUrrxw==",
   "sourceBinding": {
     "clean": true,
-    "head": "2de4bbeb4f2d76c3792668bce1c085231921334d"
+    "head": "66ced6182426532958af1962f54f33531223ed88",
+    "note": "Built from a detached worktree at sourceHEAD; unrelated uncommitted docs in the main checkout were not present."
   }
 }

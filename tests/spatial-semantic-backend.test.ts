@@ -84,7 +84,8 @@ test('semantic records are written to the fact port, not topology nodes', () => 
   for (const anchor of containers) {
     assert.equal(anchor.ledgerRef, `${W}:${D}:${anchor.pos.x},${anchor.pos.y},${anchor.pos.z}`);
   }
-  assert.equal(stores.topology.nodes({ limit: 10 }).total, 0, 'no semantic node is written to the topology');
+  assert.equal('topology' in stores, false, 'semantic composition no longer carries legacy topology');
+  assert.equal('history' in stores, false, 'semantic composition no longer carries legacy fragment history');
 });
 
 test('WorldMemory JSON keeps only non-spatial facts', (t) => {

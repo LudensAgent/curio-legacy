@@ -1,8 +1,6 @@
 import type {
-  FragmentStore,
   JsonObject,
   JsonValue,
-  TopologyStore,
 } from 'curio-minecraft-3d-memory';
 import type {
   LedgerStore,
@@ -26,14 +24,15 @@ import {
   type ResourceAnchorFact,
 } from './facts-adapter.ts';
 
-/** The in-memory library stores a spatial session exposes. */
+/**
+ * The library domains the semantic layer actually consumes. World identity is
+ * passed explicitly by the owning session scope; legacy Fragment/Topology
+ * stores are not part of this interface.
+ */
 export interface SpatialLibraryStores {
   /** Semantic facts (places, exact resources, container anchors). */
   readonly facts: HostFactsPort;
-  /** World binding for this library session; passage/route methods are retired. */
-  readonly history: FragmentStore;
-  /** Topology remains for the compatibility migration marker. */
-  readonly topology: TopologyStore;
+  /** Preserved placement/visit/portal-crossing ledger. */
   readonly ledger: LedgerStore;
 }
 
@@ -48,10 +47,6 @@ export const GONE_CAP = 120;
 
 type Vec = { x: number; y: number; z: number };
 
-interface CurioMetadata { curio?: unknown }
-
-const isRecord = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
 const clone = <T>(value: T): T => structuredClone(value);
 const jsonRecord = (value: object): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 const point = (p: Vec3Like): Vec => ({ x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) });
@@ -125,12 +120,12 @@ export class SpatialSemanticStore {
   constructor(
     private readonly session: SpatialLibraryStores,
     private readonly containerLedgerStore: ContainerLedger,
-    options: { sessionId?: string; worldId?: string } = {},
+    options: { sessionId?: string; worldId: string },
   ) {
-    this.worldId = options.worldId ?? session.history.worldId;
-    if (session.history.worldId !== this.worldId) {
-      throw new Error(`spatial semantic world mismatch: ${session.history.worldId} != ${this.worldId}`);
+    if (typeof options.worldId !== 'string' || options.worldId.length === 0) {
+      throw new Error('spatial semantic worldId must come from the explicit session scope');
     }
+    this.worldId = options.worldId;
     this.sessionId = options.sessionId ?? 'semantic-store';
   }
 
@@ -1206,34 +1201,6 @@ export class SpatialSemanticStore {
 
   novelty(dim: string, x: number, z: number): number {
     return this.session.ledger.novelty(dim, Math.floor(x / 16), Math.floor(z / 16));
-  }
-
-  /**
-   * The compatibility migration marker intentionally stays on the topology
-   * node surface: the startup gate (integration-owned) reads it there. It is
-   * not a semantic fact and carries no world geometry.
-   */
-  migrationMarker(): { version: number; completedAt: number; sources?: JsonValue } | null {
-    const node = this.session.topology.getNode('curio:migration');
-    if (!node) return null;
-    const curio = isRecord(node.metadata) ? (node.metadata as CurioMetadata).curio : undefined;
-    const record = isRecord(curio) ? (curio as { record?: unknown }).record : undefined;
-    if (!isRecord(record)) return null;
-    return {
-      version: typeof record.version === 'number' ? record.version : 0,
-      completedAt: typeof record.completedAt === 'number' ? record.completedAt : 0,
-      ...(record.sources !== undefined ? { sources: record.sources as JsonValue } : {}),
-    };
-  }
-
-  writeMigrationMarker(sources: JsonValue = {}, completedAt = Date.now()) {
-    this.session.topology.saveNode({
-      id: 'curio:migration', kind: 'place', source: 'program', tag: 'discovery',
-      label: 'spatial migration', worldId: this.worldId, dim: 'overworld',
-      location: { kind: 'exact', pos: { x: 0, y: 0, z: 0 } }, observedAt: completedAt,
-      externalRef: 'curio:migration',
-      metadata: { curio: { v: 2, type: 'migration', record: { version: 1, completedAt, sources } as JsonValue } },
-    });
   }
 
   hasManagedRecords(): boolean {

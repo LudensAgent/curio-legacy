@@ -9,9 +9,9 @@
  * 启动日志只输出有界摘要（契约版本与各域 false 键），完整报告按需查询。
  *
  * 路线/片段/拓扑写入已随旧导航体系退役：`MemoryWriteCapability` 只列共享会话
- * 仍真正接线并使用的体素写与观测入口；库报告里的历史写键仍保留在 `library`/
- * `effective` 原样，但宿主不再声明、不再调用。只读查询仍直接读 `session.voxel`/
- * `session.history`（`spatial-query.ts`），它不是写入入口。
+ * 仍真正接线并使用的体素写与观测入口；库报告里的历史写键不再由生产组合提供，
+ * 宿主也不再声明、不再调用。生产查询组合只读 `session.voxel` 与 `session.facts`
+ * （`shared-session.ts`），不经过旧 fragment/topology 域。
  */
 import {
   composeCapabilities,

@@ -400,6 +400,24 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(queryCaps.resourceAnchors, true);
     assert.equal(queryCaps.containerAnchors, true);
     assert.equal(queryCaps.containerContents, false);
+    // 生产组合只有 voxel + facts；旧路线/拓扑读面报告为 false，而不是可执行。
+    assert.equal(queryCaps.fragments, false);
+    assert.equal(queryCaps.traversals, false);
+    assert.equal(queryCaps.edges, false);
+    assert.equal(queryCaps.historyRoute, false);
+    assert.equal(queryCaps.anchors, false);
+    assert.equal(queryCaps.components, false);
+    assert.equal(queryCaps.segments, false);
+    assert.equal(queryCaps.portals, false);
+    const memoryCaps = rec(report.memory);
+    assert.equal(memoryCaps.observeBatch, true);
+    assert.equal(memoryCaps.markStale, true);
+    assert.equal(memoryCaps.saveFragment, false);
+    assert.equal(memoryCaps.addTraversal, false);
+    assert.equal(memoryCaps.recordNode, false);
+    assert.equal(memoryCaps.upsertEdge, false);
+    assert.equal(memoryCaps.savePortalEdge, false);
+    assert.equal(Object.values(rec(report.plan)).some(Boolean), false, '旧路线规划不再报告为生产可执行');
 
     // 双报告：库信封与 capabilities 形状原样；宿主组合能力单独标注 owner。
     assert.equal('owner' in report, false, '库能力报告不得混入宿主 owner');
@@ -446,8 +464,10 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     const snapshot = await spatialQuery.run(ctxFor(svc), { kind: 'snapshot' });
     const snapshotData = rec(innerOf(snapshot).snapshot);
     assert.equal(snapshotData.worldId, WORLD);
-    assert.equal(rec(snapshotData.fragments).total, 0, 'facts 数据不写入旧片段域');
-    assert.equal(rec(snapshotData.topology).nodes, 0, 'facts 数据不写入旧拓扑域');
+    assert.equal(rec(snapshotData.facts).containers, 1);
+    assert.equal(rec(snapshotData.facts).places, 0);
+    assert.equal(snapshotData.fragments, undefined, '生产组合不伪造空的旧片段域');
+    assert.equal(snapshotData.topology, undefined, '生产组合不伪造空的旧拓扑域');
   } finally {
     shutdown = await svc.shutdown();
     assertCleanClose(shutdown);

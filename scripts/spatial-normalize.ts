@@ -22,6 +22,7 @@ import type { JsonObject, PathFragment, SpatialNode } from 'curio-minecraft-3d-m
 import type { ChestRecord, FurnaceRecord } from '../src/memory/store.ts';
 import { ContainerLedger, type ContainerEntry, type FurnaceEntry } from '../src/memory/container-ledger.ts';
 import { isContainerLandmark } from '../src/memory/chest-memory.ts';
+import { writeLegacyMigrationMarker } from './legacy-migration-marker.ts';
 
 type Vec = { x: number; y: number; z: number };
 /** 离线迁移工具自己的 legacy 路径 links 上限；运行时路线写入已退役，故不从 src 反向导入。 */
@@ -337,27 +338,13 @@ try {
     chestOps: containers.chestOps,
   };
   const completedAt = Date.now();
-  const marker = {
-    version: 1, completedAt,
-    sources: {
-      worldId,
-      containerLedger: containerPath,
-      travelMemory: fileFact(travelPath),
-      counts,
-    },
+  const markerSources = {
+    worldId,
+    containerLedger: containerPath,
+    travelMemory: fileFact(travelPath),
+    counts,
   };
-  const markerNode = {
-    id: 'curio:migration', kind: 'place' as const, source: 'program' as const, tag: 'discovery' as const,
-    label: 'spatial migration', worldId, dim: 'overworld',
-    location: { kind: 'exact' as const, pos: { x: 0, y: 0, z: 0 } }, observedAt: completedAt,
-    externalRef: 'curio:migration',
-    metadata: { curio: { v: 2, type: 'migration', record: marker } } as JsonObject,
-  };
-  if (session.topology.getNode(markerNode.id)) session.topology.updateNode(markerNode.id, {
-    label: markerNode.label, location: markerNode.location, observedAt: markerNode.observedAt,
-    externalRef: markerNode.externalRef, metadata: markerNode.metadata,
-  });
-  else session.topology.saveNode(markerNode);
+  writeLegacyMigrationMarker(session.topology, worldId, markerSources as JsonObject, completedAt);
   containers.flush();
   const checkpoint = await session.checkpoint();
   const state = session.getPersistenceState();

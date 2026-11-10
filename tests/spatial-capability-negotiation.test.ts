@@ -55,11 +55,14 @@ test('启动时读取并记录库能力报告与契约版本，宿主生命周�
     const report = svc.capabilities();
     assert.equal(report.owner, 'host_composed');
     assert.equal(report.contract, 'memory-host-contract/1');
-    // 库报告原样：memory 写入能力来自 store 自己的可用性报告。
+    // 库报告原样：生产组合只有 voxel + facts，观测写入可用，旧路线写入/查询不可用。
     assert.equal(report.library.memory.markTraversed, true);
     assert.equal(report.library.memory.markModified, true);
-    assert.equal(report.library.memory.saveFragment, true);
-    assert.equal(report.library.memory.addTraversal, true);
+    assert.equal(report.library.memory.saveFragment, false);
+    assert.equal(report.library.memory.addTraversal, false);
+    assert.equal(report.library.query.nodes, true);
+    assert.equal(report.library.query.fragments, false);
+    assert.equal(report.library.query.historyRoute, false);
     // containerContents 恒为 false（宿主账本职责），不是可协商项。
     assert.equal(report.library.query.containerContents, false);
     // 持久化生命周期由共享会话拥有，不冒充库 memory 能力。

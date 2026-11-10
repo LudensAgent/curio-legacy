@@ -28,7 +28,7 @@ import type {
   VoxelLoading,
   WorkingSetStats,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-memory';
+import { createVoxelFactsQueryPort, VoxelResidencyError } from 'curio-minecraft-3d-memory';
 import type {
   BatchChangeReport,
   ChangeReport,
@@ -37,7 +37,6 @@ import type {
   ResidencyLimits,
   SectionKey,
   SectionResidency,
-  SpatialNode,
   SpatialQueryPort,
   SpatialQueryRequest,
   SpatialQueryResult,
@@ -523,22 +522,14 @@ export class SharedSpatialSession {
     this.operationTimeoutMs = operationTimeoutMs;
     this.diagnostic = diagnostic;
     this.coordinator = session.voxelLoading === 'manual' ? new WorkingSetCoordinator(session) : null;
-    // 宿主知道哪些节点是容器锚点：只认 exact location 且 metadata.curio 明确标了
-    // container/chest/furnace 的节点。contents 仍由宿主 ledger 负责，库只回答锚点。
-    const isContainer = (node: SpatialNode) => {
-      const curio = (node.metadata as { curio?: { type?: unknown; types?: unknown } } | undefined)?.curio;
-      const types = [curio?.type, ...(Array.isArray(curio?.types) ? curio.types : [])];
-      return node.location.kind === 'exact' && types.some((type) => type === 'container' || type === 'chest' || type === 'furnace');
-    };
-    const store = new SpatialMemoryStoreImpl({
+    // 生产查询组合只需要体素与 fact 域：语义查询读 facts，容器内容仍由宿主精确
+    // ledger 负责。旧 Fragment/Topology 不参与查询，也不为构造查询而实例化占位对象。
+    this.queryPort = createVoxelFactsQueryPort({
       worldId,
-      map: session.voxel,
+      voxel: session.voxel,
       facts: session.facts,
-      fragments: session.history,
-      topology: session.topology,
-      query: { now, isContainer },
+      query: { now },
     });
-    this.queryPort = store;
     // 契约 §13.1：启动时读取能力报告并留下契约版本；读取失败就是启动失败。
     this.capabilityReport = readHostCapabilities(this);
   }
