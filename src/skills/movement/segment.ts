@@ -851,10 +851,12 @@ async function runNavigationSegmentInner(
         return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
       }
       const next = transitions[index + 1];
-      // 只有已证实的同向 walk/step 链才保留中间速度；转向、下落、边界和末点仍停车。
+      // 已证实的同向 walk/step/小落差链保留中间速度；转向、大落差、边界和末点仍停车。
+      // <=0.6 的地面小落差仍由身体控制落边制动，真实落地到位后才交接。
       // 前视用下一段计划几何，交接时仍会以上方实测起点再次复验，不能跳过未知格。
       const continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
-        && (transition.kind === 'walk' || transition.kind === 'step') && (next.kind === 'walk' || next.kind === 'step')
+        && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 0.6)
+        && (transition.kind !== 'drop' || drop <= 0.6)
         && transition.to.x - transition.from.x === next.to.x - next.from.x
         && transition.to.z - transition.from.z === next.to.z - next.from.z
         && !goalReached(request.goal, transition.to, true)

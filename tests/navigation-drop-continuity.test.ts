@@ -40,6 +40,7 @@ function setup() {
 test('travel_to traverses a non-centred two-block dirt_path drop and continues on the frozen route', async (t) => {
   const { adapter, ctx, to } = setup();
   t.after(() => ctx.memory.close());
+  Object.assign(adapter, { settleMovement: async () => assert.fail('大落差各端点完整停稳，不需要中间交接收尾') });
   const calls: { target: Vec3Like; opts: MoveOpts }[] = [];
   t.mock.method(adapter, 'moveTo', async (target, opts) => {
     assert.equal(target.kind, 'feet');
@@ -55,6 +56,7 @@ test('travel_to traverses a non-centred two-block dirt_path drop and continues o
   assert.equal(calls.length, 3);
   assert.equal(calls[1]!.opts.maxDropDown, 2);
   assert.equal(calls[0]!.opts.maxDropDown, undefined);
+  assert.ok(calls.every(call => call.opts.settleAtTarget === undefined), '大落差及其前一段仍使用完整停稳');
   assert.deepEqual(calls[1]!.target, { x: to.x - 1, y: 97.9375, z: to.z });
   assert.deepEqual(calls.at(-1)!.target, to, '落点不改成格心，不让实测残差累计到后续计划');
   assert.deepEqual(result.data?.resolvedTarget, destination, '进入原目标 range 后停下，仍保留原目标');

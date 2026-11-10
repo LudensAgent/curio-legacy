@@ -1392,7 +1392,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           : target.y < p0y
             ? EDGE + Math.max(0, speed - EDGE / AIR_STOP) * GROUND_STOP // 下降：地面减速到边缘速度，再空中滑到中心
             : speed * GROUND_STOP;                                     // 平走/上行：地面减速
-        if (settleAtTarget && d <= stopDist) { b.setControlState('forward', false); break; }
+        // 小落差即便是中间点也先按落边速度制动，避免尚未落地就越过原端点。
+        // 到位后的交接可以保留速度，不等于允许空中跳过落点验收。
+        if ((settleAtTarget || target.y < p0y) && d <= stopDist) { b.setControlState('forward', false); break; }
         const overshootLimit = horizontalJump ? initialDistance + 0.75 : 1.5;
         if (d > closest + 0.05 || d > overshootLimit) { overshot = true; break; }
         closest = Math.min(closest, d);

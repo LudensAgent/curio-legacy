@@ -37,13 +37,13 @@ const lowStairs = {
   W: { from: { x: -20.37, y: 63.5, z: -2.81 }, bearing: { x: -1, z: 0 }, facing: 'south' },
 };
 
-function setup(direction?: keyof typeof lowStairs) {
+function setup(direction?: keyof typeof lowStairs, strip = surfaces) {
   const low = direction === undefined ? undefined : lowStairs[direction];
   const from = low?.from ?? { x: -20.37, y: 64, z: -2.44 };
   const world = {
     getBlock(position: Vec3) {
       const p = position.floored();
-      const surface = surfaces[Math.max(0, p.x + 21) % surfaces.length]!;
+      const surface = strip[Math.max(0, p.x + 21) % strip.length]!;
       const stairColumn = low !== undefined && (low.bearing.x === 0 ? p.x === Math.floor(from.x) : p.z === Math.floor(from.z));
       const block = p.y === 63 ? low === undefined ? Block.fromProperties(surface.name, surface.props, 0)
         : stairColumn ? Block.fromProperties('oak_stairs', { half: 'bottom', facing: low.facing, shape: 'straight', waterlogged: false }, 0)
@@ -75,9 +75,14 @@ function setup(direction?: keyof typeof lowStairs) {
   const physics = Physics(data, world);
   // Establish actual gravity/support contact before navigation can read onGround.
   for (let tick = 0; tick < 2; tick++) physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
-  const timer = setInterval(() => physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot), 50);
+  const frames: { speed: number; ground: boolean }[] = [];
+  const timer = setInterval(() => {
+    physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+    frames.push({ speed: Math.hypot(entity.velocity.x, entity.velocity.z), ground: entity.onGround });
+  }, 50);
   timer.unref();
   const stops: Vec3Like[] = [];
+  const dispatches: { continuous: boolean; speed: number; ground: boolean; frameStart: number }[] = [];
   class SurfaceAdapter extends FakeAdapter {
     async settleMovement(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>) { await driver.settleMovement(opts); }
     override state() { return { ...super.state(), pos: { ...entity.position }, onGround: entity.onGround }; }
@@ -89,9 +94,11 @@ function setup(direction?: keyof typeof lowStairs) {
     }
     override async moveTo(target: MoveTarget, opts: MoveOpts) {
       assert.equal(target.kind, 'feet', 'route execution must preserve continuous endpoints');
+      const frameStart = frames.length;
       await driver.moveTo(target, opts);
       this.pos = { ...entity.position };
       stops.push({ ...this.pos });
+      dispatches.push({ continuous: opts.settleAtTarget === false, speed: Math.hypot(entity.velocity.x, entity.velocity.z), ground: entity.onGround, frameStart });
     }
   }
   const adapter = new SurfaceAdapter();
@@ -99,10 +106,10 @@ function setup(direction?: keyof typeof lowStairs) {
   const map = new VoxelMap(adapter.worldId, { validityWindowMs: 600_000 });
   let sequence = 0;
   const bounds = low === undefined ? { x0: -23, x1: 2, z0: -5, z1: 0 } : {
-    x0: Math.floor(from.x) + Math.min(0, low.bearing.x * 8) - 2,
-    x1: Math.floor(from.x) + Math.max(0, low.bearing.x * 8) + 2,
-    z0: Math.floor(from.z) + Math.min(0, low.bearing.z * 8) - 2,
-    z1: Math.floor(from.z) + Math.max(0, low.bearing.z * 8) + 2,
+    x0: Math.floor(from.x) + Math.min(0, low.bearing.x * 20) - 2,
+    x1: Math.floor(from.x) + Math.max(0, low.bearing.x * 20) + 2,
+    z0: Math.floor(from.z) + Math.min(0, low.bearing.z * 20) - 2,
+    z1: Math.floor(from.z) + Math.max(0, low.bearing.z * 20) + 2,
   };
   for (let x = bounds.x0; x <= bounds.x1; x++) for (let z = bounds.z0; z <= bounds.z1; z++) for (let y = 60; y <= 68; y++) {
     const pos = { x, y, z }, block = adapter.blockStateAt(pos);
@@ -113,7 +120,38 @@ function setup(direction?: keyof typeof lowStairs) {
   const ctx = { ...makeCtx(adapter, { deadlineMs: 120_000 }), spatial: {
     worldId: adapter.worldId, session: { voxel: map }, closing: false,
   } as unknown as SharedSpatialSession };
-  return { adapter, ctx, timer, controls, stops, looks, from, map, entity };
+  return { adapter, ctx, timer, controls, stops, looks, from, map, entity, frames, dispatches };
+}
+
+test('travel_to 实际执行链连续经过16格低阶梯平面，中间没有停车帧', async (t) => {
+  const { adapter, ctx, timer, from, dispatches, frames, entity } = setup('E');
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const started = performance.now();
+  const result = await travelTo.run(ctx, { to: { ...from, x: from.x + 17 }, range: 1, timeoutMs: 120_000 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(dispatches.length, 16);
+  assert.ok(dispatches.slice(0, -1).every(point => point.continuous && point.ground && point.speed > 0.003), JSON.stringify(dispatches));
+  assert.equal(dispatches.at(-1)!.continuous, false);
+  assert.ok(dispatches.at(-1)!.speed < 0.003);
+  const stoppedFrames = frames.slice(dispatches[0]!.frameStart, dispatches.at(-1)!.frameStart).filter(frame => frame.speed < 0.003).length;
+  assert.equal(stoppedFrames, 0);
+  assert.equal(entity.onGround, true);
+  t.diagnostic(`travel_to 16 edges=${Math.round(performance.now() - started)}ms; middle stopped frames=${stoppedFrames}`);
+});
+
+for (const surface of [surfaces[1]!, surfaces[3]!]) {
+  test(`实际 ${surface.name} 小落差中间点保留速度后仍先落地确认`, async (t) => {
+    const { adapter, ctx, timer, from, dispatches, stops } = setup(undefined, [surfaces[0]!, surface, surface, surface]);
+    t.after(() => { clearInterval(timer); ctx.memory.close(); });
+    const result = await travelTo.run(ctx, { to: { ...from, x: from.x + 3, y: 63 + surface.top }, range: 1, timeoutMs: 120_000 });
+    assert.equal(result.status, 'succeeded', result.summary);
+    assert.equal(dispatches.length, 2);
+    assert.ok(dispatches[0]!.continuous && dispatches[0]!.ground && dispatches[0]!.speed > 0.003, JSON.stringify(dispatches));
+    assert.ok(Math.abs(stops[0]!.y - 63 - surface.top) < 0.01);
+    assert.ok(dispatches[1]!.speed < 0.003);
+    assert.equal(dispatches[1]!.continuous, false);
+    t.diagnostic(`${surface.name} drop=${1 - surface.top}; grounded handoff speed=${dispatches[0]!.speed.toFixed(4)}`);
+  });
 }
 
 test('连续路线下一步证据失效后，回执采样实际制动终点而非交接旧位置', async (t) => {
@@ -167,7 +205,7 @@ for (const direction of ['N', 'E', 'S', 'W'] as const) {
 
 for (const skill of ['travel_to', 'explore_toward'] as const) {
   test(`${skill} crosses actual path, farmland, slab, snow and stair shapes with fractional feet`, async (t) => {
-    const { adapter, ctx, timer, controls, stops, looks, from } = setup();
+    const { adapter, ctx, timer, controls, stops, looks, from, dispatches } = setup();
     t.after(() => { clearInterval(timer); ctx.memory.close(); });
     // Observation is tested separately; here both entry points use real body physics for every edge.
     t.mock.method(lookAround, 'run', async () => ({ status: 'succeeded', summary: 'observed' }));
@@ -178,6 +216,7 @@ for (const skill of ['travel_to', 'explore_toward'] as const) {
 
     assert.equal(result.status, 'succeeded', result.summary);
     assert.ok(stops.length >= 16, `must execute a continuous route, got ${stops.length} edges`);
+    assert.ok(dispatches.filter(point => point.continuous).length >= stops.length - 2, '同向小落差不应让混合路面每格停车');
     for (const top of [0.9375, 0.5, 0.875]) {
       assert.ok(stops.some((point) => Math.abs(point.y - 63 - top) < 0.01), `must physically stand at y=${63 + top}`);
     }
