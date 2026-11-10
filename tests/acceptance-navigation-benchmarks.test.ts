@@ -71,8 +71,8 @@ function fakeSpatial(map: VoxelMap) {
     session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
     closing: false, paused: false, observationAdmitted: true,
     capabilities: () => ({
-      owner: 'host_composed', contract: 'memory-host-contract/1',
-      library: { execute: { walk: true } }, host: {},
+      owner: 'host_composed', contract: 'memory-host-contract/2',
+      library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
       effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
       overclaims: [],
     }),

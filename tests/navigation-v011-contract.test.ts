@@ -50,8 +50,8 @@ function fakeSpatial(map: VoxelMap, query?: () => unknown) {
     },
     closing: false, paused: false, observationAdmitted: true,
     capabilities: () => ({
-      owner: 'host_composed', contract: 'memory-host-contract/1',
-      library: { execute: { walk: true } }, host: {},
+      owner: 'host_composed', contract: 'memory-host-contract/2',
+      library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
       // 旧同高 search 的兼容能力显式关闭；请求的 3D 体素路径不依赖它。
       effective: {
         execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true },

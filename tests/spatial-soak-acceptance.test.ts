@@ -19,7 +19,6 @@ import {
 } from '../src/spatial/checkpoint-scheduler.ts';
 import { SharedSpatialSession, type ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
-import type { CapturedMove, CapturedRouteSample } from '../scripts/navigation-acceptance.ts';
 import type { WorkingSetStats } from 'curio-minecraft-3d-memory/storage/sqlite';
 import {
   BoundedJsonlWriter,
@@ -31,13 +30,11 @@ import {
   HELP,
   MAX_JSONL_RECORD_BYTES,
   MAX_WORKING_SET_SNAPSHOTS,
-  SOAK_ARRIVAL_RADIUS,
   VOXEL_LOADING_CHOICES,
   buildRunReport,
   buildSpatialOpenOptions,
   buildWorkingSetSnapshot,
   classifyDuration,
-  classifyLegTrace,
   classifyMainManualEvidence,
   classifyShutdownResult,
   collectPackageMeta,
@@ -50,7 +47,6 @@ import {
   prepareLegStart,
   shutdownFacts,
   smokePassed,
-  soakWalkRequest,
   startSpatialSoakFoundation,
   workingSetStatsSignature,
 } from '../scripts/spatial-soak-acceptance.ts';
@@ -227,274 +223,17 @@ test('direct JSONL evidence is human-readable and a record over 64KiB fails expl
   }
 });
 
-const legSample = (
-  taskId: string,
-  executionId: string,
-  sequence: number,
-  observedAt: number,
-  position: { x: number; y: number; z: number },
-  accepted = true,
-): CapturedRouteSample => ({
-  taskId,
-  delegationId: executionId,
-  accepted,
-  receivedAt: observedAt + 1,
-  sample: {
-    executionId,
-    sequence,
-    worldId: 'world',
-    dim: 'overworld',
-    sessionId: 'session-1',
-    observedAt,
-    position,
-    onGround: true,
-    inWater: false,
-  },
-  returned: {
-    delegationId: executionId,
-    lastPosition: position,
-    nextPointIndex: 1,
-    activeStepIndex: 0,
-    resultOutcome: 'RUNNING',
-    resultLastPosition: position,
-    resultLastObservation: null,
-  },
-});
-
-const legMove = (
-  taskId: string,
-  executionId: string,
-  from: { x: number; y: number; z: number },
-  to: { x: number; y: number; z: number },
-  receivedAt: number,
-  deadlineMs: number,
-): CapturedMove => ({
-  taskId,
-  receivedAt,
-  request: { executionId, worldId: 'world', dim: 'overworld', sessionId: 'session-1', from, to, deadlineMs, timeoutMs: 45_000 },
-  result: null,
-  error: null,
-});
-
-test('leg trace correlation uses dispatch order + accepted sample identity without requiring every move result', () => {
-  const taskId = 'walk-task';
-  // 真实关系：accepted BodySample.executionId 是路由 delegationId（walk-1），
-  // 而 ExecutableMove.executionId 是 walk-1-step-N。
-  const delegation = 'walk-1';
-  const a = { x: 207.5, y: 64, z: 216.5 };
-  const b = { x: 208.5, y: 64, z: 216.5 };
-  const c = { x: 209.5, y: 64, z: 216.5 };
-  const moves = [
-    legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000),
-    legMove(taskId, `${delegation}-step-1`, b, c, 2_000, 47_000),
-  ];
-  // 两个 move 都没有 result.sample；相关只来自 accepted onSample 样本。
-  const samples = [
-    legSample(taskId, delegation, 1, 1_500, b),
-    legSample(taskId, delegation, 2, 2_500, c),
-  ];
-  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { pos: c, ts: 2_500 }] };
-
-  const ok = classifyLegTrace(nav, taskId, samples, moves);
-  assert.equal(ok.ok, true, ok.problems.join(', '));
-
-  // 派发必须与确认 trace 点一一对应：多出的派发没有 trace/样本证据，必须失败。
-  const withExtra = [...moves, legMove(taskId, `${delegation}-step-2`, c, a, 3_000, 48_000)];
-  const extraDispatch = classifyLegTrace(nav, taskId, samples, withExtra);
-  assert.equal(extraDispatch.ok, false);
-  assert.match(extraDispatch.problems.join(' '), /confirmed trace has 2 points but 3 ExecutableMove dispatches/);
-
-  // 反方向（trace 多于派发）同样失败。
-  const longTrace = { confirmed: true, trace: [...nav.trace, { pos: a, ts: 3_000 }] };
-  const shortDispatch = classifyLegTrace(longTrace, taskId, samples, [moves[0]!]);
-  assert.equal(shortDispatch.ok, false);
-  assert.match(shortDispatch.problems.join(' '), /confirmed trace has 3 points but 1 ExecutableMove dispatches/);
-
-  const wrongPosition = { confirmed: true, trace: [{ pos: a, ts: 1_500 }, { pos: c, ts: 2_500 }] };
-  assert.match(classifyLegTrace(wrongPosition, taskId, samples, moves).problems.join(' '), /trace point 0/);
-
-  const wrongTime = { confirmed: true, trace: [{ pos: b, ts: 1_501 }, { pos: c, ts: 2_500 }] };
-  assert.match(classifyLegTrace(wrongTime, taskId, samples, moves).problems.join(' '), /trace point 0/);
-
-  // 不同路由 delegation 的样本不能被借来配对。
-  const wrongDelegation = [legSample(taskId, 'walk-other', 1, 1_500, b), samples[1]!];
-  assert.match(classifyLegTrace(nav, taskId, wrongDelegation, moves).problems.join(' '), /route delegations/);
-
-  const outOfRange = [legSample(taskId, delegation, 1, 900, b), samples[1]!];
-  assert.match(classifyLegTrace(nav, taskId, outOfRange, moves).problems.join(' '), /trace point 0/);
-
-  const rejected = [legSample(taskId, delegation, 1, 1_500, b, false), samples[1]!];
-  assert.match(classifyLegTrace(nav, taskId, rejected, moves).problems.join(' '), /trace point 0/);
-
-  // move 的 executionId 必须由同一路由 delegation 派生。
-  const wrongMoveId = [moves[0]!, legMove(taskId, 'other-step-1', b, c, 2_000, 47_000)];
-  assert.match(classifyLegTrace(nav, taskId, samples, wrongMoveId).problems.join(' '), /not derived/);
-
-  const unconfirmed = { confirmed: false, trace: [{ pos: b, ts: 1_500 }, { pos: c, ts: 2_500 }] };
-  assert.match(classifyLegTrace(unconfirmed, taskId, samples, moves).problems.join(' '), /confirmed nav trace/);
-
-  // 跨任务样本不得借来配对。
-  const foreign = [legSample('other-task', delegation, 1, 1_500, b), samples[1]!];
-  assert.match(classifyLegTrace(nav, taskId, foreign, moves).problems.join(' '), /trace point 0/);
-});
-
-test('malformed confirmed trace points fail instead of being silently filtered', () => {
-  const taskId = 'walk-malformed-trace';
-  const delegation = 'walk-1';
-  const a = { x: 207.5, y: 64, z: 216.5 };
-  const b = { x: 208.5, y: 64, z: 216.5 };
-  const moves = [legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000)];
-  const samples = [legSample(taskId, delegation, 1, 1_500, b)];
-  // 一条合法点 + 一条畸形点：过滤后长度仍与派发相等，必须由原始长度暴露畸形点。
-  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { garbage: true }] };
-
-  const verdict = classifyLegTrace(nav, taskId, samples, moves);
-  assert.equal(verdict.ok, false);
-  assert.match(verdict.problems.join(' '), /confirmed nav trace contains 1 malformed point/);
-  assert.equal(verdict.facts.tracePoints, 1);
-  assert.equal(verdict.facts.dispatches, 1);
-});
-
-test('soak walk requests keep the fixed target and use the same near radius for completion and verification', () => {
-  const request = soakWalkRequest(FIXTURE_B, 46_000);
-  assert.deepEqual(request.to, FIXTURE_B);
-  assert.deepEqual(request.arrival, { kind: 'near', radius: SOAK_ARRIVAL_RADIUS });
-  assert.equal(request.deadlineMs, 46_000);
-  // 必须小于执行器允许的最大水平容差上限 0.5，且足够容纳真实停止抖动。
-  assert.ok(SOAK_ARRIVAL_RADIUS > 0 && SOAK_ARRIVAL_RADIUS < 0.5);
-});
-
-test('every leg teleports to its fixed nominal start and measures the actual settled body separately', async () => {
-  // 固定夹具点保持未取整的 A/B 标称坐标；setup 起点和目标始终是相反的两格。
-  const outbound = legFixturePoints('A', 'B');
-  assert.deepEqual(outbound, { setup: FIXTURE_A, target: FIXTURE_B });
-  assert.deepEqual(outbound.target, { x: 209.5, y: 64, z: 216.5 });
-  const inbound = legFixturePoints('B', 'A');
-  assert.deepEqual(inbound, { setup: FIXTURE_B, target: FIXTURE_A });
-  assert.notDeepEqual(outbound.setup, outbound.target);
-
-  const calls: string[] = [];
-  // 真实跑中上一段会停在容差内的半格上；setup 结算点与随后实测点都可能偏离标称值。
-  const setupSettled = { x: 209.5, y: 64, z: 216.5 };
-  const actualAfterSettle = { x: 209.4375, y: 64, z: 216.5 };
-  const prepared = await prepareLegStart(
-    3,
-    inbound.setup,
-    async (position, label) => {
-      calls.push(`setup:${label}:${position.x},${position.y},${position.z}`);
-      assert.deepEqual(position, FIXTURE_B);
-      return setupSettled;
-    },
-    async (label) => {
-      calls.push(`measure:${label}`);
-      return actualAfterSettle;
-    },
-  );
-  // 顺序必须是 setup tp -> 结算 -> 读取真实位置；测量不得复用 setup 请求或上一段终点。
-  assert.deepEqual(calls, ['setup:leg-3-setup:209.5,64,216.5', 'measure:leg 3']);
-  assert.deepEqual(prepared.setupRequested, FIXTURE_B);
-  assert.deepEqual(prepared.setupSettled, setupSettled);
-  assert.deepEqual(prepared.measuredStart, actualAfterSettle);
-  assert.notDeepEqual(prepared.measuredStart, prepared.setupRequested);
-
-  // setup tp 失败时不得继续测量或发出 walk_to。
-  let measuredAfterFailure = false;
-  await assert.rejects(
-    prepareLegStart(
-      4,
-      FIXTURE_A,
-      async () => { throw new Error('fixture tp did not settle'); },
-      async () => { measuredAfterFailure = true; return FIXTURE_A; },
-    ),
-    /fixture tp did not settle/,
-  );
-  assert.equal(measuredAfterFailure, false);
-});
-
-test('pre-dispatch stable samples and interleaved dispatches are recorded, not rejected', () => {
-  const taskId = 'walk-stable-start';
-  const delegation = 'walk-1';
-  const a = { x: 207.5, y: 64, z: 216.5 };
-  const b = { x: 208.5, y: 64, z: 216.5 };
-  const c = { x: 209.5, y: 64, z: 216.5 };
-  // 真实运行：4 个 accepted 稳定起点样本在第一次 move 派发之前到达。
-  const stable = [1, 2, 3, 4].map((sequence) =>
-    legSample(taskId, delegation, sequence, 1_000 + sequence * 100, a));
-  const dispatches = [
-    legMove(taskId, `${delegation}-step-0`, a, b, 1_500, 46_000),
-    legMove(taskId, `${delegation}-step-1`, b, c, 1_700, 47_000),
-  ];
-  const moved = [
-    legSample(taskId, delegation, 5, 1_600, b),
-    legSample(taskId, delegation, 6, 2_000, c),
-  ];
-  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_600 }, { pos: c, ts: 2_000 }] };
-
-  const accepted = classifyLegTrace(nav, taskId, [...stable, ...moved], dispatches);
-  assert.equal(accepted.ok, true, accepted.problems.join(', '));
-  assert.equal(accepted.facts.acceptedSamples, 6);
-  assert.equal(accepted.facts.acceptedSamplesOutsideDispatchWindows, 4);
-  assert.deepEqual(accepted.facts.acceptedSampleSequencesOutsideDispatch, [1, 2, 3, 4]);
-  assert.equal(accepted.facts.outsideDispatchSequencesTruncated, false);
-  assert.equal(accepted.facts.compared, 2);
-
-  // 所有派发窗口结束后的终点 accepted 样本同样允许。
-  const terminal = legSample(taskId, delegation, 7, 48_000, c);
-  const withTerminal = classifyLegTrace(nav, taskId, [...stable, ...moved, terminal], dispatches);
-  assert.equal(withTerminal.ok, true, withTerminal.problems.join(', '));
-  assert.equal(withTerminal.facts.acceptedSamplesOutsideDispatchWindows, 5);
-
-  // 额外样本的作用域或 executionId 与派发矛盾时仍然失败。
-  const scopeTemplate = legSample(taskId, delegation, 8, 3_100, c);
-  const foreignScope = { ...scopeTemplate, sample: { ...scopeTemplate.sample, dim: 'nether' } };
-  assert.match(
-    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignScope], dispatches).problems.join(' '),
-    /scope contradicts/,
-  );
-  const execTemplate = legSample(taskId, delegation, 9, 3_200, c);
-  const foreignExec = { ...execTemplate, sample: { ...execTemplate.sample, executionId: 'walk-9' } };
-  assert.match(
-    classifyLegTrace(nav, taskId, [...stable, ...moved, foreignExec], dispatches).problems.join(' '),
-    /executionId walk-9 contradicts route delegation walk-1/,
-  );
-});
-
-test('duplicate confirmed trace points require distinct accepted samples', () => {
-  const taskId = 'walk-duplicate-trace';
-  const delegation = 'walk-1';
-  const a = { x: 207.5, y: 64, z: 216.5 };
-  const b = { x: 208.5, y: 64, z: 216.5 };
-  const moves = [
-    legMove(taskId, `${delegation}-step-0`, a, b, 1_000, 46_000),
-    legMove(taskId, `${delegation}-step-1`, a, b, 1_200, 47_000),
-  ];
-  const nav = { confirmed: true, trace: [{ pos: b, ts: 1_500 }, { pos: b, ts: 1_500 }] };
-
-  const oneSample = classifyLegTrace(nav, taskId, [legSample(taskId, delegation, 1, 1_500, b)], moves);
-  assert.equal(oneSample.ok, false);
-  assert.match(oneSample.problems.join(' '), /trace point 1 has no unused accepted same-delegation sample/);
-
-  const twoSamples = classifyLegTrace(nav, taskId, [
-    legSample(taskId, delegation, 1, 1_500, b),
-    legSample(taskId, delegation, 2, 1_500, b),
-  ], moves);
-  assert.equal(twoSamples.ok, true, twoSamples.problems.join(', '));
-});
-
-const cleanShutdown = (overrides: Partial<ShutdownResult> = {}): ShutdownResult => ({
-  checkpoint: { checkpointId: 'checkpoint-1' } as never,
+const cleanShutdown = (over: Partial<ShutdownResult> = {}): ShutdownResult => ({
+  checkpoint: {
+    checkpointId: 'cp', worldId: 'world', voxelRevision: 1,
+    journalRevision: 1, ledgerRevision: 1, factsRevision: 1, factsCommitted: true,
+  } as NonNullable<ShutdownResult['checkpoint']>,
   error: null,
   cancelError: null,
-  close: {
-    completed: true,
-    error: null,
-    dirty: false,
-    unconfirmedRequest: false,
-    checkpointId: 'checkpoint-1',
-  } as never,
+  close: { completed: true, lastConfirmedCheckpointId: 'cp', unconfirmedRequest: false, dirty: false, error: null },
   closeError: null,
-  ...overrides,
-});
+  ...over,
+} as ShutdownResult);
 
 test('shutdown classification fails every real failure surface, not just a thrown stop()', () => {
   assert.equal(classifyShutdownResult(null).ok, false);
@@ -1102,10 +841,12 @@ test('real SQLite session reaches actual checkpoint/close and foundation writes 
         'lifecycle',
         'voxelRevision',
         'confirmedVoxelRevision',
-        'fragmentRevision',
-        'confirmedFragmentRevision',
-        'topologyRevision',
-        'confirmedTopologyRevision',
+        'journalRevision',
+        'confirmedJournalRevision',
+        'ledgerRevision',
+        'confirmedLedgerRevision',
+        'factsRevision',
+        'confirmedFactsRevision',
         'lastConfirmedCheckpointId',
         'inFlightCheckpointId',
       ]) {

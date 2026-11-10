@@ -256,25 +256,18 @@ test('空间历史仍由共享空间库承担，Curio 任务事实不复制格�
     assert.ok(report.sections.length > 0, '真实观测应产生空间报告');
     assert.equal(svc.session.voxel.cellAt('overworld', 0, -1, 0).observed, true, 'voxel 证据可读');
 
-    svc.session.history.saveFragment({
-      id: 'f-rs04', worldId: 'rs04-world', dim: 'overworld', kind: 'walked', geometrySource: 'traversal',
-      polyline: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-      entrances: [{ x: 0, y: 0, z: 0 }], deepestY: 0, createdAt: observedAt, lastUsedAt: observedAt, uses: 1,
+    svc.session.facts.upsertPlace({
+      id: 'p-rs04', kind: 'base', label: 'rs04 base', worldId: 'rs04-world', dim: 'overworld',
+      location: { kind: 'exact', pos: { x: 0, y: 0, z: 0 } }, observedAt,
+      source: { source: 'vision' }, gone: false,
     });
-    svc.session.history.addTraversal({
-      id: 't-rs04', fragmentId: 'f-rs04', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 0, z: 0 },
-      worldId: 'rs04-world', dim: 'overworld', sessionId: 'rs04-session', observedAt,
-      source: 'confirmed_walk', executionId: 'exec-rs04', actionId: 'act-rs04', mode: 'walk',
-    });
-    const fragments = svc.query({ kind: 'fragments', dim: 'overworld', limit: 5 });
-    const traversals = svc.query({ kind: 'traversals', dim: 'overworld', fragmentId: 'f-rs04', limit: 5 });
     const cells = svc.query({ kind: 'cells', dim: 'overworld', positions: [{ x: 0, y: -1, z: 0 }] });
-    assert.equal(fragments.status, 'ok');
-    assert.equal((fragments.data as { items: { id: string }[] }).items[0]?.id, 'f-rs04');
-    assert.equal(traversals.status, 'ok');
-    assert.equal((traversals.data as { items: { id: string }[] }).items[0]?.id, 't-rs04');
+    const places = svc.query({ kind: 'places', dim: 'overworld', limit: 5 });
     assert.equal(cells.status, 'ok');
     assert.equal((cells.data as { cells: { observed: boolean }[] }).cells[0]?.observed, true);
+    assert.equal(places.status, 'ok');
+    assert.equal((places.data as { items: { id: string }[] }).items[0]?.id, 'p-rs04');
+    assert.equal(svc.session.legacyStoreSummary.fragments, 0, '普通语义事实不创建旧路线行');
   } finally {
     try { shutdown = await svc.shutdown(); } catch { /* 保留临时目录作为诊断证据 */ }
     if (shutdown?.close?.completed === true && shutdown.close.error === null) rmSync(dir, { recursive: true, force: true });

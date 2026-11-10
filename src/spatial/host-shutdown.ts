@@ -68,8 +68,10 @@ export interface SpatialShutdownDiagnostics extends ShutdownClassification {
     checkpointId: string;
     worldId: string;
     voxelRevision: number;
-    fragmentRevision: number;
-    topologyRevision: number;
+    journalRevision: number;
+    ledgerRevision: number;
+    factsRevision: number;
+    factsCommitted: boolean;
   } | null;
   primarySaveError: ErrorFacts | null;
   cancelError: ErrorFacts | null;
@@ -92,8 +94,10 @@ export function spatialShutdownDiagnostics(result: ShutdownResult, expectedWorld
       checkpointId: result.checkpoint.checkpointId,
       worldId: result.checkpoint.worldId,
       voxelRevision: result.checkpoint.voxelRevision,
-      fragmentRevision: result.checkpoint.fragmentRevision,
-      topologyRevision: result.checkpoint.topologyRevision,
+      journalRevision: result.checkpoint.journalRevision,
+      ledgerRevision: result.checkpoint.ledgerRevision,
+      factsRevision: result.checkpoint.factsRevision,
+      factsCommitted: result.checkpoint.factsCommitted,
     },
     primarySaveError: result.error === null ? null : errorFacts(result.error),
     cancelError: result.cancelError === null ? null : errorFacts(result.cancelError),

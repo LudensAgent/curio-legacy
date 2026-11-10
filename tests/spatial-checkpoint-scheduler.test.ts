@@ -30,13 +30,8 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
   return {
     lifecycle: 'open',
     voxelRevision: 0,
-    fragmentRevision: 0,
-    topologyRevision: 0,
     confirmedVoxelRevision: 0,
-    confirmedFragmentRevision: 0,
-    confirmedTopologyRevision: 0,
     dirty: false,
-    baselineCheckpointId: null,
     voxelBaselineCheckpointId: null,
     journalRevision: 0,
     confirmedJournalRevision: 0,
@@ -58,21 +53,19 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
     unconfirmedCheckpointId: null,
     lastError: null,
     ...overrides,
-  };
+  } as SpatialPersistenceState;
 }
 
-function checkpoint(id: string, revisions = { voxel: 5, fragment: 4, topology: 3 }): SpatialCheckpointResult {
+function checkpoint(id: string, revisions: { voxel: number; journal: number; ledger: number; facts?: number } = { voxel: 5, journal: 4, ledger: 3, facts: 2 }): SpatialCheckpointResult {
   return {
     checkpointId: id,
     worldId: WORLD,
     voxelRevision: revisions.voxel,
-    fragmentRevision: revisions.fragment,
-    topologyRevision: revisions.topology,
-    journalRevision: 0,
-    ledgerRevision: 0,
-    factsRevision: 0,
-    factsCommitted: false,
-  };
+    journalRevision: revisions.journal,
+    ledgerRevision: revisions.ledger,
+    factsRevision: revisions.facts ?? 0,
+    factsCommitted: true,
+  } as SpatialCheckpointResult;
 }
 
 function deferred<T>() {
@@ -128,11 +121,11 @@ function begin(t: TestContext, spatial: SpatialCheckpointSource, intervalMs?: nu
 test('默认每 30 秒触发一次 checkpoint；保存后 clean 则跳过', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();
-  fx.setState({ dirty: true, voxelRevision: 5, fragmentRevision: 4, topologyRevision: 3 });
+  fx.setState({ dirty: true, voxelRevision: 5, journalRevision: 4, ledgerRevision: 3 });
   const saved = checkpoint('cp-1');
   fx.onCheckpoint(async () => {
     fx.setState({
-      dirty: false, confirmedVoxelRevision: 5, confirmedFragmentRevision: 4, confirmedTopologyRevision: 3,
+      dirty: false, confirmedVoxelRevision: 5, confirmedJournalRevision: 4, confirmedLedgerRevision: 3,
       lastConfirmedCheckpointId: 'cp-1',
     });
     return saved;
@@ -211,7 +204,7 @@ test('clean 状态每个周期都跳过', async (t) => {
 test('上一次保存未落定时不再发起或排队新保存', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();
-  fx.setState({ dirty: true, voxelRevision: 5, fragmentRevision: 4, topologyRevision: 3 });
+  fx.setState({ dirty: true, voxelRevision: 5, journalRevision: 4, ledgerRevision: 3 });
   const pending = deferred<SpatialCheckpointResult>();
   fx.onCheckpoint(() => pending.promise);
   const { reports } = begin(t, fx.spatial, 1000);
@@ -227,7 +220,7 @@ test('上一次保存未落定时不再发起或排队新保存', async (t) => {
   assert.equal(reports.length, 0);
 
   fx.setState({
-    dirty: false, confirmedVoxelRevision: 5, confirmedFragmentRevision: 4, confirmedTopologyRevision: 3,
+    dirty: false, confirmedVoxelRevision: 5, confirmedJournalRevision: 4, confirmedLedgerRevision: 3,
     lastConfirmedCheckpointId: 'cp-1',
   });
   pending.resolve(checkpoint('cp-1'));
@@ -239,7 +232,7 @@ test('上一次保存未落定时不再发起或排队新保存', async (t) => {
 test('保存期间的新观测保留为 dirty：汇报已保存批次和真实剩余状态', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();
-  fx.setState({ dirty: true, voxelRevision: 10, fragmentRevision: 20, topologyRevision: 30 });
+  fx.setState({ dirty: true, voxelRevision: 10, journalRevision: 20, ledgerRevision: 30 });
   const pending = deferred<SpatialCheckpointResult>();
   fx.onCheckpoint(() => pending.promise);
   const { reports } = begin(t, fx.spatial, 1000);
@@ -250,23 +243,23 @@ test('保存期间的新观测保留为 dirty：汇报已保存批次和真实�
 
   // 保存期间又写入新观测：当前版本前进，但确认版本只到本次批次。
   fx.setState({
-    voxelRevision: 11, fragmentRevision: 21, topologyRevision: 31, dirty: true,
-    confirmedVoxelRevision: 10, confirmedFragmentRevision: 20, confirmedTopologyRevision: 30,
+    voxelRevision: 11, journalRevision: 21, ledgerRevision: 31, dirty: true,
+    confirmedVoxelRevision: 10, confirmedJournalRevision: 20, confirmedLedgerRevision: 30,
     lastConfirmedCheckpointId: 'cp-2',
   });
-  pending.resolve(checkpoint('cp-2', { voxel: 10, fragment: 20, topology: 30 }));
+  pending.resolve(checkpoint('cp-2', { voxel: 10, journal: 20, ledger: 30 }));
   await flush();
 
   const report = reports[0];
   assert.ok(report && report.status === 'saved');
-  assert.deepEqual(report.checkpoint, checkpoint('cp-2', { voxel: 10, fragment: 20, topology: 30 }));
+  assert.deepEqual(report.checkpoint, checkpoint('cp-2', { voxel: 10, journal: 20, ledger: 30 }));
   assert.equal(report.remainingDirty, true, '已保存批次不等于最新地图已 clean');
   assert.equal(report.state.voxelRevision, 11);
   assert.equal(report.state.confirmedVoxelRevision, 10);
   assert.equal(report.state.dirty, true);
 
   // 调度器没有替库清 dirty：下个周期会继续保存。
-  fx.onCheckpoint(async () => checkpoint('cp-3', { voxel: 11, fragment: 21, topology: 31 }));
+  fx.onCheckpoint(async () => checkpoint('cp-3', { voxel: 11, journal: 21, ledger: 31 }));
   t.mock.timers.tick(1000);
   await flush();
   assert.equal(fx.calls, 2);
@@ -275,12 +268,12 @@ test('保存期间的新观测保留为 dirty：汇报已保存批次和真实�
 test('失败经 reporter 给出结构化事实，状态不变，下个周期才重试', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();
-  fx.setState({ dirty: true, voxelRevision: 7, fragmentRevision: 8, topologyRevision: 9 });
+  fx.setState({ dirty: true, voxelRevision: 7, journalRevision: 8, ledgerRevision: 9 });
   fx.onCheckpoint(async () => {
     if (fx.calls === 1) throw new PersistenceError('sql', 'disk full');
-    const saved = checkpoint('cp-4', { voxel: 7, fragment: 8, topology: 9 });
+    const saved = checkpoint('cp-4', { voxel: 7, journal: 8, ledger: 9 });
     fx.setState({
-      dirty: false, confirmedVoxelRevision: 7, confirmedFragmentRevision: 8, confirmedTopologyRevision: 9,
+      dirty: false, confirmedVoxelRevision: 7, confirmedJournalRevision: 8, confirmedLedgerRevision: 9,
       lastConfirmedCheckpointId: 'cp-4',
     });
     return saved;

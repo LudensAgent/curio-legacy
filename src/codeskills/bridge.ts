@@ -276,8 +276,8 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (o.sprint === true) throw new Error('moveTo 不再支持 sprint；需要跑用 press_keys，或让 Agent 自己选择');
         if (Array.isArray(o.avoid) && o.avoid.length) throw new Error('moveTo 不再支持 avoid；需要绕行请让 navigate_to 按当前证据规划');
         if (a[3] !== undefined && Number(a[3]) !== 0) throw new Error('moveTo 只支持精确到达，不再接受 range；需要保留距离时先 api.act("plan_route",{to,source:"spatial"}) 查看落点');
-        // 代码技能的 moveTo 直接使用 navigate_to：目标原样交给 3D 体素 A*，不再经过
-        // plan_route 的 routeId 注册表或 walk_path。整数/分数目标语义由 navigate_to 保持。
+        // 代码技能的 moveTo 直接使用 navigate_to：目标原样交给 3D 体素 A*；
+        // 整数/分数目标语义由 navigate_to 保持。
         const walked = await runSkill('navigate_to', { to: p });
         pendingStance = null;
         return walked.ok

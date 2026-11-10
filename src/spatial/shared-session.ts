@@ -1,9 +1,9 @@
 /**
  * shared-session：宿主级共享空间记忆服务（阶段 D1）。
  *
- * 持有唯一一个公开的 SpatialSession（组合会话：voxel + history + topology +
- * 单个 SQLite Worker），以及最后一份可信的有效 world/dim/session 作用域、
- * 暂停/关停状态和当前唯一的步行委托 report/cancel 附着。
+ * 持有唯一一个公开的 SpatialSession（组合会话：voxel + facts + ledger +
+ * journal + 单个 SQLite Worker），以及最后一份可信的有效 world/dim/session
+ * 作用域、暂停/关停状态和当前唯一的步行委托 report/cancel 附着。
  *
  * 证据只来自 Curio 感知产出的 typed BlockObservation[]；生命周期/作用域由
  * adapter 的真实状态单独供给，绝不从观测载荷激活。模块加载只读取宿主配置里的
@@ -52,20 +52,9 @@ import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './worki
 /** 正常操作的持久化时限；supervisor 20s 窗口内约可容纳一次保存 + 最终 checkpoint + close。 */
 const DEFAULT_TIMEOUT_MS = 5000;
 
-/**
- * 显式 eager 读取旧历史时的单 fragment links 容量。库默认 4096，旧库中已有
- * 4097+ 条的合法片段（线上曾出现 4107 条）；eager 是兼容诊断入口，恢复足够容量
- * 才能读回旧数据。生产默认 historyLoading:'none' 不加载旧域，也不经过这里。
- * 这不是路线写入器：只放宽读取/恢复容量，不恢复普通写入链。
- */
-const LEGACY_FRAGMENT_MAX_LINKS = 16_384;
-
 /** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
 export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
-/** 体素观测只保留最近观测的这么多格（每次落盘前修剪），更早的格回到未知；不修剪的话观测格只增不减，
- *  线上约 4 小时就超过快照上限 maxObservedCells(1,000,000)，此后每次保存都失败、再也落不了盘。 */
-export const MAX_OBSERVED_CELLS = 25_600;
 /** 关停时最终保存窗口内最多提交多少个 bounded dirty 批次。 */
 const MAX_FINAL_CHECKPOINT_BATCHES = 16;
 
@@ -109,8 +98,6 @@ export interface SharedSpatialOpenOptions {
   snapshotLimits?: SnapshotLimits;
   /** 体素加载模式；默认 eager。manual 时才构造宿主工作集协调器。 */
   voxelLoading?: VoxelLoading;
-  /** 历史/拓扑加载模式；none 不恢复旧域，且拒绝用未加载空集覆盖旧域。 */
-  historyLoading?: 'eager' | 'none';
   /** manual 模式的运行时驻留上限；透传库的 ResidencyLimits。 */
   residencyLimits?: ResidencyLimits;
   /** 单次 checkpoint 的体素 dirty 批次字节上限；省略时沿用快照 maxBytes。 */
@@ -179,8 +166,7 @@ export type SharedSpatialWriteRejection =
   | { kind: 'capability_unavailable'; method: MemoryWriteCapability; detail: string }
   | { kind: 'not_ready'; detail: string }
   | { kind: 'closed'; detail: string }
-  | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string }
-  | { kind: 'session_mismatch'; detail: string; expectedSession: string; actualSession: string | null };
+  | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string };
 
 /** 共享会话直接拥有并仍使用的体素写方法。 */
 export type MemoryWriteMethod = Extract<MemoryWriteCapability, 'markTraversed' | 'markModified' | 'markStale'>;
@@ -310,7 +296,7 @@ interface ObservedBatch {
   report: ChangeReport;
 }
 
-/** 把一次合法视锥观测映射成库的 Observation（与 walk-route 的 toObservation 一致）。 */
+/** 把一次合法视锥观测映射成库的 Observation。 */
 function toObservation(b: BlockObservation): Observation {
   const properties = Object.fromEntries(Object.entries(b.properties ?? {}).map(([k, v]) => [k, String(v)]));
   return {
@@ -545,17 +531,13 @@ export class SharedSpatialSession {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     // 同一个时钟供体素中断边界与查询信封使用；测试可注入固定时钟。
     const now = options.now ?? Date.now;
-    // 显式 eager 会恢复旧 fragment/topology；只有这个兼容读取边界需要放宽旧片段容量。
-    const restoresLegacyHistory = (options.historyLoading ?? 'eager') === 'eager';
     const session = await openSpatialSession({
       worldId: options.worldId,
       databasePath: options.databasePath,
       voxelOptions: { now, validityWindowMs: options.voxelValidityWindowMs ?? config.spatial.voxelValidityWindowMs },
       ...(options.voxelLoading === undefined ? {} : { voxelLoading: options.voxelLoading }),
-      ...(options.historyLoading === undefined ? {} : { historyLoading: options.historyLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       ...(options.voxelBatchMaxBytes === undefined ? {} : { voxelBatchMaxBytes: options.voxelBatchMaxBytes }),
-      ...(restoresLegacyHistory ? { fragmentOptions: { maxLinks: LEGACY_FRAGMENT_MAX_LINKS } } : {}),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
     });
@@ -941,10 +923,8 @@ export class SharedSpatialSession {
     if (this.closingFlag) {
       throw new PersistenceError('closing', 'shared spatial session is closing; checkpoint is rejected');
     }
-    this.retainObservations();
     const result = await this.session.checkpoint();
     // 保存确认后淘汰已提交、非 pinned/dirty 的冷 Section；保存成功不因换出结果改写。
-    // manual 没有预存遗忘钩子；eager 仍走 retainObservations 的兼容路径。
     if (!this.closingFlag && this.coordinator !== null) {
       const free = this.freeOnce();
       this.lastEviction = free.kind === 'result'
@@ -972,12 +952,6 @@ export class SharedSpatialSession {
   /** 最近一次保存后换出的事实；eager 或尚未保存时为 null。只读，不触发换出。 */
   lastPostSaveEviction(): PostSaveEviction | null {
     return this.lastEviction;
-  }
-
-  /** 落盘前修剪体素观测：只留最近 MAX_OBSERVED_CELLS 格。按需驻留时库无法和未驻留区段统一排序，不修剪。 */
-  private retainObservations(): void {
-    if (this.session.voxelLoading === 'manual') return;
-    this.session.voxel.retainNewestObservedCells(MAX_OBSERVED_CELLS);
   }
 
   getPersistenceState(): SpatialPersistenceState {
@@ -1046,7 +1020,6 @@ export class SharedSpatialSession {
       // 捕获最终 checkpoint；分片保存时在同一关停期限内提交后续批次，直到 clean
       // 或达到有界批数。最后一批的版本可能低于已确认的最大版本，最终以 state 核对。
       try {
-        this.retainObservations();
         // All final batches share one absolute shutdown window. A batch never
         // gets a fresh per-request timeout that could extend the total drain.
         const finalDeadline = Date.now() + this.operationTimeoutMs;
@@ -1065,8 +1038,9 @@ export class SharedSpatialSession {
           state.dirty ||
           state.lastConfirmedCheckpointId !== checkpoint.checkpointId ||
           state.voxelRevision !== state.confirmedVoxelRevision ||
-          state.fragmentRevision !== state.confirmedFragmentRevision ||
-          state.topologyRevision !== state.confirmedTopologyRevision
+          state.journalRevision !== state.confirmedJournalRevision ||
+          state.ledgerRevision !== state.confirmedLedgerRevision ||
+          state.factsRevision !== state.confirmedFactsRevision
         ) {
           capture(new PersistenceError(
             expired && state.dirty ? 'timeout' : 'data',
@@ -1715,7 +1689,6 @@ export class SharedSpatialSession {
   private writeRejection(
     dim: string,
     method: MemoryWriteMethod,
-    sessionId: string | null = this.scope?.sessionId ?? null,
   ): SharedSpatialWriteRejection | null {
     if (!this.allowed('memory', method)) {
       this.recordCapabilityRejection(method);
@@ -1736,20 +1709,7 @@ export class SharedSpatialSession {
         expectedDim: scope.dim, actualDim: dim,
       };
     }
-    const mismatch = this.sessionMismatch(sessionId);
-    return mismatch === null
-      ? null
-      : { kind: 'session_mismatch', detail: mismatch, expectedSession: scope.sessionId, actualSession: sessionId };
-  }
-
-  /**
-   * 旧会话的证据不得写成当前会话的事实：库只校验 fragment 的 world/dim，会话
-   * 归属只能由宿主校验。`null` sessionId 是“未知”，同样不能当作当前会话。
-   */
-  private sessionMismatch(sessionId: string | null): string | null {
-    const scope = this.scope;
-    if (scope === null || sessionId === scope.sessionId) return null;
-    return `evidence session ${sessionId === null ? 'null (unknown)' : `"${sessionId}"`} is not the trusted session "${scope.sessionId}"`;
+    return null;
   }
 
   /**

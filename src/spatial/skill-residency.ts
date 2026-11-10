@@ -21,7 +21,7 @@ import type {
   VoxelMap,
 } from 'curio-minecraft-3d-memory';
 import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { walkCollisionProvider } from '../adapter/walk-route.ts';
+import { walkCollisionProvider } from '../adapter/walk-collision.ts';
 import type { SharedSpatialSession } from './shared-session.ts';
 import type { WorkingSetLease } from './working-set.ts';
 

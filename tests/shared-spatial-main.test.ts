@@ -65,9 +65,9 @@ function runChild(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Pr
 
 function checkpoint(id: string) {
   return {
-    checkpointId: id, worldId: 'world-a', voxelRevision: 1, fragmentRevision: 2,
-    topologyRevision: 3, journalRevision: 0, ledgerRevision: 0, factsRevision: 0, factsCommitted: false,
-  };
+    checkpointId: id, worldId: 'world-a', voxelRevision: 1,
+    journalRevision: 2, ledgerRevision: 3, factsRevision: 4, factsCommitted: true,
+  } as NonNullable<ShutdownResult['checkpoint']>;
 }
 
 function closeResult(overrides: Partial<NonNullable<ShutdownResult['close']>> = {}) {

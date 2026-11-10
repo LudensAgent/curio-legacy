@@ -121,7 +121,7 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(nodes.result.status, 'succeeded');
       const nodesEnvelope = rec(nodes.result.data);
       assert.equal(nodesEnvelope.status, 'ok');
-      assert.equal(nodesEnvelope.contract, 'memory-host-contract/1');
+      assert.equal(nodesEnvelope.contract, 'memory-host-contract/2');
       assert.equal(nodesEnvelope.worldId, WORLD);
       assert.equal(nodesEnvelope.dim, DIM);
       assert.equal(nodesEnvelope.readOnly, true);
@@ -150,12 +150,13 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       const secondNode = rec((rec(secondEnvelope.data).items as unknown[])[0]);
       assert.equal(secondNode.id, 'n-b');
 
-      // 退役的路线/片段 kind 在宿主入口结构化拒绝，不返回空列表冒充无记录。
+      // 退役的路线/片段 kind 已不在库请求联合中；库 validator 自然拒绝。
       const retired = await arbiterOutcome(arbiter!, 'spatial_query', { kind: 'fragments', dim: DIM, limit: 1 });
       assert.ok(retired !== null);
+      assert.equal(retired.result.status, 'failed');
       const retiredData = rec(retired.result.data);
-      assert.equal(retiredData.status, 'unsupported');
-      assert.equal(retiredData.reason, 'route_retired');
+      assert.equal(retiredData.status, 'invalid_request');
+      assert.equal(retiredData.data, undefined);
     });
 
     await t.test('代码路径 api.act：保留查询结果、标记 noop、不冒充物理动作', async () => {

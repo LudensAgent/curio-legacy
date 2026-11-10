@@ -18,7 +18,7 @@ function fakeSpatial(map: VoxelMap) {
       ? { status: 'ok', data: { kind: 'fragments', items: [], total: 0 } }
       : { status: 'ok', data: null },
     closing: false, paused: false, observationAdmitted: true,
-    capabilities: () => ({ owner: 'host_composed', contract: 'memory-host-contract/1', library: { execute: { walk: true } }, host: {},
+    capabilities: () => ({ owner: 'host_composed', contract: 'memory-host-contract/2', library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
       effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } }, overclaims: [] }),
   } as unknown as SharedSpatialSession;
 }

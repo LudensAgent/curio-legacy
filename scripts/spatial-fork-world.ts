@@ -17,9 +17,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { DEFAULT_SNAPSHOT_MAX_MB } from '../src/spatial/shared-session.ts';
 
-/** 离线迁移工具自己的 legacy 路径 links 上限；运行时路线写入已退役，故不从 src 反向导入。 */
-const OFFLINE_LEGACY_MAX_FRAGMENT_LINKS = 16_384;
-
 const args = process.argv.slice(2);
 const replace = args.includes('--replace');
 const [source, target, fromWorld, toWorld] = args.filter((a) => !a.startsWith('--'));
@@ -74,16 +71,25 @@ if (integrity !== 'ok' || leftover.length || countDiff.length) {
   throw new Error(`fork check failed: integrity=${integrity} leftover=${leftover.join(',')} countDiff=${countDiff.join(',')}`);
 }
 
-// 与运行时同样的上限经库打开：能打开、目标世界里读得到片段才算可用
+// 与运行时同样的上限经库打开：能打开、目标世界里的当前领域读得到记录才算可用。
 const session = await openSpatialSession({
   databasePath: work, worldId: toWorld, timeoutMs: 30_000,
-  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: OFFLINE_LEGACY_MAX_FRAGMENT_LINKS },
+  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 },
 });
-const fragments = session.history.fragments({ limit: 1 }).items.length;
+const summary = session.legacyStoreSummary;
+const facts = {
+  places: session.facts.places({ worldId: toWorld, limit: 1 }).total,
+  resources: session.facts.resources({ worldId: toWorld, limit: 1 }).total,
+  containers: session.facts.containers({ worldId: toWorld, limit: 1 }).total,
+};
 await session.close();
-if (sourceCounts.path_fragments > 0 && fragments === 0) {
+if (sourceCounts.path_fragments > 0 && summary.fragments === 0) {
   rmSync(work, { force: true });
-  throw new Error(`fork opened as ${toWorld} but no fragments are visible`);
+  throw new Error(`fork opened as ${toWorld} but archived fragment rows are not visible`);
+}
+if (sourceCounts.fact_places > 0 && facts.places === 0) {
+  rmSync(work, { force: true });
+  throw new Error(`fork opened as ${toWorld} but place facts are not visible`);
 }
 
 const backup = existsSync(dst) ? `${dst}.pre-fork-${stamp}.sqlite` : null;

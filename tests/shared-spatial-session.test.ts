@@ -8,42 +8,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RouteVerifier, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
-import type {
-  BodySample,
-  CollisionShape,
-  CollisionShapeProvider,
-  ChangeReport,
-  ExecutableMove,
-  ExecutableMoveResult,
-  MoveExecutor,
-} from 'curio-minecraft-3d-memory';
+import type { ChangeReport } from 'curio-minecraft-3d-memory';
 import { PersistenceError } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SnapshotLimits } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { MAX_OBSERVED_CELLS, SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { ShutdownResult } from '../src/spatial/shared-session.ts';
 import type { BlockObservation } from '../src/adapter/types.ts';
 
 const WORLD = 'world-a';
-const BODY = { feet: { x: 0.5, y: 0, z: 0.5 }, width: 0.6, height: 1.8, pose: 'standing' as const };
-const POINTS = [{ x: 0.5, y: 0, z: 0.5 }, { x: 1.5, y: 0, z: 0.5 }];
-
-const EMPTY_SHAPE: CollisionShape = { boxes: [], supportFaces: [] };
-const FULL_CUBE: CollisionShape = {
-  boxes: [{ minX: 0, minY: 0, minZ: 0, maxX: 1, maxY: 1, maxZ: 1 }],
-  supportFaces: [{ top: 1, minX: 0, minZ: 0, maxX: 1, maxZ: 1 }],
-};
-
-/** 测试用完整方块形状规则：只识别 stone/air，不猜测其他形状。 */
-const testShapes: CollisionShapeProvider = {
-  version: 'shared-session-test-dry-full-v1',
-  resolve(state, _cell, _read) {
-    const name = state.name.replace(/^minecraft:/, '');
-    if (name === 'air' || name === 'cave_air') return { kind: 'shape', shape: EMPTY_SHAPE };
-    if (name === 'stone') return { kind: 'shape', shape: FULL_CUBE };
-    return { kind: 'unsupported_shape', block: state.name, detail: `unsupported test shape: ${name}` };
-  },
-};
 
 /** 构造一条合法的 typed 视锥观测（properties 含 number 以验证归一化）。 */
 function block(over: Partial<BlockObservation> & Pick<BlockObservation, 'pos' | 'observedAt' | 'observationId'>): BlockObservation {
@@ -147,248 +119,46 @@ function assertFinalSave(svc: SharedSpatialSession, result: ShutdownResult, prio
   assert.equal(state.lastConfirmedCheckpointId, checkpoint.checkpointId);
   assert.equal(checkpoint.voxelRevision, state.voxelRevision);
   assert.equal(checkpoint.voxelRevision, state.confirmedVoxelRevision);
-  assert.equal(checkpoint.fragmentRevision, state.fragmentRevision);
-  assert.equal(checkpoint.fragmentRevision, state.confirmedFragmentRevision);
-  assert.equal(checkpoint.topologyRevision, state.topologyRevision);
-  assert.equal(checkpoint.topologyRevision, state.confirmedTopologyRevision);
+  assert.equal(checkpoint.journalRevision, state.journalRevision);
+  assert.equal(checkpoint.journalRevision, state.confirmedJournalRevision);
+  assert.equal(checkpoint.ledgerRevision, state.ledgerRevision);
+  assert.equal(checkpoint.ledgerRevision, state.confirmedLedgerRevision);
+  assert.equal(checkpoint.factsRevision, state.factsRevision);
+  assert.equal(checkpoint.factsRevision, state.confirmedFactsRevision);
   assertCleanClose(result);
   if (result.close === null) assert.fail('shutdown did not return a close result');
   assert.equal(result.close.lastConfirmedCheckpointId, checkpoint.checkpointId);
 }
 
-/** 可悬挂的单步执行器：move 返回 pending，只有 stop(id) 才以 cancelled 结束。 */
-class HangingMoveExecutor implements MoveExecutor {
-  readonly moves: ExecutableMove[] = [];
-  readonly stopped: string[] = [];
-  private readonly pending = new Map<string, (result: ExecutableMoveResult) => void>();
-
-  move(request: ExecutableMove): Promise<ExecutableMoveResult> {
-    this.moves.push(request);
-    return new Promise((resolve) => {
-      this.pending.set(request.executionId, resolve);
-    });
-  }
-
-  stop(executionId: string): void {
-    this.stopped.push(executionId);
-    const resolve = this.pending.get(executionId);
-    if (resolve === undefined) return;
-    this.pending.delete(executionId);
-    resolve({ failure: { kind: 'cancelled' } });
-  }
-}
-
-test('a real verifier goes non-OPEN on a lifecycle report; a no-op receiver fails the same check', async () => {
+test('interrupt delivers the lifecycle report to the attached receiver', async () => {
   let t = 0;
   const now = () => t;
-  {
-    const { svc, dir } = await openShared({ now });
-    let result: ShutdownResult | null = null;
-    let failed = false;
-    try {
-      svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
-      svc.observe(corridor('s1', 0));
+  const { svc, dir } = await openShared({ now });
+  let result: ShutdownResult | null = null;
+  let failed = false;
+  try {
+    svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
+    svc.observe(corridor('s1', 0));
+    const reports: ChangeReport[] = [];
+    svc.attach({ receiver: (report) => { reports.push(report); }, cancel: () => {} });
 
-      const verifier = new RouteVerifier(svc.session.voxel, { now });
-      verifier.register({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1', mode: 'walk',
-        body: BODY, points: POINTS, shapeProvider: testShapes,
-      });
-      assert.equal(verifier.advance(10).verdict, 'OPEN');
+    t = 100;
+    svc.interrupt();
+    assert.equal(reports.length, 1, '生命周期报告必须同步交给当前附着');
+    assert.ok(Array.isArray(reports[0]!.sections));
 
-      t = 100;
-      svc.attach({ receiver: (report) => { verifier.apply(report, 10); }, cancel: () => {} });
-      svc.interrupt();
-      assert.notEqual(verifier.status()!.verdict, 'OPEN');
-
-      result = await svc.shutdown();
-      assert.equal(result.error, null);
-      assertCleanClose(result);
-    } catch (err) {
-      failed = true;
-      throw err;
-    } finally {
-      if (result === null) {
-        try {
-          result = await svc.shutdown();
-        } catch (err) {
-          if (!failed) throw err;
-        }
-      }
+    result = await svc.shutdown();
+    assert.equal(result.error, null);
+    assertCleanClose(result);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (result === null) {
+      try { result = await svc.shutdown(); } catch (err) { if (!failed) throw err; }
     }
-    cleanup(dir, result);
   }
-
-  {
-    // 负向对照：receiver 为 no-op，同一个 OPEN 断言必须失败（不做替代 verifier）。
-    const { svc, dir } = await openShared({ now });
-    let result: ShutdownResult | null = null;
-    let failed = false;
-    try {
-      svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
-      svc.observe(corridor('s1', 0));
-
-      const verifier = new RouteVerifier(svc.session.voxel, { now });
-      verifier.register({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1', mode: 'walk',
-        body: BODY, points: POINTS, shapeProvider: testShapes,
-      });
-      assert.equal(verifier.advance(10).verdict, 'OPEN');
-
-      t = 100;
-      svc.attach({ receiver: () => {}, cancel: () => {} });
-      svc.interrupt();
-      // 同一“not OPEN”断言在 no-op receiver 下必须失败（仍为 OPEN）。
-      assert.throws(() => assert.notEqual(verifier.status()!.verdict, 'OPEN'));
-
-      result = await svc.shutdown();
-      assert.equal(result.error, null);
-      assertCleanClose(result);
-    } catch (err) {
-      failed = true;
-      throw err;
-    } finally {
-      if (result === null) {
-        try {
-          result = await svc.shutdown();
-        } catch (err) {
-          if (!failed) throw err;
-        }
-      }
-    }
-    cleanup(dir, result);
-  }
-});
-
-test('an in-flight walk is cancelled by a real lifecycle report even when the report is empty', async () => {
-  let t = 0;
-  const now = () => t;
-
-  // 正向：真实 interrupt 的第二次 markStale 报告确实为空，取消仍终止该委托。
-  {
-    const { svc, dir } = await openShared({ now });
-    let result: ShutdownResult | null = null;
-    let failed = false;
-    try {
-      svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
-      svc.observe(corridor('s1', 0));
-
-      const body = new HangingMoveExecutor();
-      const walk = new WalkRouteExecutor(svc.session.voxel, body, { now });
-      const started = walk.start({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1', mode: 'walk',
-        body: BODY, points: POINTS, arrival: { kind: 'exact' },
-        deadlineMs: 1_000_000, timeoutMs: 10_000, shapeProvider: testShapes,
-      });
-      walk.onSample({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1',
-        pos: { ...BODY.feet }, observedAt: now(), sequence: 1,
-        alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
-        executionId: started.delegationId,
-      });
-      const running = walk.advance(10);
-      assert.notEqual(running.activeStepIndex, null);
-      assert.equal(running.result, null);
-      assert.equal(body.moves.length, 1);
-
-      // 测试隔离：直接置 STALE 且故意不派发这次准备报告，让 walk 保持缓存的
-      // in-flight 状态；随后真实 interrupt 的 markStale 才会返回真正空的报告。
-      // 这不是生产接线。
-      t = 100;
-      svc.session.voxel.markStale('overworld', 'observation_gap');
-
-      svc.attach({
-        receiver: (report) => { walk.observe(report, 10); },
-        cancel: () => { walk.cancel('lifecycle', 'lifecycle interruption'); },
-      });
-      const interruptReport = svc.interrupt();
-      assert.equal(interruptReport.sections.length, 0); // 真正的空报告
-
-      const cancelled = walk.status()!;
-      assert.notEqual(cancelled.result, null);
-      assert.equal(cancelled.activeStepIndex, null);
-      assert.notEqual(cancelled.result!.outcome, 'ARRIVED');
-      assert.equal(cancelled.result!.outcome, 'CANCELLED');
-      // 停止的是本步自己的 executable id，不是 delegation id。
-      assert.deepEqual(body.stopped, [body.moves[0].executionId]);
-      assert.notEqual(body.moves[0].executionId, started.delegationId);
-
-      result = await svc.shutdown();
-      assert.equal(result.error, null);
-      assertCleanClose(result);
-    } catch (err) {
-      failed = true;
-      throw err;
-    } finally {
-      if (result === null) {
-        try {
-          result = await svc.shutdown();
-        } catch (err) {
-          if (!failed) throw err;
-        }
-      }
-    }
-    cleanup(dir, result);
-  }
-
-  // 负向：cancel 为 no-op，同样的“已终止”断言必须失败，且 walk 保持运行。
-  {
-    const { svc, dir } = await openShared({ now });
-    let result: ShutdownResult | null = null;
-    let failed = false;
-    let hanging: HangingMoveExecutor | null = null;
-    try {
-      svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
-      svc.observe(corridor('s1', 0));
-
-      const body = new HangingMoveExecutor();
-      hanging = body;
-      const walk = new WalkRouteExecutor(svc.session.voxel, body, { now });
-      const started = walk.start({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1', mode: 'walk',
-        body: BODY, points: POINTS, arrival: { kind: 'exact' },
-        deadlineMs: 1_000_000, timeoutMs: 10_000, shapeProvider: testShapes,
-      });
-      walk.onSample({
-        worldId: WORLD, dim: 'overworld', sessionId: 's1',
-        pos: { ...BODY.feet }, observedAt: now(), sequence: 1,
-        alive: true, connected: true, observationReady: true, onGround: true, inWater: false,
-        executionId: started.delegationId,
-      });
-      const running = walk.advance(10);
-      assert.notEqual(running.activeStepIndex, null);
-      assert.equal(running.result, null);
-
-      t = 100;
-      svc.session.voxel.markStale('overworld', 'observation_gap'); // 测试隔离，丢弃报告
-      svc.attach({ receiver: (report) => { walk.observe(report, 10); }, cancel: () => {} });
-      svc.interrupt();
-
-      assert.throws(() => assert.equal(walk.status()!.result !== null, true));
-      assert.equal(walk.status()!.result, null);
-      assert.notEqual(walk.status()!.activeStepIndex, null);
-
-      // 清理悬挂 fake：让 move 以 cancelled 结束，再真实关闭。
-      body.stop(body.moves[0].executionId);
-      await Promise.resolve();
-      result = await svc.shutdown();
-      assert.equal(result.error, null);
-      assertCleanClose(result);
-    } catch (err) {
-      failed = true;
-      throw err;
-    } finally {
-      if (hanging !== null && hanging.moves.length > 0) hanging.stop(hanging.moves[0].executionId);
-      if (result === null) {
-        try {
-          result = await svc.shutdown();
-        } catch (err) {
-          if (!failed) throw err;
-        }
-      }
-    }
-    cleanup(dir, result);
-  }
+  cleanup(dir, result);
 });
 
 test('attachment replacement, pause, and same-session dimension change cancel; interrupt gates evidence until ready', async () => {
@@ -917,28 +687,4 @@ test('a cancel callback fault is surfaced after gating and retained through shut
     }
   }
   cleanup(dir, result);
-});
-
-test('checkpoint keeps only the newest MAX_OBSERVED_CELLS observed cells; older ones read as unknown again', async () => {
-  const { svc, dir } = await openShared();
-  let result: ShutdownResult | null = null;
-  try {
-    svc.beginSession({ worldId: WORLD, dim: 'overworld', sessionId: 's1' });
-    const total = MAX_OBSERVED_CELLS + 100;
-    const cells = Array.from({ length: total }, (_, i) => block({
-      pos: { x: i % 64, y: Math.floor(i / 4096), z: Math.floor(i / 64) % 64 }, observedAt: 1 + i, observationId: 1 + i,
-    }));
-    for (let i = 0; i < cells.length; i += 1000) svc.observe(cells.slice(i, i + 1000));
-    assert.equal(svc.session.voxel.checkpointCounts().observedCells, total);
-
-    await svc.checkpoint();
-    assert.equal(svc.session.voxel.checkpointCounts().observedCells, MAX_OBSERVED_CELLS);
-    assert.equal(svc.session.voxel.cellAt('overworld', 0, 0, 0).observed, false, '最早观测的格回到未知');
-    const last = cells.at(-1)!.pos;
-    assert.equal(svc.session.voxel.cellAt('overworld', last.x, last.y, last.z).observed, true, '最近观测的格保留');
-    result = await svc.shutdown();
-    assertCleanClose(result);
-  } finally {
-    cleanup(dir, result ?? await svc.shutdown());
-  }
 });

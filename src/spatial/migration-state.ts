@@ -55,9 +55,9 @@ export interface MigrationGateResult {
 /**
  * Read-only startup gate: refuse to start on top of un-migrated spatial data.
  *
- * The gate no longer walks `history.fragments()` / `topology.nodes()`: the
- * library reports this world's old-domain row counts and marker at open, even
- * under `historyLoading:'none'`. A fresh world is allowed; any existing old
+ * The library reports this world's old-domain row counts and marker at open as
+ * read-only metadata; the session never loads or writes the retired
+ * Fragment/Topology domains. A fresh world is allowed; any existing old
  * route/topology data (or a preserved ledger) requires the new facts migration
  * receipt. Old rows stay archived; once the receipt exists they are neither
  * loaded nor written.
@@ -80,23 +80,27 @@ export function checkMigrationGate(input: MigrationGateInput): MigrationGateResu
     legacyMarker: migrationMarker, factsMigrationReceipt,
     fragments, traversals, nodes, edges, ledgerRecords,
   };
-  const command = [
-    'node --import tsx scripts/spatial-cutover.ts',
-    `--world-memory=${input.worldMemoryPath}`,
-    `--database=${input.databasePath}`,
-    `--world-id=${input.worldId}`,
-    `--mode=${legacyKeys.length || travelFile || placedFile ? 'auto' : 'normalize'}`,
-    '--execute',
-  ].join(' ');
-  if (patchFile) return { ok: false, reason: 'pending_patch', details, command };
-  if (legacyKeys.length || travelFile || placedFile) return { ok: false, reason: 'legacy_files', details, command };
+  const factsCommand = 'node --import tsx scripts/spatial-facts-cutover.ts --database=' + JSON.stringify(input.databasePath) + ' --world-id=' + JSON.stringify(input.worldId) + ' --execute';
+  if (patchFile) return { ok: false, reason: 'pending_patch', details, command: factsCommand };
+  if (legacyKeys.length || travelFile || placedFile) {
+    // 旧 JSON 空间导入器已退役：这里不再指向不存在的 spatial-cutover。
+    // 支持的一次性迁移只针对 SQLite 中已归档的旧节点行（facts cutover）；
+    // 旧 JSON 中的空间字段必须由操作者归档/移出活动数据目录后再启动。
+    return {
+      ok: false,
+      reason: 'legacy_files',
+      details,
+      command: 'legacy spatial JSON import is retired; archive world-memory.json spatial keys, travel-memory.json, *.placed and memory-patch.json after review, then restart. '
+        + 'Archived SQLite legacy rows migrate through: ' + factsCommand,
+    };
+  }
   const hasExistingData = fragments + traversals + nodes + edges > 0 || migrationMarker || ledgerRecords > 0;
   if (hasExistingData && !factsMigrationReceipt) {
     return {
       ok: false,
       reason: 'facts_migration_required',
       details,
-      command: 'node --import tsx scripts/spatial-facts-cutover.ts --database=' + JSON.stringify(input.databasePath) + ' --world-id=' + JSON.stringify(input.worldId) + ' --execute',
+      command: factsCommand,
     };
   }
   return { ok: true, details };

@@ -42,15 +42,6 @@ import type { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import type { Rcon } from '../src/observer/rcon.ts';
 import type { Vision } from '../src/perception/vision.ts';
 import type { WorldMemory } from '../src/memory/store.ts';
-import type { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
-import type {
-  BodySample,
-  ExecutableMove,
-  ExecutableMoveResult,
-  WalkRouteExecutor,
-  WalkRouteRequest,
-  WalkRouteStatus,
-} from 'curio-minecraft-3d-memory';
 import type { WorkingSetStats } from 'curio-minecraft-3d-memory/storage/sqlite';
 import {
   CANCEL_MOVEMENT_THRESHOLD,
@@ -68,8 +59,6 @@ import {
   parseRconList,
   preflightBotConflict,
   validateQueryPage,
-  type CapturedMove,
-  type CapturedRouteSample,
   type PhysicsFrame,
 } from './navigation-acceptance.ts';
 import {
@@ -109,10 +98,9 @@ export const SMOKE_LEG_BUDGET_MS = 45_000;
  */
 export const SOAK_ARRIVAL_RADIUS = 0.25;
 
-/** 所有 soak walk_to 请求共用：固定目标 + 同一 near 半径，目标永不投影或改写。 */
+/** 所有 soak navigate_to 请求共用：固定脚位目标，目标永不投影或改写。 */
 export const soakWalkRequest = (target: FixtureEndpoint, deadlineMs: number) => ({
   to: { ...target },
-  arrival: { kind: 'near' as const, radius: SOAK_ARRIVAL_RADIUS },
   deadlineMs,
 });
 
@@ -144,9 +132,6 @@ export const SMOKE_MIN_CHECKPOINT_SAVES = 2;
 /** smoke 完成等待上限；避免 full 在 smoke 未满足时空等一小时。 */
 export const SMOKE_COMPLETION_WAIT_MS = 90_000;
 /** 当前任务保留给既有分类器的有界窗口。超出显式失败/取消，不静默截断。 */
-export const MAX_SAMPLES_PER_TASK = 4_096;
-export const MAX_MOVES_PER_TASK = 16;
-export const MAX_STARTS_PER_TASK = 16;
 /** full 模式必须执行的 H2b 场景；manual 仅在 manual-residency 分支合入后可用。 */
 export const H2B_REQUIRED_SCENARIOS = [
   'explicit-cancel',
@@ -1276,13 +1261,6 @@ interface RuntimeScope {
   sessionId: string;
 }
 
-interface TaskWindow {
-  samples: CapturedRouteSample[];
-  moves: CapturedMove[];
-  starts: Record<string, unknown>[];
-  lastSequence: number;
-}
-
 interface ScenarioResult {
   id: string;
   state: 'passed' | 'failed' | 'not-integrated' | 'not-run';
@@ -1291,162 +1269,6 @@ interface ScenarioResult {
   facts: Record<string, unknown>;
 }
 
-/**
- * 相关已接受样本与确认 Nav.trace 的关联。
- *
- * accepted 样本由 onSample 阶段确认：样本 executionId 等于该路由的 delegationId、
- * 返回的 lastPosition 与样本位置深相等、sequence 为数值（见 executorWrappedOnSample
- * 与 navigation-acceptance 的既有模式）。ExecutableMove 的 executionId 是
- * `${delegationId}-step-N`，因此这里不再错误地要求两者逐字相等。
- *
- * 按真实派发顺序把 `taskMoves[i]` 对应到 `trace[i]`：确认 trace 点与派发必须
- * 一一对应，且每个 trace 点必须使用一条未被占用的 accepted 同任务/同作用域样本，
- * 位置与 observedAt 精确对应，时间落在该派发的 [receivedAt, deadlineMs] 内。
- * move.request.to 是名义请求目标，不拿它替代真实观测位置。
- * 不要求每个 move.result 都有 sample，也不拿上一移动的 result 充当下一移动的 from。
- *
- * 方向必须从 trace/派发出发：派发前的稳定起点样本、派发后的终点样本或派发间隙
- * 样本都是正常观测，只记录为 `acceptedSamplesOutsideDispatchWindows`，不能因为
- * 它们不落在任何派发窗口就把整段判失败。矛盾的作用域或 executionId 仍然失败。
- */
-export function classifyLegTrace(
-  nav: Record<string, unknown> | null,
-  taskId: string,
-  samples: readonly CapturedRouteSample[],
-  moves: readonly CapturedMove[],
-): {
-  ok: boolean;
-  problems: string[];
-  facts: {
-    tracePoints: number;
-    dispatches: number;
-    compared: number;
-    acceptedSamples: number;
-    acceptedSamplesOutsideDispatchWindows: number;
-    acceptedSampleSequencesOutsideDispatch: number[];
-    outsideDispatchSequencesTruncated: boolean;
-  };
-} {
-  const problems: string[] = [];
-  const rawTrace = nav !== null && Array.isArray(nav.trace) ? nav.trace : null;
-  const trace = rawTrace === null
-    ? []
-    : rawTrace.filter((entry): entry is { pos: FixtureEndpoint; ts: number } =>
-      isRecordValue(entry) && isVec(entry.pos) && isNumberValue(entry.ts));
-  const malformedTracePoints = rawTrace === null ? 0 : rawTrace.length - trace.length;
-  if (nav === null || nav.confirmed !== true) problems.push('missing confirmed nav trace');
-  // 损坏的 trace 点不能被静默过滤：否则额外或畸形的点可以绕过一一对应检查。
-  if (malformedTracePoints > 0) {
-    problems.push(`confirmed nav trace contains ${malformedTracePoints} malformed point(s)`);
-  }
-  if (trace.length === 0) problems.push('confirmed nav trace has no points');
-
-  const taskMoves = moves.filter((move) => move.taskId === taskId);
-  const acceptedSamples = samples.filter((sample) =>
-    sample.taskId === taskId && sample.accepted && Number.isInteger(sample.sample.sequence));
-  if (taskMoves.length === 0 && trace.length > 0) problems.push('confirmed trace exists but no ExecutableMove dispatch was recorded');
-  // 每个确认 trace 点必须恰好对应一次真实派发；多出的派发没有 trace/样本证据，
-  // 不能因为 trace 较短就被静默放过。
-  if (trace.length !== taskMoves.length) {
-    problems.push(
-      `confirmed trace has ${trace.length} points but ${taskMoves.length} ExecutableMove dispatches were recorded; exactly one dispatch per trace point is required`,
-    );
-  }
-
-  // 一个 walk 任务对应一个路由 delegation；move 的 executionId 必须由它派生。
-  const routeDelegations = new Set(acceptedSamples.map((sample) => sample.delegationId));
-  if (routeDelegations.size > 1) {
-    problems.push(`accepted samples span ${routeDelegations.size} route delegations within ${taskId}`);
-  }
-  const routeDelegation = routeDelegations.size === 1 ? [...routeDelegations][0]! : null;
-  if (routeDelegation !== null) {
-    for (const [index, move] of taskMoves.entries()) {
-      if (!move.request.executionId.startsWith(`${routeDelegation}-step-`)) {
-        problems.push(`move ${index}.executionId is not derived from accepted route delegation ${routeDelegation}`);
-      }
-    }
-  }
-
-  const compared = Math.min(trace.length, taskMoves.length);
-  // 样本按 sequence 一对一消费：重复的 pos/ts trace 点必须由不同样本分别证明，
-  // 不能拿同一条 accepted 样本重复配对。
-  const usedSequences = new Set<number>();
-  for (let index = 0; index < compared; index += 1) {
-    const point = trace[index]!;
-    const move = taskMoves[index]!;
-    const matched = acceptedSamples.find((sample) =>
-      !usedSequences.has(sample.sample.sequence)
-      && (routeDelegation === null || sample.delegationId === routeDelegation)
-      && sample.sample.executionId === sample.delegationId
-      && isDeepStrictEqual(sample.sample.position, point.pos)
-      && sample.sample.observedAt === point.ts
-      && sample.sample.worldId === move.request.worldId
-      && sample.sample.dim === move.request.dim
-      && sample.sample.sessionId === move.request.sessionId
-      && sample.sample.observedAt >= move.receivedAt
-      && sample.sample.observedAt <= move.request.deadlineMs);
-    if (matched === undefined) {
-      problems.push(`trace point ${index} has no unused accepted same-delegation sample matching pos/ts/scope/time-range`);
-    } else {
-      usedSequences.add(matched.sample.sequence);
-    }
-  }
-
-  // 样本自身必须与 accepted 的条件一致；executionId 与 route delegation 矛盾仍失败。
-  const contradictoryExecution = acceptedSamples.find(
-    (sample) => sample.sample.executionId !== sample.delegationId,
-  );
-  if (contradictoryExecution !== undefined) {
-    problems.push(
-      `accepted sample sequence ${contradictoryExecution.sample.sequence} executionId ${contradictoryExecution.sample.executionId} contradicts route delegation ${contradictoryExecution.delegationId}`,
-    );
-  }
-
-  // 样本作用域必须与至少一次真实派发一致；矛盾仍失败，但时间窗口外的
-  // 稳定起点/终点样本不再因此被判失败。
-  const dispatchScopeOf = (sample: CapturedRouteSample): boolean => taskMoves.some((move) =>
-    sample.sample.worldId === move.request.worldId
-    && sample.sample.dim === move.request.dim
-    && sample.sample.sessionId === move.request.sessionId);
-  const contradictoryScope = taskMoves.length === 0
-    ? undefined
-    : acceptedSamples.find((sample) => !dispatchScopeOf(sample));
-  if (contradictoryScope !== undefined) {
-    problems.push(
-      `accepted sample sequence ${contradictoryScope.sample.sequence} scope contradicts the recorded dispatch scope`,
-    );
-  }
-
-  // 确认的 trace 点必须匹配派发；额外的 accepted 样本（首帧稳定、末帧或派发间隙）
-  // 是正常事实，只记录数量/有界序号，不作为失败。
-  const outsideDispatch = acceptedSamples.filter((sample) => !taskMoves.some((move) =>
-    sample.delegationId === sample.sample.executionId
-    && sample.sample.observedAt >= move.receivedAt
-    && sample.sample.observedAt <= move.request.deadlineMs
-    && sample.sample.worldId === move.request.worldId
-    && sample.sample.dim === move.request.dim
-    && sample.sample.sessionId === move.request.sessionId));
-  const outsideSequences = outsideDispatch.map((sample) => sample.sample.sequence);
-
-  return {
-    ok: problems.length === 0,
-    problems,
-    facts: {
-      tracePoints: trace.length,
-      dispatches: taskMoves.length,
-      compared,
-      acceptedSamples: acceptedSamples.length,
-      acceptedSamplesOutsideDispatchWindows: outsideDispatch.length,
-      acceptedSampleSequencesOutsideDispatch: outsideSequences.slice(0, 32),
-      outsideDispatchSequencesTruncated: outsideSequences.length > 32,
-    },
-  };
-}
-
-/**
- * 时长诚实分类：full 只有在活动时长真正达到请求时长时才有资格 full pass；
- * smoke 无论跑多久都只是 smoke/scenario 结果，不转成 full pass。
- */
 export function classifyDuration(
   mode: 'smoke' | 'full',
   durationMs: number,
@@ -1570,8 +1392,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   const startedAt = Date.now();
   const outcomes = new Map<string, TaskOutcome>();
   const waitTimers = new Set<NodeJS.Timeout>();
-  const perTask = new Map<string, TaskWindow>();
-  const executorTasks = new WeakMap<object, { taskId: string; delegationId: string }>();
   const takenTraceKeys = new Set<string>();
   const scenarioResults = new Map<string, ScenarioResult>();
   /** 证据容量溢出的首个有界事实；一旦出现，整次运行必须失败。 */
@@ -1607,12 +1427,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   // TypeScript 不会把闭包内对 ownedBot 的赋值反映到外层的控制流收窄，用显式读取函数
   // 保持清理代码看到真实的可空句柄类型。
   const ownedBotHandle = (): OwnedBotHandle | null => ownedBot;
-  let executorOriginalStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
-  let executorOriginalOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
-  let executorWrappedStart: ((this: WalkRouteExecutor, request: WalkRouteRequest) => WalkRouteStatus) | null = null;
-  let executorWrappedOnSample: ((this: WalkRouteExecutor, sample: BodySample) => WalkRouteStatus) | null = null;
-  let moverOriginalMove: ((this: unknown, request: ExecutableMove) => Promise<ExecutableMoveResult>) | null = null;
-  let moverWrappedMove: ((this: unknown, request: ExecutableMove) => Promise<ExecutableMoveResult>) | null = null;
 
   let connectAttempted = false;
   let spawnObserved = false;
@@ -1639,8 +1453,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   let shutdownVerdict: ShutdownVerdict | null = null;
   let finalTelemetry: Record<string, unknown> | null = null;
   let stopping = false;
-  let moveCallSequence = 0;
-  let startCallSequence = 0;
 
   // 主会话 manual 证据全部有界：快照序列、诊断计数、drain 结果与关停前 pending。
   const workingSetSnapshots: WorkingSetSnapshotFacts[] = [];
@@ -1776,36 +1588,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     };
   };
 
-  const traceOverflow = (kind: 'samples' | 'moves' | 'starts', taskId: string): void => {
-    const key = `${taskId}:${kind}`;
-    if (takenTraceKeys.has(key)) return;
-    takenTraceKeys.add(key);
-    const limit = kind === 'samples' ? MAX_SAMPLES_PER_TASK : kind === 'moves' ? MAX_MOVES_PER_TASK : MAX_STARTS_PER_TASK;
-    traceCapacityEvents += 1;
-    traceCapacityFailure ??= { kind, taskId, limit };
-    emit('trace-window-exceeded', taskId, {
-      kind,
-      limit,
-      note: 'Explicit evidence-capacity failure; the run fails even if the task itself finishes successfully.',
-    });
-    const active = arbiter?.info() ?? null;
-    if (active !== null && active.id === taskId) {
-      try {
-        arbiter?.cancel(`harness evidence capacity exceeded: ${kind} > ${limit}`);
-      } catch (error) {
-        emit('cancel-error', taskId, { reason: 'evidence-capacity', error: errorFacts(error) });
-      }
-    }
-  };
-
-  const taskWindow = (taskId: string): TaskWindow => {
-    const existing = perTask.get(taskId);
-    if (existing !== undefined) return existing;
-    const created: TaskWindow = { samples: [], moves: [], starts: [], lastSequence: -1 };
-    perTask.set(taskId, created);
-    return created;
-  };
-
   const waitForTaskOutcome = (taskId: string, timeoutMs: number, checkEvidence: boolean): Promise<TaskOutcome | null> => {
     const existing = outcomes.get(taskId);
     if (existing !== undefined) return Promise.resolve(existing);
@@ -1852,7 +1634,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   const runQuery = async (legTaskId: string, dim: string): Promise<void> => {
     if (arbiter === null || runScope === null) throw new Error('spatial query requested before runtime scope is ready');
     if (stopping) throw new Error('run is stopping; refusing spatial_query');
-    const args = { kind: 'fragments', dim, limit: 8 };
+    const args = { kind: 'nodes', dim, limit: 8 };
     const started = arbiter.start({ skill: 'spatial_query', args }, 'user');
     if ('error' in started) throw new Error(`spatial_query rejected: ${started.error}`);
     const info = started as TaskInfo;
@@ -1863,7 +1645,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       if (outcome === null) throw new Error('spatial_query timed out before terminal outcome');
       if (outcome.result.status !== 'succeeded') throw new Error(`spatial_query status ${outcome.result.status}`);
       const query = isRecordValue(outcome.result.data) ? outcome.result.data : undefined;
-      const checked = validateQueryPage(query, 'fragments');
+      const checked = validateQueryPage(query, 'nodes');
       emit('query-verdict', info.id, { legTaskId, verdict: checked, query: query === undefined ? null : clone(query) });
       if (!checked.ok) throw new Error(`spatial_query invalid: ${checked.problems.join(', ')}`);
       queryVerifiedLegs += 1;
@@ -1894,16 +1676,13 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
   ): Promise<void> => {
     if (arbiter === null) throw new Error('walk leg requested before arbiter is ready');
     if (runScope === null) throw new Error('walk leg requested before runtime scope is ready');
-    if (stopping) throw new Error('run is stopping; refusing walk_to');
+    if (stopping) throw new Error('run is stopping; refusing navigate_to');
     const tolerance = { ...library!.GROUNDED_ARRIVAL_DEFAULTS, horizontalTolerance: SOAK_ARRIVAL_RADIUS };
-    // 即使 setup tp 落在标称格，服务端结算也可能让实测起点偏离整数脚格；exact 目标
-    // 会因不在 ±1 脚格上被库拒绝。用 near 且验收使用同一半径：仍要求真实终点落在
-    // 容差内，不投影或改写目标。
     const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
     // leg-start/leg-result 共用同一个真实派发时刻，不用 deadline 反推。
     const startedAt = Date.now();
-    const started = arbiter.start({ skill: 'walk_to', args: request }, 'user');
-    if ('error' in started) throw new Error(`walk_to rejected: ${started.error}`);
+    const started = arbiter.start({ skill: 'navigate_to', args: request }, 'user');
+    if ('error' in started) throw new Error(`navigate_to rejected: ${started.error}`);
     const info = started as TaskInfo;
     emit('leg-start', info.id, {
       index,
@@ -1919,22 +1698,17 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const outcome = await waitForTaskOutcome(info.id, SMOKE_LEG_BUDGET_MS + 5_000, true);
       if (outcome === null) {
         emit('leg-timeout', info.id, { index, budgetMs: SMOKE_LEG_BUDGET_MS + 5_000 });
-        throw new Error(`walk_to leg ${index} timed out before terminal outcome`);
+        throw new Error(`navigate_to leg ${index} timed out before terminal outcome`);
       }
       const terminalState = adapter!.state();
       const terminalControls = controlsSnapshot(adapter!);
-      const window = perTask.get(info.id) ?? { samples: [], moves: [], starts: [], lastSequence: -1 };
-      const verdict = classifyWalkToResult(outcome.result, measuredFrom, target, tolerance, {
-        taskId: info.id,
-        samples: window.samples,
-      });
+      const verdict = classifyWalkToResult(outcome.result, measuredFrom, target, tolerance);
       const bodyVerdict = classifyTerminalBody(
         { state: terminalState, controls: terminalControls.values },
         target,
         tolerance,
         runScope,
       );
-      const traceVerdict = classifyLegTrace(verdict.nav, info.id, window.samples, window.moves);
       const finishedAt = Date.now();
       emit('leg-result', info.id, {
         index,
@@ -1948,16 +1722,12 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         controls: terminalControls,
         verdict,
         bodyVerdict,
-        traceVerdict,
-        samplesKept: window.samples.length,
-        movesKept: window.moves.length,
       });
-      const problems = [...verdict.problems, ...bodyVerdict.problems, ...traceVerdict.problems];
-      if (problems.length > 0) throw new Error(`walk_to leg ${index} failed verification: ${problems.join(', ')}`);
+      const problems = [...verdict.problems, ...bodyVerdict.problems];
+      if (problems.length > 0) throw new Error(`navigate_to leg ${index} failed verification: ${problems.join(', ')}`);
       successfulLegs += 1;
       await runQuery(info.id, terminalState.dim);
     } finally {
-      perTask.delete(info.id);
       outcomes.delete(info.id);
     }
   };
@@ -1982,7 +1752,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     const { WorldMemory: WorldMemoryClass } = await import('../src/memory/store.ts');
     const { Arbiter: ArbiterClass } = await import('../src/arbiter/arbiter.ts');
     const { Rcon: RconClass } = await import('../src/observer/rcon.ts');
-    const { WalkMoveExecutor: WalkMoveExecutorClass } = await import('../src/adapter/walk-route.ts');
     library = await import('curio-minecraft-3d-memory');
 
     // full 只有在真实 manual API 存在时才可能通过；缺失时在连接前显式失败，
@@ -2052,180 +1821,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     };
     arbiter.on('done', doneListener);
 
-    // 只在真实原型方法仍是我们安装的版本时还原；不改动旧脚本。
-    const executorProto = library.WalkRouteExecutor.prototype as unknown as {
-      start(this: WalkRouteExecutor, request: WalkRouteRequest): WalkRouteStatus;
-      onSample(this: WalkRouteExecutor, sample: BodySample): WalkRouteStatus;
-    };
-    executorOriginalStart = executorProto.start;
-    executorOriginalOnSample = executorProto.onSample;
-    executorWrappedStart = function (this: WalkRouteExecutor, request: WalkRouteRequest) {
-      const status = executorOriginalStart!.call(this, request);
-      const task = arbiter?.info() ?? null;
-      if (task !== null) {
-        executorTasks.set(this as unknown as object, { taskId: task.id, delegationId: status.delegationId });
-        const window = taskWindow(task.id);
-        const startRecord = {
-          taskId: task.id,
-          delegationId: status.delegationId,
-          receivedAt: Date.now(),
-          request: {
-            worldId: request.worldId,
-            dim: request.dim,
-            sessionId: request.sessionId,
-            mode: request.mode,
-            body: clone(request.body),
-            points: clone(request.points),
-            arrival: clone(request.arrival),
-            ...(request.bodyArrival === undefined ? {} : { bodyArrival: clone(request.bodyArrival) }),
-            deadlineMs: request.deadlineMs,
-            timeoutMs: request.timeoutMs,
-          },
-          status: {
-            delegationId: status.delegationId,
-            nextPointIndex: status.nextPointIndex,
-            activeStepIndex: status.activeStepIndex,
-            lastPosition: status.lastPosition === null ? null : clone(status.lastPosition),
-            resultOutcome: status.result === null ? null : status.result.outcome,
-          },
-        };
-        if (window.starts.length >= MAX_STARTS_PER_TASK) traceOverflow('starts', task.id);
-        else window.starts.push(startRecord);
-        emit('executor-start', task.id, { call: ++startCallSequence, start: startRecord });
-      } else {
-        emit('executor-start', null, {
-          call: ++startCallSequence,
-          delegationId: status.delegationId,
-          note: 'No active Arbiter task; request is not attributed to a task.',
-        });
-      }
-      return status;
-    };
-    executorWrappedOnSample = function (this: WalkRouteExecutor, sample: BodySample) {
-      const returned = executorOriginalOnSample!.call(this, sample);
-      const binding = executorTasks.get(this as unknown as object);
-      const scopeOk = binding !== undefined && runScope !== null
-        && sample.worldId === runScope.worldId
-        && sample.dim === runScope.dim
-        && sample.sessionId === runScope.sessionId;
-      const window = binding === undefined ? null : perTask.get(binding.taskId) ?? null;
-      const ordered = binding === undefined || window === null
-        ? false
-        : Number.isInteger(sample.sequence) && sample.sequence > window.lastSequence;
-      const accepted = binding !== undefined
-        && scopeOk
-        && ordered
-        && sample.executionId === binding.delegationId
-        && returned.delegationId === binding.delegationId
-        && isDeepStrictEqual(returned.lastPosition, sample.pos);
-      const captured: CapturedRouteSample | null = binding === undefined ? null : {
-        taskId: binding.taskId,
-        delegationId: binding.delegationId,
-        accepted,
-        receivedAt: Date.now(),
-        sample: {
-          executionId: sample.executionId,
-          sequence: sample.sequence,
-          worldId: sample.worldId,
-          dim: sample.dim,
-          sessionId: sample.sessionId,
-          observedAt: sample.observedAt,
-          position: { ...sample.pos },
-          onGround: sample.onGround,
-          inWater: sample.inWater,
-        },
-        returned: {
-          delegationId: returned.delegationId,
-          lastPosition: returned.lastPosition === null ? null : { ...returned.lastPosition },
-          nextPointIndex: returned.nextPointIndex,
-          activeStepIndex: returned.activeStepIndex,
-          resultOutcome: returned.result === null ? null : returned.result.outcome,
-          resultLastPosition: returned.result?.lastPosition === undefined ? null : { ...returned.result.lastPosition },
-          resultLastObservation: returned.result?.lastObservation === undefined
-            ? null
-            : { ...returned.result.lastObservation } as Record<string, unknown>,
-        },
-      };
-      emit('walk-sample', binding?.taskId ?? null, {
-        accepted,
-        sample: captured,
-        scopeOk,
-        ordered,
-        windowOverflow: false,
-      });
-      if (captured !== null && window !== null) {
-        if (window.samples.length >= MAX_SAMPLES_PER_TASK) {
-          traceOverflow('samples', captured.taskId);
-        } else {
-          window.samples.push(captured);
-          if (ordered) window.lastSequence = sample.sequence;
-        }
-      }
-      return returned;
-    };
-    executorProto.start = executorWrappedStart;
-    executorProto.onSample = executorWrappedOnSample;
-
-    const moverProto = WalkMoveExecutorClass.prototype as unknown as {
-      move(this: unknown, request: ExecutableMove): Promise<ExecutableMoveResult>;
-    };
-    moverOriginalMove = moverProto.move;
-    moverWrappedMove = function (this: unknown, request: ExecutableMove) {
-      const taskId = arbiter?.info()?.id ?? null;
-      const window = taskId === null ? null : taskWindow(taskId);
-      const canKeep = window !== null && window.moves.length < MAX_MOVES_PER_TASK;
-      if (window !== null && !canKeep) traceOverflow('moves', taskId!);
-      // 本次调用自己的 record 在任何 await 之前创建并保留；绝不使用 sink.at(-1)，
-      // 否则并发/紧随其后的另一次 move 会让结果写到错误的 record 上。
-      const entry: CapturedMove = {
-        taskId,
-        receivedAt: Date.now(),
-        request: {
-          executionId: request.executionId,
-          worldId: request.worldId,
-          dim: request.dim,
-          sessionId: request.sessionId,
-          from: clone(request.from),
-          to: clone(request.to),
-          deadlineMs: request.deadlineMs,
-          timeoutMs: request.timeoutMs,
-        },
-        result: null,
-        error: null,
-      };
-      if (canKeep) window!.moves.push(entry);
-      const call = ++moveCallSequence;
-      emit('walk-move-request', taskId, { call, move: clone(entry) });
-      const pending = moverOriginalMove!.call(this, request);
-      return pending.then(
-        (result) => {
-          entry.result = {
-            ...(result.sample === undefined ? {} : {
-              sample: {
-                executionId: result.sample.executionId,
-                sequence: result.sample.sequence,
-                worldId: result.sample.worldId,
-                dim: result.sample.dim,
-                sessionId: result.sample.sessionId,
-                observedAt: result.sample.observedAt,
-                position: clone(result.sample.pos),
-                onGround: result.sample.onGround,
-                inWater: result.sample.inWater,
-              },
-            }),
-            ...(result.failure === undefined ? {} : { failure: clone(result.failure) as Record<string, unknown> }),
-          };
-          emit('walk-move-result', taskId, { call, move: clone(entry) });
-          return result;
-        },
-        (error: unknown) => {
-          entry.error = errorText(error);
-          emit('walk-move-error', taskId, { call, move: clone(entry), error: errorFacts(error) });
-          throw error;
-        },
-      );
-    };
-    moverProto.move = moverWrappedMove;
 
     const botName = config.mc.username;
     if (!/^[A-Za-z0-9_]{1,16}$/.test(botName)) throw new Error(`unsafe bot username: ${botName}`);
@@ -2311,21 +1906,9 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
     }
 
     const nextPhysicsFrame = async (timeoutMs: number): Promise<{ position: FixtureEndpoint; onGround: boolean; isInWater: boolean } | null> => {
-      const tick = adapter!.walkTick?.();
-      if (tick === undefined) return null;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
-      try {
-        const entity = await tick(controller.signal);
-        if (entity === null) return null;
-        return {
-          position: { ...entity.position },
-          onGround: entity.onGround,
-          isInWater: entity.isInWater,
-        };
-      } finally {
-        clearTimeout(timer);
-      }
+      await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(50, timeoutMs))));
+      const state = adapter!.state();
+      return { position: { ...state.pos }, onGround: state.onGround, isInWater: state.inWater };
     };
 
     const collectSetupSettle = async (timeoutMs: number): Promise<{ position: FixtureEndpoint; frames: PhysicsFrame[] }> => {
@@ -2460,21 +2043,20 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       const targetName = nearest === 'A' ? 'B' : 'A';
       const target = targetName === 'A' ? FIXTURE_A : FIXTURE_B;
       const request = soakWalkRequest(target, Date.now() + SMOKE_LEG_BUDGET_MS);
-      const started = arbiter!.start({ skill: 'walk_to', args: request }, 'user');
+      const started = arbiter!.start({ skill: 'navigate_to', args: request }, 'user');
       if ('error' in started) {
-        return { id, state: 'failed', ok: false, problems: [`walk_to rejected: ${started.error}`], facts };
+        return { id, state: 'failed', ok: false, problems: [`navigate_to rejected: ${started.error}`], facts };
       }
       const info = started as TaskInfo;
       emit('scenario-start', info.id, { id, start: clone(start), target: clone(target), request: clone(request), task: clone(info) });
       try {
-        const moved = await waitForEvidenceAware(() => {
-          const window = perTask.get(info.id);
-          return window !== undefined && window.samples.some((sample) =>
-            sample.accepted && sample.taskId === info.id
-            && distance(sample.sample.position, start) > CANCEL_MOVEMENT_THRESHOLD);
-        }, 20_000, 'explicit cancel movement');
+        const moved = await waitForEvidenceAware(
+          () => distance(adapter!.state().pos, start) > CANCEL_MOVEMENT_THRESHOLD,
+          20_000,
+          'explicit cancel movement',
+        );
         facts.moved = moved;
-        if (!moved) problems.push('no accepted same-task sample showed real movement before cancel');
+        if (!moved) problems.push('no measured body movement before cancel');
         const cancelCalledAt = Date.now();
         emit('scenario-cancel-request', info.id, { id, at: cancelCalledAt });
         arbiter!.cancel('soak acceptance: explicit cancel after measured movement');
@@ -2505,11 +2087,8 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
         facts.controls = controls;
         if (!controls.ok) problems.push(`control keys unreadable after cancel: ${controls.missing.join(',')}`);
         if (outcome !== null) {
-          const window = perTask.get(info.id);
           const verdict = classifyCancellationResult(
             outcome.result,
-            info.id,
-            window?.samples ?? [],
             controls.values,
             postCancel.reactivated,
             start,
@@ -2518,7 +2097,6 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
           problems.push(...verdict.problems);
         }
       } finally {
-        perTask.delete(info.id);
         outcomes.delete(info.id);
       }
       return { id, state: problems.length === 0 ? 'passed' : 'failed', ok: problems.length === 0, problems, facts };
@@ -2967,28 +2545,7 @@ async function runSoak(cli: Extract<ParsedCli, { ok: true; help: false }>): Prom
       }
     }
 
-    // 只还原自己安装的实际原型包装；若已被他人替换则不动。
-    if (library !== null) {
-      const executorProto = library.WalkRouteExecutor.prototype as unknown as {
-        start(this: WalkRouteExecutor, request: WalkRouteRequest): WalkRouteStatus;
-        onSample(this: WalkRouteExecutor, sample: BodySample): WalkRouteStatus;
-      };
-      if (executorOriginalStart !== null && executorWrappedStart !== null && executorProto.start === executorWrappedStart) {
-        executorProto.start = executorOriginalStart;
-      }
-      if (executorOriginalOnSample !== null && executorWrappedOnSample !== null && executorProto.onSample === executorWrappedOnSample) {
-        executorProto.onSample = executorOriginalOnSample;
-      }
-      const moverProto = (await import('../src/adapter/walk-route.ts')).WalkMoveExecutor.prototype as unknown as {
-        move(this: unknown, request: ExecutableMove): Promise<ExecutableMoveResult>;
-      };
-      if (moverOriginalMove !== null && moverWrappedMove !== null && moverProto.move === moverWrappedMove) {
-        moverProto.move = moverOriginalMove;
-      }
-    }
-
     outcomes.clear();
-    perTask.clear();
     takenTraceKeys.clear();
   }
 

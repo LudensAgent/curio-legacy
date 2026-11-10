@@ -16,7 +16,7 @@ export function voxelNavigationFixture(maxX = 80) {
   const spatial = {
     worldId: state.worldId, session: { voxel: map, lifecycle: 'open' },
     closing: false, paused: false, observationAdmitted: true,
-    capabilities: () => ({ owner: 'host_composed', contract: 'memory-host-contract/1', library: { execute: { walk: true } }, host: {}, effective: { execute: { walk: true } }, overclaims: [] }),
+    capabilities: () => ({ owner: 'host_composed', contract: 'memory-host-contract/2', library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } }, effective: { execute: { walk: true } }, overclaims: [] }),
     attach: () => 1, detach() {}, query() { throw new Error('旧空间路线查询不能被调用'); },
   } as unknown as SharedSpatialSession;
   return { adapter, map, ctx: { ...makeCtx(adapter), spatial } };

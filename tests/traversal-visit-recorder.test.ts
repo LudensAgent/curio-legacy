@@ -17,20 +17,17 @@ import {
 } from '../src/spatial/traversal-visit-recorder.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
-import { DIM, FixtureClock, SESSION_1, WORLD, withSharedSession } from './fixtures/spatial-w4-w5-w7.ts';
+import { DIM, FixtureClock, SESSION_1, WORLD, withSharedSession } from './fixtures/shared-session.ts';
 
 const at = (x: number, y: number, z: number) => ({ x, y, z });
 
 function counts(session: SharedSpatialSession) {
-  const fragments = session.query({ kind: 'fragments', dim: DIM, limit: 1 });
-  const traversals = session.query({ kind: 'traversals', dim: DIM });
-  const nodes = session.query({ kind: 'nodes', dim: DIM });
-  const edges = session.query({ kind: 'edges', dim: DIM });
+  const summary = session.session.legacyStoreSummary;
   return {
-    fragments: fragments.data?.kind === 'fragments' ? fragments.data.total : null,
-    traversals: traversals.data?.kind === 'traversals' ? traversals.data.total : null,
-    nodes: nodes.data?.kind === 'nodes' ? nodes.data.total : null,
-    edges: edges.data?.kind === 'edges' ? edges.data.total : null,
+    fragments: summary.fragments,
+    traversals: summary.traversals,
+    nodes: summary.nodes,
+    edges: summary.edges,
   };
 }
 

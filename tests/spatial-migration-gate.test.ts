@@ -3,11 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { FragmentStore, TopologyStore, type LegacyStoreSummary } from 'curio-minecraft-3d-memory';
-import { ContainerLedger } from '../src/memory/container-ledger.ts';
+import type { LegacyStoreSummary } from 'curio-minecraft-3d-memory';
 import { createInMemoryLibraryStores } from '../src/spatial/in-memory.ts';
 import { checkMigrationGate } from '../src/spatial/migration-state.ts';
-import { writeLegacyMigrationMarker } from '../scripts/legacy-migration-marker.ts';
 
 const W = 'world-1';
 const EMPTY: LegacyStoreSummary = { fragments: 0, traversals: 0, nodes: 0, edges: 0, migrationMarker: false };
@@ -17,10 +15,7 @@ function fixture() {
   const worldMemoryPath = path.join(dir, 'world-memory.json');
   const databasePath = path.join(dir, 'spatial.sqlite');
   const stores = createInMemoryLibraryStores(W);
-  // Old marker/route rows live on the archived topology domain, not in the
-  // production semantic composition.
-  const legacyTopology = new TopologyStore(new FragmentStore(W));
-  return { dir, worldMemoryPath, databasePath, stores, legacyTopology };
+  return { dir, worldMemoryPath, databasePath, stores };
 }
 
 test('fresh world passes the gate', (t) => {
@@ -35,13 +30,8 @@ test('fresh world passes the gate', (t) => {
 });
 
 test('old rows without a facts receipt are refused; the old marker cannot stand in for it', (t) => {
-  const { dir, worldMemoryPath, databasePath, stores, legacyTopology } = fixture();
+  const { dir, worldMemoryPath, databasePath, stores } = fixture();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  legacyTopology.saveNode({
-    id: 'n1', kind: 'place', source: 'program', tag: 'base', label: '家', worldId: W,
-    dim: 'overworld', location: { kind: 'exact', pos: { x: 0, y: 64, z: 0 } },
-    metadata: { curio: { v: 1, type: 'landmark', record: { kind: 'base', label: '家' } } },
-  });
   const withRows: LegacyStoreSummary = { ...EMPTY, nodes: 1 };
   const blocked = checkMigrationGate({
     legacyStore: withRows, ledger: stores.ledger, worldMemoryPath, dataDir: dir, databasePath, worldId: W,
@@ -52,7 +42,6 @@ test('old rows without a facts receipt are refused; the old marker cannot stand 
   assert.match(blocked.command ?? '', /spatial-facts-cutover\.ts/);
 
   // 旧 cutover marker 只是旧体系的标记，不是新的 facts 迁移回执。
-  writeLegacyMigrationMarker(legacyTopology, W);
   const marked: LegacyStoreSummary = { ...withRows, migrationMarker: true };
   const stillBlocked = checkMigrationGate({
     legacyStore: marked, ledger: stores.ledger, worldMemoryPath, dataDir: dir, databasePath, worldId: W,
@@ -88,9 +77,8 @@ test('preserved ledger records also require the facts receipt', (t) => {
 });
 
 test('legacy spatial JSON or travel files require migration even with a receipt', (t) => {
-  const { dir, worldMemoryPath, databasePath, stores, legacyTopology } = fixture();
+  const { dir, worldMemoryPath, databasePath, stores } = fixture();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  writeLegacyMigrationMarker(legacyTopology, W);
   fs.writeFileSync(worldMemoryPath, JSON.stringify({ worldId: W, landmarks: [{ id: 'old' }] }));
   const legacy = checkMigrationGate({
     legacyFactsMigrationVersion: 1, legacyStore: { ...EMPTY, migrationMarker: true },

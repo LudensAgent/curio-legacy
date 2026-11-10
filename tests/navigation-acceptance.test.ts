@@ -1,22 +1,18 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { Vec3 } from 'vec3';
 import {
   CANCEL_MOVEMENT_THRESHOLD,
   acceptanceExitCode,
   classifyAdapterEnd,
   classifyCancellationResult,
-  classifyKnownRouteResult,
   classifyPostCancelFrames,
   classifySettledFrames,
   classifyTerminalBody,
-  classifyTraversalOwnership,
   classifyWalkToResult,
   controlReleaseProblems,
   initialObservationFacts,
@@ -25,21 +21,8 @@ import {
   parseRconList,
   preflightBotConflict,
   validateQueryPage,
-  type CapturedMove,
-  type CapturedRouteSample,
   type PhysicsFrame,
 } from '../scripts/navigation-acceptance.ts';
-import { WalkMoveExecutor } from '../src/adapter/walk-route.ts';
-import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
-import { spatialQuery } from '../src/skills/spatial-query.ts';
-import { runSkill, type SkillCtx } from '../src/skills/types.ts';
-import type { BlockObservation, GameAdapter } from '../src/adapter/types.ts';
-import type { ExecutableMove } from 'curio-minecraft-3d-memory';
-
-const require = createRequire(import.meta.url);
-const data = require('minecraft-data')('1.20.1');
-const Block = require('prismarine-block')(data);
-const { Physics, PlayerState } = require('prismarine-physics');
 
 const script = fileURLToPath(new URL('../scripts/navigation-acceptance.ts', import.meta.url));
 const tsx = import.meta.resolve('tsx');
@@ -47,94 +30,6 @@ const tolerance = { horizontalTolerance: 0.12, feetTolerance: 0.05 };
 
 function runCli(args: string[], env: NodeJS.ProcessEnv = process.env) {
   return spawnSync(process.execPath, ['--import', tsx, script, ...args], { cwd: path.dirname(script), env, encoding: 'utf8', timeout: 30_000 });
-}
-
-function routeSample(taskId: string, nav: Record<string, unknown>, over: Partial<CapturedRouteSample['sample']> = {}): CapturedRouteSample {
-  const obs = nav.lastObservation as Record<string, unknown>;
-  const sample = {
-    executionId: `exec-${taskId}`, sequence: 1, worldId: String(obs.worldId), dim: String(obs.dim), sessionId: String(obs.sessionId),
-    observedAt: Number(obs.observedAt), position: { ...(nav.lastPosition as { x: number; y: number; z: number }) },
-    onGround: obs.onGround === true, inWater: obs.inWater === true, ...over,
-  };
-  return {
-    taskId, delegationId: sample.executionId, accepted: true, receivedAt: 1, sample,
-    returned: {
-      delegationId: sample.executionId, lastPosition: { ...sample.position }, nextPointIndex: 2, activeStepIndex: null,
-      resultOutcome: 'ARRIVED', resultLastPosition: { ...sample.position }, resultLastObservation: { ...obs },
-    },
-  };
-}
-
-/** 本文件专用的真实 prismarine 平坦身体（y<=63 为石，脚高 64），只用于 WalkRouteExecutor 证据。 */
-function acceptancePhysics() {
-  const feet = { x: 200.5, y: 64, z: 216.5 };
-  const world = {
-    getBlock(position: { floored(): { x: number; y: number; z: number } }) {
-      const p = position.floored();
-      const stateId = p.y <= 63 ? data.blocksByName.stone.defaultState : data.blocksByName.air.defaultState;
-      const block = Block.fromStateId(stateId, 0);
-      block.position = p;
-      return block;
-    },
-  };
-  const control: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
-  const entity = {
-    position: new Vec3(feet.x, feet.y, feet.z), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false,
-    isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false,
-    yaw: 0, pitch: 0, effects: {}, attributes: {},
-  };
-  const bot = {
-    version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] },
-    setControlState(name: string, value: boolean) { control[name] = value; },
-    clearControlStates() { for (const key of Object.keys(control)) control[key] = false; },
-    look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
-  };
-  const physics = Physics(data, world);
-  const tick = (signal: AbortSignal) => new Promise<{ position: { x: number; y: number; z: number }; velocity: { x: number; y: number; z: number }; onGround: boolean; isInWater: boolean } | null>((resolve) => {
-    if (signal.aborted) { resolve(null); return; }
-    const onAbort = () => { cleanup(); resolve(null); };
-    const timer = setTimeout(() => {
-      physics.simulatePlayer(new PlayerState(bot, control), world).apply(bot);
-      cleanup();
-      resolve({
-        position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-        velocity: { x: entity.velocity.x, y: entity.velocity.y, z: entity.velocity.z },
-        onGround: entity.onGround, isInWater: entity.isInWater,
-      });
-    }, 50);
-    const cleanup = () => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-  const adapter = {
-    state: () => ({
-      worldId: 'world', dim: 'overworld', sessionId: 's1', alive: true, connected: true, observationReady: true,
-      pos: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
-    }),
-    walkBody: () => ({
-      setControlState: (name: string, value: boolean) => bot.setControlState(name, value),
-      clearControlStates: () => bot.clearControlStates(),
-      look: (yaw: number, pitch: number) => bot.look(yaw, pitch),
-      entity: { position: entity.position, velocity: entity.velocity, onGround: entity.onGround, isInWater: entity.isInWater },
-    }),
-    walkTick: () => tick,
-  } as unknown as GameAdapter;
-  return { adapter, feet, cell: (p: { x: number; y: number; z: number }) => p.y === 63 ? 'minecraft:stone' : 'minecraft:air' };
-}
-
-function acceptanceSenses(svc: SharedSpatialSession, nameAt: (p: { x: number; y: number; z: number }) => string) {
-  let sequence = 1;
-  const observeBlocks = (positions: { x: number; y: number; z: number }[]): BlockObservation[] => {
-    const observations = positions.map((p): BlockObservation => ({
-      name: nameAt(p), properties: {}, worldId: 'world', sessionId: 's1', dimension: 'overworld',
-      source: 'vision', stateComplete: true, observedAt: Date.now(), observationId: sequence++, pos: { ...p },
-    }));
-    if (observations.length > 0) svc.observe(observations);
-    return observations;
-  };
-  const cells: { x: number; y: number; z: number }[] = [];
-  for (let x = 199; x <= 205; x++) for (let z = 215; z <= 218; z++) for (let y = 62; y <= 66; y++) cells.push({ x, y, z });
-  observeBlocks(cells);
-  return { observeBlocks, perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
 }
 
 test('--help exits 0 without loading config', () => {
@@ -177,71 +72,42 @@ test('parseCliArgs accepts only the explicit test lane start', () => {
   assert.equal(parseCliArgs(['--curio=test', '--start=219,64,216.5']).ok, false);
 });
 
-test('walk_to requires ARRIVED, tolerance, movement and exact same-task sample evidence', () => {
+test('navigate_to requires succeeded ARRIVED/confirmed, measured movement and runtime tolerance', () => {
   const start = { x: 200.5, y: 64, z: 216.5 };
   const target = { x: 202.5, y: 64, z: 216.5 };
-  const obs = { worldId: 'world', dim: 'overworld', sessionId: 'session', observedAt: 1_000, onGround: true, inWater: false };
-  const arrived = { outcome: 'ARRIVED', confirmed: true, lastPosition: { ...target }, lastObservation: obs };
-  const result = { status: 'succeeded', summary: 'ok', data: { nav: arrived } };
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', arrived)] }).ok, true);
-  // 没有真实同任务样本不能 PASS；只靠 NavResult 不够。
-  assert.equal(classifyWalkToResult(result, start, target, tolerance).ok, false);
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [] }).ok, false);
-  // 样本时间、作用域、任务归属或接受状态不对都不能 PASS（不再有 ±50ms 猜时）。
-  const base = routeSample('t1', arrived);
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', arrived, { observedAt: 1_040 })] }).ok, false);
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', arrived, { sessionId: 'other' })] }).ok, false);
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [{ ...base, taskId: 'other' }] }).ok, false);
-  assert.equal(classifyWalkToResult(result, start, target, tolerance, { taskId: 't1', samples: [{ ...base, accepted: false }] }).ok, false);
+  const nav = { outcome: 'ARRIVED', confirmed: true, lastPosition: { ...target } };
+  const result = { status: 'succeeded', summary: 'ok', data: { nav } };
+  assert.equal(classifyWalkToResult(result, start, target, tolerance).ok, true);
+  // 当前 navigate_to 回执没有 data.nav 时，从真实字段构造只读视图。
+  const current = { status: 'succeeded', summary: 'ok', data: { arrived: true, position: { ...target }, stop: { reason: 'ARRIVED' } } };
+  assert.equal(classifyWalkToResult(current, start, target, tolerance).ok, true);
   // 运行时容差按水平 Math.hypot：单独 x/z 都在 0.12 内，但 hypot 超了也不能算到达。
-  const diagonal = { ...arrived, lastPosition: { x: target.x + 0.1, y: target.y, z: target.z + 0.1 } };
-  assert.equal(classifyWalkToResult({ ...result, data: { nav: diagonal } }, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', diagonal)] }).ok, false);
-  const notArrived = { ...arrived, outcome: 'PARTIAL', confirmed: false };
-  assert.equal(classifyWalkToResult({ ...result, data: { nav: notArrived } }, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', notArrived)] }).ok, false);
-  const noMovement = { ...arrived, lastPosition: { ...start } };
-  assert.equal(classifyWalkToResult({ ...result, data: { nav: noMovement } }, start, target, tolerance, { taskId: 't1', samples: [routeSample('t1', noMovement)] }).ok, false);
+  const diagonal = { ...nav, lastPosition: { x: target.x + 0.1, y: target.y, z: target.z + 0.1 } };
+  assert.equal(classifyWalkToResult({ ...result, data: { nav: diagonal } }, start, target, tolerance).ok, false);
+  const notArrived = { ...nav, outcome: 'PARTIAL', confirmed: false };
+  assert.equal(classifyWalkToResult({ ...result, data: { nav: notArrived } }, start, target, tolerance).ok, false);
+  const noMovement = { ...nav, lastPosition: { ...start } };
+  assert.equal(classifyWalkToResult({ ...result, data: { nav: noMovement } }, start, target, tolerance).ok, false);
 });
 
-test('known route requires original typed geometry and exact same-task samples', () => {
+test('cancellation needs cancelled/unconfirmed, measured partial movement and released controls', () => {
   const start = { x: 200.5, y: 64, z: 216.5 };
-  const points = [{ ...start }, { x: 201.5, y: 64, z: 216.5 }, { x: 202.5, y: 64, z: 216.5 }];
-  const obs = { worldId: 'world', dim: 'overworld', sessionId: 'session', observedAt: 2_000, onGround: true, inWater: false };
-  const nav = { outcome: 'ARRIVED', confirmed: true, lastPosition: { ...points[2] }, lastObservation: obs };
-  const data = { knownStart: { kind: 'STARTED', route: { points: [...points], target: { ...points[2] } } }, nav };
-  const result = { status: 'succeeded', summary: 'ok', data };
-  assert.equal(classifyKnownRouteResult(result, points, start, tolerance, { taskId: 't2', samples: [routeSample('t2', nav)] }).ok, true);
-  assert.equal(classifyKnownRouteResult(result, points, start, tolerance).ok, false);
-  const changed = { status: 'succeeded', summary: 'ok', data: { ...data, knownStart: { kind: 'STARTED', route: { points: [...points, { x: 203.5, y: 64, z: 216.5 }], target: { x: 203.5, y: 64, z: 216.5 } } } } };
-  assert.equal(classifyKnownRouteResult(changed, points, start, tolerance, { taskId: 't2', samples: [routeSample('t2', nav)] }).ok, false);
-  assert.equal(classifyKnownRouteResult({ ...result, data: { ...data, nav: { ...nav, outcome: 'PARTIAL', confirmed: false } } }, points, start, tolerance, { taskId: 't2', samples: [routeSample('t2', nav)] }).ok, false);
-});
-
-test('cancellation needs exact same-task partial sample, released controls and real frames', () => {
-  const start = { x: 200.5, y: 64, z: 216.5 };
-  const obs = { worldId: 'world', dim: 'overworld', sessionId: 'session', observedAt: 3_000, onGround: true, inWater: false };
-  const nav = { outcome: 'CANCELLED', confirmed: false, lastPosition: { x: 200.8, y: 64, z: 216.5 }, lastObservation: obs };
+  const nav = { outcome: 'CANCELLED', confirmed: false, lastPosition: { x: 200.8, y: 64, z: 216.5 } };
   const result = { status: 'cancelled', summary: 'cancelled', data: { nav } };
   const controls = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
-  const sample = routeSample('t3', nav);
-  assert.equal(classifyCancellationResult(result, 't3', [sample], controls, false, start).ok, true);
-  assert.equal(classifyCancellationResult(result, 't3', [], controls, false, start).ok, false);
-  // 旧的 ±50ms 时间容忍不再接受：时间必须精确等于被接受样本。
-  assert.equal(classifyCancellationResult(result, 't3', [routeSample('t3', nav, { observedAt: 3_040 })], controls, false, start).ok, false);
-  assert.equal(classifyCancellationResult(result, 't3', [{ ...sample, taskId: 'other' }], controls, false, start).ok, false);
-  assert.equal(classifyCancellationResult(result, 't3', [sample], { ...controls, jump: true }, false, start).ok, false);
-  assert.equal(classifyCancellationResult(result, 't3', [sample], controls, true, start).ok, false);
+  assert.equal(classifyCancellationResult(result, controls, false, start).ok, true);
+  assert.equal(classifyCancellationResult(result, { ...controls, jump: true }, false, start).ok, false);
+  assert.equal(classifyCancellationResult(result, controls, true, start).ok, false);
   const missingKey = { ...controls } as Record<string, unknown>;
   delete missingKey.sneak;
-  assert.equal(classifyCancellationResult(result, 't3', [sample], missingKey, false, start).ok, false);
+  assert.equal(classifyCancellationResult(result, missingKey, false, start).ok, false);
 
-  // 触发取消与终态分类共用同一阈值：0.16 格的部分位移是有效的取消证据，
-  // 0.10 格则不能证明真的动过。
+  // 触发取消与终态分类共用同一阈值：0.16 格的部分位移有效，0.10 格不能证明动过。
   assert.equal(CANCEL_MOVEMENT_THRESHOLD, 0.15);
   const partial = { ...nav, lastPosition: { x: start.x + 0.16, y: start.y, z: start.z } };
-  const partialResult = { status: 'cancelled', summary: 'cancelled', data: { nav: partial } };
-  assert.equal(classifyCancellationResult(partialResult, 't3', [routeSample('t3', partial)], controls, false, start).ok, true);
+  assert.equal(classifyCancellationResult({ status: 'cancelled', summary: 'cancelled', data: { nav: partial } }, controls, false, start).ok, true);
   const tiny = { ...nav, lastPosition: { x: start.x + 0.1, y: start.y, z: start.z } };
-  assert.equal(classifyCancellationResult({ status: 'cancelled', summary: 'cancelled', data: { nav: tiny } }, 't3', [routeSample('t3', tiny)], controls, false, start).ok, false);
+  assert.equal(classifyCancellationResult({ status: 'cancelled', summary: 'cancelled', data: { nav: tiny } }, controls, false, start).ok, false);
 });
 
 test('settle and post-cancel windows require real consecutive frames, no invented gaps', () => {
@@ -352,24 +218,23 @@ test('terminal body must satisfy the same hypot tolerance, grounded/dry/ready sc
   assert.equal(controlReleaseProblems(controls).length, 0);
 });
 
-test('spatial query envelope validation keeps raw records and rejects old projections', () => {
-  assert.equal(validateQueryPage({}, 'fragments').ok, false);
+test('spatial query envelope validation keeps raw records and rejects malformed projections', () => {
+  assert.equal(validateQueryPage({}, 'nodes').ok, false);
   const page = {
-    contract: 'memory-host-contract/1', status: 'ok', readOnly: true, executable: false,
-    total: 1, nextAfter: 'f1',
-    data: { kind: 'fragments', items: [{ id: 'f1', polyline: [{ x: 1, y: 64, z: 1 }] }], total: 1, nextAfter: 'f1' },
+    contract: 'memory-host-contract/2', status: 'ok', readOnly: true, executable: false,
+    total: 1, nextAfter: 'n1',
+    data: { kind: 'nodes', items: [{ id: 'n1', label: 'home' }], total: 1, nextAfter: 'n1' },
   };
-  const checked = validateQueryPage(page, 'fragments');
+  const checked = validateQueryPage(page, 'nodes');
   assert.equal(checked.ok, true);
   assert.equal(checked.total, 1);
-  assert.equal(checked.nextAfter, 'f1');
-  assert.deepEqual(checked.items, [{ id: 'f1', polyline: [{ x: 1, y: 64, z: 1 }] }], '列表保留库原样条目');
-  assert.equal(validateQueryPage({ ...page, status: 'partial' }, 'fragments').ok, false);
-  assert.equal(validateQueryPage({ ...page, contract: 'memory-host-contract/0' }, 'fragments').ok, false);
-  assert.equal(validateQueryPage({ ...page, data: { ...page.data, kind: 'traversals' } }, 'fragments').ok, false);
-  // 旧投影（fragments/page 与 fragment/field/offset）不再被接受。
-  assert.equal(validateQueryPage({ fragments: [], page: { total: 0 } }, 'fragments').ok, false);
-  assert.equal(validateQueryPage({ found: true, fragment: { id: 'f1' } }, 'fragments').ok, false);
+  assert.equal(checked.nextAfter, 'n1');
+  assert.deepEqual(checked.items, [{ id: 'n1', label: 'home' }], '列表保留库原样条目');
+  assert.equal(validateQueryPage({ ...page, status: 'partial' }, 'nodes').ok, false);
+  assert.equal(validateQueryPage({ ...page, contract: 'memory-host-contract/0' }, 'nodes').ok, false);
+  assert.equal(validateQueryPage({ ...page, data: { ...page.data, kind: 'places' } }, 'nodes').ok, false);
+  assert.equal(validateQueryPage({ nodes: [], page: { total: 0 } }, 'nodes').ok, false);
+  assert.equal(validateQueryPage({ found: true, node: { id: 'n1' } }, 'nodes').ok, false);
 });
 
 test('adapter end classification requires both real observations and cleanup failure stays nonzero', () => {

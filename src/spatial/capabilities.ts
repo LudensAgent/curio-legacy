@@ -14,17 +14,24 @@
  * （`shared-session.ts`），不经过旧 fragment/topology 域。
  */
 import {
+  CAPABILITY_DOMAINS,
   composeCapabilities,
   CONTRACT_VERSION,
-  requireCapability,
   type ComposedCapabilityReport,
-  type HostCapabilityDeclaration,
   type MemoryHostCapabilities,
   type SpatialQueryResult,
 } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from './shared-session.ts';
 
-export type CapabilityDomain = keyof Omit<MemoryHostCapabilities, 'contract'>;
+/**
+ * 宿主执行能力。v0.11 库不再报告 `execute` 域，也不再执行身体移动：
+ * 这些位是宿主自己的接线事实，不能伪装成库能力或库交集。
+ */
+export type HostExecutionCapability = 'walk' | 'groundedArrival' | 'invalidation' | 'cancellation' | 'swim' | 'boat';
+export type HostExecutionReport = Record<HostExecutionCapability, boolean>;
+
+/** 库能力域 + 宿主独有的 execute 扩展（不属于 MemoryHostCapabilities）。 */
+export type CapabilityDomain = keyof Omit<MemoryHostCapabilities, 'contract'> | 'execute';
 
 /**
  * 共享会话仍接线的库 memory 写入能力名（契约 §2.3 的子集）：观测准入与体素写。
@@ -35,26 +42,26 @@ export type MemoryWriteCapability =
   | 'beginSession' | 'observeBatch' | 'markStale' | 'markTraversed' | 'markModified';
 
 /**
- * 宿主组合报告：库报告逐键 + 宿主真正拥有的持久化生命周期 + 两者交集。
+ * 宿主组合报告：库报告逐键 + 宿主真正拥有的持久化生命周期与执行接线。
  *
- * `library` 是库的事实，`host` 是宿主自己的接线事实；`effective` 是
- * `library AND host`，门禁只读它。宿主不能把库的 false 抬成 true，也不能把
- * 自己未接线的能力借库的 true 当成可用。
+ * `library` 是库的事实，原样保留；`host` 是宿主自己的接线事实。库能力的
+ * `effective` 仍是 `library AND host`；`effective.execute` 是宿主自己的扩展，
+ * 不与已删除的库 execute 域取交集，也不冒充库实现。
  */
 export interface HostCapabilityReport {
   owner: 'host_composed';
   contract: MemoryHostCapabilities['contract'];
   /** 库报告原样；宿主不得改写其中任何值，包括把 false 改成 true。 */
   library: MemoryHostCapabilities;
-  /** 共享会话真正实现的生命周期方法；不冒充库 memory 能力。 */
-  host: { checkpoint: true; flush: true; close: true };
-  /** 库与宿主接线的交集；所有调用门禁读这里。 */
-  effective: MemoryHostCapabilities;
+  /** 共享会话真正实现的生命周期方法与宿主身体移动接线。 */
+  host: { checkpoint: true; flush: true; close: true; execute: HostExecutionReport };
+  /** 库能力交集 + 宿主 execute 扩展；所有调用门禁读这里。 */
+  effective: MemoryHostCapabilities & { execute: HostExecutionReport };
   /** 宿主声明为 true、库报告为 false 的能力（诊断用，不会放宽 effective）。 */
   overclaims: ComposedCapabilityReport['overclaims'];
 }
 
-/** 调用点的能力门禁：库报告为 false 时不得调用，也不得回退到更宽的旧后端。 */
+/** 调用点的能力门禁：库报告为 false 时不得调用，也不得回退到更宽的旧后端；execute 只读宿主接线。 */
 export type CapabilityGate = (domain: CapabilityDomain, name: string) => boolean;
 
 /** 启动时读取一次能力报告；查询失败或契约版本不符时抛错，不静默当成全 false。 */
@@ -68,32 +75,32 @@ export function readHostCapabilities(spatial: Pick<SharedSpatialSession, 'query'
   if (library.contract !== CONTRACT_VERSION) {
     throw new Error(`memory host contract "${library.contract}" is not ${CONTRACT_VERSION}`);
   }
-  // What the host actually wires. Walk execution is wired in
-  // `skills/movement/walk.ts` with a measured body port and shared-session
-  // invalidation; near/reach-block arrival, swim and boat are not wired and are
-  // deliberately omitted (omission means "no host claim", not "true").
-  const declaration: HostCapabilityDeclaration = {
-    execute: {
-      walk: true,
-      groundedArrival: true,
-      invalidation: true,
-      cancellation: true,
-    },
+  // 宿主身体移动由 runSkill(navigate_to) → coordinator/segment → adapter 执行；
+  // 库不执行行走。swim/boat 仍无宿主执行器，按 false 报告。
+  const execute: HostExecutionReport = {
+    walk: true,
+    groundedArrival: true,
+    invalidation: true,
+    cancellation: true,
+    swim: false,
+    boat: false,
   };
-  const composed = composeCapabilities(library, declaration);
+  // 库能力只按 library 自报，宿主声明为空；execute 不参与库交集。
+  const composed = composeCapabilities(library);
   return {
     owner: 'host_composed',
     contract: library.contract,
     library,
-    host: { checkpoint: true, flush: true, close: true },
-    effective: composed.effective,
+    host: { checkpoint: true, flush: true, close: true, execute: { ...execute } },
+    effective: { ...composed.effective, execute: { ...execute } },
     overclaims: composed.overclaims,
   };
 }
 
-/** 逐域读取一个能力位；未知键按 false（未接线不是已批准）。 */
+/** 逐域读取一个能力位；execute 只读宿主实际接线，其它域读库/宿主交集。 */
 export function capabilityGate(report: HostCapabilityReport): CapabilityGate {
   return (domain, name) => {
+    if (domain === 'execute') return report.host.execute[name as HostExecutionCapability] === true;
     // Effective is already library AND host, but intersecting with the live
     // library value again keeps a test/controlled override of `library` from
     // being masked by a stale precomputed `effective`.
@@ -103,22 +110,24 @@ export function capabilityGate(report: HostCapabilityReport): CapabilityGate {
   };
 }
 
-/** 执行能力门禁：false/未声明时抛结构化 unsupported，不进入身体调用。 */
+/** 执行能力门禁：宿主未提供时抛结构化 unsupported，不进入身体调用。 */
 export function requireExecutionCapability(report: HostCapabilityReport, name: string): void {
-  requireCapability(report.effective, 'execute', name);
+  if (report.host.execute[name as HostExecutionCapability] === true) return;
+  throw Object.assign(new Error(`host execution capability "${name}" is not available`), {
+    code: 'unsupported', domain: 'execute', capability: name,
+  });
 }
 
 /** 启动日志摘要：契约版本与各域为 false 的能力名（有界，不打印整份报告）。 */
 export function capabilitySummary(report: HostCapabilityReport) {
-  const library = Object.fromEntries(
-    (Object.keys(report.library) as (keyof MemoryHostCapabilities)[])
-      .filter((key): key is CapabilityDomain => key !== 'contract')
-      .map((domain) => [domain, Object.entries(report.library[domain]).filter(([, value]) => value !== true).map(([name]) => name)]),
-  ) as Record<CapabilityDomain, string[]>;
-  const effective = Object.fromEntries(
-    (Object.keys(report.effective) as (keyof MemoryHostCapabilities)[])
-      .filter((key): key is CapabilityDomain => key !== 'contract')
-      .map((domain) => [domain, Object.entries(report.effective[domain]).filter(([, value]) => value !== true).map(([name]) => name)]),
-  ) as Record<CapabilityDomain, string[]>;
-  return { contract: report.contract, owner: report.owner, library, effective, host: { ...report.host } };
+  const summaryOf = (source: MemoryHostCapabilities) => Object.fromEntries(
+    CAPABILITY_DOMAINS.map((domain) => [domain, Object.entries(source[domain]).filter(([, value]) => value !== true).map(([name]) => name)]),
+  ) as Record<Exclude<CapabilityDomain, 'execute'>, string[]>;
+  return {
+    contract: report.contract,
+    owner: report.owner,
+    library: summaryOf(report.library),
+    effective: summaryOf(report.effective),
+    host: { checkpoint: report.host.checkpoint, flush: report.host.flush, close: report.host.close, execute: { ...report.host.execute } },
+  };
 }

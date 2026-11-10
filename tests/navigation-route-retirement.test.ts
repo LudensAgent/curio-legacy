@@ -39,19 +39,19 @@ function flatMap(maxX: number) {
   return map;
 }
 
-function fakeSpatial(map: VoxelMap): SharedSpatialSession {
+function fakeSpatial(map: VoxelMap, query: (request: unknown) => unknown = () => { throw new Error('unexpected query'); }): SharedSpatialSession {
   return {
     worldId: WORLD,
-    session: { voxel: map, lifecycle: 'open', history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
+    session: { voxel: map, lifecycle: 'open' },
     closing: false, paused: false, observationAdmitted: true,
     capabilities: () => ({
-      owner: 'host_composed', contract: 'memory-host-contract/1',
-      library: { execute: { walk: true } }, host: {},
+      owner: 'host_composed', contract: 'memory-host-contract/2',
+      library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
       effective: { execute: { walk: true } },
       overclaims: [],
     }),
     attach: () => ({}), detach: () => {},
-    query: () => { throw new Error('退役测试不应查询旧路线/片段'); },
+    query,
   } as unknown as SharedSpatialSession;
 }
 
@@ -116,16 +116,25 @@ test('代码技能 api.moveTo 直接使用 navigate_to 并到达精确目标', a
   assert.equal(data.routeId, undefined);
 });
 
-test('spatial_query 对旧路线 kind 返回结构化 unsupported，不返回空列表', async () => {
+test('spatial_query 不再有旧路线兼容门面：未知 kind 原样交给库 validator', async () => {
   const adapter = new FakeAdapter();
-  const ctx = { ...makeCtx(adapter), spatial: { closing: false, session: { lifecycle: 'open' } } as unknown as SharedSpatialSession };
+  const forwarded: unknown[] = [];
+  const spatial = fakeSpatial(flatMap(1), (request) => {
+    forwarded.push(request);
+    return {
+      status: 'invalid_request', contract: 'memory-host-contract/2', worldId: WORLD, computedAt: 1,
+      readOnly: true, executable: false, problem: { kind: 'invalid_request', detail: 'unknown query kind' },
+    };
+  });
+  const ctx = { ...makeCtx(adapter), spatial };
   for (const kind of ['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges'] as const) {
     const r = await spatialQuery.run(ctx, { kind });
-    assert.equal(r.status, 'succeeded', r.summary);
-    assert.equal(r.data?.status, 'unsupported');
-    assert.equal(r.data?.reason, 'route_retired');
-    assert.equal(r.data?.items, undefined, '不能用空列表冒充无记录');
+    assert.equal(r.status, 'failed', r.summary);
+    assert.equal(r.failureCode, 'BAD_ARGS');
+    assert.equal(r.data?.status, 'invalid_request');
+    assert.equal(r.data?.reason, undefined, '没有任何 route_retired 兼容原因');
   }
+  assert.deepEqual(forwarded.map((request) => (request as { kind: string }).kind), ['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges']);
 });
 
 test('spatial_extrema 只保留 explored；deepest/farthest/gaps 被拒绝', () => {

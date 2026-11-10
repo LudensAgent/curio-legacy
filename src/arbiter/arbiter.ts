@@ -108,7 +108,7 @@ interface Running extends TaskInfo {
 // 原始 adapter，不能借它透视。把它一起禁掉会让 follow_passage 在路线预检时直接
 // 抛出 NO_XRAY，整条已记录路线都用不了。
 const XRAY_METHODS = new Set(['findBlocks', 'nearbyEntities']);
-const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'useBucketAt', 'interactEntity', 'ride', 'dismount', 'emptyFurnace', 'walkBody', 'walkTick']);
+const ACTION_METHODS = new Set(['moveTo', 'dig', 'placeBlockAt', 'placeBlockStateAt', 'equipItem', 'tossItem', 'arrangeHotbar', 'useGui', 'tradeWith', 'useBlockAt', 'useItem', 'rangedAttack', 'enterPortalAt', 'collectNearbyDrops', 'craft', 'sleepInBed', 'smelt', 'useChest', 'till', 'plant', 'eat', 'equipWeapon', 'attack', 'look', 'jump', 'swimTo', 'diveTo', 'pillarUp', 'drive', 'raiseShield', 'startDraw', 'releaseDraw', 'signText', 'editBook', 'chat', 'stopAll', 'fish', 'useItemOn', 'useBucketAt', 'interactEntity', 'ride', 'dismount', 'emptyFurnace']);
 
 /**
  * 动作仲裁器：任意时刻只有一个任务拥有角色控制权。

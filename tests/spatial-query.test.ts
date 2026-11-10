@@ -180,7 +180,7 @@ test('spatial_query：validate 只做对象边界，支持的 kind 由库校验�
       assert.notEqual(envelopeOf(result).status, 'invalid_request', `${String(request.kind)} 不应被库拒绝`);
     }
 
-    // 路线/片段/拓扑 kind 在宿主入口直接返回结构化 unsupported，不调用库、不返回空列表。
+    // 已退役的路线 kind 不再是库请求联合的一部分；由库 validator 自然拒绝。
     const retired: Record<string, unknown>[] = [
       { kind: 'fragments', dim: DIM, fragmentKind: 'walked', limit: 1000 },
       { kind: 'traversals', dim: DIM, fragmentId: 'f1', limit: 2 },
@@ -193,9 +193,10 @@ test('spatial_query：validate 只做对象边界，支持的 kind 由库校验�
     ];
     for (const request of retired) {
       const result = await spatialQuery.run(ctxFor(svc), request);
-      assert.equal(result.status, 'succeeded', `${String(request.kind)}：${result.summary}`);
-      assert.equal(rec(envelopeOf(result)).status, 'unsupported');
-      assert.equal(rec(envelopeOf(result)).reason, 'route_retired');
+      assert.equal(result.status, 'failed', `${String(request.kind)}：${result.summary}`);
+      assert.equal(result.failureCode, 'BAD_ARGS');
+      assert.equal(envelopeOf(result).status, 'invalid_request');
+      assert.equal(envelopeOf(result).data, undefined, '不为已退役 kind 返回空列表或兼容信封');
     }
 
     // 库仍是支持 kind 的 schema 边界：非法/旧 kind、未知字段、越界值都结构化拒绝。
@@ -240,7 +241,7 @@ test('spatial_query：cells 区分已观察 / resident-unobserved / no_record，
     assert.equal(result.status, 'succeeded');
     const envelope = envelopeOf(result);
     assert.equal(envelope.status, 'ok');
-    assert.equal(envelope.contract, 'memory-host-contract/1');
+    assert.equal(envelope.contract, 'memory-host-contract/2');
     assert.equal(envelope.worldId, WORLD);
     assert.equal(envelope.dim, DIM);
     assert.equal(envelope.sessionId, S1);
@@ -393,59 +394,49 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(capEnvelope.status, 'ok');
     const libraryData = innerOf(capabilities);
     const report = rec(libraryData.capabilities);
-    assert.equal(report.contract, 'memory-host-contract/1');
+    assert.equal(report.contract, 'memory-host-contract/2');
     const queryCaps = rec(report.query);
     assert.equal(queryCaps.cells, true);
     assert.equal(queryCaps.nodes, true);
     assert.equal(queryCaps.resourceAnchors, true);
     assert.equal(queryCaps.containerAnchors, true);
     assert.equal(queryCaps.containerContents, false);
-    // 生产组合只有 voxel + facts；旧路线/拓扑读面报告为 false，而不是可执行。
-    assert.equal(queryCaps.fragments, false);
-    assert.equal(queryCaps.traversals, false);
-    assert.equal(queryCaps.edges, false);
-    assert.equal(queryCaps.historyRoute, false);
-    assert.equal(queryCaps.anchors, false);
-    assert.equal(queryCaps.components, false);
-    assert.equal(queryCaps.segments, false);
-    assert.equal(queryCaps.portals, false);
+    // 生产组合只有 voxel + facts；退役路线键不存在，不以 false 占位。
+    for (const key of ['fragments', 'traversals', 'edges', 'historyRoute', 'anchors', 'components', 'segments', 'portals', 'frontiers']) {
+      assert.equal(Object.hasOwn(queryCaps, key), false, `已退役 query.${key} 不应出现在库报告中`);
+    }
     const memoryCaps = rec(report.memory);
     assert.equal(memoryCaps.observeBatch, true);
     assert.equal(memoryCaps.markStale, true);
-    assert.equal(memoryCaps.saveFragment, false);
-    assert.equal(memoryCaps.addTraversal, false);
-    assert.equal(memoryCaps.recordNode, false);
-    assert.equal(memoryCaps.upsertEdge, false);
-    assert.equal(memoryCaps.savePortalEdge, false);
-    assert.equal(Object.values(rec(report.plan)).some(Boolean), false, '旧路线规划不再报告为生产可执行');
+    for (const key of ['saveFragment', 'addTraversal', 'recordNode', 'upsertEdge', 'savePortalEdge']) {
+      assert.equal(Object.hasOwn(memoryCaps, key), false, `已退役 memory.${key} 不应出现在库报告中`);
+    }
+    assert.equal('plan' in report, false, '旧路线 plan 域已从库报告删除');
 
     // 双报告：库信封与 capabilities 形状原样；宿主组合能力单独标注 owner。
     assert.equal('owner' in report, false, '库能力报告不得混入宿主 owner');
     const host = rec(capEnvelope.hostComposed);
     assert.equal(host.owner, 'host_composed');
-    assert.equal(host.contract, 'memory-host-contract/1');
+    assert.equal(host.contract, 'memory-host-contract/2');
     assert.equal(rec(host.memory).checkpoint, true);
     assert.equal(rec(host.memory).markTraversed, true);
     assert.equal(rec(host.memory).markModified, true);
-    assert.equal(Object.hasOwn(rec(host.memory), 'saveFragment'), false, '路线片段写入键已从宿主组合能力删除');
-    assert.equal(Object.hasOwn(rec(host.memory), 'addTraversal'), false);
-    assert.equal(Object.hasOwn(rec(host.memory), 'recordNode'), false);
-    assert.equal(Object.hasOwn(rec(host.memory), 'upsertEdge'), false);
-    assert.equal(Object.hasOwn(rec(host.memory), 'savePortalEdge'), false);
+    for (const key of ['saveFragment', 'addTraversal', 'recordNode', 'upsertEdge', 'savePortalEdge']) {
+      assert.equal(Object.hasOwn(rec(host.memory), key), false, `退役 memory.${key} 不得出现在宿主组合能力`);
+    }
     assert.equal(rec(host.query).containerContents, false);
-    assert.equal(rec(host.query).fragments, false);
-    assert.equal(rec(host.query).historyRoute, false);
-    assert.equal(rec(host.query).edges, false);
-    assert.equal(rec(host.plan).walkAuto, false, '不再有旧路优先或同高 search 规划');
-    assert.equal(rec(host.plan).walkSearch, false);
-    assert.equal(rec(host.plan).swim, false);
+    for (const key of ['fragments', 'historyRoute', 'edges', 'frontiers']) {
+      assert.equal(Object.hasOwn(rec(host.query), key), false, `退役 query.${key} 不得出现在宿主组合能力`);
+    }
+    assert.equal('plan' in host, false, '旧路线 plan 域不得出现在宿主组合能力');
+    assert.equal('execute' in report, false, '库不再报告 execute；宿主 execute 是独立接线');
     assert.equal(rec(host.execute).walk, true);
+    assert.equal(rec(host.execute).swim, false);
     assert.equal(rec(host.persistence).sqlite, true);
     assert.equal(rec(host.persistence).manualResidency, true);
 
-    // 与库报告逐键对齐（D-013 取交集的前提），但值各自独立。memory 域例外：
-    // 宿主只声明仍接线的键，库报告保留的已退役路线写键不出现在宿主组合报告里。
-    for (const key of ['query', 'plan', 'execute', 'persistence'] as const) {
+    // 库报告与宿主声明在 memory/query/persistence 上逐键对齐；execute 不属于库交集。
+    for (const key of ['query', 'persistence'] as const) {
       assert.deepEqual(Object.keys(rec(host[key])).sort(), Object.keys(rec(report[key])).sort(), `${key} 能力键必须与库报告一致`);
     }
     const hostMemoryKeys = Object.keys(rec(host.memory)).sort();
@@ -517,20 +508,19 @@ test('spatial_query：nodes/resourceAnchors 读 facts；传送门用 nodes tag:p
     assert.equal(envelopeOf(otherDim).dim, 'nether');
     assert.deepEqual(list(innerOf(otherDim).items), []);
 
-    // 旧拓扑/片段/锚点读面不再把库数据透传给 Agent：统一结构化 unsupported。
-    const retired = [
-      spatialQuery.run(ctxFor(svc), { kind: 'edges', dim: DIM }),
-      spatialQuery.run(ctxFor(svc), { kind: 'historyRoute', dim: DIM, from: point(0, 64), to: point(5, 64) }),
-      spatialQuery.run(ctxFor(svc), { kind: 'segments', fragmentId: 'f-main' }),
-      spatialQuery.run(ctxFor(svc), { kind: 'fragments', dim: DIM }),
-      spatialQuery.run(ctxFor(svc), { kind: 'anchor', dim: DIM, here: point(0, 64), order: 'surface' }),
-      spatialQuery.run(ctxFor(svc), { kind: 'portals' }),
-    ];
-    for (const pending of retired) {
-      const result = await pending;
-      assert.equal(result.status, 'succeeded', result.summary);
-      assert.equal(rec(envelopeOf(result)).status, 'unsupported');
-      assert.equal(rec(envelopeOf(result)).reason, 'route_retired');
+    // 旧拓扑/片段/锚点 kind 已不在库请求联合中；由库 validator 自然拒绝。
+    for (const request of [
+      { kind: 'edges', dim: DIM },
+      { kind: 'historyRoute', dim: DIM, from: point(0, 64), to: point(5, 64) },
+      { kind: 'segments', fragmentId: 'f-main' },
+      { kind: 'fragments', dim: DIM },
+      { kind: 'anchor', dim: DIM, here: point(0, 64), order: 'surface' },
+      { kind: 'portals' },
+    ]) {
+      const result = await spatialQuery.run(ctxFor(svc), request);
+      assert.equal(result.status, 'failed', result.summary);
+      assert.equal(result.failureCode, 'BAD_ARGS');
+      assert.equal(rec(envelopeOf(result)).status, 'invalid_request');
       assert.equal(envelopeOf(result).items, undefined, '不返回空列表冒充无记录');
     }
   } finally {
@@ -546,11 +536,11 @@ test('spatial_query：库 validator 仍失败关闭非法端口请求；宿主�
   let shutdown: ShutdownResult | null = null;
   try {
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    const unknownField = svc.query({ kind: 'fragments', nodeId: 'x' } as unknown as SpatialQueryRequest);
+    const unknownField = svc.query({ kind: 'nodes', nodeId: 'x' } as unknown as SpatialQueryRequest);
     assert.equal(unknownField.status, 'invalid_request');
     assert.match(JSON.stringify(unknownField.problem), /unknown field/);
 
-    const overLimit = svc.query({ kind: 'fragments', limit: 1001 } as SpatialQueryRequest);
+    const overLimit = svc.query({ kind: 'nodes', limit: 1001 } as SpatialQueryRequest);
     assert.equal(overLimit.status, 'invalid_request');
 
     const badPoint = svc.query({ kind: 'cells', dim: DIM, positions: [{ x: 1.5, y: 0, z: 0 }] } as unknown as SpatialQueryRequest);

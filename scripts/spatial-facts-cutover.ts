@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { SemanticFact } from 'curio-minecraft-3d-memory';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import { applyHostSemanticMigration, planHostSemanticMigration, type HostSemanticNode } from '../src/spatial/facts-adapter.ts';
-import { backupDatabase } from './legacy-spatial-import.ts';
+import { backupDatabase } from './backup-database.ts';
 
 export async function cutoverFacts(options: { databasePath: string; worldId: string; execute?: boolean; backupPath?: string }) {
   const databasePath = resolve(options.databasePath);
@@ -25,7 +25,7 @@ export async function cutoverFacts(options: { databasePath: string; worldId: str
   if (!options.execute) return { executed: false, report: plan.report, gaps: plan.gaps };
   if (plan.report.conflicts || plan.report.unknown) throw new Error('migration has unresolved facts: ' + JSON.stringify({ report: plan.report, gaps: plan.gaps }));
   const backup = backupDatabase(databasePath, options.backupPath ?? databasePath + '.pre-facts-' + Date.now() + '.sqlite');
-  const session = await openSpatialSession({ databasePath, worldId: options.worldId, voxelLoading: 'manual', historyLoading: 'none' });
+  const session = await openSpatialSession({ databasePath, worldId: options.worldId, voxelLoading: 'manual' });
   try {
     const applied = applyHostSemanticMigration(session.facts, plan);
     if (applied.conflict) throw new Error('facts changed during offline migration');

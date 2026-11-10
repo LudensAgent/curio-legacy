@@ -4,11 +4,7 @@ import { searchLandRouteAsync, summarizeBoundaries, verifyLandRouteBounded, type
 import { goalOf, stanceFor, type NavigationGoal } from './goal.ts';
 import { fail, obj, ok, type FailureCode, type Skill, type SkillCtx } from '../types.ts';
 
-/**
- * 只读的体素路线预览。执行入口只有 navigate_to / advance；这里不再签发 routeId，
- * 也不查询历史拓扑、路径片段或同高兼容搜索。旧 `walk_path` 路线句柄与注册表已退役，
- * `source:"memory"|"search"` 不再被接受。
- */
+/** 只读的体素路线预览。执行入口只有 navigate_to / advance；source 只接受 auto/spatial。 */
 type RouteSource = 'auto' | 'spatial';
 type PlanArgs = {
   to: Vec3Like;
@@ -213,12 +209,12 @@ export function executionWindow(verification: LandRouteVerification | undefined,
 /**
  * 只读体素路线预览。执行入口只有 navigate_to / advance；不移动、不观察、不写库。
  * `auto` 与 `spatial` 都只在已观测 VoxelMap 上做有界 3D 搜索（当前证据优先，
- * 可返回 remembered 历史体素候选）；旧拓扑/片段/同高搜索与 routeId 注册表已退役。
+ * 可返回 remembered 历史体素候选）。
  */
 export const planRoute: Skill<PlanArgs> = {
   name: 'plan_route',
-  description: '只读体素路线预览：在已观测 VoxelMap 上做有界 3D 搜索（walk/step/drop），返回现有动作 steps（move_step/descend_to；精确连续脚位不给格动作）与搜索终态；历史体素候选额外带当前证据逐段复验的 verifiedOpenSegments/blocker。不移动/观察/写库，不挖/放/搭柱，也不签发 routeId；执行请用 navigate_to/advance。spatial 失败时返回搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）、当前证据可达前缀 endpoint/transitions/prefixSteps 与 boundarySummary（边界位置/方向/状态/原因；前缀不是到达）；若回执采用历史体素候选，当前证据前缀另放 currentPrefix/currentBoundaries/currentBoundarySummary，不混用。旧 source:"memory"（历史拓扑路线）与 source:"search"（同高路线 + routeId）已退役，会返回 BAD_ARGS。',
-  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|spatial","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；spatial 失败时返回可达前缀与边界摘要，前缀不是到达，也不会自动执行；memory/search 已退役，不返回 routeId，旧路线句柄不可执行；执行只用 navigate_to/advance。',
+  description: '只读体素路线预览：在已观测 VoxelMap 上做有界 3D 搜索（walk/step/drop），返回现有动作 steps（move_step/descend_to；精确连续脚位不给格动作）与搜索终态；历史体素候选额外带当前证据逐段复验的 verifiedOpenSegments/blocker。不移动/观察/写库，不挖/放/搭柱；执行请用 navigate_to/advance。spatial 失败时返回搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）、当前证据可达前缀 endpoint/transitions/prefixSteps 与 boundarySummary（边界位置/方向/状态/原因；前缀不是到达）；若回执采用历史体素候选，当前证据前缀另放 currentPrefix/currentBoundaries/currentBoundarySummary，不混用。',
+  argsDoc: '{"to":{"x":0,"y":64,"z":0},"mode"?:"walk","source"?:"auto|spatial","arrival"?:{"kind":"exact"},"deadlineMs"?:绝对 epoch 毫秒}；to 是绝对坐标（整数 x/z 为方块格，分数按精确脚位；名字先用 resolve_target）。spatial 返回 points/transitions 和现有动作 steps，可能带 historical 标记（历史体素、当前可通行性未知，执行时逐步核实）；spatial 失败时返回可达前缀与边界摘要，前缀不是到达，也不会自动执行；执行只用 navigate_to/advance。',
   timeoutMs: 15000,
   movement: false,
   readOnly: true,
@@ -232,9 +228,6 @@ export const planRoute: Skill<PlanArgs> = {
     const mode = a.mode ?? 'walk';
     if (mode !== 'walk') return { ok: false, error: 'plan_route 当前只支持 mode:"walk"；游泳用 swim_path，船用 boat_path' };
     const source = a.source ?? 'auto';
-    if (source === 'memory' || source === 'search') {
-      return { ok: false, error: `source:"${source}" 已退役：历史拓扑路线与同高搜索/routeId 不再可用；用 source:"spatial" 预览体素路线，执行用 navigate_to/advance` };
-    }
     if (source !== 'auto' && source !== 'spatial') return { ok: false, error: 'source 必须是 auto 或 spatial' };
     const arrival = a.arrival ?? { kind: 'exact' };
     if (!arrival || typeof arrival !== 'object' || Array.isArray(arrival) || (arrival as Record<string, unknown>).kind !== 'exact') {

@@ -59,16 +59,6 @@ if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
   throw new Error(`SPATIAL_VOXEL_LOADING 必须为 eager 或 manual，收到：${voxelLoadingRaw}`);
 }
 const voxelLoading: 'eager' | 'manual' = voxelLoadingRaw;
-// 历史/拓扑加载模式。默认 none：新主会话只验证已提交基线，不把旧 Fragment/
-// Topology 解码进内存，也不能用未加载的空集覆盖旧域。旧库的启动判定改由库在
-// open 时返回的行数/旧 marker 摘要完成，不再依赖内存历史对象。离线迁移脚本
-// 需要旧域时显式以 eager 打开（例如 spatial-cutover / legacy-spatial-import）。
-// 显式 eager 保留给诊断与离线工具，不是主会话默认。
-const historyLoadingRaw = str('SPATIAL_HISTORY_LOADING', 'none').toLowerCase();
-if (historyLoadingRaw !== 'eager' && historyLoadingRaw !== 'none') {
-  throw new Error(`SPATIAL_HISTORY_LOADING 必须为 eager 或 none，收到：${historyLoadingRaw}`);
-}
-const historyLoading: 'eager' | 'none' = historyLoadingRaw;
 // manual 工作集的字节上限。residentBytes 是库的解码体素估算，不是进程 RSS；
 // 32MiB 在已被探索的密集矿道里会长期贴边，只比上限高一点也永远腾不出空间。
 const maxResidentMb = num('SPATIAL_MAX_RESIDENT_MB', 64);
@@ -200,15 +190,12 @@ export const config = {
   spatial: {
     databasePath: res(str('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
     /**
-     * 体素驻留模式。eager（默认）= 打开时加载已提交体素，保持原有行为；
-     * manual = 只按显式 prepare 加载调用方点名的 Section，技能在执行前声明
-     * 依赖，未驻留的已保存证据有界排队。manual 只约束体素驻留；history/
-     * topology 是否加载由 historyLoading 决定。residentBytes 是库的工作集估算，
-     * 不是进程 RSS，也不是整个系统的内存上限。
+     * 体素驻留模式。manual（默认）= 只按显式 prepare 加载调用方点名的 Section，
+     * 技能在执行前声明依赖，未驻留的已保存证据有界排队；eager = 打开时加载
+     * 已提交体素。residentBytes 是库的工作集估算，不是进程 RSS，也不是整个
+     * 系统的内存上限。旧路线 Fragment/Topology 不再由会话加载。
      */
     voxelLoading,
-    /** 历史/拓扑加载模式；默认 none 不恢复旧域，旧库迁移由启动门禁与离线工具负责。 */
-    historyLoading,
     /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
     maxResidentMb,
     maxResidentBytes,

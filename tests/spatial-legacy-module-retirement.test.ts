@@ -32,11 +32,10 @@ test('生产源码不再引用已退役的路线模块与 passage 查询面', ()
   }
 });
 
-test('semantic-store 不再写 fragment 路线；迁移 marker 只走 topology', () => {
+test('semantic-store 只写 facts/ledger，不写 fragment 路线或 topology', () => {
   const file = path.join(ROOT, 'src/spatial/semantic-store.ts');
   const text = fs.readFileSync(file, 'utf8');
-  for (const call of ['saveFragment(', 'updateFragment(', 'forgetFragment(']) {
+  for (const call of ['saveFragment(', 'updateFragment(', 'forgetFragment(', 'topology.']) {
     assert.equal(text.includes(call), false, `semantic-store 不得调用 ${call}`);
   }
-  assert.match(text, /topology\.(getNode|saveNode)\(/, '迁移 marker 仍由 topology 节点承载');
 });

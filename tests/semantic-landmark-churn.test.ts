@@ -1,16 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { FragmentStore, TopologyStore } from 'curio-minecraft-3d-memory';
 import { semanticMemory } from './semantic-fixture.ts';
 
 test('反复看见同一处资源不再每帧写事实；同一快照内查地标不重新分页', () => {
   const { memory, stores } = semanticMemory();
-  // 旧路线拓扑仍可能存在于归档库中；语义组合不引用它，事实查询也不读它。
-  const legacyTopology = new TopologyStore(new FragmentStore('test'));
-  for (let i = 0; i < 1200; i++) {
-    legacyTopology.saveNode({ id: `route_${i}`, kind: 'turn', source: 'program', worldId: 'test', dim: 'the_nether', location: { kind: 'exact', pos: { x: i, y: 64, z: 0 } } });
-  }
-  assert.equal(legacyTopology.nodes({ limit: 1 }).total, 1200);
   memory.addLandmark('resource', 'nether_quartz_ore', 'the_nether', { x: 5, y: 60, z: 5 });
 
   let writes = 0;

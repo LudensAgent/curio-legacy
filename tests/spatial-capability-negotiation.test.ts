@@ -27,11 +27,12 @@ const DIM = 'overworld';
 function forcedReport(library: MemoryHostCapabilities, overrides: Partial<{ [K in keyof MemoryHostCapabilities['memory']]: boolean }>): HostCapabilityReport {
   const libraryWithOverrides = { ...library, memory: { ...library.memory, ...overrides } };
   const composed = composeCapabilities(libraryWithOverrides);
+  const execute = { walk: true, groundedArrival: true, invalidation: true, cancellation: true, swim: false, boat: false };
   return {
     owner: 'host_composed', contract: library.contract,
     library: libraryWithOverrides,
-    host: { checkpoint: true, flush: true, close: true },
-    effective: composed.effective,
+    host: { checkpoint: true, flush: true, close: true, execute },
+    effective: { ...composed.effective, execute },
     overclaims: composed.overclaims,
   };
 }
@@ -54,19 +55,25 @@ test('启动时读取并记录库能力报告与契约版本，宿主生命周�
   try {
     const report = svc.capabilities();
     assert.equal(report.owner, 'host_composed');
-    assert.equal(report.contract, 'memory-host-contract/1');
-    // 库报告原样：生产组合只有 voxel + facts，观测写入可用，旧路线写入/查询不可用。
+    assert.equal(report.contract, 'memory-host-contract/2');
+    // 库报告原样：生产组合只有 voxel + facts，观测写入可用；旧路线键不存在。
     assert.equal(report.library.memory.markTraversed, true);
     assert.equal(report.library.memory.markModified, true);
-    assert.equal(report.library.memory.saveFragment, false);
-    assert.equal(report.library.memory.addTraversal, false);
+    assert.equal('saveFragment' in report.library.memory, false);
+    assert.equal('addTraversal' in report.library.memory, false);
     assert.equal(report.library.query.nodes, true);
-    assert.equal(report.library.query.fragments, false);
-    assert.equal(report.library.query.historyRoute, false);
+    assert.equal('fragments' in report.library.query, false);
+    assert.equal('historyRoute' in report.library.query, false);
     // containerContents 恒为 false（宿主账本职责），不是可协商项。
     assert.equal(report.library.query.containerContents, false);
-    // 持久化生命周期由共享会话拥有，不冒充库 memory 能力。
-    assert.deepEqual(report.host, { checkpoint: true, flush: true, close: true });
+    // 持久化生命周期与身体执行由宿主拥有；库报告不再有 execute 域。
+    assert.deepEqual(report.host, {
+      checkpoint: true, flush: true, close: true,
+      execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true, swim: false, boat: false },
+    });
+    assert.equal('execute' in report.library, false, '库不再报告 execute');
+    assert.equal(capabilityGate(report)('execute', 'walk'), true);
+    assert.equal(capabilityGate(report)('execute', 'swim'), false);
 
     // 与直接查询同一份事实；启动只读取一次，不在运行中重新协商。
     const direct = svc.query({ kind: 'capabilities' });
@@ -75,9 +82,12 @@ test('启动时读取并记录库能力报告与契约版本，宿主生命周�
     assert.equal(svc.capabilities(), report, '报告在启动时记录一次，读取不产生新协商');
 
     const summary = capabilitySummary(report);
-    assert.equal(summary.contract, 'memory-host-contract/1');
+    assert.equal(summary.contract, 'memory-host-contract/2');
     assert.equal(summary.owner, 'host_composed');
-    assert.deepEqual(summary.host, { checkpoint: true, flush: true, close: true });
+    assert.deepEqual(summary.host, {
+      checkpoint: true, flush: true, close: true,
+      execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true, swim: false, boat: false },
+    });
     assert.ok(summary.library.query.includes('containerContents'), '摘要只列 false 键，保留容器内容边界');
     assert.ok(summary.library.memory.every((name) => name !== 'markTraversed'), '可用能力不进 false 摘要');
   } finally {
@@ -150,7 +160,7 @@ test('markStale 能力 false：生命周期边界不调用库，返回值如实 
 test('读取失败或契约版本不符时拒绝启动，不把缺失当成全 false', () => {
   const unavailable = {
     query: (): SpatialQueryResult => ({
-      status: 'unsupported', contract: 'memory-host-contract/1', worldId: WORLD,
+      status: 'unsupported', contract: 'memory-host-contract/2', worldId: WORLD,
       computedAt: 1, readOnly: true, executable: false,
       problem: { kind: 'unsupported', query: 'capabilities', detail: 'not implemented' },
     }),
@@ -159,11 +169,11 @@ test('读取失败或契约版本不符时拒绝启动，不把缺失当成全 f
 
   const wrongContract = {
     query: (): SpatialQueryResult => ({
-      status: 'ok', contract: 'memory-host-contract/1', worldId: WORLD,
+      status: 'ok', contract: 'memory-host-contract/2', worldId: WORLD,
       computedAt: 1, readOnly: true, executable: false,
       data: {
         kind: 'capabilities',
-        capabilities: { contract: 'memory-host-contract/2' } as unknown as MemoryHostCapabilities,
+        capabilities: { contract: 'memory-host-contract/1' } as unknown as MemoryHostCapabilities,
       },
     }),
   };

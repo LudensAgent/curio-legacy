@@ -105,7 +105,6 @@ try {
     worldId: adapter.state().worldId,
     databasePath: config.spatial.databasePath,
     voxelLoading: config.spatial.voxelLoading,
-    historyLoading: config.spatial.historyLoading,
     // 快照序列化容量是宿主配置，不是库的固定规则；长期世界超过库默认 64MiB 后
     // checkpoint 会一直 capacity 失败。上限只决定一次保存能否完成，不改变驻留。
     snapshotLimits: {
@@ -164,8 +163,8 @@ try {
 const worldMemoryPath = path.join(config.dataDir, 'world-memory.json');
 const migrationGate = checkMigrationGate({
   legacyFactsMigrationVersion: spatial.session.legacyFactsMigrationVersion,
-  // 旧域行数/旧 marker 由库在 open 时只读计数得到；主会话 historyLoading:'none'
-  // 不加载 Fragment/Topology，门禁也不再遍历它们。
+  // 旧域行数/旧 marker 由库在 open 时只读计数得到；主会话不加载、不写、
+  // 不删除已退役的 Fragment/Topology 行。
   legacyStore: spatial.session.legacyStoreSummary,
   ledger: spatial.session.ledger,
   worldMemoryPath,
@@ -193,7 +192,7 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
       ? '｜换出=not_reported'
       : `｜换出=${fact.eviction.status}（${fact.eviction.evictedSections} sections${fact.eviction.error === undefined ? '' : `，error=${String(fact.eviction.error)}`}）`;
     bus.publish('spatial_checkpoint', 'P3',
-      `共享空间记忆已保存 ${checkpoint.checkpointId}（voxel=${checkpoint.voxelRevision}, fragment=${checkpoint.fragmentRevision}, topology=${checkpoint.topologyRevision}）｜剩余 dirty=${fact.remainingDirty}${evictionNote}`,
+      `共享空间记忆已保存 ${checkpoint.checkpointId}（voxel=${checkpoint.voxelRevision}, journal=${checkpoint.journalRevision}, ledger=${checkpoint.ledgerRevision}, facts=${checkpoint.factsRevision}${checkpoint.factsCommitted ? '' : ', facts=deferred'}）｜剩余 dirty=${fact.remainingDirty}${evictionNote}`,
       { checkpoint, remainingDirty: fact.remainingDirty, state: fact.state, eviction: fact.eviction });
     return;
   }

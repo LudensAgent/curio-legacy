@@ -170,8 +170,8 @@ test('navigate_to 恢复保留原目标与目标类型，不能换目标或改�
 
 test('Agent 新的显式委托不受恢复上下文约束', () => {
   const adapter = new FakeAdapter();
-  const values = { routeId: 'rt_9' };
-  const out = constrainRecoveryAction({ adapter } as unknown as SkillCtx, 'walk_path', values);
+  const values = { to: { x: 1, y: 64, z: 0 }, targetKind: 'cell' };
+  const out = constrainRecoveryAction({ adapter } as unknown as SkillCtx, 'navigate_to', values);
   assert.deepEqual(out, values, '没有 recovery 时原样放行');
 });
 
