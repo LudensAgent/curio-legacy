@@ -12,8 +12,9 @@ import type { NavigationTargetKind } from './goal.ts';
 
 export type MoveMode = 'walk' | 'step' | 'drop' | 'jump' | 'ladder';
 /**
- * Default modes for advance. Ladder and jump body control remain opt-in; the
- * skill-specific KINDS arrays validate explicit requests.
+ * Default modes for advance. `navigate_to` has its own KINDS list so jump and
+ * ladder body control remain explicitly opt-in; advance keeps its documented
+ * walk/step/drop default.
  */
 export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop'];
 
