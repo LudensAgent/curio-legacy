@@ -160,6 +160,8 @@ test('有界分段报告实测事实、失效原因并保留原目标', async (t
   assert.equal(segment.progress.meaningful, false, '没有新观测/新区块/到达时，位移本身不算探索进展');
   assert.equal(segment.progress.reason, 'none');
   assert.match(first.summary, /实测位移 2 格、新区块 0、新观测格 0/, '失败摘要也带实测分段事实');
+  assert.match(first.summary, /已沿确认路线移动，未新增探索覆盖/);
+  assert.doesNotMatch(first.summary, /本段无新进展/);
 
   // 下一段继续用同一个原目标，不因上一段的 maxSteps 截断而改目标。
   const second = await navigateTo.run(ctx, {

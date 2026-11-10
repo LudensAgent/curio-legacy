@@ -204,7 +204,12 @@ export const navigateTo: Skill<NavigateArgs> = {
     }
     const last = outcome.segments.at(-1);
     const segment = segmentCompat(args, outcome, invocationStart, newChunks, newObservedCells);
-    const segmentNote = `；实测位移 ${segment.displacement.horizontal} 格、新区块 ${newChunks}、新观测格 ${newObservedCells}，${segment.progress.meaningful ? '本段有进展' : '本段无新进展'}`;
+    // 在已知地图上走过的前缀不会新增探索覆盖，但仍是实际移动。
+    // 不能把探索指标的 false 告诉心智成“没走动”，诱使它改用单步或挖掘。
+    const progressNote = segment.progress.meaningful ? '本段有进展'
+      : outcome.segments.some((entry) => entry.confirmed.length > 0) ? '已沿确认路线移动，未新增探索覆盖'
+        : segment.displacement.euclidean > 0.05 ? '身体已有部分位移，未确认新路径段' : '本段无新进展';
+    const segmentNote = `；实测位移 ${segment.displacement.horizontal} 格、新区块 ${newChunks}、新观测格 ${newObservedCells}，${progressNote}`;
     const extra = {
       requestedTarget: { ...args.to },
       remainingTarget: { ...args.to },
