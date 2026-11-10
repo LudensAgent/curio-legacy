@@ -31,6 +31,9 @@ test('同一位置连续路径失败时，用户提醒要求换动作类而不�
   assert.match(user.content, /不要只写 move_step\/plan_route\/navigate_to/);
   assert.match(user.content, /excavate_run/);
   assert.match(user.content, /assess_landings 后再 descend_to/);
+  assert.match(user.content, /这几次都没授权挖\/放：只说明不施工时没找到/, '没授权施工的失败不能断言地形没有路线');
+  assert.match(user.content, /travel_to\/explore_toward 带 allowDig\/allowPlace/, '带施工授权的寻路与手动施工并列可见');
+  assert.doesNotMatch(user.content, /这段地形没有可执行/);
 });
 
 test('activity reference frame survives creation, description, and the completed record', () => {

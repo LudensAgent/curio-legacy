@@ -472,6 +472,10 @@ export class WorldMemory {
     return this.semantic.visitedExtent(dim);
   }
 
+  nearbyPaths(dim: string, here: Vec3Like, radius: number) {
+    return this.semantic.nearbyPaths(dim, here, radius);
+  }
+
   /** 计数式新颖性：1/sqrt(n+1)，取目标点周围 3x3 区块平均。 */
   novelty(dim: string, x: number, z: number): number {
     return this.semantic.novelty(dim, x, z);

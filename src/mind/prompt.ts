@@ -506,7 +506,9 @@ export function situationalReminders(ctx: MindContext): string[] {
   const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
   if (pathFails.length >= 3) {
     const f = pathFails[0];
-    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。这段地形没有可执行的 walk/step/drop 路线；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标，或用 excavate_run/place_support/pillar_one 施工，或 assess_landings 后再 descend_to；由你决定。`);
+    // 失败只说明这几次授权下走不通：没开挖/放时不能断言“地形没有路线”，也要让带施工授权的寻路和手动直线施工并列可见。
+    const unbuilt = pathFails.every((x) => { const a = x.args as { allowDig?: unknown; allowPlace?: unknown }; return a.allowDig !== true && a.allowPlace !== true; });
+    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（辅助按代价挑路：现成地面和已有的路优先，没有才挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
@@ -714,6 +716,13 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
   const n = tier === 'glance' ? 5 : 10;
   const here = p.self.pos;
   const placed = memory.queryPlacedNear({ x: here[0], y: here[1], z: here[2] }, 8, p.self.dim);
+  // 身边记录过的路：方块图只有 ±4 格、nearby_placed 只列最近 5 块（刚搭的那几块就占满），10 格外自己的旧桥/旧路从来看不到。
+  // 按连成一条的路报最近处和通到哪；只给历史事实，接不接由 Agent 定。
+  const at = { x: here[0], y: here[1], z: here[2] };
+  const where = (c: Vec3Like) => { const d = Math.round(Math.hypot(c.x + 0.5 - at.x, c.z + 0.5 - at.z)), dy = Math.round(c.y - at.y); return `(${c.x},${c.y},${c.z}) ${d ? `${dirName(c.x + 0.5 - at.x, c.z + 0.5 - at.z)} ${d}格` : '就在脚下'}${dy ? `，${dy > 0 ? '高' : '低'} ${Math.abs(dy)} 格` : ''}`; };
+  const KIND = { bridge: '搭过', dug: '挖过', walked: '走过', built: '建过' } as const;
+  const paths = tier === 'deliberate' ? memory.nearbyPaths(p.self.dim, at, 16).slice(0, 3).map((r) =>
+    `${r.kinds.map((k) => KIND[k]).join('/')}的路（${r.cells} 格记录）：${r.onIt ? '你正站在这条上' : `最近处 ${where(r.nearest)}`}；它一直通到 ${where(r.far)}`) : [];
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
@@ -725,6 +734,7 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
+    ...(paths.length ? { nearby_paths: [...paths, '以上是自己以前亲历的路径记录，不代表现在还通；沿记录走可用 travel_to 目标坐标并写 via:"history"'] } : {}),
     ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${dirName(b.pos.x - here[0], b.pos.z - here[2])} ${Math.round(b.dist)}格，自己放的）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
