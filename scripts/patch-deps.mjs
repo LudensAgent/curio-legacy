@@ -40,18 +40,6 @@ function patch(rel, mark, anchor, replacement, done, missing) {
     'mineflayer 清空主手失败时不丢弃光标物品', '检查 equipEmpty 的光标清理');
 }
 
-// 寻路停止挖掘时只移除自己的监听；removeAllListeners 的第二个参数无效，
-// 会把通道记忆等外部订阅一起清空，之后成功挖掘也不再留下记录。
-{
-  const anchor = `    bot.removeAllListeners('diggingAborted', detectDiggingStopped)
-    bot.removeAllListeners('diggingCompleted', detectDiggingStopped)`;
-  patch('mineflayer-pathfinder/index.js', '/* curio-patch: preserve external digging listeners */', anchor,
-    `    /* curio-patch: preserve external digging listeners */
-    bot.removeListener('diggingAborted', detectDiggingStopped)
-    bot.removeListener('diggingCompleted', detectDiggingStopped)`,
-    'mineflayer-pathfinder 停止挖掘时保留外部挖掘记录监听', '检查 detectDiggingStopped 的监听清理');
-}
-
 // 死亡只取消当前挖掘；通道记录等跨生命订阅仍需接收重生后的挖掘事件。
 {
   const anchor = `      bot.removeAllListeners('diggingAborted')
@@ -67,49 +55,6 @@ function patch(rel, mark, anchor, replacement, done, missing) {
     `      bot.emit('diggingCompleted', newBlock)`,
     `      bot.emit('diggingCompleted', block) /* curio-patch: report mined block */`,
     'mineflayer 挖掘完成事件保留原方块类型和位置', '检查 onBlockUpdate 的完成事件');
-}
-
-// mineflayer-pathfinder 2.4.x：路上要开门时（useOne），开完门 toPlace 已经空了，placingBlock 变成 undefined，
-// placing 却还是 true；之后每个物理刻都读 placingBlock.y 抛错（日志里一次几十条 "reading 'y'"），寻路卡在原地。
-{
-  const mark = '/* curio-patch: placingBlock guard */';
-  const anchor = `      const block = stateMovements.getScaffoldingItem()`;
-  patch('mineflayer-pathfinder/index.js', mark, anchor, `      ${mark}\n      if (!placingBlock) { placing = false; return }\n${anchor}`,
-    'mineflayer-pathfinder 补丁已打上：placingBlock 为空时不再每刻抛错', '检查 placingBlock 的用法');
-}
-
-// 搭桥后先退回原来的落脚点，途中继续潜行；取消时清掉返回动作，避免旧的放置回包恢复它。
-{
-  const rel = 'mineflayer-pathfinder/index.js';
-  patch(rel, '/* curio-patch: bridge return epoch */', '  let returningPos = null',
-    '  let returningPos = null\n  let bridgeReturnEpoch = 0 /* curio-patch: bridge return epoch */',
-    'mineflayer-pathfinder 桥接返回状态已启用', '检查 returningPos 状态');
-  patch(rel, '/* curio-patch: cancel bridge return */', '    if (clearStates) bot.clearControlStates()',
-    `    if (clearStates) {\n      /* curio-patch: cancel bridge return */\n      bridgeReturnEpoch++\n      returningPos = null\n      bot.clearControlStates()\n    }`,
-    'mineflayer-pathfinder 取消时清除桥接返回', '检查 resetPath 控制状态');
-  patch(rel, '/* curio-patch: finish bridge return */', '      returningPos = null\n    }\n\n    if (path.length === 0)',
-    '      returningPos = null\n      bot.setControlState(\'sneak\', false) /* curio-patch: finish bridge return */\n    }\n\n    if (path.length === 0)',
-    'mineflayer-pathfinder 返回后松开潜行', '检查 returningPos 处理');
-  patch(rel, '/* curio-patch: bridge placement epoch */', `        bot.equip(block, 'hand')\n          .then(function () {\n            lockEquipItem.release()`,
-    `        const placementEpoch = bridgeReturnEpoch /* curio-patch: bridge placement epoch */\n        bot.equip(block, 'hand')\n          .then(function () {\n            lockEquipItem.release()\n            if (placementEpoch !== bridgeReturnEpoch) return`,
-    'mineflayer-pathfinder 忽略取消后的装备回包', '检查搭桥装备调用');
-  patch(rel, '/* curio-patch: hold sneak on bridge return */', `                // Dont release Sneak if the block placement was not successful\n                bot.setControlState('sneak', false)\n                if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()`,
-    `                /* curio-patch: hold sneak on bridge return */\n                if (placementEpoch !== bridgeReturnEpoch) return\n                if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) {\n                  returningPos = placingBlock.returnPos.clone()\n                  bot.setControlState('sneak', true)\n                } else {\n                  bot.setControlState('sneak', false)\n                }`,
-    'mineflayer-pathfinder 搭桥返回时保持潜行', '检查搭桥放置完成回调');
-}
-
-// 路径中断时角色可能蹲在方块边缘，脚心已经进入还没有支撑的相邻格；不能把脚心瞬移到该格中心。
-{
-  const anchor = `    const blockX = Math.floor(bot.entity.position.x) + 0.5
-    const blockZ = Math.floor(bot.entity.position.z) + 0.5
-
-    // Make sure our bounding box don't collide with neighboring blocks
-    // otherwise recenter the position
-    if (Math.abs(bot.entity.position.x - blockX) > 0.2) { bot.entity.position.x = blockX }
-    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }`;
-  patch('mineflayer-pathfinder/index.js', '/* curio-patch: stop without moving position */', anchor,
-    '    /* curio-patch: stop without moving position */',
-    'mineflayer-pathfinder 停止时不再把角色移到相邻空格中心', '检查 fullStop 的位置重置');
 }
 
 // mineflayer 物理：主线程卡住 N 秒后，积压的时间不会丢掉，之后每 50ms 补跑 4 个物理刻、只消化掉 3 刻的积压，
