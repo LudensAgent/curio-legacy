@@ -838,6 +838,11 @@ export class SpatialSemanticStore {
     }
   }
 
+  /** Current-validity flag for known contents; quantities/time/position stay exact. */
+  markContainerContentsPossiblyStale(): number {
+    return this.containerLedgerStore.markContentsPossiblyStale();
+  }
+
   chests(dim?: string): ChestRecord[] {
     const entries = new Map<string, ChestRecord>(this.containerLedgerStore.chests(dim).map((entry) => [chestKey(this.worldId, entry.dim, entry.pos), entry] as const));
     for (const node of this.containerNodes()) {

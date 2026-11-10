@@ -41,6 +41,23 @@ test('long-term resource landmarks remain addressable after the short visual cac
   assert.equal(memory.findLandmark(landmark.id, 'the_nether'), undefined);
 });
 
+test('session/world progression marks known contents possibly stale without changing exact facts', (t) => {
+  const { world, memory } = fixture();
+  t.after(() => memory.close());
+  memory.noteChestUse('overworld', box, { seen: [{ name: 'dirt', count: 7 }], now: 1_700_000_000_000 });
+  const before = memory.chestAt('overworld', box)!;
+  assert.equal(before.contents?.possiblyStale, undefined);
+
+  const perception = new Perception(world, memory, new EventBus(), new Vision(world));
+  perception.update();
+  const after = memory.chestAt('overworld', box)!;
+  assert.equal(after.contents?.possiblyStale, true);
+  assert.deepEqual(after.contents?.items, before.contents?.items);
+  assert.equal(after.contents?.observedAt, before.contents?.observedAt);
+  assert.deepEqual(after.pos, before.pos);
+  assert.equal(memory.markContainerContentsPossiblyStale(), 0, '已经是 stale 的不重复计数');
+});
+
 test('chestLocation 位置恒精确，不再按时间淡化成区域', (t) => {
   const memory = new WorldMemory(null), now = Date.now(), pos = { x: 123, y: 67, z: -234 };
   t.after(() => memory.close());

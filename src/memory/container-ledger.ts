@@ -110,6 +110,23 @@ export class ContainerLedger {
     if (delete this.data.chests[this.key(dim, pos)]) this.dirty = true;
   }
 
+  /**
+   * Mark known container contents as possibly changed after an unobserved session
+   * or world progression. This preserves the last exact items, counts, position
+   * and observedAt; it only flags current validity, never decays or empties them.
+   */
+  markContentsPossiblyStale(): number {
+    let marked = 0;
+    for (const entry of Object.values(this.data.chests)) {
+      if (entry.worldId !== this.worldId || entry.contents === undefined || entry.contents.observedAt <= 0) continue;
+      if (entry.contents.possiblyStale === true) continue;
+      entry.contents = { ...entry.contents, possiblyStale: true };
+      marked += 1;
+      this.dirty = true;
+    }
+    return marked;
+  }
+
   chests(dim?: string): ContainerEntry[] {
     return Object.values(this.data.chests)
       .filter((entry) => entry.worldId === this.worldId && (!dim || entry.dim === dim))

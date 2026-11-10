@@ -579,6 +579,14 @@ export class WorldMemory {
     return this.semantic.resourceIndexStatus();
   }
 
+  /**
+   * 会话/世界推进后标记容器内容可能变化：只影响当前有效性，不扣减数量、
+   * 不扩大坐标、不改最后确认时间；下次开箱全量快照再校正。
+   */
+  markContainerContentsPossiblyStale(): number {
+    return this.semantic.markContainerContentsPossiblyStale();
+  }
+
   // ------------------------------------------------ 技能 / 目标 / 笔记
   recordSkill(name: string, status: 'succeeded' | 'failed' | 'cancelled', failCode?: string) {
     const s = (this.data.skillStats[name] ??= { runs: 0, ok: 0, fail: 0, cancelled: 0, failCodes: {} });

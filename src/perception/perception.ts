@@ -196,6 +196,8 @@ export class Perception {
   private readonly spatial?: SharedSpatialSession;
   private lastStanceAt = 0;
   private lastStanceKey = '';
+  /** 容器内容跨会话/维度/世界的当前有效性边界；变化时只标 possiblyStale。 */
+  private lastMemoryScope: string | null = null;
   /** 效率账本的挖掘游标：不依赖 where，任何环境都能推进 */
   private lastDugAt = 0;
   /** 空间记账（矿点失效、放置方块移除）的挖掘游标：where 未知时先不消费，等能判断环境再补 */
@@ -570,6 +572,12 @@ export class Perception {
   update(): Percept {
     const s = this.adapter.state();
     this.memory.setWorld(s.worldId);
+    const memoryScope = `${s.worldId}:${s.sessionId}:${s.dim}`;
+    if (this.lastMemoryScope !== memoryScope) {
+      this.lastMemoryScope = memoryScope;
+      // 离线/换会话/换维后的已知库存数量与时间保留，只把当前有效性标为待确认。
+      this.memory.markContainerContentsPossiblyStale();
+    }
     const priorFrame = this.vision.frame;
     this.vision.refresh();
     const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
