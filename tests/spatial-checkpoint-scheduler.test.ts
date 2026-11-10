@@ -153,6 +153,43 @@ test('默认每 30 秒触发一次 checkpoint；保存后 clean 则跳过', asyn
   assert.equal(reports.length, 1, 'clean 跳过不产生汇报');
 });
 
+test('一个周期内连续提交有界批次，直到 clean 或达到批数上限', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fx = makeSpatial();
+  fx.setState({ dirty: true });
+  let saved = 0;
+  fx.onCheckpoint(async () => {
+    saved += 1;
+    fx.setState({
+      dirty: saved < 3,
+      lastConfirmedCheckpointId: `cp-${saved}`,
+    });
+    return checkpoint(`cp-${saved}`);
+  });
+  const reports: SpatialCheckpointReport[] = [];
+  const stop = startSpatialCheckpointScheduler(fx.spatial, (report) => reports.push(report), 1000, 4);
+  t.after(stop);
+
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(fx.calls, 3);
+  assert.equal(reports.length, 3);
+  assert.deepEqual(reports.map((report) => report.status === 'saved' ? report.remainingDirty : null), [true, true, false]);
+
+  // 上限：状态始终 dirty 时，一个周期只提交 maxBatchesPerCycle 批。
+  const bounded = makeSpatial();
+  bounded.setState({ dirty: true });
+  bounded.onCheckpoint(async () => checkpoint('cp-x'));
+  let boundedReports = 0;
+  const stopBounded = startSpatialCheckpointScheduler(bounded.spatial, () => { boundedReports += 1; }, 1000, 2);
+  t.after(stopBounded);
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(bounded.calls, 2);
+  assert.equal(boundedReports, 2);
+  assert.equal(bounded.state.dirty, true);
+});
+
 test('clean 状态每个周期都跳过', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();

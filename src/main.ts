@@ -33,7 +33,11 @@ import { checkMigrationGate } from './spatial/migration-state.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
 import { capabilitySummary } from './spatial/capabilities.ts';
-import { startSpatialCheckpointScheduler } from './spatial/checkpoint-scheduler.ts';
+import {
+  DEFAULT_SPATIAL_CHECKPOINT_BATCHES,
+  DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
+  startSpatialCheckpointScheduler,
+} from './spatial/checkpoint-scheduler.ts';
 import { classifySpatialShutdown, errorFacts, spatialShutdownDiagnostics } from './spatial/host-shutdown.ts';
 import { HindsightBackend } from './memory/hindsight.ts';
 import { HindsightUsage } from './memory/hindsight-usage.ts';
@@ -104,6 +108,8 @@ try {
     // 快照序列化容量是宿主配置，不是库的固定规则；长期世界超过库默认 64MiB 后
     // checkpoint 会一直 capacity 失败。上限只决定一次保存能否完成，不改变驻留。
     snapshotLimits: { maxBytes: config.spatial.snapshotMaxBytes },
+    // 单次保存只提交有界 dirty 前缀；剩余 dirty 由同一调度周期的后续批次提交。
+    voxelBatchMaxBytes: config.spatial.voxelBatchMaxBytes,
     ...(config.spatial.voxelLoading === 'manual'
       ? { residencyLimits: { maxResidentBytes: config.spatial.maxResidentBytes } }
       : {}),
@@ -192,7 +198,7 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
     `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}${capacityNote}｜lifecycle=${fact.state.lifecycle}, closing=${spatial.closing}, 剩余 dirty=${fact.remainingDirty}, unconfirmed=${fact.state.unconfirmedCheckpointId ?? 'none'}`,
     { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
-});
+}, DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS, DEFAULT_SPATIAL_CHECKPOINT_BATCHES);
 const containers = new ContainerLedger(path.join(config.dataDir, 'containers.json'), adapter.state().worldId);
 const semantic = new SpatialSemanticStore(spatial.session, containers, {
   sessionId: adapter.state().sessionId,

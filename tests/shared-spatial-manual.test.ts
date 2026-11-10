@@ -263,6 +263,58 @@ test('a confirmed checkpoint evicts saved manual sections; prepare reloads the o
   }
 });
 
+test('shutdown commits bounded dirty batches until clean and reloads all cells', { timeout: 20_000 }, async () => {
+  const { dir, dbPath } = makeTempDb();
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      voxelBatchMaxBytes: 1,
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    shared.observe([
+      blockObservation(0, 64, 0, 1000, 1, SESSION, 'minecraft:stone'),
+      blockObservation(20, 64, 0, 1000, 2, SESSION, 'minecraft:dirt'),
+      blockObservation(40, 64, 0, 1000, 3, SESSION, 'minecraft:air'),
+    ]);
+    const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
+    assert.equal(drained.pending.observations, 0);
+    assert.equal(shared.getPersistenceState().dirty, true);
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
+    assert.equal(shutdown.error, null);
+    assertClose(close);
+    assert.equal(close?.dirty, false, '最终关机必须把分片 dirty 批次全部提交');
+
+    const reopened = await SharedSpatialSession.open({ worldId: WORLD, databasePath: dbPath, timeoutMs: 5000 });
+    try {
+      assert.equal(reopened.session.voxel.cellAt(DIM, 0, 64, 0).observed, true);
+      assert.equal(reopened.session.voxel.cellAt(DIM, 20, 64, 0).observed, true);
+      assert.equal(reopened.session.voxel.cellAt(DIM, 40, 64, 0).observed, true);
+    } finally {
+      const reopenedShutdown = await reopened.shutdown();
+      assert.equal(reopenedShutdown.error, null);
+    }
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (!failed) {
+      const result = await shutdownQuietly(shared);
+      if (close === null) close = result?.close ?? null;
+    } else {
+      close = (await shutdownQuietly(shared))?.close ?? null;
+    }
+    cleanup(dir, close);
+  }
+});
+
 test('a refused queued byte growth retains the original evidence and shutdown reports it unsaved', { timeout: 30_000 }, async () => {
   const { dir, dbPath } = makeTempDb();
   let shared: SharedSpatialSession | null = null;

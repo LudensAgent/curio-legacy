@@ -14,6 +14,8 @@ import type { PostSaveEviction } from './shared-session.ts';
 
 /** 常规运行时存档周期；固定默认值，不提供用户配置开关。 */
 export const DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS = 30_000;
+/** 每个调度周期最多提交多少个 bounded dirty 批次；防止一次周期无限占用。 */
+export const DEFAULT_SPATIAL_CHECKPOINT_BATCHES = 8;
 
 /** 调度器需要的最小公开表面；SharedSpatialSession 直接满足。 */
 export interface SpatialCheckpointSource {
@@ -55,31 +57,45 @@ export function startSpatialCheckpointScheduler(
   spatial: SpatialCheckpointSource,
   report: (fact: SpatialCheckpointReport) => void,
   intervalMs = DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
+  maxBatchesPerCycle = 1,
 ): () => void {
   // 只接受 Node 定时器支持范围内的整数毫秒（1..2147483647）。
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 2_147_483_647) {
     throw new RangeError(`spatial checkpoint interval must be an integer between 1 and 2147483647 ms, got ${intervalMs}`);
   }
+  if (!Number.isInteger(maxBatchesPerCycle) || maxBatchesPerCycle < 1 || maxBatchesPerCycle > 64) {
+    throw new RangeError(`maxBatchesPerCycle must be an integer between 1 and 64, got ${maxBatchesPerCycle}`);
+  }
   let stopped = false;
   let pending = false;
+  const runCycle = async (): Promise<void> => {
+    for (let batch = 0; batch < maxBatchesPerCycle; batch++) {
+      if (stopped) return;
+      const before = spatial.getPersistenceState();
+      if (spatial.closing || before.lifecycle !== 'open'
+        || before.inFlightCheckpointId !== null || spatial.session.busy || !before.dirty) return;
+      let checkpoint: SpatialCheckpointResult;
+      try {
+        checkpoint = await spatial.checkpoint();
+      } catch (error) {
+        const state = spatial.getPersistenceState();
+        report({ status: 'failed', error: errorFacts(error), remainingDirty: state.dirty, state: { ...state } });
+        return;
+      }
+      const state = spatial.getPersistenceState();
+      report({
+        status: 'saved', checkpoint, remainingDirty: state.dirty, state: { ...state },
+        eviction: spatial.lastPostSaveEviction?.() ?? null,
+      });
+      if (!state.dirty) return;
+    }
+  };
   const timer = setInterval(() => {
     if (stopped || pending) return;
     const before = spatial.getPersistenceState();
     if (spatial.closing || before.lifecycle !== 'open' || before.inFlightCheckpointId !== null || spatial.session.busy || !before.dirty) return;
     pending = true;
-    void spatial.checkpoint()
-      .then((checkpoint) => {
-        // 公开 checkpoint 只在提交确认后 resolve；当前状态只用于汇报剩余 dirty。
-        const state = spatial.getPersistenceState();
-        report({
-          status: 'saved', checkpoint, remainingDirty: state.dirty, state: { ...state },
-          eviction: spatial.lastPostSaveEviction?.() ?? null,
-        });
-      }, (error: unknown) => {
-        const state = spatial.getPersistenceState();
-        report({ status: 'failed', error: errorFacts(error), remainingDirty: state.dirty, state: { ...state } });
-      })
-      .finally(() => { pending = false; });
+    void runCycle().finally(() => { pending = false; });
   }, intervalMs);
   timer.unref();
   return () => {

@@ -73,6 +73,8 @@ export const MAX_PATH_FRAGMENTS = 1000;
 /** 体素观测只保留最近观测的这么多格（每次落盘前修剪），更早的格回到未知；不修剪的话观测格只增不减，
  *  线上约 4 小时就超过快照上限 maxObservedCells(1,000,000)，此后每次保存都失败、再也落不了盘。 */
 export const MAX_OBSERVED_CELLS = 25_600;
+/** 关停时最终保存窗口内最多提交多少个 bounded dirty 批次。 */
+const MAX_FINAL_CHECKPOINT_BATCHES = 16;
 /** 写满时一次腾出的片数：腾位要整表扫描片段和边，按批摊薄。 */
 const FRAGMENT_PRUNE_BATCH = 50;
 
@@ -130,6 +132,8 @@ export interface SharedSpatialOpenOptions {
   voxelLoading?: VoxelLoading;
   /** manual 模式的运行时驻留上限；透传库的 ResidencyLimits。 */
   residencyLimits?: ResidencyLimits;
+  /** 单次 checkpoint 的体素 dirty 批次字节上限；省略时沿用快照 maxBytes。 */
+  voxelBatchMaxBytes?: number;
   /** 体素证据新鲜度上限；默认取宿主 config.spatial.voxelValidityWindowMs（5 分钟）。 */
   voxelValidityWindowMs?: number;
   /** 可选诊断回调：容量、队列、未就绪与作用域丢弃事件。 */
@@ -778,6 +782,7 @@ export class SharedSpatialSession {
       voxelOptions: { now, validityWindowMs: options.voxelValidityWindowMs ?? config.spatial.voxelValidityWindowMs },
       ...(options.voxelLoading === undefined ? {} : { voxelLoading: options.voxelLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
+      ...(options.voxelBatchMaxBytes === undefined ? {} : { voxelBatchMaxBytes: options.voxelBatchMaxBytes }),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
       fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS, maxFragments: MAX_PATH_FRAGMENTS },
@@ -1517,20 +1522,22 @@ export class SharedSpatialSession {
         capture(err);
       }
 
-      // 捕获最终 checkpoint 并核对实际返回值与已确认状态。
+      // 捕获最终 checkpoint；分片保存时在同一关停期限内提交后续批次，直到 clean
+      // 或达到有界批数。最后一批的版本可能低于已确认的最大版本，最终以 state 核对。
       try {
         this.retainObservations();
         checkpoint = await this.session.checkpoint();
-        const state = this.session.getPersistenceState();
+        let state = this.session.getPersistenceState();
+        for (let batch = 1; batch < MAX_FINAL_CHECKPOINT_BATCHES && state.dirty; batch++) {
+          checkpoint = await this.session.checkpoint();
+          state = this.session.getPersistenceState();
+        }
         if (
           state.dirty ||
           state.lastConfirmedCheckpointId !== checkpoint.checkpointId ||
-          checkpoint.voxelRevision !== state.voxelRevision ||
-          checkpoint.voxelRevision !== state.confirmedVoxelRevision ||
-          checkpoint.fragmentRevision !== state.fragmentRevision ||
-          checkpoint.fragmentRevision !== state.confirmedFragmentRevision ||
-          checkpoint.topologyRevision !== state.topologyRevision ||
-          checkpoint.topologyRevision !== state.confirmedTopologyRevision
+          state.voxelRevision !== state.confirmedVoxelRevision ||
+          state.fragmentRevision !== state.confirmedFragmentRevision ||
+          state.topologyRevision !== state.confirmedTopologyRevision
         ) {
           capture(new PersistenceError('data', 'final checkpoint did not confirm clean state'));
         }
