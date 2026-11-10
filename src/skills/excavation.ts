@@ -6,7 +6,7 @@ import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable,
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
-import { pageFragments } from '../spatial/fragments.ts';
+
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 export interface ExcavationArgs {
@@ -333,7 +333,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, noDropBlocks = 0, filled = 0, fillTried = false;
   /** 既没挖也没补就迈过去的格数：这些格本来就能直接走。 */
   let openSteps = 0;
-  const runStartedAt = Date.now();
+
   /** 风险与邻格未知作为数据返回，成功/失败都带；不让它们只活在错误文本里。 */
   const ledger: RiskLedger = { risks: [], unknownAdjacent: [], riskKeys: new Set(), unknownKeys: new Set() };
   const path: { pos: Vec3Like; observationId: number }[] = [];
@@ -351,18 +351,6 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const startChunks = ctx.memory.visitedChunkCount;
   // 这一段实际做了什么：开挖是固定方向直线施工，平地上也是一格一格迈；按实数报，不让“挖出 N 格”掩盖其实没挖。
   const workNote = () => completed ? `（${completed} 格里挖掉 ${excavated} 块、补了 ${filled} 处支撑、${openSteps} 格本来就能直接走）` : '';
-  // 补过支撑时：直线两侧几格内有没有以前走过/搭过的记录路径（只是历史几何，不代表现在还通；接不接由你定）。
-  const nearbyPathNote = () => {
-    if (!filled || ctx.spatial === undefined) return '';
-    const dir = DIRECTIONS[args.direction], from = origin.pos, len = completed + 2;
-    const scan = pageFragments(ctx.spatial, { dim: origin.dim, maxFragments: 1000, signal, deadline: Date.now() + 800 });
-    const near = scan.items.filter((f) => f.createdAt < runStartedAt && f.geometrySource === 'traversal').flatMap((f) => f.polyline.map((p) => {
-      const rx = p.x - from.x, rz = p.z - from.z;
-      return { p, kind: f.kind, along: rx * dir.x + rz * dir.z, lateral: Math.abs(rz * dir.x - rx * dir.z), dy: p.y - from.y };
-    })).filter((q) => q.along >= -2 && q.along <= len && q.lateral >= 1.5 && q.lateral <= 6 && Math.abs(q.dy) <= 4)
-      .sort((a, b) => a.lateral - b.lateral)[0];
-    return near === undefined ? '' : `；这条直线两侧 6 格内有以前${near.kind === 'bridge' ? '搭过' : near.kind === 'dug' ? '挖过' : '走过'}的记录路径，最近一处 (${Math.floor(near.p.x)},${Math.floor(near.p.y)},${Math.floor(near.p.z)}) 离这条线约 ${Math.round(near.lateral)} 格（历史记录，现在是否还通未确认）`;
-  };
   // 一个新区块都没进时说清楚：挖出来的是新通道，但这一带以前就来过（历史事实，不替它选方向）。
   const visitedNote = () => {
     if (ctx.memory.visitedChunkCount > startChunks) return `，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块`;
@@ -599,7 +587,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
       }
     }
-    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${workNote()}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}${nearbyPathNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${workNote()}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。

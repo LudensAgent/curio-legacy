@@ -6,6 +6,7 @@ import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import type { LandingOption } from '../src/skills/types.ts';
 import { AbortedError } from '../src/util.ts';
 import { goalOf } from '../src/skills/movement/goal.ts';
+import { planRoute } from '../src/skills/movement/route.ts';
 import { runNavigationSegment } from '../src/skills/movement/segment.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -67,6 +68,83 @@ function fakeSpatial(map: VoxelMap) {
 function ctxFor(adapter: FakeAdapter, map: VoxelMap) {
   return { ...makeCtx(adapter), spatial: fakeSpatial(map) };
 }
+
+/**
+ * 0..5 列只有过期证据（当前搜索看不见），6..22 列是当前证据。
+ * remembered 搜索能跨过过期桥接段找到 22 段候选；当前证据搜索在起点就被 STALE
+ * 挡住，因此只能走历史体素候选 + 当前证据复验这条路。
+ */
+function rememberedRouteMap() {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const now = Date.now();
+  const air: Vec3Like[] = [];
+  const floor: Vec3Like[] = [];
+  for (let x = 0; x <= 22; x++) {
+    air.push(at(x, 64, 0), at(x, 65, 0));
+    floor.push(at(x, 63, 0));
+  }
+  const stale = (pos: Vec3Like) => pos.x <= 5;
+  observe(map, 'minecraft:air', air.filter(stale), now - 120_000);
+  observe(map, 'minecraft:stone', floor.filter(stale), now - 120_000);
+  observe(map, 'minecraft:air', air.filter((pos) => !stale(pos)), now);
+  observe(map, 'minecraft:stone', floor.filter((pos) => !stale(pos)), now);
+  return map;
+}
+
+/**
+ * plan_route 只读预览：历史体素候选 >16 段时，当前证据复验在取消时已检查 16 段并让出；
+ * 公开结局是取消，但完整搜索的 FOUND、候选与部分复验覆盖都必须保留。
+ */
+test('plan_route 历史体素候选复验被取消：公开 status cancelled，searchStatus 仍是 FOUND 且候选/覆盖保留', async (t) => {
+  const map = rememberedRouteMap();
+  const adapter = new FakeAdapter();
+  adapter.pos = at(0.5, 64, 0.5);
+  const controller = new AbortController();
+  const ctx = { ...ctxFor(adapter, map), signal: controller.signal };
+  t.after(() => ctx.memory.close());
+
+  // 复验的当前证据检查会经过宿主 verifyLandRoute 的 cellAt 读边界；
+  // 搜索本身只读 sectionRef。第一次 cellAt 出现即复验已开始，在同步复验段内排入
+  // 一个微任务，让取消落在紧随 16 段之后的让出点，而不是搜索阶段。
+  const originalCellAt = map.cellAt.bind(map);
+  let armed = false;
+  map.cellAt = (dim, x, y, z) => {
+    if (!armed) {
+      armed = true;
+      queueMicrotask(() => controller.abort());
+    }
+    return originalCellAt(dim, x, y, z);
+  };
+
+  const result = await planRoute.run(ctx, {
+    to: at(22, 64, 0), mode: 'walk', source: 'auto', arrival: { kind: 'exact' },
+  });
+
+  assert.equal(result.status, 'cancelled', result.summary);
+  assert.match(result.summary, /取消/);
+  assert.equal(result.data?.backend, 'spatial_voxel_search');
+  assert.equal(result.data?.searchStatus, 'FOUND', '已完成的搜索不能被改写成 CANCELLED');
+  assert.equal(result.data?.evidenceMode, 'historical');
+  const transitions = result.data?.transitions as { kind: string; to: Vec3Like }[];
+  const points = result.data?.points as Vec3Like[];
+  assert.ok(transitions.length > 16, `候选必须超过 16 段：${transitions.length}`);
+  assert.equal(points.length, transitions.length + 1, '候选路点与 transition 事实保留');
+  assert.deepEqual(result.data?.requestedTarget, at(22, 64, 0), '原目标保留');
+
+  const verification = result.data?.verification as {
+    verdict: string;
+    coverage?: { checked: number; total: number; complete: boolean; stopped?: string };
+    transitions: unknown[];
+  };
+  assert.notEqual(verification.verdict, 'OPEN', '没有整条路线被评为当前 OPEN');
+  assert.equal(verification.coverage?.stopped, 'cancelled', '真实取消必须如实标为 cancelled');
+  assert.equal(verification.coverage?.complete, false);
+  assert.equal(verification.coverage?.checked, 16, '取消落在 16 段后的有界让出点');
+  assert.equal(verification.coverage?.total, transitions.length);
+  assert.equal(verification.transitions.length, 16, '部分复验事实保留，未检查段不被伪造');
+  assert.equal(result.data?.verifiedOpenSegments, 0, '首段为 STALE，不冒充可通行前缀');
+  assert.equal(result.data?.routeId, undefined, '只读预览不签发 routeId');
+});
 
 /** 第三次 feet 派发先落下实测位置再抛项目的取消错误；位移由夹具独立设定。 */
 class CancelThirdMoveAdapter extends FakeAdapter {

@@ -38,28 +38,31 @@ const argsOf = (raw: unknown) => {
 };
 
 test('approach_visible 校验：landmark 目标与 backend 选项，规范化后再校验不变', () => {
-  const lm = approachVisible.validate({ target: { landmark: 'base' }, backend: 'pathfinder' }, new FakeAdapter());
+  const lm = approachVisible.validate({ target: { landmark: 'base' }, backend: 'spatial' }, new FakeAdapter());
   assert.ok(lm.ok);
   assert.deepEqual(lm.args.target, { kind: 'landmark', name: 'base' });
-  assert.equal(lm.args.backend, 'pathfinder');
+  assert.equal(lm.args.backend, 'spatial');
+  assert.equal(approachVisible.validate({ target: { landmark: 'base' }, backend: 'pathfinder' }, new FakeAdapter()).ok, false);
   assert.deepEqual(approachVisible.validate(lm.args, new FakeAdapter()), lm);
   assert.equal(argsOf({ target: { pos: { x: 1, y: 64, z: 0 } } }).backend, 'spatial', '默认仍是共享空间记忆后端');
   assert.ok(!approachVisible.validate({ target: { pos: { x: 1, y: 64, z: 0 } }, backend: 'auto' }, new FakeAdapter()).ok);
 });
 
-test('pathfinder 后端：本会话亲眼见过的方块可接近，回执标明来源与后端，不挖不放', async () => {
+test('已识别方块仍需体素路线证据，不借旧后端跨过未知区域', async () => {
   const { adapter, ctx } = setup({ recognizedAt: (p: Vec3Like) => p.x === 20 && p.y === 64 && p.z === 0 ? 'chest' : null });
-  const r = await approachVisible.run(ctx, argsOf({ target: { block: { x: 20, y: 64, z: 0 } }, backend: 'pathfinder' }));
-  assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(r.data?.backend, 'pathfinder');
+  adapter.blocks.push({ name: 'chest', pos: { x: 20, y: 64, z: 0 } });
+  const r = await approachVisible.run(ctx, argsOf({ target: { block: { x: 20, y: 64, z: 0 } }, backend: 'spatial' }));
+  assert.equal(r.status, 'failed', r.summary);
+  assert.equal(r.data?.backend, 'spatial');
   assert.equal(r.data?.targetEvidence, 'recognized');
-  assert.ok(Math.hypot(adapter.pos.x - 20.5, adapter.pos.z - 0.5) <= 3);
+  assert.equal(r.data?.outcome, 'UNKNOWN');
+  assert.ok(!adapter.actions.some((a) => a.startsWith('moveTo:')));
   assert.ok(!adapter.actions.some((a) => /^dig:|^place:/.test(a)));
 });
 
-test('没看见过的方块即使选 pathfinder 也不接近', async () => {
+test('没看见过的方块不接近', async () => {
   const { adapter, ctx } = setup();
-  const r = await approachVisible.run(ctx, argsOf({ target: { block: { x: 20, y: 64, z: 0 } }, backend: 'pathfinder' }));
+  const r = await approachVisible.run(ctx, argsOf({ target: { block: { x: 20, y: 64, z: 0 } }, backend: 'spatial' }));
   assert.equal(r.failureCode, 'NOT_FOUND');
   assert.ok(!adapter.actions.some((a) => a.startsWith('moveTo:')));
 });
@@ -67,10 +70,10 @@ test('没看见过的方块即使选 pathfinder 也不接近', async () => {
 test('landmark 目标按记忆解析成位置；记不得就不动', async () => {
   const { adapter, ctx } = setup();
   ctx.memory.addLandmark('waypoint', '矿洞口', DIM, { x: 12, y: 64, z: 0 });
-  const r = await approachVisible.run(ctx, argsOf({ target: { landmark: '矿洞口' }, backend: 'pathfinder' }));
-  assert.equal(r.status, 'succeeded', r.summary);
+  const r = await approachVisible.run(ctx, argsOf({ target: { landmark: '矿洞口' }, backend: 'spatial' }));
+  assert.equal(r.status, 'failed', r.summary);
   assert.deepEqual((r.data?.landmark as { pos: Vec3Like }).pos, { x: 12, y: 64, z: 0 });
-  assert.ok(Math.abs(adapter.pos.x - 12) <= 2);
+  assert.ok(!adapter.actions.some((a) => a.startsWith('moveTo:')));
 
   const none = setup();
   const missing = await approachVisible.run(none.ctx, argsOf({ target: { landmark: '不存在' } }));

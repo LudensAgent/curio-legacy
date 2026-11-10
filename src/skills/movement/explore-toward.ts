@@ -1,216 +1,95 @@
 import type { Vec3Like } from '../../adapter/types.ts';
-import { DIRS } from '../../perception/perception.ts';
 import { lookAround } from '../movement.ts';
-import { fail, isAbort, obj, ok, type Skill, type SkillResult } from '../types.ts';
-import { travelTo } from './travel-to.ts';
+import { fail, isAbort, obj, ok, runSkill, type Skill, type SkillResult } from '../types.ts';
+import { coordinatorResult, runMovementCoordinator } from './coordinator.ts';
+import { CARDINAL_DIRECTIONS, type CardinalDirection } from './session.ts';
 
-type Heading = keyof typeof DIRS;
 type ExploreArgs = {
-  direction: Heading;
+  direction: CardinalDirection;
   distance: number;
   origin: Vec3Like;
   until?: string;
   segment: number;
-  /** 横向偏离冻结射线超过这么多格就停（格）。 */
   maxLateralDrift: number;
-  allowDig: boolean;
-  allowPlace: boolean;
-  allowSwim: boolean;
-  allowHazard: boolean;
-  sprint: boolean;
   timeoutMs: number;
-  /** 寻路挖掘只用这件工具（原样交给每段 travel_to）。 */
-  tool?: string;
+  sessionId?: string;
 };
 
-/** 单次探索的方向距离上限（格）；更远由 Agent 分次续走。 */
 export const MAX_EXPLORE_DISTANCE = 512;
-/** 每段交给 travel_to 的到达半径（格）；走完全程的判定与它一致，否则每段都“到了”却永远差几格算不上走完。 */
-const SEGMENT_RANGE = 3;
-/** 连续这么多段没走到段终点、或沿方向推进不足 2 格就停（没挪动，或只是横着/往回走），不在原地或侧向反复试。 */
-const MAX_STUCK_SEGMENTS = 2;
 
-const round1 = (v: number) => Math.round(v * 10) / 10;
-const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
-
-/**
- * Agent 指定方向的远距离探索：沿冻结的方向射线，每段 ≤segment 格交给 travel_to（pathfinder，已加载区块），
- * 每段结束朝该方向扫视一次（look_around），可选 until 看见某物就停。方向、距离、何时继续都由 Agent 决定；
- * 这里不打分、不换方向、不推荐 frontier，只报实测位置、新区块、每段停止原因与扫视结果。
- */
+/** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走（按沿方向推进验收，横向不超过 maxLateralDrift 的任意站位都算这段到了），每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段没走到段终点、沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to：先按不施工直接寻路，只有明确 NoPath 且原请求授权施工时才按原授权重试；不查询、不优先复用历史路线或路径片段。超时、卡住、NOT_CONFIRMED、取消不会升级成挖/垫。每段始终沿同一条冻结射线推进，不会因分段而重新定向；需要按已记录体素证据 3D 移动时用 navigate_to/advance。',
-  argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；每段后朝该方向扫视，until 在本轮视野看见时停止。距离 16–512 格，不缩短原目标。只执行已确认的 walk/step/drop，证据不足返回边界，不回退 pathfinder，不挖放、不下水。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。对角方向、施工/游泳/冲刺选项尚无等价执行能力，明确拒绝。',
+  argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（单次身体窗口最多32步）,"maxLateralDrift"?:16（4-64）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z}}；只用体素证据，不接受 allowDig/allowPlace/allowSwim/allowHazard/sprint:true 或 tool；until 只认当前扫视。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
     const direction = String(a.direction ?? '').toUpperCase();
-    if (!Object.hasOwn(DIRS, direction)) return { ok: false, error: 'direction 只能是 N/NE/E/SE/S/SW/W/NW' };
-    if (!Number.isInteger(a.distance) || a.distance < 16 || a.distance > MAX_EXPLORE_DISTANCE) {
-      return { ok: false, error: `distance 需要 16–${MAX_EXPLORE_DISTANCE} 的整数格数；原目标不会被缩短，更远请分次续走` };
-    }
-    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要方块/生物名、类别（log、stem）或 "a|b"（≤40 字）' };
+    if (!CARDINAL_DIRECTIONS.includes(direction as CardinalDirection)) return { ok: false, error: '当前体素方向推进只支持 N/E/S/W；对角方向需要额外角落净空支持，不会替换成其他方向' };
+    if (!Number.isInteger(a.distance) || a.distance < 16 || a.distance > MAX_EXPLORE_DISTANCE) return { ok: false, error: `distance 需要 16–${MAX_EXPLORE_DISTANCE} 的整数；原目标不会被缩短` };
+    if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要 1–40 字的方块/生物名或类别' };
     if (a.segment !== undefined && (!Number.isInteger(a.segment) || a.segment < 16 || a.segment > 48)) return { ok: false, error: 'segment 需要 16–48 的整数' };
     if (a.maxLateralDrift !== undefined && (!Number.isInteger(a.maxLateralDrift) || a.maxLateralDrift < 4 || a.maxLateralDrift > 64)) return { ok: false, error: 'maxLateralDrift 需要 4–64 的整数' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
-    for (const flag of ['allowDig', 'allowPlace', 'allowSwim', 'allowHazard', 'sprint'] as const) {
+    for (const flag of ['allowDig', 'allowPlace', 'allowTower', 'allowSwim', 'allowHazard', 'sprint']) {
       if (a[flag] !== undefined && typeof a[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
+      if (a[flag] === true) return { ok: false, error: `${flag}:true 在体素方向推进中没有等价能力；施工请显式 mine_cell/place_support/pillar_one，水路用 swim_path，不会静默忽略授权` };
     }
-    if (a.tool !== undefined) {
-      if (typeof a.tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(a.tool)) return { ok: false, error: 'tool 为物品注册名（如 stone_pickaxe）' };
-      if (a.allowDig !== true) return { ok: false, error: 'tool 指定寻路挖掘用哪件工具，需要同时写 allowDig:true' };
-      if (!adapter.state().inventory.some((i) => i.name === a.tool && i.count > 0)) return { ok: false, error: `TOOL_MISSING：背包里没有 ${a.tool}，没有移动` };
-    }
-    // 首次校验冻结起点；续接/重试沿用同一条射线，不按新位置重新解释方向。
-    const o = obj(a.origin);
-    if (a.origin !== undefined && ![o.x, o.y, o.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'origin 需要 {x,y,z} 有限数字' };
-    const origin = a.origin === undefined ? { ...adapter.state().pos } : { x: o.x as number, y: o.y as number, z: o.z as number };
-    return {
-      ok: true,
-      args: {
-        direction: direction as Heading, distance: a.distance, origin,
-        ...(typeof a.until === 'string' ? { until: a.until.trim().toLowerCase() } : {}),
-        segment: a.segment ?? 32, maxLateralDrift: a.maxLateralDrift ?? 16,
-        allowDig: a.allowDig === true, allowPlace: a.allowPlace === true, allowSwim: a.allowSwim === true,
-        allowHazard: a.allowHazard === true, sprint: a.sprint === true, timeoutMs: a.timeoutMs ?? 300000,
-        ...(typeof a.tool === 'string' ? { tool: a.tool } : {}),
-      },
-    };
+    if (a.tool !== undefined || a.via !== undefined) return { ok: false, error: 'tool/via 属于已退役的寻路选项；explore_toward 只使用 VoxelMap，不自动施工' };
+    if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
+    const origin = a.origin === undefined ? { ...adapter.state().pos } : obj(a.origin);
+    if (![origin.x, origin.y, origin.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'origin 需要 {x,y,z} 有限数字' };
+    return { ok: true, args: {
+      direction: direction as CardinalDirection, distance: a.distance,
+      origin: { x: origin.x as number, y: origin.y as number, z: origin.z as number },
+      segment: a.segment ?? 32, maxLateralDrift: a.maxLateralDrift ?? 16, timeoutMs: a.timeoutMs ?? 300000,
+      ...(a.until === undefined ? {} : { until: (a.until as string).trim().toLowerCase() }),
+      ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
+    } };
   },
   async run(ctx, args) {
-    const { adapter } = ctx;
-    const s0 = adapter.state();
-    const backend = 'pathfinder';
-    const [bx, bz] = DIRS[args.direction];
-    const norm = Math.hypot(bx, bz);
-    const ux = bx / norm, uz = bz / norm;
-    const project = (p: Vec3Like) => {
-      const dx = p.x - args.origin.x, dz = p.z - args.origin.z;
-      return { along: round1(dx * ux + dz * uz), lateral: round1(dx * -uz + dz * ux) };
-    };
-    const startedAt = Date.now();
-    const deadline = Math.min(ctx.deadline, startedAt + args.timeoutMs);
-    const startChunks = ctx.memory.visitedChunkCount;
-    const segments: { target: { x: number; z: number }; stopReason: string; end: Vec3Like; closer: number }[] = [];
-    let stuck = 0, bestAlong = project(s0.pos).along;
-    let stop: 'DISTANCE_MET' | 'UNTIL_SEEN' | 'BLOCKED' | 'NO_ALONG_PROGRESS' | 'LATERAL_DRIFT' | 'IN_WATER' | 'TIMEOUT' | 'DIMENSION_CHANGED' | 'NOT_ALIVE' = 'TIMEOUT';
-    let sighting: Record<string, unknown> | undefined;
-    let lastFailure: SkillResult | undefined;
-    const factsNow = () => {
-      const end = { ...adapter.state().pos }, progress = project(end);
-      const newChunks = ctx.memory.visitedChunkCount - startChunks;
-      // 一个新区块都没进时，说明本段全在去过的范围里；给出这个方向上访问记录到哪为止（历史事实，不替它选方向）。
-      const extent = newChunks === 0 ? ctx.memory.visitedExtent(s0.dim) : null;
-      const reach = extent === null || extent.bounds === null ? '' : `（本段全在去过的区块里；${s0.dim} 区块访问外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}${
-        extent.farthest === null ? '' : (['N', 'S', 'E', 'W'] as const).filter((d) => args.direction.includes(d)).map((d) => {
-          const f = extent.farthest![d].pos;
-          return `，记录路径最${{ N: '北', S: '南', E: '东', W: '西' }[d]}脚点 (${f.x},${f.y},${f.z}) 离这里 ${Math.round(Math.hypot(f.x - end.x, f.z - end.z))} 格`;
-        }).join('')
-      }；只是历史记录，不代表现在还通）`;
-      return {
-        end, progress,
-        measured: `实测 ${at(end)}，沿 ${args.direction} 推进 ${progress.along}/${args.distance} 格、横向偏离 ${progress.lateral} 格，${segments.length} 段，新进入 ${newChunks} 个区块${reach}`,
-      };
-    };
-
-    try {
-      for (;;) {
-        const s = adapter.state();
-        if (!s.alive) { stop = 'NOT_ALIVE'; break; }
-        if (s.dim !== s0.dim) { stop = 'DIMENSION_CHANGED'; break; }
-        const { along } = project(s.pos);
-        if (along >= args.distance - SEGMENT_RANGE) { stop = 'DISTANCE_MET'; break; }
-        const left = deadline - Date.now();
-        if (left < 10000) { stop = 'TIMEOUT'; break; }
-        ctx.progress(Math.max(0, along) / args.distance, `往 ${args.direction} 已推进 ${Math.round(along)}/${args.distance} 格`);
-        // 下一段终点在冻结射线上，从实测沿方向进度往前一段；中途绕行由 travel_to 处理。
-        // travel_to 的 heading.distance 是“从 origin 起算”且单次上限 200：这里把段起点沿同一条冻结射线
-        // 平移到当前沿方向进度，只把本段长度交给它；总目标、方向和 corridor 仍由本技能保持不变。
-        const segmentStart = Math.max(0, along);
-        const segmentDistance = Math.max(1, Math.min(args.segment, Math.ceil(args.distance - segmentStart)));
-        const reach = Math.min(args.distance, segmentStart + segmentDistance);
-        const target = { x: Math.round(args.origin.x + ux * reach), z: Math.round(args.origin.z + uz * reach) };
-        const segmentOrigin = { x: args.origin.x + ux * segmentStart, y: args.origin.y, z: args.origin.z + uz * segmentStart };
-        const parsed = travelTo.validate({
-          to: { heading: args.direction, distance: segmentDistance, origin: segmentOrigin, corridor: args.maxLateralDrift }, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
-          allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left), ...(args.tool ? { tool: args.tool } : {}),
-        }, adapter);
-        if (!parsed.ok) {
-          const { end, progress, measured } = factsNow();
-          return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；${measured}`, {
-            backend, direction: args.direction, distance: args.distance, origin: args.origin, position: end, progress, measured,
-            segments: segments.slice(-24), segmentCount: segments.length, continuation: { direction: args.direction, distance: args.distance, origin: args.origin },
-          });
-        }
-        const segStart = { ...adapter.state().pos };
-        const hop = await travelTo.run(ctx, parsed.args);
-        const end = { ...adapter.state().pos };
-        const hopStop = String(hop.data?.stopReason ?? hop.status);
-        const closer = Number(hop.data?.closer ?? 0);
-        segments.push({ target, stopReason: hopStop, end, closer });
-        if (hopStop === 'NOT_ALIVE' || hopStop === 'DIMENSION_CHANGED' || hopStop === 'IN_WATER') { stop = hopStop; break; }
-        if (hop.status !== 'succeeded') lastFailure = hop;
-        // 每段结束朝探索方向扫视一次：新看到的地形同时进入空间记忆；until 只认本次视野里看见的。
-        const glance = await lookAround.run(ctx, { seconds: 2, direction: args.direction, ...(args.until ? { for: args.until } : {}) });
-        if (args.until && glance.status === 'succeeded') { stop = 'UNTIL_SEEN'; sighting = glance.data; break; }
-        // 最后一段的目标就是全程终点：travel_to 按同一到达半径确认到了，就是走完全程。
-        if (reach >= args.distance && hop.status === 'succeeded') { stop = 'DISTANCE_MET'; break; }
-        if (hopStop === 'TIMEOUT' && deadline - Date.now() < 10000) { stop = 'TIMEOUT'; break; }
-        // 进展按沿冻结方向的实测推进算：横着走或往回绕不算前进（下界岩洞里 pathfinder 可能绕出反方向的路）。
-        const now = project(end);
-        if (Math.abs(now.lateral) > args.maxLateralDrift) { stop = 'LATERAL_DRIFT'; break; }
-        const gained = now.along >= bestAlong + 2;
-        if (gained) bestAlong = now.along;
-        // 这一段 travel_to 没走到段终点（正前方与偏转都试过）也算卡住，哪怕顺带往前蹭了几格：
-        // 实机下界两段都 NO_PROGRESS、各往前蹭 9 格和 3 格，按“推进 ≥2 格”一直不停，在原地附近绕圈。
-        if (gained && hop.status === 'succeeded') stuck = 0;
-        // travel_to 报回到了之前到过的位置：身体在动、只是来回绕，起止点重合也不算「没挪动」。
-        else if (++stuck >= MAX_STUCK_SEGMENTS) { stop = Math.hypot(end.x - segStart.x, end.z - segStart.z) >= 2 || hop.data?.revisited ? 'NO_ALONG_PROGRESS' : 'BLOCKED'; break; }
-      }
-    } catch (e) {
-      // 被打断（挨打、改主意、操作者指令）时也把已走出的事实交回去：取消回执里能看到推进与偏离。
-      if (isAbort(e)) {
-        const { end, progress, measured } = factsNow();
-        const target = e as Error & { partial?: Record<string, unknown> };
-        target.partial = { ...(target.partial ?? {}), backend, direction: args.direction, distance: args.distance, origin: args.origin,
-          progress, position: end, segments: segments.slice(-24), segmentCount: segments.length,
-          continuation: { direction: args.direction, distance: args.distance, origin: args.origin },
-          progressNote: `explore_toward 被打断时${measured}` };
-      }
-      throw e;
+    const start = ctx.adapter.state().pos;
+    if (args.sessionId === undefined && Math.hypot(start.x - args.origin.x, start.y - args.origin.y, start.z - args.origin.z) > 0.05) {
+      return fail('BAD_ARGS', '身体已离开冻结起点；续接原方向请带原 sessionId，不会从新位置重解释目标', { originalRequest: args, position: { ...start }, reason: 'INTENT_MISMATCH' });
     }
-
-    const { end, progress, measured } = factsNow();
-    const dug = adapter.recentDug?.(startedAt - 1) ?? [];
-    const placed = adapter.recentPlaced?.(startedAt - 1) ?? [];
-    const facts = {
-      backend, direction: args.direction, distance: args.distance, origin: args.origin, stopReason: stop,
-      progress: { ...progress, remaining: round1(Math.max(0, args.distance - progress.along)) },
-      position: end, newChunks: ctx.memory.visitedChunkCount - startChunks, visitedChunks: ctx.memory.visitedChunkCount,
-      segments: segments.slice(-24), segmentCount: segments.length,
-      ...(args.until ? { until: { seen: args.until, found: stop === 'UNTIL_SEEN' }, ...(sighting ? { sighting } : {}) } : {}),
-      sideEffects: { dugCount: dug.length, placedCount: placed.length },
-      // 续走同一条射线：把这些参数原样再给一次（origin 冻结，不按新位置重新解释方向）。
-      continuation: { direction: args.direction, distance: args.distance, origin: args.origin },
-    };
-    const effects = dug.length || placed.length ? `；挖掉 ${dug.length} 块、放下 ${placed.length} 块` : '';
-    if (stop === 'DISTANCE_MET') return ok(`往 ${args.direction} 走完 ${args.distance} 格：${measured}${effects}${args.until ? `；途中扫视没看见 ${args.until}（只覆盖每段的当前视野）` : ''}`, facts);
-    if (stop === 'UNTIL_SEEN') return ok(`往 ${args.direction} 探索途中看见 ${args.until}：${measured}${effects}；看见的位置见 sighting`, facts);
-    const why = {
-      BLOCKED: `连续 ${MAX_STUCK_SEGMENTS} 段几乎没挪动（最后一段：${lastFailure?.summary.slice(0, 160) ?? '无'}）`,
-      NO_ALONG_PROGRESS: `连续 ${MAX_STUCK_SEGMENTS} 段没走到段终点或沿 ${args.direction} 推进不足 2 格（身体在动，寻路在附近横着/往回绕；正前方与偏转都没走通）`,
-      LATERAL_DRIFT: `横向偏离冻结方向超过 ${args.maxLateralDrift} 格（绕路太远；maxLateralDrift 可放宽到 64）`,
-      TIMEOUT: `用完 ${Math.round(args.timeoutMs / 1000)} 秒时限`,
-      DIMENSION_CHANGED: `途中离开了 ${s0.dim}`,
-      NOT_ALIVE: '途中死亡',
-      IN_WATER: `没授权下水却进了水，已停下（没有再走、没有扫视），氧气 ${adapter.state().oxygen}/20；换气、上岸怎么做由你定`,
-    }[stop];
-    const code = stop === 'TIMEOUT' ? 'TIMEOUT' : stop === 'BLOCKED' || stop === 'NO_ALONG_PROGRESS' || stop === 'LATERAL_DRIFT' || stop === 'IN_WATER' ? 'STUCK' : stop === 'DIMENSION_CHANGED' ? 'WRONG_DIMENSION' : 'ERROR';
-    // 授权是 Agent 给的：说清这次有没有允许挖、放（搭桥/垫脚要 allowPlace）、下水，换不换手段由它定。
-    const permissions = `当前授权 allowDig:${args.allowDig} allowPlace:${args.allowPlace}（搭桥/垫脚需要它） allowSwim:${args.allowSwim}`;
-    return fail(code, `往 ${args.direction} 探索停下：${why}；${measured}${effects}。${permissions}；这只说明辅助走不通，不描述没看见的地形；继续、换方向或换手段由你决定`, facts);
+    const deadline = Math.min(ctx.deadline, Date.now() + args.timeoutMs);
+    const stepBudget = Math.min(32, args.segment);
+    let sessionId = args.sessionId;
+    let last: SkillResult | undefined;
+    const extra = { planner: 'voxel_astar', requestedDirection: args.direction, requestedDistance: args.distance, originalRequest: args };
+    try {
+      for (let segment = 0; segment < 32; segment++) {
+        const outcome = await runMovementCoordinator({ ...ctx, deadline }, {
+          intent: { kind: 'advance', direction: args.direction, distance: args.distance, maxLateralDrift: args.maxLateralDrift, allowed: ['walk', 'step', 'drop'], historical: true },
+          maxSegments: 1, maxStepsPerSegment: stepBudget, invocationMaxTransitions: stepBudget,
+          maxTransitions: Math.min(1024, args.distance * 2 + 16), maxSearches: 32,
+          maxObservations: 16, maxObservedCells: 512, maxNoProgressSegments: 2,
+          ...(sessionId === undefined ? {} : { sessionId }), deadlineMs: deadline, allowUnknownCorridor: false,
+        });
+        last = coordinatorResult(outcome, extra);
+        if (!outcome.ok) return last;
+        sessionId = outcome.session.id;
+        if (last.status === 'cancelled' || Date.now() >= deadline) return last;
+        const before = outcome.segments.length;
+        if (before > 0) {
+          const glance = await runSkill({ ...ctx, deadline }, lookAround, { seconds: 2, direction: args.direction, ...(args.until ? { for: args.until } : {}) });
+          if (glance.status === 'cancelled') return { ...glance, data: { ...last.data, ...glance.data, ...extra, position: { ...ctx.adapter.state().pos } } };
+          if (args.until && glance.status === 'succeeded') {
+            outcome.session.phase = 'completed';
+            outcome.session.stop = { reason: 'UNTIL_SEEN', at: Date.now(), detail: `本轮扫视看见 ${args.until}` };
+            return ok(`沿 ${args.direction} 推进后本轮看见 ${args.until}，停止本次探索`, { ...last.data, ...extra, phase: 'completed', arrived: false, stop: outcome.session.stop, stopReason: 'UNTIL_SEEN', sighting: glance.data, continuation: { canContinue: false }, position: { ...ctx.adapter.state().pos } });
+          }
+        }
+        if (last.status === 'succeeded' || outcome.stop.reason !== 'BUDGET_EXHAUSTED') return last;
+        if (outcome.session.counters.searches >= outcome.session.budget.maxSearches || outcome.session.counters.confirmedTransitions >= outcome.session.budget.maxTransitions || before === 0) return last;
+      }
+      return last ?? fail('ERROR', '探索未产生执行结果', extra);
+    } catch (error) {
+      if (!isAbort(error)) throw error;
+      return { status: 'cancelled', summary: 'explore_toward 已取消，保留原方向、累计预算与最后位置', data: { ...last?.data, ...extra, sessionId, position: { ...ctx.adapter.state().pos } } };
+    }
   },
 };

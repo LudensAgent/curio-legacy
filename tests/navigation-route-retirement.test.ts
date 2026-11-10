@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
-import type { GameAdapter, MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { makeBridge } from '../src/codeskills/bridge.ts';
 import { SKILLS, skillCatalog } from '../src/skills/index.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
@@ -10,7 +10,6 @@ import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { constrainRecoveryAction, recoveryContext } from '../src/skills/recovery.ts';
 import { spatialExtrema } from '../src/skills/spatial-extrema.ts';
 import { spatialQuery } from '../src/skills/spatial-query.ts';
-import type { SkillCtx } from '../src/skills/types.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -86,33 +85,20 @@ test('plan_route 不再接受 memory/search；travel_to 不再接受 via history
   for (const via of ['auto', 'history', { fragment: 'f-1' }] as const) {
     assert.equal(travelTo.validate({ to: '10,10', via }, adapter).ok, false, `via:${JSON.stringify(via)}`);
   }
-  assert.equal(travelTo.validate({ to: '10,10' }, adapter).ok, true, '默认直接寻路仍是合法兜底');
+  assert.equal(travelTo.validate({ to: '10,10' }, adapter).ok, true, '默认体素导航外壳仍是合法入口');
 });
 
-test('travel_to 执行时不查询 historyRoute/fragments，也不会沿旧路线走', async (t) => {
-  let queries = 0;
-  let pos: Vec3Like = at(0.5, 64, 0.5);
-  const calls: MoveTarget[] = [];
-  const adapter = {
-    state: () => ({ pos: { ...pos }, dim: DIM, worldId: WORLD, alive: true, connected: true, riding: null, inWater: false, oxygen: 20, inventory: [] }),
-    async moveTo(target: MoveTarget, _opts: MoveOpts) {
-      calls.push(target);
-      if (target.kind === 'xz') pos = at(target.x + 0.5, pos.y, target.z + 0.5);
-      else if (target.kind === 'near') pos = at(target.pos.x + 0.5, target.pos.y, target.pos.z + 0.5);
-    },
-    recentDug: () => [], recentPlaced: () => [],
-  } as unknown as GameAdapter;
-  const memory = { visitedChunkCount: 0, lastDeath: () => null, findLandmark: () => undefined };
-  const spySpatial = { query: () => { queries += 1; throw new Error('travel_to 不应查询旧路线'); } };
-  const ctx = { adapter, memory, spatial: spySpatial, signal: new AbortController().signal, deadline: Date.now() + 60_000, progress() {} } as unknown as SkillCtx;
-  t.after(() => {});
-  const parsed = travelTo.validate({ to: { x: 3, z: 0 } }, adapter);
+test('travel_to 只沿体素证据移动，不查询 historyRoute/fragments', async (t) => {
+  const { adapter, ctx } = navCtx(8);
+  t.after(() => ctx.memory.close());
+  const parsed = travelTo.validate({ to: { x: 6, y: 64, z: 0 }, range: 1 }, adapter);
   assert.ok(parsed.ok);
   const r = await travelTo.run(ctx, parsed.args);
   assert.equal(r.status, 'succeeded', r.summary);
-  assert.equal(queries, 0, '没有 historyRoute/fragments 查询');
-  assert.ok(calls.length > 0);
-  assert.equal(Math.floor(pos.x), 3);
+  assert.equal(r.data?.backend, 'voxel_astar');
+  assert.ok(adapter.actions.some((a) => a.startsWith('moveTo:feet')));
+  assert.ok(!adapter.actions.some((a) => /^moveTo:(xz|near|advance)/.test(a)));
+  assert.equal(Math.floor(adapter.pos.x), 6);
 });
 
 test('代码技能 api.moveTo 直接使用 navigate_to 并到达精确目标', async (t) => {
