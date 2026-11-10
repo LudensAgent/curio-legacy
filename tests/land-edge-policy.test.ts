@@ -1,0 +1,219 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type {
+  LandSearchPolicyCell,
+  LandSearchPolicyDecision,
+  LandSearchPolicyEdge,
+  LandSearchPolicyRead,
+} from 'curio-minecraft-3d-memory/navigation';
+import { hostLandEdgePolicy, isDangerousBlock, LAVA_EDGE_COST } from '../src/spatial/land-edge-policy.ts';
+
+type Hazard = LandSearchPolicyEdge['hazards'][number];
+type CellEntry = readonly [x: number, y: number, z: number, cell: LandSearchPolicyCell];
+
+const at = (x: number, y: number, z: number) => ({ x, y, z });
+const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
+const recorded = (name: string, stateComplete = true): LandSearchPolicyCell => ({
+  kind: 'recorded', state: { name, properties: {} }, stateComplete,
+});
+const unknownCell: LandSearchPolicyCell = { kind: 'unknown' };
+const unavailableCell: LandSearchPolicyCell = { kind: 'unavailable' };
+const hazard = (kind: Hazard['kind']): Hazard => ({ kind, pos: at(0, 64, 0), basis: 'observed', detail: `${kind} test fact` });
+const edgeAt = (to: { x: number; y: number; z: number }, overrides: Partial<LandSearchPolicyEdge> = {}): LandSearchPolicyEdge => ({
+  kind: 'walk', from: at(0, 64, 0), to, baseCost: 1, hazards: [], evidenceMode: 'current', ...overrides,
+});
+
+/** Bounded fake reader: a policy that over-reads fails instead of silently passing. */
+function fakeReader(entries: readonly CellEntry[] = [], maxReads = 11) {
+  const cells = new Map(entries.map(([x, y, z, cell]) => [key(x, y, z), cell]));
+  const reads: { x: number; y: number; z: number }[] = [];
+  const read: LandSearchPolicyRead = {
+    cell(x, y, z) {
+      if (reads.length >= maxReads) throw new Error(`policy exceeded ${maxReads} reads`);
+      reads.push(at(x, y, z));
+      return cells.get(key(x, y, z)) ?? unknownCell;
+    },
+  };
+  return { read, reads };
+}
+
+const allowedCost = (decision: LandSearchPolicyDecision): number => {
+  if (!decision.allow) assert.fail(`expected the policy to allow the edge: ${decision.reason}`);
+  return decision.extraCost ?? 0;
+};
+
+const rejectionReason = (decision: LandSearchPolicyDecision): string => {
+  if (decision.allow) assert.fail('expected the policy to reject the edge');
+  return decision.reason;
+};
+
+const DANGEROUS = ['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'cobweb', 'pointed_dripstone'] as const;
+const HORIZONTAL = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+
+test('danger set: bare and minecraft: names only, no unrelated matches', () => {
+  for (const name of DANGEROUS) {
+    assert.equal(isDangerousBlock(name), true, name);
+    assert.equal(isDangerousBlock(`minecraft:${name}`), true, `minecraft:${name}`);
+  }
+  for (const name of ['', 'air', 'stone', 'water', 'lava_block', 'nether_lava', 'mod:lava', 'minecraft:lava_block', 'minecraft:minecraft:lava', 'FIRE']) {
+    assert.equal(isDangerousBlock(name), false, name);
+  }
+  assert.equal(LAVA_EDGE_COST, 3);
+});
+
+test('non-fall hazards are rejected before any read; fall alone is allowed', () => {
+  for (const kind of ['water_contact', 'submersion', 'lava_contact', 'current', 'bubble_column'] as const) {
+    const reader = fakeReader();
+    const reason = rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5), { hazards: [hazard('fall'), hazard(kind)] }), reader.read));
+    assert.match(reason, new RegExp(kind));
+    assert.doesNotMatch(reason, /BLOCKED/);
+    assert.equal(reader.reads.length, 0);
+  }
+  const reader = fakeReader();
+  const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5), { hazards: [hazard('fall')] }), reader.read);
+  assert.equal(allowedCost(decision), 0);
+  assert.equal(reader.reads.length, 11);
+});
+
+test('recorded dangerous destination feet/head/support cells reject the edge', () => {
+  const to = at(0.5, 64, 0.5);
+
+  const feetReader = fakeReader([[0, 64, 0, recorded('minecraft:lava')]]);
+  const feetReason = rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(to), feetReader.read));
+  assert.match(feetReason, /minecraft:lava/);
+  assert.match(feetReason, /feet/);
+  assert.doesNotMatch(feetReason, /BLOCKED/);
+  assert.equal(feetReader.reads.length, 1);
+
+  const headReader = fakeReader([[0, 65, 0, recorded('magma_block')]]);
+  const headReason = rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(to), headReader.read));
+  assert.match(headReason, /magma_block/);
+  assert.match(headReason, /head/);
+  assert.equal(headReader.reads.length, 2);
+
+  const supportReader = fakeReader([[0, 63, 0, recorded('sweet_berry_bush')]]);
+  const supportReason = rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(to), supportReader.read));
+  assert.match(supportReason, /sweet_berry_bush/);
+  assert.match(supportReason, /support/);
+  assert.equal(supportReader.reads.length, 3);
+});
+
+test('incomplete recorded names still reject or price by their known name', () => {
+  const feetReader = fakeReader([[0, 64, 0, recorded('minecraft:lava', false)]]);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), feetReader.read)), /minecraft:lava/);
+
+  const neighborReader = fakeReader([[1, 63, 0, recorded('lava', false)]]);
+  const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), neighborReader.read);
+  assert.equal(allowedCost(decision), LAVA_EDGE_COST);
+});
+
+test('unknown or unavailable destination facts do not invent a dangerous name', () => {
+  for (const cell of [unknownCell, unavailableCell]) {
+    const reader = fakeReader([[0, 64, 0, cell]]);
+    const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read);
+    assert.equal(allowedCost(decision), 0);
+  }
+});
+
+test('fractional and negative destinations address the floored legacy cell', () => {
+  const to = at(-0.3, 63.95, -2.2);
+  const reader = fakeReader([[-1, 64, -3, recorded('cobweb')]]);
+  const reason = rejectionReason(hostLandEdgePolicy.evaluate(edgeAt(to), reader.read));
+  assert.match(reason, /cobweb/);
+  assert.deepEqual(reader.reads[0], at(-1, 64, -3));
+
+  const allowed = fakeReader();
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(to), allowed.read)), 0);
+  assert.equal(allowed.reads[0]?.x, -1);
+  assert.equal(allowed.reads[0]?.y, 64);
+  assert.equal(allowed.reads[0]?.z, -3);
+});
+
+for (const [dx, dz] of HORIZONTAL) {
+  for (const dy of [0, -1]) {
+    const height = dy === 0 ? 'foot' : 'support';
+    test(`lava at ${height} neighbor (${dx},${dz}) adds ${LAVA_EDGE_COST}`, () => {
+      const name = dy === 0 ? 'lava' : 'minecraft:lava';
+      const reader = fakeReader([[dx, 64 + dy, dz, recorded(name)]]);
+      const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read);
+      assert.equal(allowedCost(decision), LAVA_EDGE_COST);
+      assert.equal(reader.reads.length, 11);
+    });
+  }
+}
+
+test('each recorded lava neighbor is counted, with a finite surcharge for a sole edge', () => {
+  const entries = HORIZONTAL.flatMap(([dx, dz]) => [0, -1].map((dy): CellEntry => [
+    dx, 64 + dy, dz, recorded(dy === 0 ? 'lava' : 'minecraft:lava'),
+  ]));
+  const reader = fakeReader(entries);
+  const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read);
+  assert.equal(allowedCost(decision), HORIZONTAL.length * 2 * LAVA_EDGE_COST);
+  assert.equal(reader.reads.length, 11);
+});
+
+test('non-lava, unknown and unavailable neighbors add no surcharge', () => {
+  const reader = fakeReader([
+    [1, 64, 0, recorded('water')],
+    [-1, 64, 0, recorded('magma_block')],
+    [0, 64, 1, unknownCell],
+    [0, 64, -1, unavailableCell],
+    [1, 63, 0, recorded('minecraft:stone')],
+    [-1, 63, 0, recorded('minecraft:fire')],
+    [0, 63, 1, recorded('lava_block')],
+    [0, 63, -1, unavailableCell],
+  ]);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read)), 0);
+});
+
+test('current and remembered evidence modes use the same recorded-name policy', () => {
+  const entries: CellEntry[] = [
+    [1, 64, 0, recorded('lava')],
+    [0, 63, 1, recorded('minecraft:lava', false)],
+  ];
+  const currentReader = fakeReader(entries);
+  const rememberedReader = fakeReader(entries);
+  const current = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5), { evidenceMode: 'current' }), currentReader.read);
+  const remembered = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5), { evidenceMode: 'remembered' }), rememberedReader.read);
+  assert.equal(allowedCost(current), 2 * LAVA_EDGE_COST);
+  assert.deepEqual(remembered, current);
+});
+
+test('evaluation does not mutate the edge or its positions', () => {
+  const from = Object.freeze(at(0, 64, 0));
+  const to = Object.freeze(at(-0.3, 63.95, -2.2));
+  const hazards = Object.freeze([Object.freeze(hazard('fall'))]);
+  const edge = Object.freeze<LandSearchPolicyEdge>({
+    kind: 'walk', from, to, baseCost: 1, hazards, evidenceMode: 'remembered',
+  });
+  const before = JSON.stringify(edge);
+  const reader = fakeReader([[0, 64, -3, recorded('minecraft:lava')]]);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, reader.read)), LAVA_EDGE_COST);
+  assert.equal(JSON.stringify(edge), before);
+  assert.deepEqual(to, at(-0.3, 63.95, -2.2));
+  assert.deepEqual(from, at(0, 64, 0));
+});
+
+test('reader errors propagate unchanged', () => {
+  let calls = 0;
+  const read: LandSearchPolicyRead = {
+    cell() {
+      calls += 1;
+      if (calls === 3) throw new Error('reader exploded');
+      return unknownCell;
+    },
+  };
+  assert.throws(() => hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), read), /reader exploded/);
+  assert.equal(calls, 3);
+});
+
+test('permitted edge stays within 11 bounded destination/neighbor reads', () => {
+  const reader = fakeReader([], 11);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read)), 0);
+  assert.equal(reader.reads.length, 11);
+  const expected = [
+    key(0, 64, 0), key(0, 65, 0), key(0, 63, 0),
+    ...HORIZONTAL.flatMap(([dx, dz]) => [64, 63].map((y) => key(dx, y, dz))),
+  ].sort();
+  assert.deepEqual([...new Set(reader.reads.map(({ x, y, z }) => key(x, y, z)))].sort(), expected);
+});
