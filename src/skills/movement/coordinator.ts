@@ -70,6 +70,12 @@ export interface CoordinatorRequest {
   sessionId?: string;
   deadlineMs?: number;
   allowUnknownCorridor: boolean;
+  /**
+   * 显式方向探索允许在本次 invocation 的分段上限处仍完成一次前沿观察。
+   * 观察本身不是新段；若相关证据变化，本次调用以 BUDGET_EXHAUSTED 交回，
+   * 由调用方续接同一 session 继续确认已观测的前缀。其他入口保持原有语义。
+   */
+  observeFrontierBeyondSegments?: boolean;
 }
 
 export type CoordinatorOutcome =
@@ -536,42 +542,117 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'unknown_boundary') {
-        // 观察/重搜也要消耗剩余段数；没有下一段预算时如实停在边界。
+        // 观察/重搜原本也要消耗剩余段数；显式探索例外：前沿观察不是新段，
+        // 在分段上限处仍允许观察一次，然后由调用方用同一 session 续接确认。
         const boundary = segment.boundary;
-        if (boundary === undefined || executedSegments >= request.maxSegments) {
-          stop = stopOf('UNKNOWN_BOUNDARY', segment.detail ?? '搜索边界证据不足；未进入 UNKNOWN/STALE', {
+        const frontierObservation = request.observeFrontierBeyondSegments === true;
+        if (boundary === undefined && !frontierObservation) {
+          stop = stopOf('UNKNOWN_BOUNDARY', segment.detail ?? '搜索边界证据不足；未进入 UNKNOWN/STALE', { boundaries: [] });
+          break;
+        }
+        if (boundary !== undefined && executedSegments >= request.maxSegments && !frontierObservation) {
+          stop = stopOf('UNKNOWN_BOUNDARY', segment.detail ?? '搜索边界证据不足；未进入 UNKNOWN/STALE', { boundaries: [boundary] });
+          break;
+        }
+        const boundaryKey = boundary === undefined ? undefined : boundaryKeyOf(boundary, after.pos);
+        const boundaryDone = boundaryKey !== undefined && session.observedBoundaries?.includes(boundaryKey) === true;
+        // 当前列回退只属于显式探索：空地图可能连前沿边界都定位不到，
+        // 此时对当前身体所在列做一次有界观察（脚/头/支撑），让下一次搜索有起点证据。
+        // 普通 advance/navigate_to 保持原路径，不额外探测。
+        let currentKey: string | undefined;
+        let currentDone = false;
+        let needCurrent = false;
+        if (frontierObservation) {
+          currentKey = `current@${Math.floor(after.pos.x)},${Math.floor(after.pos.y)},${Math.floor(after.pos.z)}`;
+          currentDone = session.observedBoundaries?.includes(currentKey) === true;
+          if (boundary === undefined) {
+            needCurrent = true;
+          } else {
+            const supportCell = { x: Math.floor(after.pos.x), y: Math.floor(after.pos.y) - 1, z: Math.floor(after.pos.z) };
+            const supportView = voxel.cellAt(scope.dim, supportCell.x, supportCell.y, supportCell.z);
+            needCurrent = !(supportView.observed
+              && supportView.evidence.freshness === 'FRESH'
+              && supportView.evidence.validUntil >= Date.now()
+              && supportView.evidence.observation.stateComplete);
+          }
+        }
+        if ((boundary === undefined || boundaryDone) && (!needCurrent || currentDone)) {
+          stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已在这个站位观察过相关证据；没有新的相关证据时不重复观察/搜索', {
             boundaries: boundary === undefined ? [] : [boundary],
           });
           break;
         }
-        const boundaryKey = boundaryKeyOf(boundary, after.pos);
-        if (session.observedBoundaries?.includes(boundaryKey) === true) {
-          stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已在这个站位观察过这个边界；没有新的相关证据时不重复观察/搜索', { boundaries: [boundary] });
-          break;
-        }
         if (session.counters.observations >= session.budget.maxObservations || session.counters.newObservedCells >= session.budget.maxObservedCells) {
-          stop = stopOf('BUDGET_EXHAUSTED', `观察预算已用尽（${session.counters.observations}/${session.budget.maxObservations} 次，${session.counters.newObservedCells}/${session.budget.maxObservedCells} 格）；边界仍未知`, { boundaries: [boundary] });
+          stop = stopOf('BUDGET_EXHAUSTED', `观察预算已用尽（${session.counters.observations}/${session.budget.maxObservations} 次，${session.counters.newObservedCells}/${session.budget.maxObservedCells} 格）；边界仍未知`, { boundaries: boundary === undefined ? [] : [boundary] });
           break;
         }
         session.phase = 'observing';
         ctx.setStationaryWait?.(true);
+        let currentReceipt: ObservationReceipt | undefined;
+        let boundaryReceipt: ObservationReceipt | undefined;
         try {
-          observation = await observeBoundary(ctx, {
-            boundary,
-            maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
-            ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
-          });
+          if (needCurrent && !currentDone
+            && session.counters.observations < session.budget.maxObservations
+            && session.counters.newObservedCells < session.budget.maxObservedCells) {
+            currentReceipt = await observeBoundary(ctx, {
+              boundary: {
+                from: { ...after.pos }, to: { ...after.pos }, kind: 'walk', status: 'UNKNOWN',
+                reason: '当前位置自身支撑/身体证据不足；只观察身体所在列', direction: 'HERE',
+              },
+              maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
+              ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+            });
+            session.counters.observations += 1;
+            session.counters.newObservedCells += currentReceipt.newObservedCells;
+            session.lastObservation = currentReceipt;
+          }
+          if (boundary !== undefined && !boundaryDone
+            && session.counters.observations < session.budget.maxObservations
+            && session.counters.newObservedCells < session.budget.maxObservedCells) {
+            boundaryReceipt = await observeBoundary(ctx, {
+              boundary,
+              maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
+              ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+            });
+            session.counters.observations += 1;
+            session.counters.newObservedCells += boundaryReceipt.newObservedCells;
+            session.lastObservation = boundaryReceipt;
+          }
         } finally {
           ctx.setStationaryWait?.(false);
         }
-        session.counters.observations += 1;
-        session.counters.newObservedCells += observation.newObservedCells;
-        session.lastObservation = observation;
-        session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey];
+        observation = boundaryReceipt ?? currentReceipt;
+        if (observation === undefined) {
+          stop = stopOf('BUDGET_EXHAUSTED', '观察预算不足以再执行一次前沿观察；边界仍未知', {
+            boundaries: boundary === undefined ? [] : [boundary],
+          });
+          break;
+        }
+        if (currentReceipt !== undefined && boundaryReceipt !== undefined) {
+          observation = {
+            ...boundaryReceipt,
+            cells: [...currentReceipt.cells, ...boundaryReceipt.cells],
+            observed: currentReceipt.observed + boundaryReceipt.observed,
+            attempted: currentReceipt.attempted || boundaryReceipt.attempted,
+            newObservedCells: currentReceipt.newObservedCells + boundaryReceipt.newObservedCells,
+            relatedCells: [...currentReceipt.relatedCells, ...boundaryReceipt.relatedCells],
+            relatedChanged: currentReceipt.relatedChanged || boundaryReceipt.relatedChanged,
+            turned: currentReceipt.turned || boundaryReceipt.turned,
+          };
+          session.lastObservation = observation;
+        }
+        if (boundaryReceipt !== undefined) {
+          session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey!];
+        }
+        if (currentReceipt !== undefined && currentKey !== undefined) {
+          session.observedBoundaries = [...(session.observedBoundaries ?? []), currentKey];
+        }
         session.updatedAt = Date.now();
         // 段内已先走到证据前缀端点，观察就是在新站位朝边界做的；没有相关变化时从同一站位重搜不会有新结果。
         if (!observation.relatedChanged) {
-          stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', { boundaries: [boundary] });
+          stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', {
+            boundaries: boundary === undefined ? [] : [boundary],
+          });
           break;
         }
         session.phase = 'replanning';
