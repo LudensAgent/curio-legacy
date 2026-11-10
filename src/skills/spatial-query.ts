@@ -39,12 +39,8 @@ const HOST_COMPOSED_CAPABILITIES = {
     markStale: true,
     markTraversed: true,
     markModified: true,
-    // 路线/片段/拓扑写入入口已退役；宿主不再声明这些写能力。
-    saveFragment: false,
-    addTraversal: false,
-    recordNode: false,
-    upsertEdge: false,
-    savePortalEdge: false,
+    // 路线/片段/拓扑写入入口已退役；宿主不再声明这些写能力（键本身已删除，
+    // 不存在即未接线，不以 false 占位）。
     checkpoint: true,
     flush: false,
     close: true,

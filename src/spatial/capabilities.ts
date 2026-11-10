@@ -8,9 +8,10 @@
  *
  * 启动日志只输出有界摘要（契约版本与各域 false 键），完整报告按需查询。
  *
- * 过渡期直读清单（D-070）：库执行环境与只读查询仍直接读 `session.voxel`/
- * `session.history`——`route.ts`（搜索/历史规划源）、`walk.ts`（执行环境 map）、
- * `spatial-query.ts`（只读查询）。它们不是写入入口，新增写入口必须走共享会话。
+ * 路线/片段/拓扑写入已随旧导航体系退役：`MemoryWriteCapability` 只列共享会话
+ * 仍真正接线并使用的体素写与观测入口；库报告里的历史写键仍保留在 `library`/
+ * `effective` 原样，但宿主不再声明、不再调用。只读查询仍直接读 `session.voxel`/
+ * `session.history`（`spatial-query.ts`），它不是写入入口。
  */
 import {
   composeCapabilities,
@@ -26,12 +27,12 @@ import type { SharedSpatialSession } from './shared-session.ts';
 export type CapabilityDomain = keyof Omit<MemoryHostCapabilities, 'contract'>;
 
 /**
- * 库 memory 域的写入能力名；与契约 §2.3 的 `memory` 键逐键对应。
- * `MemoryIngest.addPortalTraversal` 没有独立能力键，依赖 `savePortalEdge`（传送边）。
+ * 共享会话仍接线的库 memory 写入能力名（契约 §2.3 的子集）：观测准入与体素写。
+ * 路线/片段/拓扑写入键（saveFragment/addTraversal/recordNode/upsertEdge/
+ * savePortalEdge）已随旧体系退役，不再由宿主声明或调用。
  */
 export type MemoryWriteCapability =
-  | 'beginSession' | 'observeBatch' | 'markStale' | 'markTraversed' | 'markModified'
-  | 'saveFragment' | 'addTraversal' | 'recordNode' | 'upsertEdge' | 'savePortalEdge';
+  | 'beginSession' | 'observeBatch' | 'markStale' | 'markTraversed' | 'markModified';
 
 /**
  * 宿主组合报告：库报告逐键 + 宿主真正拥有的持久化生命周期 + 两者交集。

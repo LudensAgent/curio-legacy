@@ -17,13 +17,15 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { openSpatialSession, portalTraversalIdentity } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
+import { DEFAULT_SNAPSHOT_MAX_MB } from '../src/spatial/shared-session.ts';
 import type { JsonObject, PathFragment, SpatialNode } from 'curio-minecraft-3d-memory';
 import type { ChestRecord, FurnaceRecord } from '../src/memory/store.ts';
 import { ContainerLedger, type ContainerEntry, type FurnaceEntry } from '../src/memory/container-ledger.ts';
 import { isContainerLandmark } from '../src/memory/chest-memory.ts';
 
 type Vec = { x: number; y: number; z: number };
+/** 离线迁移工具自己的 legacy 路径 links 上限；运行时路线写入已退役，故不从 src 反向导入。 */
+const OFFLINE_LEGACY_MAX_FRAGMENT_LINKS = 16_384;
 const args = new Map<string, string>();
 let execute = false;
 for (const arg of process.argv.slice(2)) {
@@ -118,7 +120,7 @@ function removeDryRunCopies() {
 
 const session = await openSpatialSession({
   databasePath: workingDatabase, worldId, timeoutMs: 30_000,
-  snapshotLimits: { maxBytes: Math.round(snapshotMaxMb * 1024 * 1024) }, fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+  snapshotLimits: { maxBytes: Math.round(snapshotMaxMb * 1024 * 1024) }, fragmentOptions: { maxLinks: OFFLINE_LEGACY_MAX_FRAGMENT_LINKS },
 });
 const containers = new ContainerLedger(workingContainerPath, worldId);
 const actions = {

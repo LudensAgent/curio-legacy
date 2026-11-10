@@ -102,11 +102,9 @@ test('能力门禁：false 时拒绝写入且不调用库，历史位保持未�
       explored: false, traversed: false, modified: false, risk: false, stale: false,
     }, '能力 false 时不得调用库写入（没有回退到更宽的后端）');
 
-    // `MemoryIngest` 投影同样按 §2.3 拒绝，而不是绕过门禁继续写。
-    assert.throws(
-      () => svc.ingest.markTraversed(DIM, { x: 1, y: 64, z: 0 }),
-      /memory\.markTraversed=false/,
-    );
+    // 旧的 `MemoryIngest` 投影已随路线写链退役：实例上不再有 ingest 入口，
+    // 也就不存在绕过门禁继续写的第二条路径。
+    assert.equal('ingest' in svc, false, '退役的 ingest 投影不应再出现在共享会话上');
     assert.equal(svc.session.voxel.historyAt(DIM, 1, 64, 0).traversed, false);
     // 结束前恢复原报告，避免影响 close 流程。
     (svc as unknown as { capabilityReport: HostCapabilityReport }).capabilityReport = recorded;

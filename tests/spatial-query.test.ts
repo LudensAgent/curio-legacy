@@ -403,8 +403,11 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(rec(host.memory).checkpoint, true);
     assert.equal(rec(host.memory).markTraversed, true);
     assert.equal(rec(host.memory).markModified, true);
-    assert.equal(rec(host.memory).saveFragment, false, '路线片段写入已从宿主组合能力退役');
-    assert.equal(rec(host.memory).addTraversal, false);
+    assert.equal(Object.hasOwn(rec(host.memory), 'saveFragment'), false, '路线片段写入键已从宿主组合能力删除');
+    assert.equal(Object.hasOwn(rec(host.memory), 'addTraversal'), false);
+    assert.equal(Object.hasOwn(rec(host.memory), 'recordNode'), false);
+    assert.equal(Object.hasOwn(rec(host.memory), 'upsertEdge'), false);
+    assert.equal(Object.hasOwn(rec(host.memory), 'savePortalEdge'), false);
     assert.equal(rec(host.query).containerContents, false);
     assert.equal(rec(host.query).fragments, false);
     assert.equal(rec(host.query).historyRoute, false);
@@ -416,10 +419,17 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(rec(host.persistence).sqlite, true);
     assert.equal(rec(host.persistence).manualResidency, true);
 
-    // 与库报告逐键对齐（D-013 取交集的前提），但值各自独立。
-    for (const key of ['memory', 'query', 'plan', 'execute', 'persistence'] as const) {
+    // 与库报告逐键对齐（D-013 取交集的前提），但值各自独立。memory 域例外：
+    // 宿主只声明仍接线的键，库报告保留的已退役路线写键不出现在宿主组合报告里。
+    for (const key of ['query', 'plan', 'execute', 'persistence'] as const) {
       assert.deepEqual(Object.keys(rec(host[key])).sort(), Object.keys(rec(report[key])).sort(), `${key} 能力键必须与库报告一致`);
     }
+    const hostMemoryKeys = Object.keys(rec(host.memory)).sort();
+    const libraryMemoryKeys = new Set(Object.keys(rec(report.memory)));
+    assert.ok(hostMemoryKeys.every((key) => libraryMemoryKeys.has(key)), '宿主 memory 键必须是库报告的键（交集，不新增）');
+    assert.deepEqual(hostMemoryKeys, [
+      'beginSession', 'checkpoint', 'close', 'flush', 'markModified', 'markStale', 'markTraversed', 'observeBatch',
+    ]);
 
     // 直接查询同一 kind 得到完全相同的库数据；宿主说明只由 skill 层附加。
     const direct = svc.query({ kind: 'capabilities' });

@@ -28,20 +28,13 @@ import type {
   VoxelLoading,
   WorkingSetStats,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { SpatialMemoryStoreImpl, VoxelResidencyError, writeConfirmedCorridor } from 'curio-minecraft-3d-memory';
+import { SpatialMemoryStoreImpl, VoxelResidencyError } from 'curio-minecraft-3d-memory';
 import type {
   BatchChangeReport,
   ChangeReport,
-  ConnectionType,
-  CorridorWriteReceipt,
-  MemoryIngest,
-  MoveMode,
-  NodeKind,
   Observation,
   ObservationBatch,
-  PathFragment,
   ResidencyLimits,
-  SaveResult,
   SectionKey,
   SectionResidency,
   SpatialNode,
@@ -49,7 +42,6 @@ import type {
   SpatialQueryRequest,
   SpatialQueryResult,
   StaleReason,
-  TraversalEvidence,
   Vec3Like,
 } from 'curio-minecraft-3d-memory';
 import { capabilityGate, readHostCapabilities } from './capabilities.ts';
@@ -61,34 +53,14 @@ import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './worki
 /** 正常操作的持久化时限；supervisor 20s 窗口内约可容纳一次保存 + 最终 checkpoint + close。 */
 const DEFAULT_TIMEOUT_MS = 5000;
 
-/** 单条通道 fragment 的 links 上限。库默认 4096，但长期沿一条主矿道行走会持续追加走过的边
- *  （线上已出现 4107 条，落盘时被拒并产生 P0）；提高到 16384 给长矿道留出余量。 */
-export const MAX_FRAGMENT_LINKS = 16_384;
 /** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
 export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
-/** 路径片段上限（整个世界、各维度合计）。不往上调：travel_to via:"history"、spatial_extrema 每次最多扫 1000 片，
- *  调大只会让它们看不全；写满时由 recordCorridor 腾位。 */
-export const MAX_PATH_FRAGMENTS = 1000;
 /** 体素观测只保留最近观测的这么多格（每次落盘前修剪），更早的格回到未知；不修剪的话观测格只增不减，
  *  线上约 4 小时就超过快照上限 maxObservedCells(1,000,000)，此后每次保存都失败、再也落不了盘。 */
 export const MAX_OBSERVED_CELLS = 25_600;
 /** 关停时最终保存窗口内最多提交多少个 bounded dirty 批次。 */
 const MAX_FINAL_CHECKPOINT_BATCHES = 16;
-/** 写满时一次腾出的片数：腾位要整表扫描片段和边，按批摊薄。 */
-const FRAGMENT_PRUNE_BATCH = 50;
-
-/** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
-const MAX_WALK_TOPOLOGY_NODES = 8;
-const MAX_WALK_TOPOLOGY_EDGES = 8;
-
-/** 已确认 corridor 写入的拓扑参数；所有路径来源共用同一套历史/证据规则。 */
-interface CorridorWriteOptions {
-  topologyNamespace: string;
-  edgeSource: string;
-  maxTopologyNodes: number;
-  maxTopologyEdges: number;
-}
 
 /** 宿主侧待加载原始证据的硬上限；超出时保留时间/数量并显式报告，不静默覆盖。 */
 export const MAX_PENDING_OBSERVATIONS = 256;
@@ -203,11 +175,8 @@ export type SharedSpatialWriteRejection =
   | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string }
   | { kind: 'session_mismatch'; detail: string; expectedSession: string; actualSession: string | null };
 
-/** 共享会话直接拥有的历史写方法（其余能力由 `ingest` 投影转发时门禁）。 */
-export type MemoryWriteMethod = Extract<
-  MemoryWriteCapability,
-  'markTraversed' | 'markModified' | 'markStale' | 'saveFragment' | 'addTraversal' | 'recordNode' | 'upsertEdge'
->;
+/** 共享会话直接拥有并仍使用的体素写方法。 */
+export type MemoryWriteMethod = Extract<MemoryWriteCapability, 'markTraversed' | 'markModified' | 'markStale'>;
 
 /**
  * 一次写入的结果。`written` 只表示内存接受；`deliveryError.committed === true`
@@ -220,73 +189,6 @@ export type SharedSpatialWriteResult =
       deliveryError: { committed: true; error: unknown } | null;
     }
   | { status: 'rejected'; reason: SharedSpatialWriteRejection };
-
-export type SharedSpatialSaveResult =
-  | { status: 'written'; result: SaveResult }
-  | { status: 'rejected'; reason: SharedSpatialWriteRejection };
-
-/** fragment 保存没有库返回值；成功只表示内存接受。 */
-export type SharedSpatialFragmentSaveResult =
-  | { status: 'written' }
-  | { status: 'rejected'; reason: SharedSpatialWriteRejection };
-
-/** walk/dug 共用的确认段；from/to 是实测脚位（walk 取自库实际 move，dug 取自上一落点）。 */
-export interface WalkCorridorSegment {
-  id: string;
-  fragmentId: string;
-  from: Vec3Like;
-  to: Vec3Like;
-  worldId: string;
-  dim: string;
-  sessionId: string | null;
-  observedAt: number | null;
-  source: string;
-  executionId: string;
-  actionId?: string;
-  /** 实测移动方式；缺省表示 traversal 不声明模式，拓扑边类型仍按实测 dy 记录几何。 */
-  mode?: TraversalEvidence['mode'];
-}
-
-/** walk_path 已确认通道的写入请求；只有实测确认的段与终点允许进入。 */
-export interface WalkCorridorEvidence {
-  fragment: PathFragment;
-  segments: readonly WalkCorridorSegment[];
-}
-
-/** 一次确认走廊写入的拓扑结果；计数来自本次实测段派生的节点/边，不是计划点。 */
-export interface WalkMemoryTopology {
-  nodes: number;
-  edges: number;
-  /** true 仅表示这些节点/边随本次走廊原子写入提交；跳过拓扑时恒为 false。 */
-  written: boolean;
-}
-
-/**
- * walk_path 记忆写入结局；失败阶段保留已写入的 traversal 前缀，不冒充已保存。
- * `stage` 只来自库/共享会话实际返回的结构化拒绝；调用方 sink 抛出不是本类型，
- * 由 recorder 侧另行如实表达（不得把异常改写成这里的阶段）。
- */
-/** 写满腾位时实际忘掉的路径记录；redundant 是其中“每格别处也记着、且已无边指向”的片数，其余取自最拥挤的区块。 */
-export interface PathRetention { fragments: number; redundant: number; edges: number; nodes: number }
-
-export type WalkMemoryOutcome = (
-  | {
-      status: 'written';
-      fragmentId: string;
-      traversalIds: string[];
-      stancesMarked: number;
-      deliveryError: { committed: true; error: unknown } | null;
-      topology: WalkMemoryTopology;
-    }
-  | {
-      status: 'failed';
-      stage: SharedSpatialWriteRejection['kind'] | 'save_fragment' | 'add_traversal' | 'capacity' | 'topology_write';
-      message: string;
-      fragmentId: string;
-      traversalIds: string[];
-      topology: WalkMemoryTopology;
-    }
-) & { forgotten?: PathRetention };
 
 /** 结构化缺口类别；只描述宿主实际拒绝/未完成的事实。 */
 export type SharedSpatialGapKind =
@@ -523,16 +425,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** `MemoryIngest` 投影只有 void/结果返回；拒绝按库的写入边界抛出。 */
-function throwIfRejected(result: SharedSpatialWriteResult | SharedSpatialSaveResult | SharedSpatialFragmentSaveResult): void {
-  if (result.status === 'rejected') throw writeRejectionError(result.reason);
-}
-
-/** 宿主拒绝写入 → 库写入边界抛出的类型化错误；拒绝事实不被吞掉。 */
-function writeRejectionError(reason: SharedSpatialWriteRejection): PersistenceError {
-  return new PersistenceError(reason.kind === 'closed' ? 'closed' : 'invalid_argument', reason.detail);
-}
-
 /** manual 写入容量拒绝是库内普通 Error；按消息里的上限名归类，不猜私有字节。 */
 function capacityKindOf(error: unknown): 'count_capacity' | 'byte_capacity' | 'capacity' | null {
   if (error instanceof PersistenceError && error.kind === 'capacity') return 'capacity';
@@ -555,76 +447,6 @@ function freeSummary(result: FreeResult): string {
   return `free evicted ${result.evicted.length} section(s); rejected ${pinned} pinned/${dirty} dirty/${notCommitted} not_committed`;
 }
 
-/** 连接类型只描述实测几何形状；±1 格台阶用 STAIRCASE，降/升超过 1 格用 DROP/CLIMB。 */
-function walkConnectionType(from: Vec3Like, to: Vec3Like): ConnectionType {
-  const dy = to.y - from.y;
-  if (dy <= -1.5) return 'DROP';
-  if (dy >= 1.5) return 'CLIMB';
-  if (Math.abs(dy) >= 0.5) return 'STAIRCASE';
-  return 'HORIZONTAL';
-}
-
-/**
- * 从已确认段规划无语义路由节点与有向边。拓扑库要求每条 traversed 边引用的
- * traversal 证据端点与边两端节点位置**逐值相等**，因此不能把相邻多段合并成一条
- * 跨段边（那会没有任何一条真实 traversal 匹配整段端点）。这里按每个确认段的实际
- * 端点建节点/边：起点 entrance、终点 place、y 类型变化 vertical_junction、真实
- * 水平方向变化 turn，其余同类型直行中间节点用中性 place（不声称转向）。节点 id
- * 用实测端点的 floor 格，重走可复用同一批 id。只使用实测 from/to 与真实
- * traversal id；不生成反向边，也不补计划点。
- */
-function planWalkTopology(dim: string, segments: readonly WalkCorridorSegment[], namespace = 'walk') {
-  const points = [{ ...segments[0]!.from }, ...segments.map((segment) => ({ ...segment.to }))];
-  const types = segments.map((segment) => walkConnectionType(segment.from, segment.to));
-  const headings = segments.map((_, i) => {
-    const dx = points[i + 1]!.x - points[i]!.x;
-    const dz = points[i + 1]!.z - points[i]!.z;
-    if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) return null;
-    if (Math.abs(dx) >= Math.abs(dz)) return dx > 0 ? 'x+' : 'x-';
-    return dz > 0 ? 'z+' : 'z-';
-  });
-  const nodes = points.map((point, index) => {
-    const cell = { x: Math.floor(point.x), y: Math.floor(point.y), z: Math.floor(point.z) };
-    return {
-      id: `${namespace}:${dim}:${cell.x},${cell.y},${cell.z}`,
-      pos: { ...point },
-      kind: (index === 0
-        ? 'entrance'
-        : index === points.length - 1
-          ? 'place'
-          : types[index - 1] !== types[index]
-            ? 'vertical_junction'
-            : headings[index - 1] !== null && headings[index] !== null && headings[index - 1] !== headings[index]
-              ? 'turn'
-              : 'place') as NodeKind,
-      observedAt: segments[Math.max(index - 1, 0)]!.observedAt,
-    };
-  });
-  // 同一次通道里端点完全相同的重复段合并 evidence（库允许一条边引用多条端点一致的 traversal）。
-  const byId = new Map<string, { id: string; from: string; to: string; type: ConnectionType; modes: MoveMode[]; evidenceIds: string[] }>();
-  for (const [i, segment] of segments.entries()) {
-    const from = nodes[i]!;
-    const to = nodes[i + 1]!;
-    const type = types[i]!;
-    const id = `${namespace}:${dim}:${from.id}->${to.id}:${type}`;
-    const modes: MoveMode[] = type === 'DROP' ? ['drop'] : type === 'CLIMB' ? ['climb'] : ['walk'];
-    const existing = byId.get(id);
-    if (existing !== undefined) existing.evidenceIds.push(segment.id);
-    else byId.set(id, { id, from: from.id, to: to.id, type, modes, evidenceIds: [segment.id] });
-  }
-  return { nodes, edges: [...byId.values()] };
-}
-
-/** Human-readable atomic-corridor rejection that keeps the structured fields. */
-function corridorProblemMessage(receipt: CorridorWriteReceipt): string {
-  const problem = receipt.problem;
-  if (problem === undefined) return 'confirmed corridor write was rejected';
-  const external = problem.externalEdgeIds === undefined || problem.externalEdgeIds.length === 0
-    ? ''
-    : `; external edge(s): ${problem.externalEdgeIds.join(', ')}`;
-  return `${problem.kind}: ${problem.detail}${external}`;
-}
-
 export class SharedSpatialSession {
   readonly worldId: string;
   readonly databasePath: string;
@@ -644,11 +466,8 @@ export class SharedSpatialSession {
   private readonly diagnostic: ((diagnostic: SharedSpatialDiagnostic) => void) | undefined;
   /** 唯一查询端口：只读组合 session 的 voxel/history/topology，不暴露写入方法。 */
   private readonly queryPort: SpatialQueryPort;
-  /** 同一组合 store 的契约写入端口（`MemoryIngest`）；写方法只能经共享会话调用。 */
-  private readonly memory: MemoryIngest;
   /** 启动时读取一次的能力报告（契约 §2.3/§13.1）；只读，不在运行中重新协商。 */
   private readonly capabilityReport: HostCapabilityReport;
-  private readonly ingestPort: MemoryIngest;
 
   /** 已接受的原始 handoff，按到达顺序；最多 MAX_PENDING_OBSERVATIONS 条。 */
   private pending: PendingHandoff[] = [];
@@ -712,62 +531,8 @@ export class SharedSpatialSession {
       query: { now, isContainer },
     });
     this.queryPort = store;
-    this.memory = store;
     // 契约 §13.1：启动时读取能力报告并留下契约版本；读取失败就是启动失败。
     this.capabilityReport = readHostCapabilities(this);
-    // `MemoryIngest` 投影只有 void/结果返回：写方法经共享会话自己的包装（同一套
-    // 能力/作用域门禁），拒绝按库的写入边界抛 `PersistenceError`；其余拓扑写方法
-    // 在这里统一过能力门禁后转发，库不会被调用。
-    const port = (name: MemoryWriteCapability) => {
-      if (this.allowed('memory', name)) return;
-      this.recordCapabilityRejection(name);
-      throw new PersistenceError('invalid_argument', `library reports memory.${name}=false; the ingest port does not call it`);
-    };
-    this.ingestPort = {
-      beginSession: (sessionId) => {
-        port('beginSession');
-        const scope = this.scope;
-        if (scope === null) {
-          throw new PersistenceError('invalid_argument', `beginSession("${sessionId}") needs a trusted scope; use beginSession(scope) first`);
-        }
-        return this.beginSession({ ...scope, sessionId });
-      },
-      // 与类上的 observeBatch 同一语义：能力 false 时记录拒绝并返回空报告，
-      // 调用方可读 `lastCapabilityRejection()`；不抛错、不伪装已写入。
-      observeBatch: (batch) => this.observeBatch(batch),
-      markTraversed: (dim, pos) => { throwIfRejected(this.markTraversed(dim, pos)); },
-      markModified: (dim, pos, actionId) => { throwIfRejected(this.markModified(dim, pos, actionId)); },
-      saveFragment: (fragment) => { throwIfRejected(this.saveFragment(fragment)); },
-      addTraversal: (evidence) => {
-        const result = this.addTraversal(evidence);
-        if (result.status === 'rejected') throw writeRejectionError(result.reason);
-        return result.result;
-      },
-      recordNode: (label, pos, tag, options) => {
-        port('recordNode');
-        return this.memory.recordNode(label, pos, tag, options);
-      },
-      upsertEdge: (edge) => {
-        port('upsertEdge');
-        this.memory.upsertEdge(edge);
-      },
-      savePortalEdge: (edge, traversals) => {
-        port('savePortalEdge');
-        return this.memory.savePortalEdge(edge, traversals);
-      },
-      addPortalTraversal: (edgeId, traversal) => {
-        // 契约 §2.3 的 memory 能力没有 addPortalTraversal 键；该写依赖传送边能力，
-        // 按 `savePortalEdge` 门禁。
-        port('savePortalEdge');
-        return this.memory.addPortalTraversal(edgeId, traversal);
-      },
-      // `this.markStale` 自己走 `writeRejection`，这里不再前置 `port()`。
-      markStale: (dim, reason) => {
-        const result = this.markStale(dim, reason);
-        if (result.status === 'rejected') throw writeRejectionError(result.reason);
-        return result.report;
-      },
-    };
   }
 
   /** 启动时已读取的库能力报告（契约 §2.3）；宿主组合的持久化生命周期单独列出。 */
@@ -789,7 +554,6 @@ export class SharedSpatialSession {
       ...(options.voxelBatchMaxBytes === undefined ? {} : { voxelBatchMaxBytes: options.voxelBatchMaxBytes }),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
-      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS, maxFragments: MAX_PATH_FRAGMENTS },
     });
     return new SharedSpatialSession(
       session,
@@ -948,22 +712,6 @@ export class SharedSpatialSession {
     return this.observeManual(converted);
   }
 
-  /**
-   * 契约 §4.1 的 `MemoryIngest` 单入口投影：宿主（含 walk_path）不再直接接触
-   * `VoxelMap`/`FragmentStore` 写方法。`beginSession`/`observeBatch`/`markStale`
-   * 走共享会话自己的准入与作用域；历史写经同一个 store 进入。拒绝时按库的写入
-   * 边界抛 `PersistenceError`，成功只表示内存接受，不等于 checkpoint 已保存。
-   *
-   * 投影比共享会话自己的 `beginSession(scope)` 窄：`sessionId` 单独无法表达
-   * world/dim，因此只在已有一份可信作用域后使用（切换作用域仍走 `beginSession(scope)`）。
-   *
-   * 过渡期仍直接读取 `session.voxel`/`session.history` 的入口只用于只读查询与
-   * 库执行环境（`route.ts`/`walk.ts`/`spatial-query.ts`），不在本类之外新增写入口。
-   */
-  get ingest(): MemoryIngest {
-    return this.ingestPort;
-  }
-
   /** 契约 §4.1 `observeBatch`；admission/pause/作用域与 `observe` 同一套门禁。 */
   observeBatch(batch: ObservationBatch): BatchChangeReport {
     if (this.closingFlag) {
@@ -1005,249 +753,12 @@ export class SharedSpatialSession {
       : { status: 'rejected', reason: rejection };
   }
 
-  /** 外部显式 markStale（`MemoryIngest` 投影）；返回报告并转发给活跃执行器。 */
+  /** 外部显式 markStale；返回报告并转发给活跃执行器。 */
   markStale(dim: string, reason: StaleReason): SharedSpatialWriteResult {
     const rejection = this.writeRejection(dim, 'markStale');
     return rejection === null
       ? this.deliverApplied(this.session.voxel.markStale(dim, reason), 0)
       : { status: 'rejected', reason: rejection };
-  }
-
-  /**
-   * 保存历史几何；不生成 traversal，不证明当前可走。库只校验 fragment 的
-   * world/dim，会话归属由这里校验：旧会话的证据不得写成当前会话的事实。
-   */
-  saveFragment(fragment: Parameters<MemoryIngest['saveFragment']>[0]): SharedSpatialFragmentSaveResult {
-    // `PathFragment` 没有 session 字段，会话归属只能由 traversal/段校验；这里只做
-    // 能力/生命周期/维度门禁。
-    const rejection = this.writeRejection(fragment.dim, 'saveFragment');
-    if (rejection !== null) return { status: 'rejected', reason: rejection };
-    this.memory.saveFragment(fragment);
-    return { status: 'written' };
-  }
-
-  /** 保存实测连续走过的证据；fragment 必须已存在；会话归属同 `saveFragment`。 */
-  addTraversal(evidence: TraversalEvidence): SharedSpatialSaveResult {
-    const rejection = this.writeRejection(evidence.dim, 'addTraversal', evidence.sessionId);
-    if (rejection !== null) return { status: 'rejected', reason: rejection };
-    return { status: 'written', result: this.memory.addTraversal(evidence) };
-  }
-
-  /**
-   * 已确认通道证据的显式/兼容写入入口：fragment、逐确认段 traversal、路由节点与有向边通过库的
-   * `writeConfirmedCorridor` 一次原子写入；任一步失败回滚全部，不留下
-   * fragment/traversal/拓扑的前缀半写入。宿主上限超限时只原子写历史前缀并明确
-   * 报告 topology skipped。站点标记（voxel）在历史写成功后单独写入。
-   * v0.11 B5.4 起普通 Perception 移动不调用本方法，只调用 `markTraversed`。
-   * `coordinate:'cell'` 是显式拓扑坐标规范：节点 id 与实测端点统一到整数格，
-   * fragment polyline 仍保留原始实测点。空段只保存 fragment、不写拓扑。不把
-   * 未确认段、计划坐标或时间接近补成亲历证据；记忆失败不改身体结果。
-   */
-  recordWalkCorridor(input: WalkCorridorEvidence): WalkMemoryOutcome {
-    return this.recordCorridor(input, {
-      topologyNamespace: 'walk',
-      edgeSource: 'confirmed_walk_path',
-      maxTopologyNodes: MAX_WALK_TOPOLOGY_NODES,
-      maxTopologyEdges: MAX_WALK_TOPOLOGY_EDGES,
-    });
-  }
-
-  private recordCorridor(input: WalkCorridorEvidence, opts: CorridorWriteOptions): WalkMemoryOutcome {
-    const base: { fragmentId: string; traversalIds: string[]; forgotten?: PathRetention } = { fragmentId: input.fragment.id, traversalIds: [] };
-    const emptyTopology: WalkMemoryTopology = { nodes: 0, edges: 0, written: false };
-    // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
-    // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
-    const rejected =
-      this.writeRejection(input.fragment.dim, 'saveFragment')
-      ?? this.writeRejection(input.fragment.dim, 'addTraversal')
-      ?? this.writeRejection(input.fragment.dim, 'markTraversed')
-      ?? this.writeRejection(input.fragment.dim, 'recordNode')
-      ?? this.writeRejection(input.fragment.dim, 'upsertEdge');
-    if (rejected !== null) return { status: 'failed', stage: rejected.kind, message: rejected.detail, ...base, topology: emptyTopology };
-    const oldSession = input.segments.find((segment) => this.sessionMismatch(segment.sessionId) !== null);
-    if (oldSession !== undefined) {
-      const mismatch = this.sessionMismatch(oldSession.sessionId)!;
-      return { status: 'failed', stage: 'session_mismatch', message: mismatch, ...base, topology: emptyTopology };
-    }
-    const sessionId = this.scope?.sessionId;
-    if (sessionId === undefined) {
-      return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base, topology: emptyTopology };
-    }
-    const forgotten = this.makeRoomForFragment();
-    if (forgotten !== null) base.forgotten = forgotten;
-
-    const traversals = input.segments.map((segment) => ({ ...segment, fragmentId: segment.fragmentId }));
-    const topology = input.segments.length === 0
-      ? null
-      : planWalkTopology(input.fragment.dim, input.segments, opts.topologyNamespace);
-    const topologyCounts: WalkMemoryTopology = {
-      nodes: topology?.nodes.length ?? 0,
-      edges: topology?.edges.length ?? 0,
-      written: false,
-    };
-
-    // Host-level route-size cap: keep the old "history written, topology skipped"
-    // outcome, but write the history prefix atomically instead of leaving a
-    // fragment without its traversals or a partial node/edge set.
-    if (topology !== null && (topology.nodes.length > opts.maxTopologyNodes || topology.edges.length > opts.maxTopologyEdges)) {
-      const historyOnly = writeConfirmedCorridor(this.session.history, this.session.topology, {
-        fragment: input.fragment,
-        traversals,
-        nodes: [],
-        edges: [],
-        sessionId,
-        coordinate: 'cell',
-      });
-      if (historyOnly.status === 'rejected') {
-        return {
-          status: 'failed',
-          stage: historyOnly.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
-          message: corridorProblemMessage(historyOnly),
-          ...base,
-          topology: topologyCounts,
-        };
-      }
-      base.traversalIds.push(...historyOnly.traversals.inserted, ...historyOnly.traversals.unchanged);
-      this.markCorridorStances(input.segments);
-      return {
-        status: 'failed', stage: 'capacity',
-        message: `history written (fragment + ${base.traversalIds.length} traversal(s)); topology skipped: `
-          + `confirmed corridor needs ${topology.nodes.length} node(s)/${topology.edges.length} edge(s), `
-          + `host cap ${opts.maxTopologyNodes}/${opts.maxTopologyEdges}`,
-        ...base,
-        topology: topologyCounts,
-      };
-    }
-
-    // One atomic write for fragment + traversals + nodes + edges. `cell` is the
-    // explicit topology coordinate spec: node ids are already floor-cell based,
-    // and measured feet positions jitter inside a cell. Canonicalizing once here
-    // keeps repeated traversals of the same block cell endpoint-identical, while
-    // the fragment still retains the raw measured polyline. No proximity snapping.
-    const receipt = writeConfirmedCorridor(this.session.history, this.session.topology, {
-      fragment: input.fragment,
-      traversals,
-      nodes: (topology?.nodes ?? []).map((node) => ({
-        id: node.id,
-        pos: { ...node.pos },
-        kind: node.kind,
-        source: 'agent' as const,
-        ...(node.observedAt === null ? {} : { observedAt: node.observedAt }),
-      })),
-      edges: (topology?.edges ?? []).map((edge) => ({
-        id: edge.id,
-        from: edge.from,
-        to: edge.to,
-        type: edge.type,
-        evidenceIds: [...edge.evidenceIds],
-        modes: [...edge.modes],
-        directed: true,
-        fragmentId: input.fragment.id,
-        source: opts.edgeSource,
-      })),
-      sessionId,
-      coordinate: 'cell',
-    });
-    if (receipt.status === 'rejected') {
-      return {
-        status: 'failed',
-        stage: receipt.problem?.kind === 'capacity' ? 'capacity' : 'topology_write',
-        message: corridorProblemMessage(receipt),
-        ...base,
-        topology: topologyCounts,
-      };
-    }
-
-    base.traversalIds.push(...receipt.traversals.inserted, ...receipt.traversals.unchanged);
-    const deliveryError = this.markCorridorStances(input.segments);
-    return {
-      status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError,
-      topology: { ...topologyCounts, written: topology !== null },
-    };
-  }
-
-  /**
-   * 路径片段写满时腾出一批位置；不腾的话此后亲历的路径全被库拒写（线上约 4 小时写满）。
-   * 先忘重复片段：已没有拓扑边指向它（同一对格子被后来的行走改写过），且它记的每一格
-   * 别的片段也记着——忘掉它不丢几何覆盖，也不断拓扑。重复片段不够时，再从片段最拥挤的区块
-   * 忘（同等拥挤先忘旧的），连同指向它的边和因此成孤点的 walk: 通道节点。只动 traversal 来源的片段；
-   * 地标、资源、区块访问、传送门记录不碰。没写满时返回 null。
-   */
-  private makeRoomForFragment(): PathRetention | null {
-    const { history, topology } = this.session;
-    const total = history.fragments({ limit: 1 }).total;
-    if (total < MAX_PATH_FRAGMENTS) return null;
-    const fragments: PathFragment[] = [];
-    for (let after: string | undefined; ;) {
-      const page = history.fragments({ limit: 100, ...(after === undefined ? {} : { after }) });
-      fragments.push(...page.items);
-      if (page.nextAfter === undefined) break;
-      after = page.nextAfter;
-    }
-    const edges: { id: string; from: string; to: string; fragmentId?: string }[] = [];
-    for (let after: string | undefined; ;) {
-      const page = topology.edges({ limit: 100, ...(after === undefined ? {} : { after }) });
-      edges.push(...page.items);
-      if (page.nextAfter === undefined) break;
-      after = page.nextAfter;
-    }
-    const referenced = new Set(edges.flatMap((edge) => edge.fragmentId === undefined ? [] : [edge.fragmentId]));
-    const cellsOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`))];
-    const coverage = new Map<string, number>();
-    for (const cell of fragments.flatMap(cellsOf)) coverage.set(cell, (coverage.get(cell) ?? 0) + 1);
-    const oldestFirst = fragments.filter((f) => f.geometrySource === 'traversal').sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-    const need = total - (MAX_PATH_FRAGMENTS - FRAGMENT_PRUNE_BATCH);
-    const chosen = new Set<string>();
-    for (const f of oldestFirst) {
-      if (chosen.size >= need) break;
-      const cells = cellsOf(f);
-      if (referenced.has(f.id) || cells.some((cell) => coverage.get(cell)! < 2)) continue;
-      for (const cell of cells) coverage.set(cell, coverage.get(cell)! - 1);
-      chosen.add(f.id);
-    }
-    const redundant = chosen.size;
-    // 不够时从最拥挤的地方忘：片段所经区块里“最稀疏那块”还有多少片段算它的拥挤度，挑最拥挤的、
-    // 同等拥挤先忘旧的。按“最旧”忘会先删最早走到的远处（下界门几百格外的那条路），而那里往往只有一条记录。
-    const chunksOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}`))];
-    const rest = oldestFirst.filter((f) => !chosen.has(f.id)).map((f) => ({ f, chunks: chunksOf(f) }));
-    const crowd = new Map<string, number>();
-    for (const chunk of rest.flatMap((entry) => entry.chunks)) crowd.set(chunk, (crowd.get(chunk) ?? 0) + 1);
-    while (chosen.size < need && rest.length > 0) {
-      const crowdOf = (chunks: string[]) => Math.min(...chunks.map((chunk) => crowd.get(chunk)!));
-      // rest 已按 lastUsedAt 升序；严格大于才换，所以同等拥挤时忘的是更旧的那个。
-      const best = rest.reduce((top, entry, index) => crowdOf(entry.chunks) > crowdOf(rest[top]!.chunks) ? index : top, 0);
-      const [{ f, chunks }] = rest.splice(best, 1);
-      for (const chunk of chunks) crowd.set(chunk, crowd.get(chunk)! - 1);
-      chosen.add(f.id);
-    }
-    const doomedEdges = edges.filter((edge) => edge.fragmentId !== undefined && chosen.has(edge.fragmentId));
-    const endpoints = new Set(doomedEdges.flatMap((edge) => [edge.from, edge.to]).filter((id) => id.startsWith('walk:')));
-    let nodes = 0;
-    history.runAtomic(() => topology.runAtomic(() => {
-      for (const edge of doomedEdges) topology.forgetEdge(edge.id);
-      for (const id of chosen) history.forgetFragment(id);
-      for (const id of endpoints) {
-        if (topology.incidentEdgeIds(id).length > 0 || topology.incidentPortalEdgeIds(id).length > 0) continue;
-        topology.forgetNode(id);
-        nodes += 1;
-      }
-    }));
-    return { fragments: chosen.size, redundant, edges: doomedEdges.length, nodes };
-  }
-
-  /**
-   * 站位标记按格坐标（库要求整数格）：实测连续位置所在的格就是走过的格，
-   * 不四舍五入到别的格，也不从计划点补；与已写入的 traversal 一一对应。
-   * 返回第一个报告转发失败（写入已提交），与历史写错误分开。
-   */
-  private markCorridorStances(segments: readonly WalkCorridorSegment[]): { committed: true; error: unknown } | null {
-    let deliveryError: { committed: true; error: unknown } | null = null;
-    for (const segment of segments) {
-      const cell = { x: Math.floor(segment.to.x), y: Math.floor(segment.to.y), z: Math.floor(segment.to.z) };
-      const delivered = this.deliverApplied(this.session.voxel.markTraversed(segment.dim, cell), 1);
-      if (deliveryError === null && delivered.status === 'written' && delivered.deliveryError !== null) deliveryError = delivered.deliveryError;
-    }
-    return deliveryError;
   }
 
   /**
@@ -1373,7 +884,7 @@ export class SharedSpatialSession {
   /**
    * 最近一次报告转发失败；`committed:true` 表示写入已提交（契约 §8.1 规则 6），
    * 调用者不得把它当成观测被拒绝而重试写入。覆盖 observeBatch/beginSession/
-   * interrupt/markStale 与历史写。
+   * interrupt 与保留的体素写（markTraversed/markModified/markStale）。
    */
   lastDeliveryFailure(): { committed: true; error: unknown } | null {
     return this.deliveryFailure;
@@ -2192,7 +1703,7 @@ export class SharedSpatialSession {
   }
 
   /**
-   * 历史写入的统一门禁：能力 false 不调用（也不回退），关停/未准入/暂停拒绝，
+   * 保留写入的统一门禁：能力 false 不调用（也不回退），关停/未准入/暂停拒绝，
    * 维度不是当前可信维度时拒绝——绝不按时间接近或请求推断写入。
    */
   private writeRejection(

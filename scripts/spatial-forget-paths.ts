@@ -17,7 +17,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { SpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { PathFragment } from 'curio-minecraft-3d-memory';
-import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
+import { DEFAULT_SNAPSHOT_MAX_MB } from '../src/spatial/shared-session.ts';
+
+/** 离线迁移工具自己的 legacy 路径 links 上限；运行时路线写入已退役，故不从 src 反向导入。 */
+const OFFLINE_LEGACY_MAX_FRAGMENT_LINKS = 16_384;
 
 const KINDS = ['dug', 'walked', 'bridge', 'built'] as const;
 const args = process.argv.slice(2);
@@ -34,7 +37,7 @@ if (!existsSync(db)) throw new Error(`database not found: ${db}`);
 
 const open = () => openSpatialSession({
   databasePath: db, worldId, timeoutMs: 30_000,
-  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: OFFLINE_LEGACY_MAX_FRAGMENT_LINKS },
 });
 
 const pages = <T>(read: (after?: string) => { items: T[]; nextAfter?: string }) => {

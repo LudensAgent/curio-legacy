@@ -15,7 +15,10 @@ import { existsSync, renameSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
-import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
+import { DEFAULT_SNAPSHOT_MAX_MB } from '../src/spatial/shared-session.ts';
+
+/** 离线迁移工具自己的 legacy 路径 links 上限；运行时路线写入已退役，故不从 src 反向导入。 */
+const OFFLINE_LEGACY_MAX_FRAGMENT_LINKS = 16_384;
 
 const args = process.argv.slice(2);
 const replace = args.includes('--replace');
@@ -74,7 +77,7 @@ if (integrity !== 'ok' || leftover.length || countDiff.length) {
 // 与运行时同样的上限经库打开：能打开、目标世界里读得到片段才算可用
 const session = await openSpatialSession({
   databasePath: work, worldId: toWorld, timeoutMs: 30_000,
-  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+  snapshotLimits: { maxBytes: DEFAULT_SNAPSHOT_MAX_MB * 1024 * 1024 }, fragmentOptions: { maxLinks: OFFLINE_LEGACY_MAX_FRAGMENT_LINKS },
 });
 const fragments = session.history.fragments({ limit: 1 }).items.length;
 await session.close();
