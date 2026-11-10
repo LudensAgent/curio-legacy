@@ -270,6 +270,37 @@ export class SpatialSemanticStore {
    * 缓存的节点只在本类内部只读使用，对外一律经 landmarkView/typedRecord 等再复制。
    */
   private nodesCache: { revision: number; nodes: SpatialNode[] } | null = null;
+  /**
+   * Resource anchors projected by 16³ Section bucket for bounded near queries.
+   * Rebuilt only when the topology revision changes; it is a derived index over
+   * persisted/current nodes, never a second authority over their facts.
+   */
+  private resourceIndex: {
+    revision: number;
+    buckets: Map<string, string[]>;
+    nodes: Map<string, SpatialNode>;
+  } | null = null;
+  private getResourceIndex(): {
+    revision: number;
+    buckets: Map<string, string[]>;
+    nodes: Map<string, SpatialNode>;
+  } {
+    const revision = this.session.topology.revision;
+    if (this.resourceIndex?.revision === revision) return this.resourceIndex;
+    const buckets = new Map<string, string[]>();
+    const nodes = new Map<string, SpatialNode>();
+    for (const node of this.allNodes()) {
+      if (node.tag !== 'resource' || node.gone || node.location.kind !== 'exact') continue;
+      const p = node.location.pos;
+      const key = `${node.dim}|${Math.floor(p.x / 16)}|${Math.floor(p.y / 16)}|${Math.floor(p.z / 16)}`;
+      const list = buckets.get(key);
+      if (list === undefined) buckets.set(key, [node.id]);
+      else list.push(node.id);
+      nodes.set(node.id, node);
+    }
+    this.resourceIndex = { revision, buckets, nodes };
+    return this.resourceIndex;
+  }
   private allNodes(): SpatialNode[] {
     const topology = this.session.topology;
     if (this.semanticIds === null || Date.now() - this.semanticIdsAt > SEMANTIC_RESCAN_MS) {
@@ -616,8 +647,44 @@ export class SpatialSemanticStore {
   }
 
   resourceLandmarksNear(names: string[], dim: string, pos: Vec3Like, radius: number): Landmark[] {
-    return this.landmarks().filter((landmark) => landmark.kind === 'resource' && landmark.dim === dim
-      && names.includes(landmark.label) && dist3(landmark.pos, pos) <= radius);
+    return this.resourceLandmarksAround(dim, pos, radius, new Set(names));
+  }
+
+  /**
+   * The resource projection is built from recorded semantic anchors, not from a
+   * full world scan. It never claims completeness: an empty near query only means
+   * no recorded anchor matched.
+   */
+  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number } {
+    return {
+      complete: false,
+      reason: 'derived from recorded resource anchors; this is not a complete world resource scan',
+      resourceAnchors: this.getResourceIndex().nodes.size,
+    };
+  }
+
+  /** All resource anchors within `radius`, using the Section coordinate index. */
+  resourceLandmarksAround(dim: string, pos: Vec3Like, radius: number, names?: ReadonlySet<string>): Landmark[] {
+    if (!Number.isFinite(radius) || radius < 0) throw new Error('resource radius must be a finite non-negative number');
+    const index = this.getResourceIndex();
+    const x0 = Math.floor((pos.x - radius) / 16), x1 = Math.floor((pos.x + radius) / 16);
+    const y0 = Math.floor((pos.y - radius) / 16), y1 = Math.floor((pos.y + radius) / 16);
+    const z0 = Math.floor((pos.z - radius) / 16), z1 = Math.floor((pos.z + radius) / 16);
+    const found: { node: SpatialNode; distance: number }[] = [];
+    for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) for (let cz = z0; cz <= z1; cz++) {
+      for (const id of index.buckets.get(`${dim}|${cx}|${cy}|${cz}`) ?? []) {
+        const node = index.nodes.get(id);
+        if (node === undefined || node.gone || node.tag !== 'resource' || node.location.kind !== 'exact') continue;
+        if (names !== undefined && (node.label === undefined || !names.has(node.label))) continue;
+        const distance = dist3(node.location.pos, pos);
+        if (distance <= radius) found.push({ node, distance });
+      }
+    }
+    found.sort((a, b) => a.distance - b.distance || a.node.id.localeCompare(b.node.id));
+    return found.flatMap(({ node }) => {
+      const landmark = this.landmarkView(node);
+      return landmark === undefined ? [] : [landmark];
+    });
   }
 
   setBase(dim: string, pos: Vec3Like, label?: string, opts: { select?: boolean } = {}): Landmark {

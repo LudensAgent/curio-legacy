@@ -419,7 +419,8 @@ export function decisionReminders(ctx: MindContext): string[] {
   if (trip && trip.minutes >= 1.5 && (trip.nearEnd || !ctx.activity || SURFACE_INTENT.test(intent)) && (p.self.where?.kind === 'underground' || p.self.sky_visible === false)) {
     const got = Object.entries(trip.gained).filter(([k]) => /raw_|_ore$|coal|diamond|emerald|lapis|redstone|amethyst|obsidian|debris|flint|gold_nugget|quartz/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => `${k}×${n}`);
     const seen = p.nearby.resources.filter((r) => r.seen === 'now' && isResourceBlock(r.block)).sort((a, b) => a.nearest - b.nearest).slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
-    const remembered = oreSpotsNear(ctx.memory.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
+    // 近邻资源走坐标索引；256 格是回忆上限，不是全图扫描。
+    const remembered = oreSpotsNear(ctx.memory.resourceLandmarksAround(p.self.dim, here, 256), { worldId: s.worldId, dim: p.self.dim, pos: here }, { radius: 48 }).length;
     const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
     tripShown = true;
@@ -821,7 +822,7 @@ function worldKnowledge(ctx: MindContext) {
   const drafts = activeDrafts()?.list(4).filter((d) => !d.usedBy) ?? [];
   const remember = p.nearby.resources.filter((r) => r.seen === 'memory').slice(0, ctx.tier === 'glance' ? 3 : 6).map((r) => `${r.block} ${r.dir ?? ''}${r.nearest}格`);
   // 记得的矿点：每种矿最近的一两处（带高低差），瞥一眼也看得到——想挖铁时知道铁在哪
-  const ores = oreSpotsByKind(oreSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), ctx.tier === 'glance' ? 1 : 2, ctx.tier === 'glance' ? 5 : 8);
+  const ores = oreSpotsByKind(oreSpotsNear(m.resourceLandmarksAround(p.self.dim, here, 256), { worldId: s.worldId, dim: p.self.dim, pos: here }), ctx.tier === 'glance' ? 1 : 2, ctx.tier === 'glance' ? 5 : 8);
   // 记得的生物出没点（不主动攻击的：羊、牛、狼、村民……）：动物会走动，只是大概那一带，带着多久前看见
   const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
   return {

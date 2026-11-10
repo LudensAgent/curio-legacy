@@ -569,6 +569,16 @@ export class WorldMemory {
     return this.semantic.resourceLandmarksNear(names, dim, pos, radius);
   }
 
+  /** 资源地标附近 radius 格内的全部地标，走坐标索引，不扫描全部 landmarks。 */
+  resourceLandmarksAround(dim: string, pos: Vec3Like, radius: number): Landmark[] {
+    return this.semantic.resourceLandmarksAround(dim, pos, radius);
+  }
+
+  /** 资源索引只是已记录锚点的派生投影；complete=false，不是全图资源结论。 */
+  resourceIndexStatus(): { complete: false; reason: string; resourceAnchors: number } {
+    return this.semantic.resourceIndexStatus();
+  }
+
   // ------------------------------------------------ 技能 / 目标 / 笔记
   recordSkill(name: string, status: 'succeeded' | 'failed' | 'cancelled', failCode?: string) {
     const s = (this.data.skillStats[name] ??= { runs: 0, ok: 0, fail: 0, cancelled: 0, failCodes: {} });
