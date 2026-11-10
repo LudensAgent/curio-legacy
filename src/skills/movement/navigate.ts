@@ -28,6 +28,8 @@ type NavigateArgs = {
 };
 
 const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'ladder'];
+/** Ladder remains opt-in; callers must list it explicitly. */
+const DEFAULT_KINDS: readonly MoveMode[] = ['walk', 'step', 'drop'];
 
 const point = (v: unknown): Vec3Like | null => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
@@ -90,7 +92,7 @@ export const navigateTo: Skill<NavigateArgs> = {
   validate(raw) {
     const a = obj(raw), to = point(a.to);
     if (!to) return { ok: false, error: 'to 需要 {x,y,z} 站立脚位；箱子/门请改用旁边的站立格' };
-    const allowedRaw = a.allowed === undefined ? KINDS : a.allowed;
+    const allowedRaw = a.allowed === undefined ? DEFAULT_KINDS : a.allowed;
     if (!Array.isArray(allowedRaw) || !allowedRaw.length || allowedRaw.some((k) => !KINDS.includes(k as MoveMode))) {
       return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop、ladder' };
     }
