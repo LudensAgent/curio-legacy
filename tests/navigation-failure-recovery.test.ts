@@ -231,7 +231,7 @@ test('STALE 刷新证据后重新规划；BLOCKED/UNSUPPORTED 在证据不变时
   }
 });
 
-test('START_CHANGED：起点漂移立即停，保留已确认段与实测位置；Activity 不自动重放', async (t) => {
+test('START_CHANGED：起点漂移按实测位置重规划，不重放旧段；Activity 保留原目的地', async (t) => {
   const map = flatGround(8);
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
@@ -248,21 +248,22 @@ test('START_CHANGED：起点漂移立即停，保留已确认段与实测位置�
   const step = nextStep(activity)!;
   noteNavigationDispatch(activity, activity.steps[0]!, adapter.state());
   const result = await navigateTo.run(correctedCtx, navArgs({ x: 5, y: 64, z: 0 }));
-  assert.equal(result.status, 'failed');
-  assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
-  assert.equal((result.data?.segment as { invalidation?: string }).invalidation, 'start_drift');
-  assert.equal(result.data?.executed, 1, '只保留漂移前已确认的段');
-  assert.deepEqual(adapter.pos, { x: 2.5, y: 64, z: 0.5 }, '实测位置如实保留');
-  // 该分支只带 segment.remainingTarget（原目标仍保留），不带顶层 requestedTarget。
+  // B5 的 Coordinator 契约：旧段起点与实测不一致时只丢弃该段几何，按实测位置
+  // 重规划原目标；已确认的段和真实位置保留，不重放旧起点动作。
+  assert.equal(result.status, 'succeeded', result.summary);
+  const replans = result.data?.replans as { reason: string; plannedStart?: Cell; measuredEnd?: Cell }[] | undefined;
+  assert.equal(replans?.length, 1, '应恰好丢弃一次旧段几何');
+  assert.deepEqual(replans![0]!.plannedStart, { x: 1.5, y: 64, z: 0.5 }, '被丢弃的是旧计划起点');
+  assert.deepEqual(replans![0]!.measuredEnd, { x: 2.5, y: 64, z: 0.5 }, '重规划使用实际纠正后的位置');
+  assert.match(replans![0]!.reason, /不一致/);
+  assert.deepEqual(adapter.pos, { x: 5.5, y: 64, z: 0.5 }, '最终实测位置应到达原目标');
   assert.deepEqual((result.data?.segment as { remainingTarget?: Cell }).remainingTarget, { x: 5, y: 64, z: 0 });
-  assert.equal(adapter.actions.length, 1, '漂移后不再继续迈步');
   assert.equal(noBuild(adapter), true);
 
   const verdict = afterStep(activity, step, result, 0, adapter.state());
-  assert.equal(verdict.kind, 'continue', '已确认段是进展，交给后续步骤从实测位置重规划');
-  assert.equal(nav.completedSegments, 1);
+  assert.equal(verdict.kind, 'continue', '成功到达后交给后续步骤');
   assert.equal(nav.destination?.x, 5, '原目的地保留');
-  assert.deepEqual(nav.measured.pos, { x: 2.5, y: 64, z: 0.5 });
+  assert.deepEqual(nav.measured.pos, { x: 5.5, y: 64, z: 0.5 });
   assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
   // 旧 walk_path route handle 已退役；本用例只补 navigate_to 的起点漂移分支。
 });
@@ -281,8 +282,10 @@ test('NOT_CONFIRMED：身体没有实际位移时立即停，不自动重试、�
   const result = await navigateTo.run(ctx, navArgs({ x: 5, y: 64, z: 0 }));
   assert.equal(result.status, 'failed');
   assert.equal(result.failureCode, 'EFFECT_NOT_CONFIRMED');
-  assert.equal((result.data?.segment as { invalidation?: string }).invalidation, 'step_failed');
-  assert.equal((result.data?.nested as { code?: string } | undefined)?.code, 'EFFECT_NOT_CONFIRMED', '保留子动作的真实失败码');
+  assert.equal((result.data?.segment as { invalidation?: string }).invalidation, 'effect_not_confirmed');
+  // 子动作报“完成”但实测不成立，失败在分段层由实测位置确认；保留 PHYSICAL_FAILURE
+  // 与 effect_not_confirmed 两个事实，不把未确认改写成成功。
+  assert.equal((result.data?.stop as { reason?: string } | undefined)?.reason, 'PHYSICAL_FAILURE');
   assert.equal(result.data?.executed, 0);
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 }, '身体没动');
   assert.deepEqual((result.data?.segment as { remainingTarget?: Cell }).remainingTarget, { x: 5, y: 64, z: 0 });
