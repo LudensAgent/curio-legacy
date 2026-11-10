@@ -50,6 +50,18 @@ test('WorldMemory 从 library fragments/nodes/ledger 读写语义记录', () => 
   assert.throws(() => second.setWorld('other-world'), /空间会话绑定|bound to world/);
 });
 
+test('removed resource is revoked from the default anchor view but kept in history', () => {
+  const { memory, stores } = semanticMemory(W);
+  const pos = at(8, 40, 8);
+  memory.addLandmark('resource', 'iron_ore', D, pos);
+  memory.markGone('iron_ore', D, pos, 'stone');
+
+  assert.equal(memory.landmarks().some((landmark) => landmark.label === 'iron_ore'), false);
+  assert.equal(stores.topology.nodes({ tag: 'resource', excludeGone: true }).items.length, 0);
+  assert.equal(stores.topology.nodes({ tag: 'resource' }).items.length, 1, 'history keeps the gone node');
+  assert.equal(stores.topology.nodes({ tag: 'resource' }).items[0]?.gone, true);
+});
+
 test('WorldMemory JSON keeps only non-spatial facts', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-semantic-'));
   const file = path.join(dir, 'world-memory.json');
