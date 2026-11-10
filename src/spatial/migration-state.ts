@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FragmentStore, TopologyStore } from 'curio-minecraft-3d-memory';
+import type { LegacyStoreSummary } from 'curio-minecraft-3d-memory';
 import type { LedgerStore } from 'curio-minecraft-3d-memory/storage/sqlite';
 
 const LEGACY_SPATIAL_KEYS = [
@@ -14,10 +14,16 @@ const nonEmpty = (value: unknown) => {
 };
 
 export interface MigrationGateInput {
+  /**
+   * New facts-model migration receipt (`curio_semantic_migration_v1:<worldId>`).
+   * Saving facts alone does not establish it; the old `curio:migration` topology
+   * marker is reported separately in `legacyStore.migrationMarker` and never
+   * stands in for this receipt.
+   */
   legacyFactsMigrationVersion?: number;
-  hasFacts?: boolean;
-  topology: TopologyStore;
-  history: FragmentStore;
+  /** Old history/topology row counts and the old cutover marker read at open. */
+  legacyStore: LegacyStoreSummary;
+  /** Preserved world-scoped placement/visit/portal-crossing ledger. */
   ledger: LedgerStore;
   worldMemoryPath: string;
   dataDir: string;
@@ -27,21 +33,34 @@ export interface MigrationGateInput {
 
 export interface MigrationGateResult {
   ok: boolean;
-  reason?: 'legacy_files' | 'unmarked_store' | 'pending_patch' | 'facts_migration_required';
+  reason?: 'legacy_files' | 'pending_patch' | 'facts_migration_required';
   details: {
     legacyKeys: string[];
     travelFile: boolean;
     placedFile: boolean;
     patchFile: boolean;
-    marker: boolean;
-    storeRecords: number;
+    /** Old `curio:migration` topology marker; not a facts migration receipt. */
+    legacyMarker: boolean;
+    /** New facts migration receipt; the only marker that can clear old rows. */
+    factsMigrationReceipt: boolean;
+    fragments: number;
+    traversals: number;
+    nodes: number;
+    edges: number;
+    ledgerRecords: number;
   };
   command?: string;
 }
 
 /**
  * Read-only startup gate: refuse to start on top of un-migrated spatial data.
- * A fresh, empty world is allowed; anything else must carry a completed marker.
+ *
+ * The gate no longer walks `history.fragments()` / `topology.nodes()`: the
+ * library reports this world's old-domain row counts and marker at open, even
+ * under `historyLoading:'none'`. A fresh world is allowed; any existing old
+ * route/topology data (or a preserved ledger) requires the new facts migration
+ * receipt. Old rows stay archived; once the receipt exists they are neither
+ * loaded nor written.
  */
 export function checkMigrationGate(input: MigrationGateInput): MigrationGateResult {
   const legacy = fs.existsSync(input.worldMemoryPath)
@@ -51,25 +70,16 @@ export function checkMigrationGate(input: MigrationGateInput): MigrationGateResu
   const travelFile = fs.existsSync(path.join(input.dataDir, 'travel-memory.json'));
   const placedFile = fs.existsSync(`${input.worldMemoryPath}.placed`);
   const patchFile = fs.existsSync(path.join(input.dataDir, 'memory-patch.json'));
-  const markerNode = input.topology.getNode('curio:migration');
-  const marker = markerNode !== null;
-  let storeRecords = 0;
-  let after: string | undefined;
-  for (let guard = 0; guard < 10_000; guard++) {
-    const page = input.topology.nodes({ after, limit: 100 });
-    storeRecords += page.items.filter((node) => (node.metadata as { curio?: unknown } | undefined)?.curio).length;
-    if (page.nextAfter === undefined) break;
-    after = page.nextAfter;
-  }
-  let fragmentAfter: string | undefined;
-  for (let guard = 0; guard < 10_000; guard++) {
-    const page = input.history.fragments({ after: fragmentAfter, limit: 100 });
-    storeRecords += page.items.filter((fragment) => (fragment.metadata as { curio?: { type?: string } } | undefined)?.curio?.type === 'passage').length;
-    if (page.nextAfter === undefined) break;
-    fragmentAfter = page.nextAfter;
-  }
-  storeRecords += input.ledger.placedBlocks().length + input.ledger.chunkVisits().length + input.ledger.portalTraversals().length;
-  const details = { legacyKeys, travelFile, placedFile, patchFile, marker, storeRecords };
+  const { fragments, traversals, nodes, edges, migrationMarker } = input.legacyStore;
+  const ledgerRecords = input.ledger.placedBlocks().length
+    + input.ledger.chunkVisits().length
+    + input.ledger.portalTraversals().length;
+  const factsMigrationReceipt = (input.legacyFactsMigrationVersion ?? 0) >= 1;
+  const details = {
+    legacyKeys, travelFile, placedFile, patchFile,
+    legacyMarker: migrationMarker, factsMigrationReceipt,
+    fragments, traversals, nodes, edges, ledgerRecords,
+  };
   const command = [
     'node --import tsx scripts/spatial-cutover.ts',
     `--world-memory=${input.worldMemoryPath}`,
@@ -80,10 +90,14 @@ export function checkMigrationGate(input: MigrationGateInput): MigrationGateResu
   ].join(' ');
   if (patchFile) return { ok: false, reason: 'pending_patch', details, command };
   if (legacyKeys.length || travelFile || placedFile) return { ok: false, reason: 'legacy_files', details, command };
-  if (input.legacyFactsMigrationVersion !== undefined && input.legacyFactsMigrationVersion < 1 && (marker || storeRecords > 0 || input.hasFacts)) {
-    return { ok: false, reason: 'facts_migration_required', details,
-      command: 'node --import tsx scripts/spatial-facts-cutover.ts --database=' + JSON.stringify(input.databasePath) + ' --world-id=' + JSON.stringify(input.worldId) + ' --execute' };
+  const hasExistingData = fragments + traversals + nodes + edges > 0 || migrationMarker || ledgerRecords > 0;
+  if (hasExistingData && !factsMigrationReceipt) {
+    return {
+      ok: false,
+      reason: 'facts_migration_required',
+      details,
+      command: 'node --import tsx scripts/spatial-facts-cutover.ts --database=' + JSON.stringify(input.databasePath) + ' --world-id=' + JSON.stringify(input.worldId) + ' --execute',
+    };
   }
-  if (input.legacyFactsMigrationVersion === undefined && storeRecords > 0 && !marker) return { ok: false, reason: 'unmarked_store', details, command };
   return { ok: true, details };
 }

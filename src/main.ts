@@ -164,9 +164,9 @@ try {
 const worldMemoryPath = path.join(config.dataDir, 'world-memory.json');
 const migrationGate = checkMigrationGate({
   legacyFactsMigrationVersion: spatial.session.legacyFactsMigrationVersion,
-  hasFacts: [spatial.session.facts.places({ limit: 1 }), spatial.session.facts.resources({ limit: 1 }), spatial.session.facts.containers({ limit: 1 })].some(page => page.total > 0),
-  topology: spatial.session.topology,
-  history: spatial.session.history,
+  // 旧域行数/旧 marker 由库在 open 时只读计数得到；主会话 historyLoading:'none'
+  // 不加载 Fragment/Topology，门禁也不再遍历它们。
+  legacyStore: spatial.session.legacyStoreSummary,
   ledger: spatial.session.ledger,
   worldMemoryPath,
   dataDir: config.dataDir,

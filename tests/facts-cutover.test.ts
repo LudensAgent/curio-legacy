@@ -38,7 +38,12 @@ test('startup refuses old semantic data without migration receipt and queries on
   const shared = await SharedSpatialSession.open({ databasePath, worldId: 'w' });
   try {
     shared.session.topology.saveNode({ id: 'old', worldId: 'w', dim: 'overworld', kind: 'place', source: 'program', tag: 'resource', label: 'old ore', observedAt: 100, location: { kind: 'exact', pos: { x: 0, y: 64, z: 0 } }, metadata: { curio: { type: 'landmark' } } });
-    const input = { topology: shared.session.topology, history: shared.session.history, ledger: shared.session.ledger, dataDir: dir, databasePath, worldId: 'w', worldMemoryPath: join(dir, 'world-memory.json'), legacyFactsMigrationVersion: 0 };
+    // 该节点是在 open 之后写入的，这里用与库启动摘要同口径的显式计数模拟重开后的库。
+    const input = {
+      legacyStore: { fragments: 0, traversals: 0, nodes: 1, edges: 0, migrationMarker: false },
+      ledger: shared.session.ledger,
+      dataDir: dir, databasePath, worldId: 'w', worldMemoryPath: join(dir, 'world-memory.json'), legacyFactsMigrationVersion: 0,
+    };
     assert.equal(checkMigrationGate(input).reason, 'facts_migration_required');
     assert.equal(shared.query({ kind: 'resourceAnchors' }).total, 0);
     shared.session.facts.upsertResource({ id: 'new', worldId: 'w', dim: 'overworld', label: 'iron_ore', sourceCell: { x: 1, y: 64, z: 0 }, observedAt: 200, source: { source: 'vision' }, revoked: false });
