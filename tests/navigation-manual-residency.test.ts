@@ -81,7 +81,10 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
     const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
     assert.equal(drained.pending.observations, 0);
     await shared.checkpoint();
-    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident', '保存后冷页应已换出');
+    // 保存后按容量目标保留热页；这里显式换出起点页，验证导航能从冷页重新加载，
+    // 而不是依赖“保存恰好把页面清空”的旧行为。
+    shared.session.unloadSections([START_KEY]);
+    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident', '起点页应已换出');
 
     const ctx = { ...makeCtx(adapter, { deadlineMs: 55_000 }), spatial: shared };
     const base = {
@@ -115,8 +118,9 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
     assert.equal(first.continuation?.canContinue, true, `导航应可续接：${first.result.summary}`);
     assert.ok(first.continuation?.sessionId !== undefined);
 
-    // 第二份委托前真实保存并换出；导航必须重新加载，而不是复用已不驻留的页面。
+    // 第二份委托前真实保存并显式换出；导航必须重新加载，而不是复用已不驻留的页面。
     await shared.checkpoint();
+    shared.session.unloadSections([START_KEY]);
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
     const second = await run(first.continuation.sessionId);
     assert.notEqual(second.stop, 'NO_PATH', `换出后再次把未驻留当成无路：${second.result.summary}`);
@@ -126,13 +130,15 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
   });
 });
 
-test('pinned 页面不被保存后换出，释放后下一次保存才淘汰', { timeout: 30_000 }, async () => {
+test('pinned 页面不被换出，释放后才能淘汰', { timeout: 30_000 }, async () => {
   await withManualSession(async (shared) => {
     shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
     shared.observe(corridor(4, Date.now()));
     const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
     assert.equal(drained.pending.observations, 0);
     await shared.checkpoint();
+    // 保存后按容量目标可能保留热页；显式换出以验证按需加载路径。
+    shared.session.unloadSections([START_KEY]);
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
 
     const residency = await acquireRouteResidency(shared, [START_KEY], { deadline: Date.now() + 5000 });
@@ -140,11 +146,15 @@ test('pinned 页面不被保存后换出，释放后下一次保存才淘汰', {
     if (residency.status !== 'ready') assert.fail('已保存 Section 应能按需加载');
     try {
       await shared.checkpoint();
-      assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', 'pinned 页面不能被保存后换出');
+      const protectedUnload = shared.session.unloadSections([START_KEY]);
+      assert.deepEqual(protectedUnload.unloaded, [], 'pinned 页面不能被换出');
+      assert.equal(protectedUnload.rejected[0]?.reason, 'pinned');
+      assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident');
     } finally {
       releaseRouteResidency(shared, residency);
     }
-    await shared.checkpoint();
-    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident', '释放后下一次保存才淘汰');
+    const released = shared.session.unloadSections([START_KEY]);
+    assert.equal(released.unloaded.length, 1, '释放后才能淘汰');
+    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
   });
 });

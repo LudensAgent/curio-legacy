@@ -64,6 +64,8 @@ export class WorkingSetCoordinator {
   private readonly cancellers = new Set<(reason: WorkingSetCancelReason) => void>();
   /** 每个已开始、尚未结算的真实 manager 操作。 */
   private readonly pending = new Set<Promise<void>>();
+  /** 最近一次 free 的目标；只读报告用，不参与缓存决策。 */
+  private lastFreeTargetValue: { sections?: number; bytes?: number } | null = null;
   private closingFlag = false;
   private settlement: Promise<void> | null = null;
   private resolveSettlement: (() => void) | null = null;
@@ -199,12 +201,33 @@ export class WorkingSetCoordinator {
   /**
    * 显式释放工作集空间；closing 之后拒绝新操作，其余直接走库内同一 session 门的
    * `WorkingSetManager.free`。不加载、不保存、不关闭会话。
+   *
+   * 无显式目标时（例如保存后换出）使用有界容量目标：保留约 75% 的驻留数量/字节
+   * 作为近期热页，只从 LRU 最旧淘汰到上限；不会再把所有 eligible 冷页一次清空。
+   * pinned/dirty/未确认保存仍由库拒绝，导航执行依赖继续用 lease 保护。
    */
   free(target?: { sections?: number; bytes?: number }): FreeResult {
     if (this.closingFlag) {
       throw new PersistenceError('closing', 'working set coordinator is closing; free is rejected');
     }
-    return this.manager.free(target);
+    const applied = target ?? this.postSaveTarget();
+    const result = this.manager.free(applied);
+    this.lastFreeTargetValue = { ...applied };
+    return result;
+  }
+
+  /** 最近一次 `free` 实际使用的目标；只读，用于保存报告/基准。 */
+  lastFreeTarget(): { sections?: number; bytes?: number } | null {
+    return this.lastFreeTargetValue === null ? null : { ...this.lastFreeTargetValue };
+  }
+
+  /** 有界回收目标：驻留上限的 75%（向下取整，至少 1），保留有限近期热页。 */
+  private postSaveTarget(): { sections: number; bytes: number } {
+    const limits = this.session.residencyLimits;
+    return {
+      sections: Math.max(1, Math.floor(limits.maxResidentSections * 3 / 4)),
+      bytes: Math.max(1, Math.floor(limits.maxResidentBytes * 3 / 4)),
+    };
   }
 
   /**

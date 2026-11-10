@@ -381,6 +381,63 @@ test('free keeps pinned and dirty resident sections and reports library reasons'
   }
 });
 
+test('post-save free uses a bounded capacity target and preserves pinned hot pages', async () => {
+  const { dir, dbPath } = makeTempDb();
+  const keys = [keyAt(0), keyAt(1), keyAt(2), keyAt(3)];
+  let session: SpatialSession | null = null;
+  let coordinator: WorkingSetCoordinator | null = null;
+  const tokens: string[] = [];
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    await seed(dbPath, keys.map((key, i) => observation(key.cx * 16, 64, 0, 100, i + 1)));
+    session = await openManual(dbPath, { maxResidentSections: 4 });
+    coordinator = new WorkingSetCoordinator(session);
+    const prepared = await coordinator.prepare(keys);
+    assert.equal(prepared.status, 'ready');
+    if (prepared.status !== 'ready') assert.fail('prepare did not become ready');
+    tokens.push(prepared.lease.token);
+    coordinator.release(prepared.lease.token);
+    tokens.length = 0;
+    assert.equal(coordinator.stats().residentSections, 4);
+
+    const pin = session.pinSections([keyAt(2)]);
+    try {
+      const freed = coordinator.free();
+      assert.equal(freed.evicted.length, 1, '只淘汰到 75% 容量目标（4 → 3）');
+      assert.ok(!freed.evicted.some((key) => key.cx === 2), 'pinned 页面不能被淘汰');
+      assert.deepEqual(coordinator.lastFreeTarget(), {
+        sections: 3,
+        bytes: Math.floor(coordinator.stats().maxResidentBytes * 3 / 4),
+      });
+      assert.equal(coordinator.stats().residentSections, 3);
+      assert.equal(session.sectionResidency(keyAt(2)).residency, 'resident');
+    } finally {
+      session.releasePins([pin.token]);
+    }
+
+    const second = coordinator.free();
+    assert.deepEqual(second.evicted, [], '已到容量目标时不再把热页全部清空');
+    assert.equal(coordinator.stats().residentSections, 3);
+
+    // 同一输入下的旧行为对照：库的无目标 free 会淘汰所有 eligible 冷页。
+    const rawManager = new WorkingSetManager(session);
+    const raw = rawManager.free();
+    assert.equal(raw.evicted.length, 3, '旧调用无目标时会清空剩余热页');
+    assert.equal(coordinator.stats().residentSections, 0);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    for (const token of tokens) coordinator?.release(token);
+    if (session !== null) {
+      close = await session.close();
+      if (!failed) assertClose(close, false);
+    }
+    cleanup(dir, close);
+  }
+});
+
 test('stale and repeated releases never drop a newer lease', async () => {
   const { dir, dbPath } = makeTempDb();
   const key = keyAt(0);
