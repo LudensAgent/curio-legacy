@@ -99,11 +99,12 @@ function fakeAdapter(): FakeAdapter {
   return adapter;
 }
 
-function observeAhead(adapter: FakeAdapter, shared: SharedSpatialSession, nextId: () => number): Partial<Senses> {
+function observeAhead(adapter: FakeAdapter, shared: SharedSpatialSession, nextId: () => number, centerLaneOnly = false): Partial<Senses> {
   return {
     observeBlocks: (positions: Vec3Like[]): BlockObservation[] => {
       const now = Date.now();
-      const blocks = positions.map((pos) => observationFor(adapter, pos, nextId(), now));
+      const visible = centerLaneOnly ? positions.filter((pos) => pos.z === 0) : positions;
+      const blocks = visible.map((pos) => observationFor(adapter, pos, nextId(), now));
       shared.observe(blocks);
       return blocks;
     },
@@ -136,10 +137,10 @@ async function navigateLeg(
   shared: SharedSpatialSession,
   adapter: FakeAdapter,
   target: Vec3Like,
-  options: { checkpointAfterCalls?: number; maxCalls?: number } = {},
+  options: { checkpointAfterCalls?: number; maxCalls?: number; centerLaneOnly?: boolean } = {},
 ): Promise<LegMetrics> {
   let nextId = 1_000_000;
-  const senses = observeAhead(adapter, shared, () => nextId++);
+  const senses = observeAhead(adapter, shared, () => nextId++, options.centerLaneOnly);
   const deadlineMs = 180_000;
   const ctx = { ...makeCtx(adapter, { deadlineMs, senses }), spatial: shared };
   const base = {
@@ -277,21 +278,48 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
     assert.equal(coldAgain.resultStatus, 'succeeded', `再次跨冷区应到达：${coldAgain.stopReasons.join(',')}`);
     assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [X_MAX, 64, 0], '再次跨冷区须满足原目标脚格');
 
-    // 相关体素变化：把返回路径上的一格改成石头，重新规划并观察搜索/加载成本。
+    // 中央通道出现两格高的墙。先只看见中线，再开放两侧的定向观察。
     const changed = { x: X_MAX - 4, y: 64, z: 0 };
-    adapter.blocks.push({ name: 'stone', pos: { ...changed } });
-    shared.observe([observationFor(adapter, changed, 9_000_000, Date.now())]);
-    const replan = await navigateLeg('after-voxel-change', shared, adapter, { x: X_MAX - 8, y: 64, z: 0 }, {
-      maxCalls: 8,
+    const wall = [changed, { ...changed, y: 65 }];
+    adapter.blocks.push(...wall.map((pos) => ({ name: 'stone', pos })));
+    shared.observe(wall.map((pos, index) => observationFor(adapter, pos, 9_000_000 + index, Date.now())));
+    const target = { x: X_MAX - 8, y: 64, z: 0 };
+    const steps: { x: number; y: number; z: number; confirmed: boolean }[] = [];
+    const voxel = shared.session.voxel;
+    const move = adapter.moveTo.bind(adapter);
+    adapter.moveTo = async (to, opts) => {
+      if (to.kind === 'feet') {
+        const x = Math.floor(to.x), y = Math.floor(to.y), z = Math.floor(to.z);
+        const confirmed = [-1, 0, 1].every(dy => {
+          const view = voxel.cellAt(DIM, x, y + dy, z);
+          return view.observed && view.evidence.freshness === 'FRESH' && view.evidence.validUntil >= Date.now()
+            && view.evidence.observation.sessionId === SESSION && view.evidence.observation.stateComplete
+            && view.evidence.observation.state.name === (dy === -1 ? 'grass_block' : 'air');
+        });
+        steps.push({ x, y, z, confirmed });
+      }
+      return move(to, opts);
+    };
+    const blocked = await navigateLeg('after-voxel-change-hidden-sides', shared, adapter, target, {
+      maxCalls: 8, centerLaneOnly: true,
     });
-    assert.equal(replan.stopReasons.at(-1), 'UNKNOWN_BOUNDARY', `侧路未知时应停止：${replan.stopReasons.join(',')}`);
-    assert.notEqual(replan.resultStatus, 'succeeded', '新增阻挡后不能虚报到达');
-    assert.ok(Math.floor(adapter.pos.x) > changed.x, '实测脚格必须留在新增石块东侧，不能越过阻挡');
+    assert.equal(blocked.stopReasons.at(-1), 'UNKNOWN_BOUNDARY', `侧路未知时应停止：${blocked.stopReasons.join(',')}`);
+    assert.notEqual(blocked.resultStatus, 'succeeded', '新增阻挡后不能虚报到达');
+    assert.equal(Math.floor(adapter.pos.x), changed.x + 1, '沿已知中线走到墙前，实测脚格留在新增石块东侧');
     assert.deepEqual([adapter.pos.y, Math.floor(adapter.pos.z)], [64, 0], '未观察的侧路不能成为执行绕行');
+    assert.ok(steps.every(step => step.confirmed && step.x > changed.x && step.y === 64 && step.z === 0));
+
+    steps.length = 0;
+    const replan = await navigateLeg('after-voxel-change-visible-sides', shared, adapter, target, { maxCalls: 8 });
+    assert.equal(replan.resultStatus, 'succeeded', replan.stopReasons.join(','));
+    assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [target.x, target.y, target.z]);
+    assert.ok(steps.some(step => step.x === changed.x && step.z !== 0), '绕过墙所在列必须实际走过侧路');
+    assert.ok(steps.every(step => step.confirmed && step.y === 64 && (step.x !== changed.x || step.z !== 0)),
+      '每一步都必须有当前支撑和净空，并且不能穿墙');
 
     const summary = {
       finalX: Math.floor(adapter.pos.x),
-      legs: [cold, warmReturn, coldAgain, replan],
+      legs: [cold, warmReturn, coldAgain, blocked, replan],
       memory: process.memoryUsage(),
     };
     console.log(`CACHE_BENCH ${JSON.stringify(summary)}`);
