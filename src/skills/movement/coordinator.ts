@@ -406,7 +406,6 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       session.counters.searches += segment.searches;
       if (!isReplan) {
         session.counters.segments += 1;
-        executedSegments += 1;
       }
       session.counters.confirmedTransitions += segment.confirmed.length;
       invocationTransitions += segment.confirmed.length;
@@ -425,6 +424,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         + Math.abs(after.pos.y - segment.measuredStart.y);
       const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
       if (!isReplan) {
+        // 原地补证据不是一次身体执行；保留本次窗口，观察成功后仍能执行原委托。
+        // 搜索、观察、无进展次数与 deadline 继续约束原地重试。
+        if (progressed) executedSegments += 1;
         session.progress.stagnationSegments = progressed ? 0 : session.progress.stagnationSegments + 1;
       }
       if (progressed) session.progress.lastProgressAt = Date.now();
@@ -547,7 +549,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'unknown_boundary') {
-        // 观察/重搜原本也要消耗剩余段数；显式探索例外：前沿观察不是新段，
+        // 已移动的前缀会消耗分段窗口；显式探索例外：前沿观察不是新段，
         // 在分段上限处仍允许观察一次，然后由调用方用同一 session 续接确认。
         const boundary = segment.boundary;
         const frontierObservation = request.observeFrontierBeyondSegments === true;

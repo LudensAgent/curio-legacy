@@ -136,7 +136,7 @@ test('navigate_to cell 目标保留 0.01 脚高容差：同列 Y=64.03 与实测
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 }, '没有为 0.03 的旧容差发动作');
 });
 
-test('navigate_to 历史候选仍给出，但过期当前证据在每次动作前阻止执行', async (t) => {
+test('navigate_to 起点证据过期时先观察，不扫描不能立即执行的历史候选', async (t) => {
   const map = flatMap();
   map.markStale(DIM, 'expired');
   const { adapter, ctx } = setup(map);
@@ -145,9 +145,10 @@ test('navigate_to 历史候选仍给出，但过期当前证据在每次动作�
     to: { x: 2, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
   });
   assert.equal(r.status, 'failed', r.summary);
-  assert.equal(r.data?.evidenceMode, 'historical', '历史候选来源仍如实标记');
+  assert.equal(r.data?.evidenceMode, 'current', '先修复局部当前证据，不扫描历史候选');
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 }, 'STALE 当前证据不启动身体');
-  assert.equal((r.data?.currentCheck as { status?: string } | undefined)?.status, 'STALE');
+  assert.equal((r.data?.counters as { searches: number }).searches, 1);
+  assert.equal((r.data?.lastSegment as SegmentReceipt).boundary?.status, 'STALE');
 });
 
 test('navigate_to 从 1×1 平台用显式 2 格下落到真实站立面', async (t) => {
