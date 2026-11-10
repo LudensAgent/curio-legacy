@@ -81,9 +81,9 @@ export interface SegmentReceipt {
   measuredEnd: Vec3Like;
   /** 搜索实际选中的结果：当前证据完整路线 / 历史候选完整路线 / null（只有前缀）。 */
   chosen: LandSearchResult | null;
-  /** 当前证据的严格搜索结果；边界与统计事实始终指向它。 */
+  /** 当前证据的严格搜索结果。若历史候选耗尽预算，记录实际耗尽预算的那次搜索；边界摘要仍来自当前证据。 */
   search: LandSearchResult;
-  /** 严格搜索的终态，保留 INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED 的区别。 */
+  /** 对应 search 的真实终态，包括历史候选的预算耗尽。 */
   searchStatus: LandSearchStatus;
   searchReason: string;
   evidenceMode: 'current' | 'historical';
@@ -264,9 +264,13 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   } finally {
     if (execution.handedOver) {
       const remaining = request.deadline - Date.now();
-      const error = !ctx.signal.aborted && remaining > 0 && ctx.adapter.settleMovement !== undefined
-        ? await ctx.adapter.settleMovement({ signal: ctx.signal, timeoutMs: Math.min(2000, remaining) }).then(() => null, (error: unknown) => error)
-        : null;
+      let error: unknown = null;
+      if (!ctx.signal.aborted && result?.outcome !== 'cancelled') {
+        if (remaining <= 0) error = new Error('TIMEOUT: 原期限已耗尽，身体尚未实测停稳');
+        else if (ctx.adapter.settleMovement !== undefined) {
+          error = await ctx.adapter.settleMovement({ signal: ctx.signal, timeoutMs: Math.min(2000, remaining) }).then(() => null, (cause: unknown) => cause);
+        }
+      }
       const stopped = ctx.adapter.state();
       if (result !== undefined) {
         const from = result.partialDisplacement?.from ?? result.confirmed.at(-1)?.measuredTo ?? result.measuredStart;
@@ -280,11 +284,17 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
               : transitionReached(result.transition, stopped.pos, stopped.onGround),
           };
         }
-        if (error !== null && result.outcome !== 'cancelled') {
-          result.outcome = isAbort(error) ? 'cancelled' : 'physical_failure';
+        if (ctx.signal.aborted || isAbort(error)) {
+          result.outcome = 'cancelled';
+          result.stopCode = 'cancelled';
           result.arrived = false;
+          result.detail = '连续移动已取消，保留最新实测位置';
+        } else if (error !== null) {
           result.failureCode = codeFromError(error);
-          result.detail = `${result.detail ?? '连续移动停止'}；释放控制后的停稳确认失败：${(error as Error).message}`;
+          result.outcome = result.failureCode === 'TIMEOUT' ? 'timeout' : 'physical_failure';
+          result.stopCode = 'settlement_failed';
+          result.arrived = false;
+          result.detail = `${result.detail ?? '连续移动停止'}；释放控制后的停稳确认失败：${error instanceof Error ? error.message : String(error)}`;
         } else if (result.arrived && request.goalMetric !== 'horizontal' && !goalReached(request.goal, stopped.pos, stopped.onGround)) {
           result.outcome = 'physical_failure';
           result.arrived = false;
@@ -336,6 +346,15 @@ async function runNavigationSegmentInner(
   // 不再用固定 1500ms 截断长路线搜索。预算耗尽时仍由同一个 deadline 停止。
   const searchWindow = () => ({ deadlineMs: request.deadline, maxSearchMs: Math.max(1, request.deadline - Date.now()) });
   let searches = 0;
+  // 这份判断同时决定是否加载更远的冷页、是否改查历史路线。范围目标可能在前缀阻挡之前就已可达。
+  const currentPrefix = (result: LandSearchResult) => {
+    const prefix = result.evidenceMode === 'current' ? result.prefix : undefined;
+    const reachesArrival = request.goal.arrival !== undefined
+      && prefix?.transitions.some(transition => goalReached(request.goal, transition.to, true)) === true;
+    const usable = prefix !== undefined && prefix.transitions.length > 0
+      && (prefix.knownBlockerAhead === undefined || reachesArrival);
+    return { usable, reachesArrival };
+  };
   /**
    * 一次搜索的真实调用。manual 下库不会隐式加载已保存页面，只把遇到的未驻留
    * Section 报告为 unavailableSections；这里显式 prepare 后重试同一搜索。
@@ -348,6 +367,7 @@ async function runNavigationSegmentInner(
     for (let round = 0; round < MAX_RESIDENCY_ROUNDS; round += 1) {
       if (result.unavailableSections.length === 0 || !RESIDENCY_RETRYABLE.has(result.status)
         || searches >= request.searchBudget || Date.now() >= request.deadline) break;
+      if (currentPrefix(result).usable) break;
       const residency = await acquireRouteResidency(spatial, result.unavailableSections, {
         signal: ctx.signal, deadline: request.deadline,
       });
@@ -396,11 +416,7 @@ async function runNavigationSegmentInner(
   // 前缀走到边界后由 Coordinator 观察/重搜。历史候选只在前缀不可用时兜底。
   // 范围委托可以在阻挡之前完成：这里只判断当前已验证前缀是否包含合法候选，
   // 不把计划位置当成身体到达；执行时仍逐步当前复验并按实测站稳位置收工。
-  const prefixReachesArrival = request.goal.arrival !== undefined
-    && strict.prefix?.transitions.some((transition) => goalReached(request.goal, transition.to, true)) === true;
-  const currentPrefixUsable = strict.prefix !== undefined
-    && strict.prefix.transitions.length > 0
-    && (strict.prefix.knownBlockerAhead === undefined || prefixReachesArrival);
+  const { usable: currentPrefixUsable, reachesArrival: prefixReachesArrival } = currentPrefix(strict);
   if (chosen === null && !currentPrefixUsable && request.historical && request.searchBudget - searches > 0) {
     historical = await search({ ...base, evidenceMode: 'remembered', ...searchWindow() });
     if (historical.status === 'CANCELLED') return cancelledReceipt(historical, request, start, searches);

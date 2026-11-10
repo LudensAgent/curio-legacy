@@ -177,6 +177,32 @@ test('连续路线下一步证据失效后，回执采样实际制动终点而�
   assert.ok(Object.values(controls).every(held => !held));
 });
 
+for (const cancel of [false, true]) {
+  test(`连续交接后期限耗尽时${cancel ? '优先保留取消' : '报告停稳未确认'}，保留实测位置`, async (t) => {
+    const { adapter, ctx, timer, from, entity } = setup('E');
+    t.after(() => { clearInterval(timer); ctx.memory.close(); });
+    const deadline = Date.now() + 20_000;
+    const controller = new AbortController();
+    const original = adapter.moveTo.bind(adapter);
+    t.mock.method(adapter, 'moveTo', async (target, opts) => {
+      assert.equal(opts.settleAtTarget, false);
+      await original(target, opts);
+      t.mock.method(Date, 'now', () => deadline + 1);
+      if (cancel) controller.abort();
+    });
+    t.mock.method(adapter, 'settleMovement', async () => assert.fail('原期限耗尽后不能延长等待'));
+    const result = await runNavigationSegment({ ...ctx, signal: controller.signal }, {
+      goal: feetGoal({ ...from, x: from.x + 6 }), allowed: ['walk'], historical: false,
+      maxTransitions: 8, allowUnknownCorridor: false, deadline, searchBudget: 1,
+    });
+    assert.equal(result.outcome, cancel ? 'cancelled' : 'timeout');
+    assert.equal(result.stopCode, cancel ? 'cancelled' : 'settlement_failed');
+    if (!cancel) assert.equal(result.failureCode, 'TIMEOUT');
+    assert.equal(result.arrived, false);
+    assert.deepEqual(result.measuredEnd, { ...entity.position });
+  });
+}
+
 for (const direction of ['N', 'E', 'S', 'W'] as const) {
   test(`travel_to walks ${direction} along actual stair lower faces at y=63.5 without climbing the high half`, async (t) => {
     const { adapter, ctx, timer, controls, stops, looks, from } = setup(direction);
