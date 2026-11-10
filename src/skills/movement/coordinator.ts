@@ -58,6 +58,7 @@ const STOP_FAILURE: Record<StopReason, FailureCode> = {
   TARGET_UNRESOLVED: 'PATH_NOT_FOUND',
   ROUTE_INVALIDATED: 'PATH_NOT_FOUND',
   NO_PATH: 'PATH_NOT_FOUND',
+  RESIDENCY_NOT_READY: 'PATH_NOT_FOUND',
   PHYSICAL_FAILURE: 'EFFECT_NOT_CONFIRMED',
   ACTION_FAILURE: 'ERROR',
   MODE_GAP: 'PATH_NOT_FOUND',
@@ -75,12 +76,13 @@ const STOP_FAILURE: Record<StopReason, FailureCode> = {
 const isSuccess = (reason: StopReason) => reason === 'DISTANCE_MET' || reason === 'REGION_ENTERED' || reason === 'UNTIL_SEEN' || reason === 'ARRIVED';
 const canResume = (reason: StopReason) =>
   reason === 'BUDGET_EXHAUSTED' || reason === 'TIMEOUT' || reason === 'NO_PROGRESS' || reason === 'UNKNOWN_BOUNDARY'
-  || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED';
+  || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'RESIDENCY_NOT_READY'
+  || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED';
 
 /** 终止后仍允许同一 session 续接的原因；其余终态必须新建意图。 */
 const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
   'BUDGET_EXHAUSTED', 'TIMEOUT', 'NO_PROGRESS', 'UNKNOWN_BOUNDARY',
-  'BLOCKED', 'NO_PATH', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED',
+  'BLOCKED', 'NO_PATH', 'RESIDENCY_NOT_READY', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED',
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -115,7 +117,8 @@ function continuationOf(session: MovementSession) {
       ? reason === 'BLOCKED' ? ['清障/改变意图后重新调用；原目标不变时用同一 sessionId']
         : reason === 'UNKNOWN_BOUNDARY' ? ['观察相关边界或靠近后重新调用；原目标不变时用同一 sessionId']
           : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
-            : ['用同一 sessionId 续接；累计预算不会重置']
+            : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
+              : ['用同一 sessionId 续接；累计预算不会重置']
       : [],
     expiresAt: session.expiresAt,
   };
@@ -410,6 +413,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       if (segment.outcome === 'search_budget') {
         stop = stopOf('BUDGET_EXHAUSTED', segment.detail ?? '搜索预算耗尽');
+        break;
+      }
+      if (segment.outcome === 'residency_not_ready') {
+        // 所需页面没有加载/驻留，不是“已观测阻挡”或“已存几何无路”；
+        // 原样保留 unavailableSections，后续由 Agent 决定重试/换目标/先观察。
+        stop = stopOf('RESIDENCY_NOT_READY', segment.detail ?? '导航所需的 Section 未能加载/驻留；没有执行未复验的动作');
         break;
       }
       if (segment.outcome === 'disallowed') {

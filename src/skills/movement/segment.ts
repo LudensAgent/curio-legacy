@@ -5,6 +5,10 @@ import {
   type LandSearchBoundary, type LandSearchBoundarySummary, type LandSearchBudget,
   type LandSearchResult, type LandSearchStatus, type LandSearchTransition, type SectionKey,
 } from '../../spatial/land-search.ts';
+import {
+  acquireRouteResidency, releaseRouteResidency, routeDependencySections, sectionsForCells,
+  type RouteResidency, type RouteResidencyFailure,
+} from '../../spatial/skill-residency.ts';
 import type { LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
 import { feetCell } from '../../perception/local.ts';
 import { codeFromError, isAbort, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult } from '../types.ts';
@@ -33,6 +37,7 @@ export type SegmentOutcome =
   | 'physical_failure'
   | 'disallowed'
   | 'search_budget'
+  | 'residency_not_ready'
   | 'replan'
   | 'cancelled'
   | 'timeout';
@@ -134,6 +139,12 @@ export interface SegmentReceipt {
 
 const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
+/** manual 模式下，一次搜索因未驻留页面最多重试加载几轮；每轮都受 deadline/搜索预算约束。 */
+const MAX_RESIDENCY_ROUNDS = 8;
+/** 这些搜索终态可能仅由未驻留页面造成；prepare 后值得重试。 */
+const RESIDENCY_RETRYABLE: ReadonlySet<LandSearchStatus> = new Set([
+  'INSUFFICIENT_EVIDENCE', 'NO_PATH_IN_MEMORY', 'INVALIDATED',
+]);
 
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
 /** Ladder transitions may legitimately end with onGround=false; use the declared body precision. */
@@ -244,8 +255,23 @@ function emptySearch(goal: NavigationGoal, status: LandSearchStatus, detail: str
 /**
  * 执行一段。每次动作后都必须读取真实身体状态；计划点、waypoint、Promise resolve 都不能代替实测。
  * 已确认前缀在后续失败时保留，不把整个 segment 归零。
+ *
+ * manual 模式下，搜索/执行期间实际依赖的 Section 由内层持有 lease；本包装器
+ * 保证所有返回路径都释放，不让 pin 泄漏到会话账本。
  */
 export async function runNavigationSegment(ctx: SkillCtx, request: SegmentRequest): Promise<SegmentReceipt> {
+  const leases: RouteResidency[] = [];
+  try {
+    return await runNavigationSegmentInner(ctx, request, leases);
+  } finally {
+    const spatial = ctx.spatial;
+    if (spatial !== undefined) for (const residency of leases) releaseRouteResidency(spatial, residency);
+  }
+}
+
+async function runNavigationSegmentInner(
+  ctx: SkillCtx, request: SegmentRequest, leases: RouteResidency[],
+): Promise<SegmentReceipt> {
   const spatial = ctx.spatial;
   const state = ctx.adapter.state();
   const start = { ...state.pos };
@@ -260,6 +286,10 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     };
   }
   const voxel = spatial.session.voxel;
+  const manual = spatial.session.voxelLoading === 'manual';
+  const scope = { worldId: state.worldId, dim: state.dim, sessionId: state.sessionId };
+  // 放在对象里，避免 TypeScript 把闭包内赋值前的变量窄化成 null。
+  const residencyState: { failure: RouteResidencyFailure | null } = { failure: null };
   const base = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
@@ -276,6 +306,31 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   // 不再用固定 1500ms 截断长路线搜索。预算耗尽时仍由同一个 deadline 停止。
   const searchWindow = () => ({ deadlineMs: request.deadline, maxSearchMs: Math.max(1, request.deadline - Date.now()) });
   let searches = 0;
+  /**
+   * 一次搜索的真实调用。manual 下库不会隐式加载已保存页面，只把遇到的未驻留
+   * Section 报告为 unavailableSections；这里显式 prepare 后重试同一搜索。
+   * 每次重试都是真实搜索，计入 searches；加载失败原样保留为回执事实。
+   */
+  const search = async (searchRequest: Parameters<typeof searchLandRouteAsync>[1]): Promise<LandSearchResult> => {
+    let result = await searchLandRouteAsync(voxel, searchRequest);
+    searches += 1;
+    if (!manual) return result;
+    for (let round = 0; round < MAX_RESIDENCY_ROUNDS; round += 1) {
+      if (result.unavailableSections.length === 0 || !RESIDENCY_RETRYABLE.has(result.status)
+        || searches >= request.searchBudget || Date.now() >= request.deadline) break;
+      const residency = await acquireRouteResidency(spatial, result.unavailableSections, {
+        signal: ctx.signal, deadline: request.deadline,
+      });
+      if (residency.status !== 'ready') {
+        residencyState.failure = residency;
+        break;
+      }
+      leases.push(residency);
+      result = await searchLandRouteAsync(voxel, searchRequest);
+      searches += 1;
+    }
+    return result;
+  };
 
   if (request.searchBudget < 1) {
     return {
@@ -287,8 +342,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     };
   }
   request.onPhase?.('searching');
-  const strict = await searchLandRouteAsync(voxel, { ...base, ...searchWindow() });
-  searches += 1;
+  const strict = await search({ ...base, ...searchWindow() });
   if (strict.status === 'CANCELLED') {
     return cancelledReceipt(strict, request, start, searches);
   }
@@ -300,8 +354,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     && strict.prefix.transitions.length > 0
     && strict.prefix.knownBlockerAhead === undefined;
   if (chosen === null && !currentPrefixUsable && request.historical && request.searchBudget - searches > 0) {
-    historical = await searchLandRouteAsync(voxel, { ...base, evidenceMode: 'remembered', ...searchWindow() });
-    searches += 1;
+    historical = await search({ ...base, evidenceMode: 'remembered', ...searchWindow() });
     if (historical.status === 'CANCELLED') return cancelledReceipt(historical, request, start, searches);
     if (historical.status === 'FOUND') chosen = historical;
   }
@@ -337,6 +390,23 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
           stopCode: 'unsupported_direct_drop',
           detail: '直接下落回退需要身体在起点格心；当前实测起点不是格心，不能用格心落点证明连续 endpoint',
         };
+      }
+      if (manual) {
+        const residency = await acquireRouteResidency(spatial, sectionsForCells(scope, [dropStart, physicalTo]), {
+          signal: ctx.signal, deadline: request.deadline,
+        });
+        if (residency.status !== 'ready') {
+          return {
+            waypoint, outcome: 'residency_not_ready', measuredStart: start, measuredEnd: dropStart,
+            chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+            evidenceMode: 'current', searches, planned: [], confirmed: [], remaining: [], pathLength: 0,
+            arrived: false, directDrop: false, boundarySummary,
+            unavailableSections: residency.sections,
+            failureCode: 'PATH_NOT_FOUND', stopCode: 'residency_gap',
+            detail: `直接下落所需的 ${residency.sections.length} 个 Section 未能加载/驻留（${residency.reason}）：${residency.message}；没有执行未复验的动作`,
+          };
+        }
+        leases.push(residency);
       }
       const dropCheck = verifyLandRoute(voxel, {
         worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
@@ -441,6 +511,14 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
           : historicalBudget !== null ? 'search_budget'
             : outcomeOfStatus(strict.status);
     const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
+    const unavailable = historicalBudget !== null && historicalBudget.unavailableSections.length > 0
+      ? historicalBudget.unavailableSections
+      : strict.unavailableSections.length > 0
+        ? strict.unavailableSections
+        : residencyState.failure?.sections ?? [];
+    const residencyNote = residencyState.failure === null
+      ? ''
+      : `；驻留加载失败（${residencyState.failure.reason}）：${residencyState.failure.message}`;
     return {
       waypoint, outcome, stopCode: blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
       chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
@@ -449,19 +527,17 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
       pathLength: 0, arrived: false, directDrop: false, boundarySummary,
       ...(historicalBudget?.budget !== undefined ? { budget: historicalBudget.budget }
         : strict.budget === undefined ? {} : { budget: strict.budget }),
-      ...(historicalBudget !== null && historicalBudget.unavailableSections.length > 0
-        ? { unavailableSections: historicalBudget.unavailableSections }
-        : strict.unavailableSections.length === 0 ? {} : { unavailableSections: strict.unavailableSections }),
+      ...(unavailable.length === 0 ? {} : { unavailableSections: unavailable }),
       ...(strict.policy === undefined ? {} : { policy: strict.policy }),
       ...(blockerAhead === undefined ? {} : { blockerAhead }),
       ...(outcome === 'unknown_boundary' && blockedBoundary !== undefined ? { boundary: blockedBoundary } : {}),
-      detail: blockerAhead !== undefined
+      detail: `${blockerAhead !== undefined
         ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
         : strict.corridorLimited === true
           ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
           : historicalBudget !== null
             ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
-            : statusDetail(strict),
+            : statusDetail(strict)}${residencyNote}`,
     };
   }
 
@@ -505,6 +581,40 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: base.body, rules: walkLandRules,
   };
+  // manual 下先保护本次真正会读的 Section：搜索与执行之间可能发生周期 checkpoint，
+  // 未 pin 的页面会被保存后换出，逐步复验随后只能看到 UNKNOWN。依赖只来自已选
+  // 路线和真实 drop/ladder 跨度，不预取目标走廊。
+  if (manual && transitions.length > 0) {
+    const actualStart = { ...ctx.adapter.state().pos };
+    const verticalCells = transitions.flatMap((transition) => {
+      const span = Math.round(transition.from.y - transition.to.y);
+      if (transition.kind !== 'ladder' && !(transition.kind === 'drop' && span > 1)) return [];
+      return Array.from({ length: Math.abs(span) + 1 }, (_, index) => ({
+        x: transition.to.x,
+        y: transition.to.y + Math.sign(span) * index,
+        z: transition.to.z,
+      }));
+    });
+    const sections = [
+      ...routeDependencySections(voxel, scope, actualStart, transitions.map((transition) => transition.to)),
+      ...sectionsForCells(scope, [
+        ...transitions.flatMap((transition) => [transition.from, transition.to]),
+        ...verticalCells,
+      ]),
+    ];
+    const residency = await acquireRouteResidency(spatial, sections, {
+      signal: ctx.signal, deadline: request.deadline,
+    });
+    if (residency.status !== 'ready') {
+      return receipt('residency_not_ready', {
+        stopCode: 'residency_gap',
+        detail: `执行 ${transitions.length} 段所需的 Section 未能加载/驻留（${residency.reason}）：${residency.message}；没有执行未复验的动作`,
+        failureCode: 'PATH_NOT_FOUND',
+        unavailableSections: residency.sections,
+      });
+    }
+    leases.push(residency);
+  }
   const cancelledHere = (index: number, transition: LandSearchTransition, from: Vec3Like): SegmentReceipt => {
     const stoppedState = ctx.adapter.state();
     const stopped = { ...stoppedState.pos };

@@ -50,6 +50,7 @@ export type StopReason =
   | 'TARGET_UNRESOLVED'
   | 'ROUTE_INVALIDATED'
   | 'NO_PATH'
+  | 'RESIDENCY_NOT_READY'
   | 'PHYSICAL_FAILURE'
   | 'ACTION_FAILURE'
   | 'MODE_GAP'
