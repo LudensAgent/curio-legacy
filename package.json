@@ -39,9 +39,6 @@
     "check:memory": "tsx scripts/check-memory.ts",
     "check:memory:local": "node --env-file=.env.local --import tsx scripts/check-memory.ts",
     "check:memory:live": "node --env-file=.env.live --import tsx scripts/check-memory.ts",
-    "fixtures:spatial-pre-real": "tsx scripts/spatial-pre-real-fixtures.ts",
-    "spatial:normalize": "tsx scripts/spatial-normalize.ts",
-    "spatial:verify": "tsx scripts/verify-spatial-cutover.ts",
     "test": "tsx --test tests/*.test.ts",
     "world:seed": "tsx scripts/world-seed.ts",
     "agents:list": "tsx scripts/agents.ts list",
@@ -62,12 +59,11 @@
   "dependencies": {
     "@vectorize-io/hindsight-client": "1.1.0",
     "better-sqlite3": "^12.11.1",
-    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-fe7e491.tgz",
+    "curio-minecraft-3d-memory": "file:vendor/curio-minecraft-3d-memory-0.11.0.tgz",
     "curio-observer": "file:../CurioObserver",
     "gridstack": "12.3.3",
     "minecraft-data": "^3.60.0",
     "mineflayer": "^4.20.0",
-    "mineflayer-pathfinder": "^2.4.5",
     "typescript": "^5.6.0",
     "vec3": "^0.1.10"
   },
