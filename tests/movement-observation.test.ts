@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../src/adapter/types.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { verifyLandRoute } from '../src/spatial/land-search.ts';
+import { walkLandRules } from '../src/adapter/land-rules.ts';
 import { boundaryProbeCells, observeBoundary } from '../src/skills/movement/observation.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -69,16 +71,50 @@ function setup() {
     worldId: adapter.worldId, session: { voxel: map },
   } as unknown as SharedSpatialSession };
   let sequence = 0;
-  const observe = (pos: Vec3Like, observedAt = Date.now()) => {
+  const observe = (pos: Vec3Like, observedAt = Date.now(), name = 'minecraft:air') => {
     map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
       observedAt, sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
-      state: { name: 'minecraft:air', properties: {} }, pos });
-    return { pos, name: 'minecraft:air', properties: {}, stateComplete: true,
+      state: { name, properties: {} }, pos });
+    return { pos, name, properties: {}, stateComplete: true,
       worldId: adapter.worldId, sessionId: adapter.sessionId, dimension: adapter.dim,
       observationId: sequence, observedAt, source: 'vision' as const };
   };
   return { adapter, map, ctx, observe };
 }
+
+test('a four-block drop spanning two axes refreshes its stale sweep cells within 32 visual probes', async (t) => {
+  const { adapter, map, ctx, observe } = setup();
+  t.after(() => ctx.memory.close());
+  const from = { x: 0.05, y: 64, z: 0.05 }, to = { x: 1.05, y: 60, z: 0.05 };
+  adapter.pos = from;
+  const edge = { ...boundary, from, to, direction: 'E' as const };
+  const stale = new Set(['1,65,-1', '1,65,0']);
+  for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) for (let y = 55; y <= 68; y++) {
+    const pos = { x, y, z };
+    // Only the trailing column supports the starting stance; the overlapping
+    // column is clear for the full drop to the lower platform.
+    const solid = y <= 59 || x === -1 && y === 63;
+    observe(pos, Date.now() - (stale.has(key(pos)) ? 61_000 : 1000), solid ? 'minecraft:stone' : 'minecraft:air');
+  }
+  const check = () => verifyLandRoute(map, {
+    worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+    body: { feet: from, width: 0.6, height: 1.8, pose: 'standing' }, rules: walkLandRules,
+  }, [{ kind: 'drop', from, to, drop: 4 }], Date.now()).transitions[0]!.status;
+  assert.equal(check(), 'STALE');
+  let turns = 0;
+  t.mock.method(adapter, 'look', async () => { turns++; });
+  ctx.senses.observeBlocks = (cells) => {
+    assert.ok(cells.length <= 32);
+    return turns === 0 ? [] : cells.filter((cell) => stale.has(key(cell))).map((cell) => observe(cell));
+  };
+  const result = await observeBoundary(ctx, { boundary: edge, maxCells: 32 });
+  assert.equal(turns, 1);
+  assert.deepEqual(new Set(result.relatedCells.map(key)), stale);
+  assert.equal(check(), 'OPEN', 'the actual drop sweep is proved only after both visible headroom cells are refreshed');
+  const fresh = await observeBoundary(ctx, { boundary: edge, maxCells: 32 });
+  assert.equal(fresh.turned, false, 'fresh sweep evidence does not cause another turn');
+  assert.equal(turns, 1);
+});
 
 test('seeing fresh nearby cells still turns once toward the unresolved boundary cell', async (t) => {
   const { adapter, map, ctx, observe } = setup();

@@ -71,6 +71,7 @@ export function boundaryProbeCells(
   limit = PROBE_LIMIT,
   corridor?: Corridor,
   landingOptions: readonly LandingOption[] = [],
+  needsObservation?: (cell: Vec3Like) => boolean,
 ): { cells: Vec3Like[]; landingCells: Vec3Like[] } {
   const to = cellOf(boundary.to);
   const from = cellOf(boundary.from);
@@ -151,7 +152,12 @@ export function boundaryProbeCells(
       landingCells.push(cell);
     }
   }
-  return { cells: [...cells, ...landingCells].slice(0, limit), landingCells: landingCells.slice(0, limit) };
+  // 先按真实起终点/扫掠、侧边、落点的顺序选尚缺证据的格，再用已有证据填剩余额度。
+  // 跨两列的深落差可能有超过 32 个接触格，不能被排在前面的新鲜格长期挤掉头部净空。
+  const pending: Vec3Like[] = [], current: Vec3Like[] = [];
+  for (const cell of [...cells, ...landingCells]) (needsObservation?.(cell) ? pending : current).push(cell);
+  const selected = [...pending, ...current].slice(0, limit);
+  return { cells: selected, landingCells: landingCells.filter((cell) => selected.includes(cell)) };
 }
 
 /** 内容变化或过期证据恢复才是新依据；仍有效的同内容刷新不触发重复搜索。 */
@@ -177,8 +183,13 @@ export async function observeBoundary(
   const eligibleLandings = landingOptions.filter((option) =>
     (corridor === undefined || withinCorridor(option.target, corridor))
     && option.clearance !== 'blocked' && option.corridor !== 'blocked').slice(0, 4);
-  const { cells, landingCells } = boundaryProbeCells(opts.boundary, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings);
   const now = Date.now();
+  const needsObservation = (cell: Vec3Like) => {
+    const view = voxel?.cellAt(state.dim, cell.x, cell.y, cell.z);
+    return !view?.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < now
+      || view.evidence.observation.sessionId !== state.sessionId || !view.evidence.observation.stateComplete;
+  };
+  const { cells, landingCells } = boundaryProbeCells(opts.boundary, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings, needsObservation);
   const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell, now)]));
   const base = {
     boundary: opts.boundary, cells, attempted: false, observed: 0, newObservedCells: 0,
@@ -205,11 +216,7 @@ export async function observeBoundary(
   let turned = false;
   // 看见邻近的新鲜格不代表补齐了边界：对仍未知/过期的相关格最多定向一次。
   // cells 是整数方块格；不能给 boundary.to 的连续脚位再加半格当作观察目标。
-  const target = cells.find((cell) => {
-    const view = voxel.cellAt(state.dim, cell.x, cell.y, cell.z);
-    return !view.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < now
-      || view.evidence.observation.sessionId !== state.sessionId || !view.evidence.observation.stateComplete;
-  });
+  const target = cells.find(needsObservation);
   if (target !== undefined) {
     const eye = ctx.adapter.eye();
     if (eye !== null) {
