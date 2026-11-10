@@ -326,7 +326,7 @@ test('cancelled bucket placement cannot clear a replacement walk’s sneak', asy
   assert.equal(controls.sneak, true, '向工作台贴面倒水必须先潜行');
   f.adapter.stopAll(); // 旧桶动作被换主打断
   assert.equal(controls.sneak, false, 'stopAll 应清掉旧动作自己的控制');
-  f.adapter.walkBody().setControlState('sneak', true); // 新移动任务接管并按下潜行
+  f.bot.setControlState('sneak', true); // 新移动任务接管并按下潜行
   assert.equal(controls.sneak, true);
   releaseLook(); // 旧桶动作迟到的完成
   await assert.rejects(pending, { name: 'AbortedError' });

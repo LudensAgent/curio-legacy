@@ -12,11 +12,10 @@ import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
 import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
-import { cornerSafe } from './corner-safe.ts';
+import { isClimbableBlockName } from './land-rules.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
-import type { WalkBody, WalkTick } from './walk-route.ts';
 import { FEET_ARRIVAL_TOLERANCE } from './types.ts';
 
 import type {
@@ -33,6 +32,7 @@ import type {
   EntityKind,
   Eye,
   GameAdapter,
+  NavigationDelegate,
   Optics,
   PlacementFaceAttempt,
   MoveOpts,
@@ -93,23 +93,12 @@ function describePillarClearance(clearance: PillarClearance): string {
   return `头顶跳跃空间未加载；${range}，具体未加载位置未确认`;
 }
 
-class PillarClearanceError extends Error {
-  override name = 'PillarClearanceError';
-  readonly block?: { pos: Vec3Like };
-  constructor(clearance: PillarClearance) {
-    super(`No path: 原地搭柱${describePillarClearance(clearance)}，未放置方块`);
-    this.block = clearance.blocks[0];
-  }
-}
-
 const require = createRequire(import.meta.url);
 /**
  * 运行时依赖只在模块加载时取一次。以前 vec() 里每次都 require('vec3')：每次都要走一遍模块解析（运行器的钩子不缓存，
  * 每次都翻 node_modules、读 package.json），blockAt 一秒调用上万次时主线程能卡上 5~10 秒，服务器就以超时踢人（10-28 08:53 采样）
  */
 const { Vec3 } = require('vec3');
-let pathfinderGoals: any = null;
-const goalsLib = () => (pathfinderGoals ??= require('mineflayer-pathfinder').goals);
 
 /** 右键一点就打开、触发的方块：贴着它放东西要按住潜行 */
 const OPENS_ON_CLICK = /chest$|barrel|crafting_table|furnace|smoker|_door$|_trapdoor$|_fence_gate$|_button$|lever|_bed$|anvil|enchanting_table|brewing_stand|loom|stonecutter|grindstone|smithing_table|cartography_table|hopper|dispenser|dropper|shulker_box|note_block|jukebox|beacon|lectern|bell|repeater|comparator|cake/;
@@ -264,7 +253,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private hygieneTimer: NodeJS.Timeout | null = null;
   private guardedClients = new WeakSet<object>();
   private dragonDeath: BossDeathObservation | null = null;
-  private normalMovements: any = null;
+  /**
+   * runSkill 在任务生命周期内绑定的非本地导航委托。只随 run 的异步作用域传播，
+   * 覆盖适配器私有方法发起的 moveTo；嵌套技能会绑定自己的委托与期限。
+   */
+  private navigationDelegate = new AsyncLocalStorage<NavigationDelegate>();
+  /**
+   * 非本地 moveTo 的执行偏好（如 sprint）随同一异步作用域传给内部
+   * 逐段 feet/ladder 身体控制；不是新的任务预算或权限来源。
+   */
+  private delegatedMoveOptions = new AsyncLocalStorage<{ sprint: boolean }>();
   /** 正在等一次跨维度传送落地：newSession 不打断这个动作，让 enterPortalAt 自己确认切换成功 */
   private inPortalTransition = false;
 
@@ -433,7 +431,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.newSession();
     this.connectedFlag = false;
     const mineflayer = require('mineflayer');
-    const { pathfinder, Movements } = require('mineflayer-pathfinder');
     const { host, port, username, version } = this.cfg.mc;
     this.bus.publish('connect', 'P3', `连接 ${host}:${port} (${version}) 用户名 ${username}`);
 
@@ -441,7 +438,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const bot = mineflayer.createBot({ host, port, username, version, auth: 'offline', viewDistance: 32 });
     this.bot = bot;
     this.guardPrePlayWrites(bot);
-    bot.loadPlugin(pathfinder);
     // Mineflayer 在 inject_allowed 才注入 openBlock 等方法；注入后再包装。
     bot.once('inject_allowed', () => {
       this.installUiPacing(bot);
@@ -493,50 +489,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       this.dimension = this.currentDimension();
       this.spawned = true;
       if (!this.mcData) this.mcData = require('minecraft-data')(bot.version);
-      if (!bot.__agentMovementsSet) {
-        const mv = new Movements(bot);
-        mv.canDig = true;
-        mv.allowSprinting = true;
-        // 跑酷跳跃对起跳位置极其敏感：起点不在格子中心就跳不上去，人会卡在方块边上来回抖。普通走路只跳一格台阶。
-        mv.allowParkour = false;
-        mv.allow1by1towers = true;
-        // 垫脚/搭路用的方块：除了默认的泥土圆石，也用其他常见石头（不用木板原木，免得烧掉建材）
-        for (const n of ['cobbled_deepslate', 'netherrack', 'andesite', 'granite', 'diorite', 'stone', 'deepslate', 'tuff']) {
-          const it = this.mcData.itemsByName[n];
-          if (it && !mv.scafoldingBlocks.includes(it.id)) mv.scafoldingBlocks.push(it.id);
-        }
-        // 海带/海草等含水植物在物理上就是水：不加进 liquids 的话寻路会以为脚下悬空，在海带丛里原地卡死
-        for (const n of ['kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column']) {
-          const b = this.mcData.blocksByName[n];
-          if (b) mv.liquids.add(b.id);
-        }
-        mv.liquidCost = 10; // 能走陆路就别游泳：海岸边绕一点陆路也比下水强（游泳慢、会被溺尸打、会淹死）
-        // 岩浆是危险流体，不是可游泳的水：寻路绝不能穿过去。默认 Movements 把 lava 加进 liquids（当水游）
-        // 和 replaceables（当空气在上面垫方块）——这里都删掉，并列为不可采掘，让 safeToBreak 返回 false，
-        // 寻路会绕开岩浆而不是游进去或往岩浆上垫路（在岩浆源上放方块会失败，人直接掉进去）。
-        const lava = this.mcData.blocksByName.lava;
-        if (lava) {
-          mv.liquids.delete(lava.id);
-          mv.replaceables.delete(lava.id);
-          mv.blocksCantBreak.add(lava.id);
-        }
-        try {
-          for (const n of PROTECTED_BLOCKS) {
-            const b = this.mcData.blocksByName[n];
-            if (b) mv.blocksCantBreak.add(b.id);
-          }
-        } catch { /* ignore */ }
-        cornerSafe(mv);
-        // 寻路途中挖方块（allowDig 授权后）原本总挑挖得最快的工具：Agent 选了石镐也会被换成钻石镐。
-        // 改为：本次委托指定了工具就只用那把（不在背包则空手，代价估算随之变高）；没指定按它自己的选择规则，最后才按最快。
-        const fastest = bot.pathfinder.bestHarvestTool.bind(bot.pathfinder);
-        bot.pathfinder.bestHarvestTool = (block: any) => this.pathfinderDigTool(block, fastest);
-        bot.pathfinder.setMovements(mv);
-        // 远一点的目标默认 5 秒想不完就报错：多给点时间，想不完时 goto 会按“没找到路”处理
-        bot.pathfinder.thinkTimeout = 10000;
-        this.normalMovements = mv;
-        bot.__agentMovementsSet = true;
-      }
       this.connectedFlag = true;
       this.reconnectAttempts = 0;
       if (!this.initialized) {
@@ -1027,10 +979,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const portal = cell && [0, 1].map((dy) => this.blockAt({ ...cell, y: cell.y + dy })).find((n): n is string => !!n && PORTAL_KINDS.has(n));
       if (cell && portal) throw new Error(`PORTAL_CELL: 目标站位 (${cell.x},${cell.y},${cell.z}) 是 ${portal} 方块，进去会被传送；没有移动。要穿门用 travel_portal`);
     }
-    // 连续脚位：不经过 pathfinder 的整数节点/格心，直接用现有身体控制推进到实测点。
+    // 连续脚位：不经过路线委托的整数节点/格心，直接用现有身体控制推进到实测点。
     // 旧的 move_step 仍走下方 xyz/adjacentStep 路径，保持格心语义不变。
     if (target.kind === 'feet') {
       const deadline = Date.now() + opts.timeoutMs;
+      const sprint = opts.sprint ?? this.delegatedMoveOptions.getStore()?.sprint ?? false;
       const outcome = await this.driveToFeet(
         { x: target.x, y: target.y, z: target.z },
         deadline,
@@ -1038,293 +991,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         'feet',
         opts.corridor,
         opts.horizontalJump === true,
+        sprint,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
       if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 连续脚位没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
       throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了连续脚位目标' : '身体控制没有完成连续脚位'}，实际位于 ${where}`);
     }
-    this.pathDigTool = opts.digTool ?? null;
-    if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
-    if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
-      const movements = cornerSafe(Object.assign(Object.create(Object.getPrototypeOf(this.normalMovements)), this.normalMovements));
-      if (opts.constructionSafe || !opts.allowTerrainChanges) {
-        // 纯移动不改地形：不挖（含树叶）、不搭柱、不架桥。明确挖掘/爬升动作另行 allowTerrainChanges:true 授权。
-        movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
-      }
-      if (!opts.constructionSafe) {
-        const allowPlace = opts.allowPlace ?? !!opts.allowTerrainChanges;
-        const allowTower = allowPlace && (opts.allowTower ?? allowPlace);
-        movements.scafoldingBlocks = allowPlace ? [...this.normalMovements.scafoldingBlocks] : [];
-        movements.allow1by1towers = allowTower && this.normalMovements.allow1by1towers;
-      }
-      if (opts.noPlaceAt?.length) {
-        const banned = new Set(opts.noPlaceAt.map((p) => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`));
-        // 权重远超 pathfinder 的 100「不能走」阈值：带这个放置的候选步直接被丢弃。
-        movements.exclusionAreasPlace = [...movements.exclusionAreasPlace, (block: any) =>
-          banned.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 1000 : 0];
-      }
-      movements.allowParkour = false;
-      if (target.kind === 'ladder') {
-        // A ladder transition has already been proved as one exact vertical or
-        // adjacent same-height move. Restrict pathfinder nodes to those columns:
-        // it may not walk around, dig, place, tower, parkour or drop elsewhere.
-        const from = b.entity.position.floored();
-        const columns = new Set([
-          `${from.x},${from.z}`,
-          `${Math.floor(target.x)},${Math.floor(target.z)}`,
-        ]);
-        const minY = Math.min(from.y, target.y) - 1;
-        const maxY = Math.max(from.y, target.y) + 1;
-        const inLadderScope = (node: any): boolean =>
-          columns.has(`${node.x},${node.z}`) && node.y >= minY && node.y <= maxY;
-        movements.canDig = false;
-        movements.allow1by1towers = false;
-        movements.scafoldingBlocks = [];
-        movements.allowParkour = false;
-        movements.allowSprinting = false;
-        movements.allowFreeMotion = false;
-        const getNeighbors = movements.getNeighbors;
-        if (typeof getNeighbors === 'function') {
-          movements.getNeighbors = function (node: any, ...args: any[]) {
-            return (getNeighbors.call(this, node, ...args) as any[])
-              .filter((next) => inLadderScope(next) && next.toBreak?.length === 0 && next.toPlace?.length === 0);
-          };
-        }
-        const getLandingBlock = movements.getLandingBlock;
-        if (typeof getLandingBlock === 'function') {
-          movements.getLandingBlock = function (node: any, ...args: any[]) {
-            const landing = getLandingBlock.call(this, node, ...args);
-            return landing && inLadderScope(landing.position) ? landing : null;
-          };
-        }
-      }
-      // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
-      if (opts.avoid?.length) {
-        movements.blocksToAvoid = new Set(movements.blocksToAvoid);
-        const avoidIds = new Set<number>();
-        for (const n of opts.avoid) { const id = this.mcData?.blocksByName?.[n]?.id; if (id !== undefined) { movements.blocksToAvoid.add(id); avoidIds.add(id); } }
-        // blocksToAvoid 只拦身体所在格；岩浆块、营火这类实心/可站的方块还要拦“站在上面”：落脚格的支撑是它就不走。
-        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => avoidIds.has(movements.getBlock(block.position, 0, -1, 0)?.type) ? 100 : 0];
-      }
-      // 贴着岩浆走一下击退就会掉进去：按委托给站位四邻的岩浆加代价，让路线离岩浆边远一点（每步 ≤40，低于 100 的“不能走”阈值）。
-      if (opts.lavaEdgeCost && this.mcData?.blocksByName?.lava) {
-        const lavaId = this.mcData.blocksByName.lava.id, per = opts.lavaEdgeCost;
-        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => {
-          let n = 0;
-          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (const dy of [0, -1]) {
-            if (movements.getBlock(block.position, dx, dy, dz)?.type === lavaId) n++;
-          }
-          return Math.min(40, n * per);
-        }];
-      }
-      // 默认走路，调用方明确 sprint:true 才跑（逃离也不例外）：冲刺每格都在消耗饥饿值，走路几乎不耗；跑不跑由委托方定
-      movements.allowSprinting = opts.sprint === true;
-      if (opts.maxDropDown !== undefined) {
-        if (!Number.isInteger(opts.maxDropDown) || opts.maxDropDown < 1 || opts.maxDropDown > 32 || target.kind !== 'xyz') throw new Error('BAD_ARGS: 明确下行需要相邻 xyz 落点和 1–32 格上限');
-        // 节点 = 「脚下那块 +1」：整块脚高 63 → 节点 63，半砖脚高 63.5 → 节点 64。过滤候选用节点，与目标映射（ceil(y-0.001)）一致。
-        const from = b.entity.position.floored(), to = { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) };
-        if (Math.abs(from.x - to.x) + Math.abs(from.z - to.z) !== 1 || target.y >= b.entity.position.y) throw new Error('BAD_ARGS: 明确下行只支持相邻一列的较低落点');
-        movements.maxDropDown = opts.maxDropDown;
-        movements.infiniteLiquidDropdownDistance = false;
-        movements.canDig = false; movements.allow1by1towers = false; movements.scafoldingBlocks = [];
-        movements.allowParkour = false; movements.allowSprinting = false; movements.allowFreeMotion = false;
-        const landingBlock = movements.getLandingBlock, neighbors = movements.getNeighbors;
-        movements.getLandingBlock = function (node: any, ...args: any[]) {
-          const landing = landingBlock.call(this, node, ...args);
-          // Native water landings bypass the solid-floor drop bound.
-          return landing && node.y - landing.position.y <= this.maxDropDown ? landing : null;
-        };
-        movements.getNeighbors = function (node: any) {
-          // This is one observed edge, not permission to find another cliff.
-          if (node.x !== from.x || node.z !== from.z) return [];
-          return neighbors.call(this, node).filter((next: any) => next.x === to.x && next.y === to.y && next.z === to.z
-            && !next.toBreak.length && !next.toPlace.length);
-        };
-      }
-      if (opts.allowSwimming === false) {
-        const water = (block: any) => !!block && (block.liquid || movements.liquids.has(block.type)
-          || String(block.getProperties?.().waterlogged) === 'true');
-        movements.exclusionAreasStep = [...movements.exclusionAreasStep, (block: any) => water(block) ? 100 : 0];
-        movements.infiniteLiquidDropdownDistance = false;
-        const landingBlock = movements.getLandingBlock;
-        movements.getLandingBlock = function (...args: any[]) {
-          const landing = landingBlock.apply(this, args);
-          // Drop-down edges bypass exclusionAreasStep in installed Pathfinder.
-          return landing && !water(landing) && !water(this.getBlock(landing.position, 0, 1, 0)) ? landing : null;
-        };
-      }
-      // Installed Pathfinder handles gates, but omits two-block wooden doors.
-      // Keep both halves out of the break list. Check the actual door panel for
-      // each approach and open a closed door only when doing so clears the way.
-      movements.canOpenDoors = opts.maxDropDown === undefined;
-      const getBlock = movements.getBlock;
-      movements.getBlock = function (...args: any[]) {
-        const block = getBlock.apply(this, args);
-        if (!block?.name?.endsWith('_door') || block.name === 'iron_door') return block;
-        const properties = block.getProperties?.();
-        if (!properties || !['upper', 'lower'].includes(properties.half)) return block;
-        const open = properties.open === true || properties.open === 'true';
-        return Object.assign(Object.create(Object.getPrototypeOf(block)), block, {
-          physical: false, height: block.position.y,
-          safe: open || properties.half === 'upper',
-          openable: !open && properties.half === 'lower',
-        });
-      };
-      let blockClass: any;
-      for (const [method, dy] of [['getMoveForward', 0], ['getMoveJumpUp', 1]] as const) {
-        const getMove = movements[method];
-        movements[method] = function (node: any, dir: any, neighbors: any[]) {
-          const door = this.getBlock(node, dir.x, dy, dir.z);
-          const properties = door.getProperties?.();
-          if (!door.name?.endsWith('_door') || door.name === 'iron_door' || properties?.half !== 'lower') {
-            return getMove.call(this, node, dir, neighbors);
-          }
-          const startX = node.x + 0.5, startZ = node.z + 0.5;
-          const minX = Math.min(startX, startX + dir.x) - 0.3, maxX = Math.max(startX, startX + dir.x) + 0.3;
-          const minZ = Math.min(startZ, startZ + dir.z) - 0.3, maxZ = Math.max(startZ, startZ + dir.z) + 0.3;
-          const collides = (shapes: number[][]) => shapes.some((shape) => door.position.x + shape[3] > minX && door.position.x + shape[0] < maxX
-            && door.position.z + shape[5] > minZ && door.position.z + shape[2] < maxZ);
-          const isOpen = properties.open === true || properties.open === 'true';
-          let openDoor = false;
-          if (collides(door.shapes)) {
-            // An open door remains a panel; never change it behind the caller's back.
-            if (isOpen || !this.canOpenDoors) return;
-            blockClass ??= require('prismarine-block')(b.registry);
-            const opened = blockClass.fromProperties(door.name, { ...properties, open: true }, 0);
-            if (collides(opened.shapes)) return;
-            openDoor = true;
-          }
-          // Preserve all the normal movement checks while treating only the verified
-          // clear doorway as passable. Opening is added only when it clears the path.
-          const before = neighbors.length, getBlock = this.getBlock;
-          this.getBlock = function (...args: any[]) {
-            const block = getBlock.apply(this, args);
-            return block.position?.equals(door.position) ? Object.assign(Object.create(Object.getPrototypeOf(block)), block, { safe: true, openable: false }) : block;
-          };
-          try { getMove.call(this, node, dir, neighbors); }
-          finally { this.getBlock = getBlock; }
-          if (openDoor) for (const move of neighbors.slice(before)) move.toPlace.unshift({ x: door.position.x, y: door.position.y, z: door.position.z, dx: 0, dy: 0, dz: 0, useOne: true });
-        };
-      }
-      // 架桥可以跨沟壑/悬崖（高处搭桥），但不往水里放方块：过水只剩 travel 游泳 / 坐船两条路。
-      // 只拦目标格是水的放置；useOne（开门/门栏）不是放方块，岩浆不是水，都不拦。
-      const isWaterBlock = (block: any) => !!block && (
-        block.name === 'water' || block.name === 'bubble_column' || block.name === 'kelp'
-        || block.name === 'kelp_plant' || block.name === 'seagrass' || block.name === 'tall_seagrass'
-        || String(block.getProperties?.().waterlogged) === 'true');
-      for (const method of ['getMoveForward', 'getMoveJumpUp'] as const) {
-        const getMove = movements[method];
-        movements[method] = function (node: any, dir: any, neighbors: any[]) {
-          const before = neighbors.length;
-          getMove.call(this, node, dir, neighbors);
-          for (let i = neighbors.length - 1; i >= before; i--) {
-            const move = neighbors[i];
-            if (move.toPlace?.some((p: any) => !p.useOne && isWaterBlock(this.getBlock({ x: p.x, y: p.y, z: p.z }, 0, 0, 0)))) {
-              neighbors.splice(i, 1);
-            }
-          }
-        };
-      }
-      b.pathfinder.setMovements(movements);
-    }
-    // 每次寻路都按这一趟的委托设定绕路余量（searchRadius：代价 ≤ 直线估计 + 余量；-1 不限）：分跳行走用它
-    // 不让一个 xz 目标在下界岩洞里绕出几十格反方向的路。每次都重设，不残留到下一趟。
-    if (b.pathfinder) b.pathfinder.searchRadius = opts.searchRadius ?? -1;
-    const goals = goalsLib();
-    let goal: any;
-    switch (target.kind) {
-      case 'near':
-        goal = new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, target.range);
-        break;
-      case 'xz': {
-        goal = new goals.GoalNearXZ(target.x, target.z, target.range);
-        const band = target.footY;
-        if (band) {
-          // 只约束终点节点的脚高，路上照常起伏；节点 y 即脚所在格。
-          const nominalEnd = goal.isEnd.bind(goal);
-          goal.isEnd = (node: any) => nominalEnd(node) && node.y >= band[0] && node.y <= band[1];
-        }
-        break;
-      }
-      case 'xyz':
-      case 'ladder':
-        // y 是脚高（可为分数）。pathfinder 的节点是“脚下那块 +1”：整块脚高 64 → 节点 64，
-        // 半砖脚高 64.5 → 节点 65（见 pathfinder getPathFromTo 的 offset）。
-        goal = new goals.GoalBlock(Math.floor(target.x), Math.ceil(target.y - 0.001), Math.floor(target.z));
-        break;
-      case 'reach_block': {
-        // 浆果丛、作物、花草、火把这些没有碰撞箱的方块：视线射线会直接穿过去，“看得到这一格”永远不成立，
-        // 寻路就一直在它旁边（甚至丛里）打转到超时，人站在浆果丛里半天不动手。这类方块按距离算够得着。
-        const there = b.blockAt(this.vec(target.pos));
-        const hollow = !!there && Array.isArray(there.shapes) && there.shapes.length === 0;
-        goal = goals.GoalLookAtBlock && !hollow
-          ? new goals.GoalLookAtBlock(this.vec(target.pos), b.world, { reach: 4 })
-          : new goals.GoalNear(target.pos.x, target.pos.y, target.pos.z, 2);
-        // GoalLookAtBlock 的距离判定偏向脚部节点；地下目标还须核对眼睛到方块中心的真实挖掘距离。
-        const nominalEnd = goal.isEnd.bind(goal);
-        goal.isEnd = (node: any) => nominalEnd(node) && Math.hypot(
-          node.x + 0.5 - target.pos.x - 0.5,
-          node.y + (b.entity.eyeHeight ?? 1.62) - target.pos.y - 0.5,
-          node.z + 0.5 - target.pos.z - 0.5,
-        ) <= 4;
-        break;
-      }
-      case 'place_block': {
-          const excluded = new Set<string>();
-          const nodeKey = (node: any) => `${node.x},${node.y},${node.z}`;
-          const deadline = Date.now() + opts.timeoutMs;
-          for (let attempt = 0; attempt < 4; attempt++) {
-            goal = new goals.GoalPlaceBlock(this.vec(target.pos), b.world, { range: 4, LOS: true, ...(target.facing ? { facing: target.facing } : {}) });
-            const nominalEnd = goal.isEnd.bind(goal);
-            // Pathfinder searches integer node centres and may stop before the
-            // actual eye has reached that centre. Keep its search semantics,
-            // then exclude any arrival whose real face is still occluded.
-            goal.isEnd = (node: any) => !excluded.has(nodeKey(node)) && nominalEnd(node);
-            const remaining = deadline - Date.now();
-            if (remaining <= 0) throw new Error('PLACEMENT_NOT_REACHABLE');
-            await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => this.stopAll()), check);
-            if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), opts.signal, Math.max(1, Math.min(2000, deadline - Date.now())), () => {}), check);
-            const actual = b.entity.position, floor = actual.floored();
-            if (!goal.isStandingIn(floor) && goal.getFaceAndRef(actual.offset(0, b.entity.eyeHeight ?? 1.62, 0))) return;
-            // goto can also resolve an empty noPath result. Never accept it as
-            // reachability proof or retry the same unusable within-node pose.
-            excluded.add(nodeKey(floor));
-            excluded.add(nodeKey(floor.offset(0, 1, 0)));
-          }
-          throw new Error('PLACEMENT_NOT_REACHABLE');
-      }
-      case 'follow_entity': {
-        const ent = b.entities[target.entityId];
-        if (!ent) throw new Error('ENTITY_GONE');
-        goal = new goals.GoalFollow(ent, target.range);
-        break;
-      }
-      case 'advance': {
-        // 节点是脚所在格，按格心算沿方向推进与横向偏离；启发值 = 还差的推进 + 超出的横向偏离（都按格数，不高估）。
-        const { origin, dir, minAlong, maxLateral } = target;
-        const along = (n: any) => (n.x + 0.5 - origin.x) * dir.x + (n.z + 0.5 - origin.z) * dir.z;
-        const lateral = (n: any) => Math.abs((n.z + 0.5 - origin.z) * dir.x - (n.x + 0.5 - origin.x) * dir.z);
-        goal = Object.assign(new goals.Goal(), {
-          heuristic: (n: any) => Math.max(0, minAlong - along(n)) + Math.max(0, lateral(n) - maxLateral),
-          isEnd: (n: any) => along(n) >= minAlong && lateral(n) <= maxLateral,
-        });
-        break;
-      }
-      case 'away_from': {
-        const me = b.entity.position;
-        let dx = me.x - target.pos.x;
-        let dz = me.z - target.pos.z;
-        const len = Math.hypot(dx, dz) || 1;
-        dx /= len;
-        dz /= len;
-        goal = new goals.GoalNearXZ(me.x + dx * target.distance, me.z + dz * target.distance, 3);
-        break;
-      }
-    }
     const deadline = Date.now() + opts.timeoutMs;
-    // 一格内的精确迈步不需要 pathfinder 的整段路线：后者在窄台/浮空边缘会把
-    // 本来一步能到的目标判成 No path。move_step 显式要求相邻格时直接走身体控制。
+    const inherited = this.delegatedMoveOptions.getStore();
+    const sprint = opts.sprint ?? inherited?.sprint ?? false;
+    // 一格内的精确迈步/明确下行/梯子过渡由本地身体控制完成：它们都是已复验的
+    // 有限动作，不需要（也不应进入）整段路线委托。
     if (target.kind === 'xyz' && opts.adjacentStep === true && opts.maxDropDown === undefined) {
       const at = b.entity.position;
       const where = `(${at.x.toFixed(2)},${at.y.toFixed(2)},${at.z.toFixed(2)})`;
@@ -1333,75 +1011,48 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
       throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '身体控制没有完成相邻一步'}，实际位于 ${where}`);
     }
-    const navigation = await this.gotoUnstalled(goal, opts, check);
-    const reached = navigation.reached;
+    if (target.kind === 'xyz' && opts.maxDropDown !== undefined) {
+      await this.driveControlledDrop({ x: target.x, y: target.y, z: target.z }, deadline, check, opts.maxDropDown, opts.allowSwimming === true);
+      check();
+      return;
+    }
+    if (target.kind === 'ladder') {
+      await this.driveAlongLadder({ x: target.x, y: target.y, z: target.z }, deadline, check);
+      check();
+      return;
+    }
+    // climb_up 的同列上行仍可落在已证实的梯子上：这是梯子身体控制，不是隐式施工。
+    if (target.kind === 'xyz'
+      && Math.floor(target.x) === Math.floor(b.entity.position.x)
+      && Math.floor(target.z) === Math.floor(b.entity.position.z)
+      && Math.abs(target.y - b.entity.position.y) > 0.05) {
+      const feetName = this.blockAt({ x: Math.floor(b.entity.position.x), y: Math.floor(b.entity.position.y), z: Math.floor(b.entity.position.z) });
+      if (feetName !== null && isClimbableBlockName(feetName)) {
+        await this.driveAlongLadder({ x: target.x, y: target.y, z: target.z }, deadline, check);
+        check();
+        return;
+      }
+    }
+    // 非本地移动只走 runSkill 绑定的 VoxelMap 导航委托。
+    // allowTerrainChanges 是“允许改变地形”的授权，不是要求本趟必须挖/放；普通 voxel
+    // 路线照常执行且不消耗这份权限。若路线确实需要施工/下水，委托会以结构化缺口交回，
+    // 由 Agent 显式调用 mine_cell / place_cell / place_support / pillar_one / swim_path。
+    // allowSwimming:true 同理只是允许，不会让陆地路线静默改成游泳模式。
+    const delegate = this.navigationDelegate.getStore();
+    if (!delegate) {
+      throw Object.assign(
+        new Error('NAVIGATION_UNAVAILABLE: 非本地移动需要 runSkill 在任务生命周期内绑定 withNavigation；没有回退到旧 pathfinder'),
+        { name: 'NavigationUnavailable', position: { ...b.entity.position }, target },
+      );
+    }
+    // sprint 是本次委托的执行请求：随同一异步作用域传给委托内部逐段 feet/ladder 控制。
+    await this.delegatedMoveOptions.run({ sprint }, () => delegate.navigate(target, { ...opts, sprint }));
     check();
-    // Pathfinder can resolve an empty noPath result without reaching its goal.
-    // Following is measured against the entity's current cell, not its old one.
-    if (target.kind === 'follow_entity') {
-      const ent = b.entities[target.entityId];
-      if (!ent) throw new Error('ENTITY_GONE');
-      goal = new goals.GoalFollow(ent, target.range);
-    }
-    const position = b.entity.position;
-    if (target.kind === 'xyz') {
-      // xyz 的 y 是脚高（可为分数）：验收实际脚高与列，不只看节点——半砖脚高 64.5 与整块脚高 65 落在同一节点。
-      const atTarget = () => {
-        const p = b.entity.position;
-        const cell = p.floored();
-        return cell.x === Math.floor(target.x) && cell.z === Math.floor(target.z) && Math.abs(p.y - target.y) <= 0.01;
-      };
-      const inTargetCell = () => {
-        const p = b.entity.position;
-        return Math.floor(p.x) === Math.floor(target.x) && Math.floor(p.z) === Math.floor(target.z);
-      };
-      const here = () => `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
-      // Pathfinder 的 GoalBlock 按“脚格”判到：一格上/下台阶可能在身体仍悬空时结算。
-      // 已在目标柱、脚高于落点且未触地时，先在期限内等落地；最终仍用精确脚高验收，不放宽容差。
-      const settling = () => !b.entity.onGround && !b.entity.isInWater && !b.entity.isInLava
-        && b.entity.position.y > target.y + 0.01;
-      if (!atTarget() && inTargetCell() && settling()) {
-        const settleBy = Math.min(deadline, Date.now() + 2000);
-        while (Date.now() < settleBy && !atTarget()) {
-          check();
-          if (!inTargetCell() || !settling()) break;
-          await this.afterAction(() => sleep(50, opts.signal), check);
-        }
-        // 期限用完仍悬空：finishAdjacentStep 在未触地时也无法前推，直接如实报告超时。
-        if (!atTarget() && inTargetCell() && settling()) {
-          throw Object.assign(new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`), { name: 'Timeout' });
-        }
-      }
-      // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；有路径但停在相邻格不是“无路”。
-      // 身体虽已在目标列、但仍由原支撑托住（如站在整块边缘去踩半砖）时，也交给它继续前推。
-      if (!atTarget() && reached && !opts.allowSwimming) {
-        const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
-        // helper 的 arrived 已经过连续稳定验收，直接采纳，不再用较宽的瞬时坐标检查覆盖它。
-        if (outcome === 'arrived') return;
-        if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`), { name: 'Timeout' });
-        throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
-      }
-      if (!atTarget()) {
-        if (inTargetCell()) {
-          throw new Error(`NOT_CONFIRMED: 已到目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}（实际脚高 ${b.entity.position.y.toFixed(2)}），实际位于 ${here()}`);
-        }
-        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有明确的 noPath 才报 PATH_NOT_FOUND。
-        // 空 timeout/partial/停止/目标变更没有被库判成 noPath 时，也不能升级成“没有路”。
-        if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`), { name: 'NoPath' });
-        if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${here()}`), { name: 'Timeout' });
-        throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`);
-      }
-    } else if (!goal.isEnd(position.floored())) {
-      const at = `(${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`;
-      if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${at}`), { name: 'NoPath' });
-      if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${at}`), { name: 'Timeout' });
-      throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${at}`);
-    }
   }
 
   /**
-   * 站在方块边缘、身体中心已经悬空时，Pathfinder 会从“脚下中心那一列”（空气）开始规划，
-   * 第一步和真实物理对不上，于是在边上来回抖。先潜行挪回真正踩着的那一格中心（潜行不会掉下去），再寻路。
+   * 站在方块边缘、身体中心已经悬空时，路线规划会从“脚下中心那一列”（空气）出发，
+   * 和真实物理对不上。先潜行挪回真正踩着的那一格中心（潜行不会掉下去），再继续。
    */
   private edgeSupport(): { x: number; z: number } | null {
     const b = this.bot, e = b?.entity;
@@ -1417,22 +1068,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const cells = [[0.3, 0.3], [0.3, -0.3], [-0.3, 0.3], [-0.3, -0.3]].map(([dx, dz]) => supports(dx, dz)).filter((c): c is any => !!c)
       .sort((a, c) => Math.hypot(a.x + 0.5 - p.x, a.z + 0.5 - p.z) - Math.hypot(c.x + 0.5 - p.x, c.z + 0.5 - p.z));
     return cells[0] ? { x: cells[0].x, z: cells[0].z } : null;
-  }
-
-  /**
-   * 身体贴着脚边或头边的实心方块、又离格子中心偏了：Pathfinder 按格子中心规划，第一步就会蹭到这块方块。
-   * 先挪回脚下那格的中心（潜行，不会掉下去）再走。返回要回到的格子；不需要时 null。
-   */
-  private hugging(): { x: number; z: number } | null {
-    const b = this.bot, e = b?.entity;
-    if (!e?.onGround || e.isInWater || e.isInLava || b.vehicle || typeof b.blockAt !== 'function' || typeof b.setControlState !== 'function' || !e.position?.offset) return null;
-    const p = e.position, cx = Math.floor(p.x), cz = Math.floor(p.z);
-    const ox = p.x - (cx + 0.5), oz = p.z - (cz + 0.5);
-    if (Math.hypot(ox, oz) < 0.15) return null;
-    const solid = (dx: number, dy: number, dz: number) => { const blk = b.blockAt(p.offset(dx, dy, dz)); return !!blk && blk.boundingBox === 'block' && !/water|lava/.test(blk.name); };
-    const sx = Math.sign(ox), sz = Math.sign(oz);
-    const touching = [0.1, 1.1].some((dy) => (Math.abs(ox) > 0.15 && solid(sx * 0.4, dy, 0)) || (Math.abs(oz) > 0.15 && solid(0, dy, sz * 0.4)));
-    return touching ? { x: cx, z: cz } : null;
   }
 
   /**
@@ -1499,196 +1134,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return blocks.length ? { kind: 'blocked', min, max, blocks } : null;
   }
 
-  /** Inspect the nearby obstruction before trying a short correction, then replan. */
-  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<{ reached: boolean; noPath: boolean; pathStatus: string | null }> {
-    const b = this.bot;
-    const epoch = this.actionEpoch, dimension = this.currentDimension();
-    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
-    const deadline = Date.now() + opts.timeoutMs;
-    const attempted = new Set<string>();
-    let corrections = 0, recoveryOrigin = b.entity?.position?.clone?.() ?? null;
-    for (;;) {
-      check();
-      // 允许原地搭柱的寻路会从当前站位起跳：身体压在两列上时，跳跃净空会把相邻
-      // 那一列也算进来。先潜行归位到中心所在格的格心，再让 Pathfinder 从格心起步。
-      const place = opts.allowPlace ?? !!opts.allowTerrainChanges;
-      const towers = !opts.constructionSafe && place && (opts.allowTower ?? place);
-      const edge = this.edgeSupport() ?? (corrections === 0 && !attempted.has('recentre') ? this.hugging() : null);
-      if (edge) { if (!this.edgeSupport()) attempted.add('recentre'); await this.steady(edge, opts.signal, check); check(); }
-      else if (towers && !attempted.has('align')) {
-        const centre = this.spanningCell();
-        if (centre) { attempted.add('align'); await this.steady(centre, opts.signal, check); check(); }
-      }
-      let stalled = false, blockedPillar: PillarClearance | null = null;
-      let last = b.entity?.position?.clone?.() ?? null, since = Date.now();
-      let groundedY = b.entity?.onGround ? last?.y ?? null : null;
-      let verticalY = last?.y ?? null;
-      let plannedPath: { status: string; nodes: { x: number; y: number; z: number }[] } | null = null;
-      let emptyPath = false, pathStatus: string | null = null;
-      const onPathUpdate = (result: { status: string; path: { x: number; y: number; z: number }[] }) => {
-        plannedPath = { status: result.status, nodes: result.path.slice(0, 6).map(({ x, y, z }) => ({ x, y, z })) };
-        pathStatus = result.status;
-        emptyPath = result.path.length === 0;
-      };
-      const onPhysicsTick = () => {
-        const p = b.entity?.position;
-        if (!ownsControls() || !b.entity?.onGround || !p?.clone) return;
-        // Pathfinder schedules jump-to-place on its physicsTick listener. This
-        // listener runs afterward, before the next physics step, and checks
-        // actual position after any planned digging has completed.
-        if (b.pathfinder?.isBuilding?.() && b.getControlState?.('jump')) {
-          blockedPillar = this.pillarClearance();
-          if (blockedPillar) { b.pathfinder.stop(); b.pathfinder.setGoal(null); return; }
-        }
-        if (groundedY === null) { groundedY = p.y; return; }
-        if (Math.abs(p.y - groundedY) < 0.5) return;
-        groundedY = p.y;
-        verticalY = p.y;
-        last = p.clone();
-        since = Date.now();
-      };
-      b.on?.('physicsTick', onPhysicsTick);
-      b.on?.('path_update', onPathUpdate);
-      const watch = setInterval(() => {
-        try { check(); } catch { clearInterval(watch); return; }
-        const p = b.entity?.position;
-        if (!p?.clone || !last) { last = p?.clone?.() ?? null; return; }
-        // A long trip may need several successful corrections. Only count
-        // failures around the same obstruction, not across the whole route.
-        if (recoveryOrigin && p.distanceTo(recoveryOrigin) >= 1.5) {
-          corrections = 0; attempted.clear(); recoveryOrigin = p.clone();
-        }
-        // A jump oscillates vertically without advancing. Count horizontal
-        // travel, a newly reached standing height, or sustained vertical travel
-        // beyond a jump's height (for example a ladder), not the jump itself.
-        const horizontal = Math.hypot(p.x - last.x, p.z - last.z);
-        const grounded = !!b.entity?.onGround;
-        if (grounded && groundedY === null) groundedY = p.y;
-        const landedProgress = grounded && groundedY !== null && Math.abs(p.y - groundedY) >= 0.5;
-        const verticalProgress = !b.entity?.isInWater && verticalY !== null && Math.abs(p.y - verticalY) >= 1.5;
-        if (landedProgress) groundedY = p.y;
-        if (horizontal >= 0.3 || landedProgress || verticalProgress || b.targetDigBlock || !b.pathfinder?.isMoving?.()) {
-          last = p.clone(); verticalY = p.y; since = Date.now(); return;
-        }
-        // A jump-and-place may need several seconds for the server to confirm
-        // the block; still bound retries if the placement never succeeds.
-        if (Date.now() - since >= (b.pathfinder?.isBuilding?.() ? 4500 : 2500) && !stalled) {
-          stalled = true;
-          this.bus.publish('path_stalled', 'P3', '寻路执行停滞，记录位置和最近一次规划', {
-            position: { x: p.x, y: p.y, z: p.z }, yaw: b.entity.yaw, onGround: b.entity.onGround,
-            collidedHorizontally: b.entity.isCollidedHorizontally, goal: { x: goal.x, y: goal.y, z: goal.z }, plannedPath,
-          });
-          try { b.pathfinder.stop(); b.pathfinder.setGoal(null); } catch { /* ignore */ }
-        }
-      }, 300);
-      try {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) throw Object.assign(new Error('TIMEOUT: 本次移动预算已用完'), { name: 'Timeout' });
-        await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); else this.actionEpoch++; }), check);
-        // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
-        if (blockedPillar) stalled = true;
-        // 已安装 Pathfinder 的 goto 在任意 path:[]（noPath/timeout/partial）时都会正常返回。
-        // 只有库明确给出 noPath 才算“没有路”；空 timeout/partial/停止只是没有到达，返回 NOT_CONFIRMED。
-        if (!stalled) return { reached: !emptyPath, noPath: pathStatus === 'noPath', pathStatus };
-      } catch (e: any) {
-        if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') stalled = true;
-        // 搜索超时/取消/调用方改目标都不是“执行停滞”，原样交回，别用 nudge 改写成别的结局。
-        if (!stalled || e?.name === 'AbortedError' || e?.name === 'Timeout' || e?.name === 'GoalChanged') throw e;
-      } finally {
-        clearInterval(watch);
-        b.removeListener?.('physicsTick', onPhysicsTick);
-        b.removeListener?.('path_update', onPathUpdate);
-      }
-      check();
-      // 搭柱被头顶/侧上方挡住是确定性失败：nudge 后重新寻路还会得到同一条搭柱，直接报障碍让心智挖头顶或换路线
-      if (blockedPillar) throw new PillarClearanceError(blockedPillar);
-      // 这些是“有路但执行走不动/调整不动”，不是寻路器给出 noPath；上层不能据此升级挖/放。
-      const stuck = (message: string) => Object.assign(new Error(message), { name: 'Stuck' });
-      if (opts.maxDropDown !== undefined) throw stuck('STUCK: 明确下行未能完成，未改走其他边缘');
-      if (corrections >= 3) throw stuck('STUCK: 附近连续调整后仍无法前进，换条路线');
-      const action = await this.nudge(attempted, opts);
-      check();
-      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : stuck(b.entity.isInWater
-        ? 'STUCK: 当前在水中，寻路没有取得进展，未另选上岸位置'
-        : 'STUCK: 附近没有可确认安全的调整空间，换条路线');
-      corrections++;
-      // nudge 会横挪半格左右、可能重新压线；下一次规划前允许再归位一次。
-      attempted.delete('align');
-      this.bus.publish('path_nudge', 'P3', `走路被挡住，第 ${corrections} 次调整：${action}`);
-    }
-  }
-
-  private async nudge(attempted: Set<string>, opts: MoveOpts): Promise<string | null> {
-    const check = this.actionCheckpoint(opts.signal);
-    const b = this.bot, epoch = this.actionEpoch;
-    const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
-    const p = b.entity.position, yaw = b.entity.yaw;
-    // Swimming and airborne recovery need their own controls; do not blindly
-    // jump or step backwards before the feet have landed.
-    if (!b.entity.onGround || b.entity.isInWater || b.entity.isInLava) return null;
-    const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
-    const hazard = (block: any) => !block || /^(water|lava|bubble_column|fire|soul_fire|cactus|sweet_berry_bush|powder_snow|magma_block|.*campfire)$/.test(block.name)
-      || String(block.getProperties?.().waterlogged) === 'true';
-    const shapes = (block: any): number[][] => block.shapes ?? (block.boundingBox === 'empty' ? [] : [[0, 0, 0, 1, 1, 1]]);
-    const bodyBlocks = (q: any) => {
-      const blocks: any[] = [];
-      for (let x = Math.floor(q.x - 0.3); x <= Math.floor(q.x + 0.3); x++)
-        for (let y = Math.floor(q.y + 0.02); y <= Math.floor(q.y + 1.79); y++)
-          for (let z = Math.floor(q.z - 0.3); z <= Math.floor(q.z + 0.3); z++) {
-            const block = b.blockAt(q.offset(x - q.x, y - q.y, z - q.z));
-            if (hazard(block) || shapes(block).some((s) => x + s[3] > q.x - 0.3 && x + s[0] < q.x + 0.3
-              && y + s[4] > q.y + 0.02 && y + s[1] < q.y + 1.8 && z + s[5] > q.z - 0.3 && z + s[2] < q.z + 0.3)) blocks.push(block);
-          }
-      return blocks;
-    };
-    const supported = (q: any) => [-0.25, 0.25].every((x) => [-0.25, 0.25].every((z) => {
-      const foot = q.offset(x, -0.05, z), cell = foot.floored(), block = b.blockAt(foot);
-      return !hazard(block) && shapes(block).some((s) => foot.x >= cell.x + s[0] && foot.x <= cell.x + s[3]
-        && foot.z >= cell.z + s[2] && foot.z <= cell.z + s[5] && Math.abs(cell.y + s[4] - q.y) < 0.1);
-    }));
-    // Include the body's width, the swept route and a little braking distance.
-    // Unknown blocks, fluids and unsupported corners rule out that correction.
-    const safeStep = (dx: number, dz: number) => [0, 0.2, 0.4, 0.6, 0.8].every((d) => {
-      const q = p.offset(dx * d, 0, dz * d);
-      return bodyBlocks(q).length === 0 && supported(q);
-    });
-    const hold = async (keys: string[], ms: number) => {
-      check();
-      b.clearControlStates();
-      for (const k of keys) b.setControlState(k, true);
-      try { await this.afterAction(() => sleep(ms, opts.signal), check); }
-      finally { if (ownsControls()) for (const k of keys) b.setControlState(k, false); }
-    };
-    if (!opts.constructionSafe) {
-      const soft = /(_leaves|grass|fern|vine|bush|_sapling|mangrove_propagule|snow|flower|tulip|dandelion|poppy|azalea|cobweb)$/;
-      for (const block of opts.allowTerrainChanges ? bodyBlocks(p.offset(fx * 0.75, 0, fz * 0.75)) : []) {
-        if (!block || !soft.test(block.name) || !b.canDigBlock?.(block)) continue;
-        const key = `dig:${block.position}`;
-        if (attempted.has(key)) continue;
-        attempted.add(key);
-        await this.afterAction(() => raceAbort(b.dig(block), opts.signal, 2000, () => { if (ownsControls()) b.stopDigging?.(); }), check);
-        return `清开挡路的 ${block.name}`;
-      }
-      const landing = p.offset(fx * 0.85, 1, fz * 0.85);
-      if (!attempted.has('jump') && bodyBlocks(p.offset(0, 1, 0)).length === 0
-        && [0.3, 0.6, 0.85, 1.1].every((d) => bodyBlocks(p.offset(fx * d, 1, fz * d)).length === 0)
-        && supported(landing) && supported(p.offset(fx * 1.1, 1, fz * 1.1))) {
-        attempted.add('jump');
-        await hold(['jump', 'forward'], 180);
-        return '前面是一格台阶，向前跳上去';
-      }
-    }
-    for (const [key, dx, dz, label] of [['left', fz, -fx, '左'], ['right', -fz, fx, '右'], ['back', -fx, -fz, '后']] as const) {
-      if (attempted.has(key) || !safeStep(dx, dz)) continue;
-      attempted.add(key);
-      await hold(opts.constructionSafe ? ['sneak', key] : [key], opts.constructionSafe ? 250 : 150);
-      return `确认脚下有支撑，向${label}挪半步后重新寻路`;
-    }
-    return null;
-  }
-
   /**
-   * 末段收尾：mineflayer-pathfinder 的 goal_reached 只按整数节点判定，薄层/小落差的一步会在身体
+   * 末段收尾：整数节点判定会在薄层/小落差的一步上提前结算，身体
    * 仍由原支撑托住、还没踩上目标支撑面时提前结算（节点已到、脚高未到）。此时身体已贴近目标列且
    * 仍在地面，分「水平推进 → 制动 → 落地确认」三阶段补完这一步：
    *   - 推进：面朝目标列中心按住前进，直到身体真正踩上目标支撑（列一致 + 脚高相符 + 站稳）才松键；
@@ -1703,6 +1150,138 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /**
+   * 明确落点的单步下行：只从当前支撑面向已选定的相邻较低列走，不跳、不挖、不放、
+   * 不绕行。落下后按实测脚位/水面接触验收，并受 maxDropDown 上限与取消归属约束。
+   */
+  private async driveControlledDrop(
+    target: { x: number; y: number; z: number }, deadline: number,
+    check: (() => void) & { signal?: AbortSignal }, maxDropDown: number, allowWater: boolean,
+  ): Promise<void> {
+    const b = this.bot, e = b?.entity;
+    const signal = check.signal ?? new AbortController().signal;
+    if (!e?.position) throw new Error('NOT_CONNECTED: 没有身体位置，不能下行');
+    if (!Number.isInteger(maxDropDown) || maxDropDown < 1 || maxDropDown > 32) throw new Error('BAD_ARGS: 明确下行需要 1–32 格上限');
+    if (Date.now() >= deadline) throw Object.assign(new Error('TIMEOUT: 明确下行的期限已耗尽'), { name: 'Timeout' });
+    if (!e.onGround || e.isInWater || e.isInLava || b.vehicle) throw new Error('STUCK: 明确下行需要先在干燥支撑面站稳，不能从乘骑、游泳或下落中再次起跳');
+    if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') throw new Error('STUCK: 当前身体没有直接控制能力');
+    const from = { x: e.position.x, y: e.position.y, z: e.position.z };
+    const fx = Math.floor(target.x), fz = Math.floor(target.z);
+    if (Math.abs(fx - Math.floor(from.x)) + Math.abs(fz - Math.floor(from.z)) !== 1) throw new Error('BAD_ARGS: 明确下行只支持相邻一列的落点');
+    if (target.y >= from.y) throw new Error('BAD_ARGS: 明确下行只用于较低的落点');
+    const tx = fx + 0.5, tz = fz + 0.5;
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
+    const inColumn = () => Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz;
+    check();
+    try {
+      if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - from.x), -(tz - from.z)), 0, true); } catch { /* ignore */ } }
+      b.clearControlStates();
+      b.setControlState('forward', true);
+      const leaveBy = Math.min(deadline, Date.now() + 4000);
+      while (Date.now() < leaveBy) {
+        check();
+        const p = b.entity.position;
+        // 身体中心进入目标列时仍可能被原支撑边缘托住；继续前推，直到真的离地
+        // 或已走到目标格心，再交给落体确认。
+        if (!b.entity.onGround || Math.hypot(p.x - tx, p.z - tz) <= 0.25) break;
+        if (Math.hypot(p.x - from.x, p.z - from.z) > 2.2) break;
+        await this.afterAction(() => sleep(25, signal), check);
+      }
+    } finally {
+      if (ownsControls()) {
+        try { b.setControlState('forward', false); } catch { /* ignore */ }
+        try { b.setControlState('jump', false); } catch { /* ignore */ }
+      }
+    }
+    check();
+    while (Date.now() < deadline) {
+      check();
+      const p = b.entity.position;
+      const column = inColumn();
+      if (b.entity.isInWater) {
+        // 水面落点：入水且仍在所选列的水层内即交回，由调用方按水深/落点验收。
+        if (allowWater && column && p.y >= target.y - 1.01 && p.y <= target.y + 1.01) return;
+      } else if (b.entity.onGround && column) {
+        if (Math.abs(p.y - target.y) <= 0.05) return;
+        throw new Error(`NOT_CONFIRMED: 已落到目标列但脚高 ${p.y.toFixed(2)} 与所选 ${target.y.toFixed(2)} 不符`);
+      } else if (b.entity.onGround) {
+        throw new Error(`NOT_CONFIRMED: 下落停在 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，不在所选列`);
+      }
+      if (from.y - p.y > maxDropDown + 0.6) throw new Error(`NOT_CONFIRMED: 实测下落超过授权 ${maxDropDown} 格，未改走其他边缘`);
+      if (p.y < target.y - 1.01) throw new Error(`NOT_CONFIRMED: 下落越过所选落点，实际脚高 ${p.y.toFixed(2)}`);
+      await this.afterAction(() => sleep(25, signal), check);
+    }
+    throw Object.assign(new Error('TIMEOUT: 明确下行没有在期限内完成'), { name: 'Timeout' });
+  }
+
+  /**
+   * 已复验的梯子过渡：先在同一高度进入/退出目标列，再在同列上下攀爬。
+   * 只按实测脚位验收；攀爬不按前进键，避免离开梯子列。取消后不再写按键。
+   */
+  private async driveAlongLadder(
+    target: { x: number; y: number; z: number }, deadline: number,
+    check: (() => void) & { signal?: AbortSignal },
+  ): Promise<void> {
+    const b = this.bot, e = b?.entity;
+    const signal = check.signal ?? new AbortController().signal;
+    if (!e?.position) throw new Error('NOT_CONNECTED: 没有身体位置，不能爬梯子');
+    if (b.vehicle || e.isInLava || e.isInWater) throw new Error('STUCK: 当前不能执行梯子过渡（乘骑/岩浆/水中）');
+    if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') throw new Error('STUCK: 当前身体没有直接控制能力');
+    if (Date.now() >= deadline) throw Object.assign(new Error('TIMEOUT: 梯子过渡的期限已耗尽'), { name: 'Timeout' });
+    const fx = Math.floor(target.x), fz = Math.floor(target.z);
+    const tx = fx + 0.5, tz = fz + 0.5;
+    const epoch = this.actionEpoch, dimension = this.currentDimension();
+    const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
+    const arrived = () => {
+      const p = b.entity.position;
+      return Math.hypot(p.x - tx, p.z - tz) <= 0.12 && Math.abs(p.y - target.y) <= 0.05;
+    };
+    const horizontal = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
+    check();
+    if (horizontal() > 0.12) {
+      try {
+        if (typeof b.look === 'function') { try { b.look(Math.atan2(-(tx - b.entity.position.x), -(tz - b.entity.position.z)), 0, true); } catch { /* ignore */ } }
+        b.clearControlStates();
+        b.setControlState('forward', true);
+        while (Date.now() < deadline && horizontal() > 0.10) {
+          check();
+          const before = horizontal();
+          await this.afterAction(() => sleep(25, signal), check);
+          // 没有靠近且已越过目标列：如实停下，不再硬推。
+          if (horizontal() >= before - 1e-6 && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz) break;
+        }
+      } finally {
+        if (ownsControls()) { try { b.setControlState('forward', false); } catch { /* ignore */ } }
+      }
+      check();
+      if (horizontal() > 0.12) throw new Error(`NOT_CONFIRMED: 没有进入梯子列，实际位于 (${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`);
+    }
+    const dy = target.y - b.entity.position.y;
+    if (Math.abs(dy) > 0.05) {
+      const up = dy > 0;
+      try {
+        b.clearControlStates();
+        b.setControlState(up ? 'jump' : 'sneak', true);
+        while (Date.now() < deadline) {
+          check();
+          const remaining = target.y - b.entity.position.y;
+          if (Math.abs(remaining) <= 0.04) break;
+          // 越过目标高度：停手，交给实测验收如实报告。
+          if ((up && remaining < -0.05) || (!up && remaining > 0.05)) break;
+          await this.afterAction(() => sleep(25, signal), check);
+        }
+      } finally {
+        if (ownsControls()) {
+          try { b.setControlState('jump', false); } catch { /* ignore */ }
+          try { b.setControlState('sneak', false); } catch { /* ignore */ }
+        }
+      }
+      check();
+    }
+    if (!arrived()) throw new Error(`NOT_CONFIRMED: 梯子过渡没有到达目标，实际位于 (${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`);
+  }
+
+  /**
    * 连续脚位/格心相邻一步共用的身体控制。`cell` 模式保留 move_step 的“先归位格心、再走到格心”契约；
    * `feet` 模式不归位、不取格心，直接朝实测连续点推进，并按声明的物理精度验收。
    */
@@ -1711,6 +1290,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     check: (() => void) & { signal?: AbortSignal }, mode: 'cell' | 'feet',
     corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number },
     horizontalJump = false,
+    sprint = false,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
@@ -1775,6 +1355,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 只在这段身体控制里补一次跳跃；目标/落点仍由调用方决定。
     const needsJump = target.y > p0y + 0.6 || (horizontalJump && initialDistance > 1.2);
     if (needsJump) b.setControlState('jump', true);
+    // sprint 只来自本次委托的执行请求；只在平走、无需跳跃/跨空时按住，
+    // 逐段 feet 控制能看到外层非本地 moveTo 通过异步作用域传下来的同一请求。
+    const sprinting = mode === 'feet' && sprint && !needsJump && !horizontalJump && Math.abs(target.y - p0y) <= 0.05;
+    if (sprinting) b.setControlState('sprint', true);
     const jumpReleaseAt = Date.now() + 180;
     // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍（停稳系数 ≈ 1/(1-0.546) ≈ 2.2），
     // 空中摩擦约 0.91 倍（停稳系数 ≈ 1/(1-0.91) ≈ 11.1，见 prismarine-physics）。
@@ -1811,6 +1395,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (ownsControls()) {
         try { b.setControlState('forward', false); } catch { /* ignore */ }
         try { b.setControlState('jump', false); } catch { /* ignore */ }
+        try { b.setControlState('sprint', false); } catch { /* ignore */ }
       }
     }
     checkCorridor();
@@ -1861,13 +1446,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return 'timeout';
   }
 
+  withNavigation<T>(delegate: NavigationDelegate, run: () => Promise<T>): Promise<T> {
+    return this.navigationDelegate.run(delegate, run);
+  }
+
   stopAll() {
     this.actionEpoch++;
     this.actionContext.exit(() => {
       const b = this.bot;
       if (!b) return;
-      try { b.pathfinder?.stop(); } catch { /* ignore */ }
-      try { b.pathfinder?.setGoal(null); } catch { /* ignore */ }
       try { b.clearControlStates(); } catch { /* ignore */ }
       try { if (b.targetDigBlock) b.stopDigging(); } catch { /* ignore */ }
       try { this.cancelItemUse(b); } catch { /* ignore */ }
@@ -1876,47 +1463,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     // 被打断的动作可能做了一半：界面里摆了一半的材料、光标上拿着东西。等服务器处理完已经发出的包，再收拾
     this.scheduleRepair('动作被打断', 250);
-  }
-
-  /**
-   * walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。
-   * 控制归属绑定创建时的 action epoch：stopAll/换 bot 之后，旧执行即使还持有这个
-   * 身体桥，也不能再写按键或释放新任务的控制。
-   */
-  walkBody(): WalkBody {
-    const bot = this.bot;
-    const epoch = this.actionEpoch;
-    const owns = () => epoch === this.actionEpoch && bot === this.bot;
-    return {
-      setControlState: (name, value) => { if (owns()) bot.setControlState(name, value); },
-      clearControlStates: () => { if (owns()) bot.clearControlStates(); },
-      look: (yaw, pitch) => (owns() ? bot.look(yaw, pitch, true) : undefined),
-      entity: bot.entity,
-      controlOwnership: { owns },
-    };
-  }
-
-  /** 下一物理帧：由服务端 physicsTick 驱动，返回最新实测实体状态（异步）。取消或断线时返回 null 并清理监听器。 */
-  walkTick(): WalkTick {
-    const bot = this.bot;
-    return (signal) => new Promise((resolve) => {
-      if (signal.aborted) { resolve(null); return; }
-      const onTick = () => {
-        cleanup();
-        const e = bot.entity;
-        resolve({ position: { x: e.position.x, y: e.position.y, z: e.position.z }, velocity: { x: e.velocity.x, y: e.velocity.y, z: e.velocity.z }, onGround: e.onGround, isInWater: e.isInWater });
-      };
-      const onAbort = () => { cleanup(); resolve(null); };
-      const onEnd = () => { cleanup(); resolve(null); };
-      const cleanup = () => {
-        signal.removeEventListener('abort', onAbort);
-        bot.removeListener('physicsTick', onTick);
-        bot.removeListener('end', onEnd);
-      };
-      signal.addEventListener('abort', onAbort, { once: true });
-      bot.on('physicsTick', onTick);
-      bot.once('end', onEnd);
-    });
   }
 
   /**
@@ -2019,17 +1565,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private noteToolChoice(name: string) {
     const kind = name.match(/_(pickaxe|axe|shovel|hoe)$/)?.[1] ?? (name === 'shears' ? 'shears' : null);
     if (kind) this.toolChoice.set(kind, name);
-  }
-  /** 本次 moveTo 委托指定的寻路挖掘工具；每次 moveTo 开头重设，不残留到下一趟。 */
-  private pathDigTool: string | null = null;
-  /**
-   * 不指定工具时挖这一格按它自己的选择来：手上这把能挖（能掉东西、比空手快）就用手上的；
-   * 手上的不行，它亲手挑过这类工具（拿过铁镐）就还拿那种。都没有返回 undefined，由调用方按最快的挑。
-   * 用哪把镐是它自己的决定（“钻石镐留着，这次用石镐”），身体不替它换成更快的。
-   */
-  private pathfinderDigTool(block: any, fastest: (block: any) => Item | null): Item | null {
-    if (this.pathDigTool) return this.bestInvItem(this.pathDigTool) ?? null;
-    return this.preferredDigTool(block) ?? fastest(block);
   }
   private preferredDigTool(block: any): Item | undefined {
     const b = this.bot, e = b.entity;
@@ -2550,6 +2085,51 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const properties = block.getProperties?.();
     if (!properties) return null;
     return { name: String(block.name), properties };
+  }
+
+  /**
+   * 实际身体验收：当前眼睛是否真能看见目标方块的一个面（或放置目标格的一个参照面）。
+   * 使用与 placeBlockAt 相同的 raycast/参照面规则；没有 raycast 能力时如实返回 false，
+   * 不用方块名猜“应该看得见”。只由完成验收调用，不参与路线规划。
+   */
+  canInteractAt(pos: Vec3Like, opts: { facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down'; place?: boolean } = {}): boolean {
+    const b = this.bot;
+    if (!this.ready || !b?.entity?.position) return false;
+    const faces = [new Vec3(0, -1, 0), new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
+    const wanted = opts.facing === undefined ? null : {
+      north: new Vec3(0, 0, -1), south: new Vec3(0, 0, 1), east: new Vec3(1, 0, 0), west: new Vec3(-1, 0, 0), up: new Vec3(0, 1, 0), down: new Vec3(0, -1, 0),
+    }[opts.facing];
+    const target = this.vec(pos);
+    const from = b.entity.position.offset(0, b.entity.eyeHeight ?? 1.62, 0);
+    if (opts.place) {
+      for (const f of faces) {
+        if (wanted !== null && !f.equals(wanted)) continue;
+        const ref = b.blockAt(target.plus(f));
+        if (!ref || ref.boundingBox !== 'block') continue;
+        if (this.canClickPlacementFace(ref, f.scaled(-1))) return true;
+      }
+      return false;
+    }
+    const here = b.blockAt(target);
+    if (!here) return false;
+    const center = target.offset(0.5, 0.5, 0.5);
+    const distance = center.distanceTo(from);
+    if (distance < 0.01 || distance > 4.25) return false;
+    // 无碰撞方块（草、花、浆果丛等）没有可点击的面：只核对实际视线是否到达这一格之前没有遮挡。
+    if (here.shapes?.length === 0 || here.boundingBox === 'empty') {
+      if (typeof b.world?.raycast !== 'function') return false;
+      const direction = center.minus(from);
+      const hit = b.world.raycast(from, direction.normalize(), direction.norm() + 0.05);
+      return !hit?.position || hit.position.equals(target) || hit.position.distanceTo(center) >= distance - 0.55;
+    }
+    if (typeof b.world?.raycast !== 'function') return false;
+    for (const f of faces) {
+      const point = target.offset(0.5 + f.x * 0.5, 0.5 + f.y * 0.5, 0.5 + f.z * 0.5);
+      const direction = point.minus(from);
+      const hit = b.world.raycast(from, direction.normalize(), direction.norm() + 0.05);
+      if (hit?.position?.equals(target)) return true;
+    }
+    return false;
   }
 
   async placeBlockStateAt(pos: Vec3Like, name: string, properties: Record<string, string | number | boolean>, signal: AbortSignal): Promise<ActionResult> {
@@ -3470,7 +3050,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const name = this.blockAt(pos);
     if (name !== 'nether_portal' && name !== 'end_portal') return { ok: false, reason: 'NO_PORTAL' };
     // 下界门：走到门面正前那个可站立的格再面向门洞中心走入；别对着不可站立的门块寻路
-    // （pathfinder 不会为 nether_portal 生成节点，GoalNear(range:0) 永远无解）。
+    // （传送门方块不参与普通步行节点，精确站位无法当作可达落点）。
     // 末地门：横铺一层、脚下常是岩浆/虚空，退回「走到门附近再短促前进」，让身体落进门格。
     const approach = computePortalApproach((p) => this.blockAt(p), pos);
     // 如实记录身体到底经历了什么：开始时是否已在门里、退出去多久、在门里连续待了多久。
@@ -3524,7 +3104,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 退出门过程中已经换维度时，旧坐标的 approach 已经没有意义，跳过接近段直接等待落地。
       if (this.currentDimension() === from.dim) {
         if (approach) {
-          // The approach cell can be a one-block step the pathfinder refuses even
+          // The approach cell can be a one-block step the route search refuses even
           // though the portal is within a couple of blocks. Do not abort the
           // portal action on a path failure: fall through to the short direct
           // drive toward the portal opening, which is what a player does.
@@ -4741,7 +4321,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const goal = this.vec(target).offset(0.5, 0.5, 0.5);
     const oxygen = () => this.state().oxygen;
     check();
-    b.pathfinder?.setGoal(null);
     b.clearControlStates();
     try {
       while (Date.now() < end) {
@@ -4815,7 +4394,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return true;
     };
 
-    b.pathfinder?.setGoal(null);
     b.clearControlStates();
     try {
       // 起飞：跳起离地；允许火箭时补一发获得高度并进入滑翔。
@@ -4977,7 +4555,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 取消/超时后不能再读 b.entity——替换任务或新连接可能已经更新它，把它当作旧动作的 partial 会把新主人的位置/氧气张冠李戴。
     let lastOwned: { pos: { x: number; y: number; z: number }; oxygen: number; surfaced: boolean; observedAt: number; stage: SwimStage } = { pos: { x: b.entity.position.x, y: b.entity.position.y, z: b.entity.position.z }, oxygen: ownOxygen(b), surfaced: false, observedAt: Date.now(), stage };
     check();
-    b.pathfinder?.setGoal(null);
     b.clearControlStates();
     try {
       while (Date.now() < end) {

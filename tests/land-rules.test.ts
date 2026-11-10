@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { evaluateLandTransition, resolveLandLimits, VoxelMap, type LandTransition } from 'curio-minecraft-3d-memory';
 import { walkLandRules, walkClimbProvider } from '../src/adapter/land-rules.ts';
-import { walkCollisionProvider } from '../src/adapter/walk-route.ts';
+import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
 
 const WORLD = 'world', DIM = 'overworld', SESSION = 's1';
 let sequence = 0;

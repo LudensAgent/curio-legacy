@@ -18,7 +18,6 @@ function fixture(x = 0.8) {
     isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, effects: {}, attributes: {} };
   bot.inventory = { items: () => [{ name: 'cobblestone' }], slots: [] };
   bot.setControlState = (key: string, value: boolean) => { controls[key] = value; };
-  bot.getControlState = (key: string) => !!controls[key];
   bot.clearControlStates = () => { for (const key of Object.keys(controls)) controls[key] = false; };
   bot.equip = async () => {}; bot.look = async () => {}; bot.placeBlock = async () => {};
   bot.blockAt = (pos: any) => {
@@ -106,58 +105,6 @@ test('a body straddling two columns sneaks to the centre cell before checking pi
   assert.deepEqual(steadied, [{ x: 0, z: 0 }], 'straddling x=0.8 is recentred before the jump');
   assert.equal(w.bot.entity.position.x, 0.5);
   assert.equal(result.ok, true, result.reason ?? result.clearanceDetail);
-});
-
-test('goto stops a blocked Pathfinder tower after its planned digging and before the next physics step', async () => {
-  const w = fixture();
-  let rejectPath: (error: Error) => void = () => {}, stopped = false;
-  w.bot.pathfinder = { goto: () => new Promise((_, reject) => { rejectPath = reject; }), isBuilding: () => true,
-    stop() { stopped = true; }, setGoal() { w.bot.clearControlStates(); rejectPath(new Error('GoalChanged')); } };
-  const signal = new AbortController().signal;
-  const pending = (w.adapter as any).gotoUnstalled({ x: 0, y: 70, z: 0 }, { signal, timeoutMs: 3000 }, (w.adapter as any).actionCheckpoint(signal));
-  // The earlier Pathfinder physicsTick listener has finished the planned dig
-  // and selected jump-to-place; the adjacent ceiling is still present.
-  w.put(1, 66, 0, 'stone'); w.bot.setControlState('jump', true); w.bot.emit('physicsTick');
-  // 搭柱被头顶挡住：先停下寻路、清掉 jump，随即以 PillarClearanceError 收场（不再退半步重规划）
-  await assert.rejects(pending);
-  assert.equal(stopped, true);
-  assert.equal(w.controls.jump, false);
-  assert.equal(w.bot.listenerCount('physicsTick'), 0);
-});
-
-test('installed Pathfinder schedules tower jump before the adapter listener stops it', async () => {
-  const w = fixture(); w.put(1, 66, 0, 'stone');
-  w.bot.entities = {}; w.bot.entity.id = 1;
-  w.bot.inventory.items = () => [{ name: 'cobblestone', type: w.data.itemsByName.cobblestone.id, count: 8 }];
-  w.bot.world = { getBlock: w.bot.blockAt };
-  require('mineflayer-pathfinder').pathfinder(w.bot);
-  const movements = w.bot.pathfinder.movements;
-  movements.allow1by1towers = true;
-  movements.allowEntityDetection = false;
-  movements.getNeighbors = function (node: any) { const next: any[] = []; this.getMoveUp(node, next); return next; };
-  w.bot.pathfinder.setMovements(movements);
-  const signal = new AbortController().signal;
-  const pending = (w.adapter as any).gotoUnstalled(new (require('mineflayer-pathfinder').goals.GoalBlock)(0, 65, 0),
-    { signal, timeoutMs: 3000 }, (w.adapter as any).actionCheckpoint(signal));
-  w.bot.emit('physicsTick');
-  await assert.rejects(pending);
-  assert.equal(w.controls.jump, false);
-  assert.equal(w.bot.pathfinder.goal, null);
-  assert.equal(w.bot.listenerCount('physicsTick'), 1, 'only the permanent Pathfinder listener remains');
-});
-
-test('aborting before a tower jump removes the clearance listener and cannot stop a later control owner', async () => {
-  const w = fixture(); w.put(1, 66, 0, 'stone');
-  w.bot.pathfinder = { goto: () => new Promise(() => {}), isBuilding: () => true, stop() {}, setGoal() {} };
-  const controller = new AbortController();
-  const pending = (w.adapter as any).gotoUnstalled({ x: 0, y: 65, z: 0 },
-    { signal: controller.signal, timeoutMs: 3000 }, (w.adapter as any).actionCheckpoint(controller.signal));
-  controller.abort();
-  await assert.rejects(pending, { name: 'AbortedError' });
-  assert.equal(w.bot.listenerCount('physicsTick'), 0);
-  w.bot.setControlState('jump', true);
-  w.bot.emit('physicsTick');
-  assert.equal(w.controls.jump, true);
 });
 
 test('pillar in shallow water places directly against the floor without jumping', async () => {

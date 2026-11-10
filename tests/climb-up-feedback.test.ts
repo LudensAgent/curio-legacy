@@ -139,8 +139,8 @@ test('climb_up on a ladder asks only for the explicit ladder transition, never t
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].target, { kind: 'ladder', x: 0, y: 65, z: 0 });
   assert.equal(calls[0].opts.allowTerrainChanges, undefined);
-  assert.equal(calls[0].opts.allowPlace, undefined);
-  assert.equal(calls[0].opts.allowTower, undefined);
+  assert.equal('allowPlace' in calls[0].opts, false);
+  assert.equal('allowTower' in calls[0].opts, false);
 });
 
 test('climb_up uses explicit pillar placement as the primary ascent', async () => {

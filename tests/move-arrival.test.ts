@@ -1,98 +1,231 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
-import { createRequire } from 'node:module';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { test } from 'node:test';
-import { Vec3 } from 'vec3';
-import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
-import type { MoveTarget } from '../src/adapter/types.ts';
-import { config } from '../src/config.ts';
-import { EventBus } from '../src/events.ts';
+import { VoxelMap } from 'curio-minecraft-3d-memory';
+import type { MoveOpts, MoveTarget, NavigationDelegate, Vec3Like } from '../src/adapter/types.ts';
+import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { runSkill, type Skill } from '../src/skills/types.ts';
+import { AbortedError } from '../src/util.ts';
+import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx } from './survival-helpers.ts';
 
-function fixture() {
-  const bot = Object.assign(new EventEmitter(), {
-    entity: { position: new Vec3(0.5, 64, 0.5), onGround: false },
-    entities: {} as Record<number, { position: Vec3 }>,
-    game: { dimension: 'overworld' },
-    blockAt: () => null,
-    pathfinder: { async goto(_goal: unknown) {}, stop() {}, setGoal(_goal: unknown) {} },
-  });
-  const adapter = new MineflayerAdapter(config, new EventBus());
-  adapter.bot = bot;
-  adapter.mcData = {};
-  Reflect.set(adapter, 'connectedFlag', true);
-  return { adapter, bot, opts: { signal: new AbortController().signal, timeoutMs: 1000 } };
+const WORLD = 'fake-world', DIM = 'overworld', SESSION = 'fake-session';
+let sequence = 0;
+
+function observe(map: VoxelMap, name: string, cells: Vec3Like[]) {
+  for (const pos of cells) {
+    sequence += 1;
+    map.observe({
+      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now() + sequence, sequence,
+      source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name, properties: {} }, pos,
+    });
+  }
 }
 
-test('installed Pathfinder empty noPath resolution is not arrival', async () => {
-  const { adapter, bot, opts } = fixture();
-  const pathfinderGoto = createRequire(import.meta.url)('mineflayer-pathfinder/lib/goto');
-  bot.pathfinder.goto = (goal) => pathfinderGoto(bot, goal);
-  bot.pathfinder.setGoal = () => { bot.emit('path_update', { status: 'noPath', path: [] }); };
-  await assert.rejects(adapter.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, opts), /No path: 寻路结束但尚未到达目标.*0\.50,64\.00,0\.50/);
-  assert.equal(bot.listenerCount('path_update'), 0);
-  assert.equal(bot.listenerCount('physicsTick'), 0);
-});
-
-test('installed Pathfinder empty timeout stays TIMEOUT, empty partial is not confirmed', async () => {
-  const pathfinderGoto = createRequire(import.meta.url)('mineflayer-pathfinder/lib/goto');
-  for (const target of [{ kind: 'xyz', x: 4, y: 64, z: 0 }, { kind: 'xz', x: 4, z: 0, range: 2 }] as MoveTarget[]) {
-    const timed = fixture();
-    timed.bot.pathfinder.goto = (goal) => pathfinderGoto(timed.bot, goal);
-    timed.bot.pathfinder.setGoal = () => { timed.bot.emit('path_update', { status: 'timeout', path: [] }); };
-    await assert.rejects(timed.adapter.moveTo(target, timed.opts), (e: Error & { name?: string }) => e.name === 'Timeout' && /TIMEOUT/.test(e.message));
-
-    const partial = fixture();
-    partial.bot.pathfinder.goto = (goal) => pathfinderGoto(partial.bot, goal);
-    partial.bot.pathfinder.setGoal = () => { partial.bot.emit('path_update', { status: 'partial', path: [] }); };
-    await assert.rejects(partial.adapter.moveTo(target, partial.opts), (e: Error & { name?: string }) => e.name !== 'NoPath' && e.name !== 'Timeout' && /NOT_CONFIRMED/.test(e.message));
+function flatMap(maxX: number) {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [], floor: Vec3Like[] = [];
+  for (let x = 0; x <= maxX; x++) {
+    air.push({ x, y: 64, z: 0 }, { x, y: 65, z: 0 });
+    floor.push({ x, y: 63, z: 0 });
   }
+  observe(map, 'minecraft:air', air);
+  observe(map, 'minecraft:stone', floor);
+  return map;
+}
+
+function fakeSpatial(map: VoxelMap) {
+  return {
+    worldId: WORLD,
+    session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
+    closing: false, paused: false, observationAdmitted: true,
+    capabilities: () => ({
+      owner: 'host_composed', contract: 'memory-host-contract/1',
+      library: { execute: { walk: true } }, host: {},
+      effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
+      overclaims: [],
+    }),
+  } as unknown as SharedSpatialSession;
+}
+
+/** 把 withNavigation 真正接进 moveTo 的测试适配器：非本地目标必须走绑定的委托。 */
+class DelegatingAdapter extends FakeAdapter {
+  private navigation = new AsyncLocalStorage<NavigationDelegate>();
+  feetCalls = 0;
+  withNavigation<T>(delegate: NavigationDelegate, run: () => Promise<T>): Promise<T> {
+    return this.navigation.run(delegate, run);
+  }
+  protected currentDelegate(): NavigationDelegate | undefined {
+    return this.navigation.getStore();
+  }
+  override async moveTo(target: MoveTarget, opts: MoveOpts) {
+    if (target.kind === 'feet') this.feetCalls += 1;
+    const delegate = this.currentDelegate();
+    if (delegate !== undefined && target.kind !== 'feet' && target.kind !== 'ladder') return delegate.navigate(target, opts);
+    return super.moveTo(target, opts);
+  }
+}
+
+const moveSkill = (target: MoveTarget, opts: Partial<MoveOpts> = {}): Skill => ({
+  name: 'test_move', description: '', argsDoc: '', timeoutMs: 8000, movement: true,
+  validate: () => ({ ok: true, args: { target, opts } }),
+  async run(ctx) {
+    await ctx.adapter.moveTo(target, { signal: ctx.signal, timeoutMs: Math.min(6000, ctx.deadline - Date.now()), ...opts });
+    return { status: 'succeeded', summary: 'moved' };
+  },
 });
 
-test('moving sideways without reaching the requested cell is not arrival', async () => {
-  const { adapter, bot, opts } = fixture();
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(0.5, 64, 1.5); };
-  await assert.rejects(adapter.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, opts), /尚未到达目标.*0\.50,64\.00,1\.50/);
-});
+test('runSkill 在任务生命周期内绑定导航委托：技能与嵌套技能的非本地 moveTo 都走委托', async (t) => {
+  const map = flatMap(6);
+  const adapter = new DelegatingAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
 
-test('exact arrival uses the actual foot height without an extra block of height', async () => {
-  const { adapter, bot, opts } = fixture();
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(-1.5, 64.5, 2.75); };
-  await adapter.moveTo({ kind: 'xyz', x: -2, y: 64.5, z: 2 }, opts);
-  await assert.rejects(adapter.moveTo({ kind: 'xyz', x: -2, y: 65, z: 2 }, opts), /尚未到达目标/);
-});
-
-test('arrival retains each goal range and horizontal or three-dimensional semantics', async () => {
-  const { adapter, bot, opts } = fixture();
-  const near: MoveTarget = { kind: 'near', pos: { x: 4, y: 64, z: 0 }, range: 2 };
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(2.75, 64.75, 0.5); };
-  await adapter.moveTo(near, opts);
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(2.75, 65.75, 0.5); };
-  await assert.rejects(adapter.moveTo(near, opts), /尚未到达目标/);
-  await adapter.moveTo({ kind: 'xz', x: 4, z: 0, range: 2 }, opts);
-});
-
-test('follow arrival uses the current entity even when it moved less than the follow range', async () => {
-  const { adapter, bot, opts } = fixture();
-  bot.entities[7] = { position: new Vec3(4.5, 64, 0.5) };
-  bot.pathfinder.goto = async () => {
-    bot.entity.position = new Vec3(1.5, 64, 0.5);
-    bot.entities[7].position = new Vec3(6.5, 64, 0.5);
+  const inner = moveSkill({ kind: 'near', pos: { x: 3.5, y: 64, z: 0.5 }, range: 1 });
+  const outer: Skill = {
+    name: 'test_outer', description: '', argsDoc: '', timeoutMs: 8000, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run(skillCtx) {
+      return runSkill(skillCtx, inner, {});
+    },
   };
-  await assert.rejects(adapter.moveTo({ kind: 'follow_entity', entityId: 7, range: 3 }, opts), /尚未到达目标/);
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(3.5, 64, 0.5); };
-  await adapter.moveTo({ kind: 'follow_entity', entityId: 7, range: 3 }, opts);
-  bot.pathfinder.goto = async () => { delete bot.entities[7]; };
-  await assert.rejects(adapter.moveTo({ kind: 'follow_entity', entityId: 7, range: 3 }, opts), /ENTITY_GONE/);
+  const result = await runSkill(ctx, outer, {});
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(adapter.feetCalls > 0, '嵌套技能内部仍由导航委托逐段调用 feet 身体控制');
+  // 原 GoalNear 语义：任意节点在目标节点 (3,64,0) 的 3D 半径 1 内都算到达。
+  const node = { x: Math.floor(adapter.pos.x), y: Math.floor(adapter.pos.y), z: Math.floor(adapter.pos.z) };
+  assert.ok(Math.hypot(node.x - 3, node.y - 64, node.z - 0) <= 1 + 1e-9, `实测节点不在 near 半径内：${JSON.stringify(adapter.pos)}`);
+  assert.ok(adapter.pos.x > 0, '身体必须真的移动过');
 });
 
-test('away arrival checks the original destination instead of moving it farther away', async () => {
-  const { adapter, bot, opts } = fixture();
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(5.5, 66, 0.5); };
-  await adapter.moveTo({ kind: 'away_from', pos: { x: -5, y: 64, z: 0.5 }, distance: 8 }, opts);
+test('精确 xyz 的分数 x/z 表示所在方块列，y 是精确脚高；不走连续 feet 语义', async (t) => {
+  const map = flatMap(4);
+  const adapter = new DelegatingAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const result = await runSkill(ctx, moveSkill({ kind: 'xyz', x: 2.5, y: 64, z: 0.5 }), {});
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(Math.floor(adapter.pos.x), 2);
+  assert.equal(Math.floor(adapter.pos.z), 0);
+  assert.ok(Math.abs(adapter.pos.y - 64) <= 0.02);
 });
 
-test('cancellation after the path resolves remains cancellation', async () => {
-  const { adapter, bot, opts } = fixture(), controller = new AbortController();
-  bot.pathfinder.goto = async () => { bot.entity.position = new Vec3(4.5, 64, 0.5); controller.abort(); };
-  await assert.rejects(adapter.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, { ...opts, signal: controller.signal }), { name: 'AbortedError' });
+test('已满足的 near 目标先按实测身体结算，不需要 VoxelMap 或路线探针', async (t) => {
+  const adapter = new DelegatingAdapter();
+  adapter.pos = { x: 1.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+
+  const result = await runSkill(ctx, moveSkill({ kind: 'near', pos: { x: 1.5, y: 64, z: 0.5 }, range: 1 }), {});
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(adapter.feetCalls, 0, '已满足时不应再发起任何身体移动');
+});
+
+test('委托返回但身体没有实测到位时不得当成到达', async (t) => {
+  const map = flatMap(6);
+  class StationaryFeetAdapter extends DelegatingAdapter {
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      if (target.kind === 'feet') { this.feetCalls += 1; this.actions.push('moveTo:feet:stationary'); return; }
+      const delegate = this.currentDelegate();
+      if (delegate !== undefined) return delegate.navigate(target, opts);
+      return super.moveTo(target, opts);
+    }
+  }
+  const adapter = new StationaryFeetAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const result = await runSkill(ctx, moveSkill({ kind: 'near', pos: { x: 4.5, y: 64, z: 0.5 }, range: 1 }), {});
+  assert.notEqual(result.status, 'succeeded', result.summary);
+  assert.ok(!result.summary.includes('moved'), '不能把委托/动作回执当成实测到达');
+  assert.equal(Math.floor(adapter.pos.x), 0, '身体实际没有移动');
+});
+
+test('取消在委托前传播：不发起任何身体移动', async (t) => {
+  const map = flatMap(4);
+  const adapter = new DelegatingAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const controller = new AbortController();
+  controller.abort();
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map), signal: controller.signal };
+  t.after(() => ctx.memory.close());
+
+  await assert.rejects(runSkill(ctx, moveSkill({ kind: 'near', pos: { x: 3.5, y: 64, z: 0.5 }, range: 1 }), {}), { name: 'AbortedError' });
+  assert.equal(adapter.feetCalls, 0, '取消后不应派发 feet 动作');
+});
+
+test('follow_entity 只使用合法感知，不读适配器原始实体表；按当前实体位置验收', async (t) => {
+  const map = flatMap(8);
+  class FencedAdapter extends DelegatingAdapter {
+    nearbyCalls = 0;
+    override nearbyEntities(): never {
+      this.nearbyCalls += 1;
+      throw new Error('NO_XRAY');
+    }
+  }
+  const adapter = new FencedAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const entity = { id: 42, name: 'cow', kind: 'passive' as const, pos: { x: 4.5, y: 64, z: 0.5 }, dist: 4, height: 1.4 };
+  const ctx = { ...makeCtx(adapter, { senses: { perceivedEntities: () => [entity] } }), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const result = await runSkill(ctx, moveSkill({ kind: 'follow_entity', entityId: 42, range: 1 }), {});
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(adapter.nearbyCalls, 0, '实时调度禁止 nearbyEntities；follow 必须走 ctx.senses');
+  const node = Math.floor(adapter.pos.x);
+  assert.ok(Math.hypot(node - 4, Math.floor(adapter.pos.y) - 64, Math.floor(adapter.pos.z) - 0) <= 1 + 1e-9, `实测节点不在实体半径内：${JSON.stringify(adapter.pos)}`);
+});
+
+test('follow_entity 取消后不把旧实体位置当成到达', async (t) => {
+  const map = flatMap(10);
+  const controller = new AbortController();
+  class AbortingFollowAdapter extends DelegatingAdapter {
+    override nearbyEntities(): never { throw new Error('NO_XRAY'); }
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      if (target.kind === 'feet') {
+        this.feetCalls += 1;
+        setTimeout(() => controller.abort(), 20);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return super.moveTo(target, { ...opts, signal: controller.signal });
+      }
+      return super.moveTo(target, opts);
+    }
+  }
+  const adapter = new AbortingFollowAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const entity = { id: 7, name: 'cow', kind: 'passive' as const, pos: { x: 8.5, y: 64, z: 0.5 }, dist: 8, height: 1.4 };
+  const ctx = { ...makeCtx(adapter, { senses: { perceivedEntities: () => [entity] } }), spatial: fakeSpatial(map), signal: controller.signal };
+  t.after(() => ctx.memory.close());
+
+  await assert.rejects(runSkill(ctx, moveSkill({ kind: 'follow_entity', entityId: 7, range: 1 }), {}), { name: 'AbortedError' });
+  assert.equal(adapter.pos.x, 0.5, '取消后不得声称已到旧实体位置');
+});
+
+test('取消在委托途中传播：保留取消语义且不追加后续动作', async (t) => {
+  const map = flatMap(6);
+  const controller = new AbortController();
+  class AbortingAdapter extends DelegatingAdapter {
+    override async moveTo(target: MoveTarget, opts: MoveOpts) {
+      if (target.kind === 'feet') {
+        setTimeout(() => controller.abort(), 20);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return super.moveTo(target, { ...opts, signal: controller.signal });
+      }
+      return super.moveTo(target, opts);
+    }
+  }
+  const adapter = new AbortingAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map), signal: controller.signal };
+  t.after(() => ctx.memory.close());
+
+  await assert.rejects(runSkill(ctx, moveSkill({ kind: 'near', pos: { x: 5.5, y: 64, z: 0.5 }, range: 1 }), {}), (error: Error) => error.name === 'AbortedError' || error.message.includes('cancel'));
+  const afterAbort = adapter.feetCalls;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(adapter.feetCalls, afterAbort, '取消后不得再派发新的身体动作');
 });

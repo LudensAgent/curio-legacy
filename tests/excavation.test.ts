@@ -41,16 +41,16 @@ class ExcavationWorld extends FakeAdapter {
   }
   override async moveTo(target: MoveTarget, options: MoveOpts) {
     throwIfAborted(options.signal);
-    assert.equal(target.kind, 'near');
-    if (target.kind !== 'near') throw new Error('Unexpected movement');
-    assert.equal(options.constructionSafe, true, 'the pathfinder must never dig or place outside the approved work column');
-    assert.ok(Math.hypot(target.pos.x - this.pos.x, target.pos.z - this.pos.z) <= 1.01);
-    const feet = { x: Math.floor(target.pos.x), y: target.pos.y, z: Math.floor(target.pos.z) };
-    if (target.pos.y > this.pos.y) assert.ok(AIR.has(this.blockAt({ x: Math.floor(this.pos.x), y: Math.floor(this.pos.y) + 2, z: Math.floor(this.pos.z) })), 'jumping first requires actual clearance above the current head');
+    assert.equal(target.kind, 'feet', 'the checked adjacent cell is dispatched as an exact feet target');
+    if (target.kind !== 'feet') throw new Error('Unexpected movement');
+    assert.equal(options.constructionSafe, true, 'the body control must never dig or place outside the approved work column');
+    assert.ok(Math.hypot(target.x - this.pos.x, target.z - this.pos.z) <= 1.01);
+    const feet = { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z) };
+    if (target.y > this.pos.y) assert.ok(AIR.has(this.blockAt({ x: Math.floor(this.pos.x), y: Math.floor(this.pos.y) + 2, z: Math.floor(this.pos.z) })), 'jumping first requires actual clearance above the current head');
     for (const level of [0, 1]) assert.ok(AIR.has(this.blockAt({ ...feet, y: feet.y + level })), 'both actual body cells must be cleared before movement');
     assert.ok(!AIR.has(this.blockAt({ ...feet, y: feet.y - 1 })), 'a resolved move cannot fabricate a floor');
-    this.moves.push({ ...target.pos }); this.moveOptions.push(options);
-    if (!this.acknowledgeMoveOnly) this.pos = { ...target.pos };
+    this.moves.push({ x: target.x, y: target.y, z: target.z }); this.moveOptions.push(options);
+    if (!this.acknowledgeMoveOnly) this.pos = { x: target.x, y: target.y, z: target.z };
     this.afterMove?.();
   }
 }
@@ -428,8 +428,8 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
     override state() { return { ...super.state(), onGround: this.player?.entity.onGround ?? true }; }
     override async moveTo(target: MoveTarget, options: MoveOpts) {
       throwIfAborted(options.signal);
-      assert.equal(target.kind, 'near'); assert.equal(options.constructionSafe, true);
-      if (target.kind !== 'near') throw new Error('Unexpected movement');
+      assert.equal(target.kind, 'feet'); assert.equal(options.constructionSafe, true);
+      if (target.kind !== 'feet') throw new Error('Unexpected movement');
       const controls = { forward: true, back: false, left: false, right: false, jump: true, sprint: false, sneak: false };
       const environment = { getBlock: (position: any) => {
         const p = position.floored(), block = Block.fromStateId(data.blocksByName[this.blockAt(p)].defaultState, 0);
@@ -441,13 +441,13 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
       const physics = Physics(data, environment);
       for (let tick = 0; tick < 100; tick++) {
         throwIfAborted(options.signal);
-        if (this.player.entity.position.x >= target.pos.x - 0.2) { controls.forward = false; controls.jump = false; }
+        if (this.player.entity.position.x >= target.x - 0.2) { controls.forward = false; controls.jump = false; }
         physics.simulatePlayer(new PlayerState(this.player, controls), environment).apply(this.player);
         this.pos = { ...this.player.entity.position };
-        if (tick > 20 && this.player.entity.onGround && Math.abs(this.pos.y - target.pos.y) < 0.1) break;
+        if (tick > 20 && this.player.entity.onGround && Math.abs(this.pos.y - target.y) < 0.1) break;
       }
       assert.equal(this.player.entity.onGround, true);
-      assert.ok(Math.abs(this.pos.y - target.pos.y) < 0.1, `actual physics failed to ascend: ${JSON.stringify(this.pos)}`);
+      assert.ok(Math.abs(this.pos.y - target.y) < 0.1, `actual physics failed to ascend: ${JSON.stringify(this.pos)}`);
       this.moves.push({ ...this.pos });
     }
   }

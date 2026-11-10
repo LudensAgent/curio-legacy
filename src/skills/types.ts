@@ -2,6 +2,7 @@ import type { BlockHit, BlockObservation, EntityInfo, GameAdapter, Vec3Like } fr
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import { createBodyNavigation } from './movement/body-navigation.ts';
 import type { RecoveryContext } from './recovery.ts';
 
 export type FailureCode =
@@ -165,13 +166,19 @@ export function runSkill<A>(ctx: SkillCtx, skill: Skill<A>, args: A & { make?: b
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  return skill.run({ ...ctx, adapter, actionAdapter, make, ...(ctx.climb === undefined && ctx.recovery?.climb ? { climb: ctx.recovery.climb } : {}) }, args).catch((error: unknown) => {
+  const bound = { ...ctx, adapter, actionAdapter, make, ...(ctx.climb === undefined && ctx.recovery?.climb ? { climb: ctx.recovery.climb } : {}) };
+  const run = () => skill.run(bound, args).catch((error: unknown) => {
     if (isAbort(error)) throw error;
     // 非取消异常（如 TimeoutError）也要保留底层带回的部分事实，别把已经发生的位移/位置/氧气丢光。
     // rejection 本身可能是 null/undefined，先做边界判断再取 partial，避免在 `(error as ...)` 上直接崩掉。
     const partial = error instanceof Error ? (error as Error & { partial?: Record<string, unknown> }).partial : undefined;
     return fail(codeFromError(error), error instanceof Error ? error.message : String(error), partial && typeof partial === 'object' ? partial : undefined);
   });
+  // 非本地 moveTo 的委托必须与当前任务同寿命：绑定覆盖技能及其内部/嵌套适配器调用。
+  // 最小适配器没有该能力时保留原有直接执行（例如离线夹具）。
+  return typeof actionAdapter.withNavigation === 'function'
+    ? actionAdapter.withNavigation(createBodyNavigation(bound), run)
+    : run();
 }
 
 /** 导航结局沿用库的分类；具体地形/能力缺口另放字段，不混成一个大枚举。 */

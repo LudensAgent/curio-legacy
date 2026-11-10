@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { GROUNDED_ARRIVAL_DEFAULTS, VoxelMap, WalkRouteExecutor } from 'curio-minecraft-3d-memory';
 import type { BodySample, MoveExecutor } from 'curio-minecraft-3d-memory';
-import { walkCollisionProvider } from '../src/adapter/walk-route.ts';
+import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
 
 function mapWithBlockAt(blockPos: { x: number; y: number; z: number }) {
   const map = new VoxelMap('world', { validityWindowMs: 60_000 });

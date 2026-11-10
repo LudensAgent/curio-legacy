@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
-import { cornerSafe } from '../src/adapter/corner-safe.ts';
 import type { AgentState, EntityInfo, GameAdapter } from '../src/adapter/types.ts';
 import { Arbiter, type Step, type TaskInfo, type TaskOutcome, type TaskSource } from '../src/arbiter/arbiter.ts';
 import { Reflex } from '../src/brain/reflex.ts';
@@ -324,21 +323,6 @@ test('use_skill：一步步照做，每步的 if 当场判断', async (t) => {
   assert.deepEqual(ran, ['t_ok'], '前面是空气，第一步跳过');
   assert.match(o.result.summary, /跳过/);
   assert.match((arbiter.start({ skill: 'use_skill', args: { name: 'nope' } }, 'llm') as any).error, /没有.*nope/);
-});
-
-test('斜着走不切角：一侧有实心方块就不走斜线', () => {
-  const block = (physical: boolean) => ({ physical });
-  const world = new Map<string, boolean>([['0,0,1', true]]); // 南边脚边一格实心
-  let called = 0;
-  const mv = cornerSafe({
-    getBlock: (node: any, dx: number, dy: number, dz: number) => block(world.get(`${node.x + dx},${node.y + dy},${node.z + dz}`) ?? false),
-    getMoveDiagonal: () => { called++; },
-  });
-  mv.getMoveDiagonal({ x: 0, y: 0, z: 0 }, { x: 1, z: 1 }, []);
-  assert.equal(called, 0, '贴着方块的斜线被拒绝');
-  mv.getMoveDiagonal({ x: 0, y: 0, z: 0 }, { x: 1, z: -1 }, []);
-  assert.equal(called, 1, '两边都空就照常');
-  assert.equal(cornerSafe(mv), mv);
 });
 
 test('专注提醒不改写瞥一眼的 switch：做完新活动不会自动恢复旧活动', async (t) => {

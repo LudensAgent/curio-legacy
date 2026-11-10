@@ -4,8 +4,6 @@
  * 所有数据都是结构化的游戏状态，不依赖截图或多模态识图。
  */
 
-import type { WalkBody, WalkTick } from './walk-route.ts';
-
 export interface Vec3Like {
   x: number;
   y: number;
@@ -187,12 +185,10 @@ export type MoveTarget =
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }
-  | { kind: 'away_from'; pos: Vec3Like; distance: number }
-  /** 沿方向推进：从 origin 沿单位向量 dir 推进到至少 minAlong 格、横向偏离不超过 maxLateral 的任意站位都算到达（不要求某个具体点）。 */
-  | { kind: 'advance'; origin: { x: number; z: number }; dir: { x: number; z: number }; minAlong: number; maxLateral: number };
+  | { kind: 'away_from'; pos: Vec3Like; distance: number };
 
 export interface MoveOpts {
-  /** 只执行一个相邻格：绕过 pathfinder 的整段搜索，直接用身体控制走/跳/下；仅 move_step 使用。 */
+  /** 只执行一个相邻格：绕过整段路线委托，直接用身体控制走/跳/下；仅 move_step 使用。 */
   adjacentStep?: boolean;
   /**
    * feet 目标：允许一次同脚高的水平起跳跨越已证实的空腔。目标必须与实测
@@ -208,28 +204,29 @@ export interface MoveOpts {
   signal: AbortSignal;
   timeoutMs: number;
   constructionSafe?: boolean;
-  /** 仅明确的挖掘/爬升动作允许寻路挖块和搭建；日常移动默认绕行。 */
+  /**
+   * 允许（不是要求）本次动作改变地形。普通 VoxelMap 路线不会因为这份授权就自动挖/放；
+   * 路线确实需要施工时会返回结构化缺口，由 Agent 显式调用 mine_cell / place_cell / place_support / pillar_one。
+   */
   allowTerrainChanges?: boolean;
-  /** 是否允许寻路放置支撑方块；未指定时沿用 allowTerrainChanges 的旧行为。 */
-  allowPlace?: boolean;
-  /** 是否允许寻路原地搭柱；未指定时沿用 allowPlace。 */
-  allowTower?: boolean;
-  /** 寻路途中挖方块时只用这件工具（物品注册名）；不写则按手上/自己挑过的工具，最后才按最快。 */
-  digTool?: string;
-  /** 寻路垫脚/搭桥不得往这些格子放方块（例如门框格与门内空间）；只限制放置，不限制行走。 */
-  noPlaceAt?: Vec3Like[];
-  /** 步行引导可禁止入水；换气、游泳等动作保留自己的移动权限。 */
+  /**
+   * 允许（不是要求）入水。陆地路线不会因这份授权静默改成游泳模式；
+   * 受控下落入水、swim_path/dive_to 仍按各自原语执行。
+   */
   allowSwimming?: boolean;
   /** 跑着去（快但很耗饥饿：每跑一格掉的饥饿相当于走路的很多倍）；不写就走路（逃离也一样，要跑就写 true） */
   sprint?: boolean;
   /** 明确落点的单步下行上限，含支撑格；仅用于相邻 xyz 目标，禁止改地形和绕行。 */
   maxDropDown?: number;
-  /** 这一趟寻路要绕开的方块名（不踩进去、不穿过） */
-  avoid?: string[];
-  /** 寻路绕路余量：路线代价最多比起点到目标的直线估计多这么多（pathfinder searchRadius）；不写不限。 */
-  searchRadius?: number;
-  /** 站位四邻（脚部/支撑高度）每有一格岩浆额外加的寻路代价；只加代价不禁止，贴岩浆的唯一路仍可走。不写为 0。 */
-  lavaEdgeCost?: number;
+}
+
+/**
+ * 非本地移动的导航委托：由 runSkill 在任务生命周期内通过 withNavigation 绑定，
+ * 把通用 MoveTarget 的完成条件翻译成宿主已观测体素上的有界路线。
+ * 委托负责路线搜索与执行；不得回调 moveTo 处理非本地目标（避免递归/旧后端回退）。
+ */
+export interface NavigationDelegate {
+  navigate(target: MoveTarget, opts: MoveOpts): Promise<void>;
 }
 
 export interface EffectEvidence {
@@ -456,19 +453,24 @@ export interface GameAdapter {
   listItems?(): string[];
 
   moveTo(target: MoveTarget, opts: MoveOpts): Promise<void>;
+  /**
+   * 在 run 的异步生命周期内绑定非本地导航委托；嵌套技能会重新绑定自己的委托。
+   * 绑定范围覆盖 runSkill 内部及适配器私有方法发起的全部 moveTo 调用。
+   */
+  withNavigation?<T>(delegate: NavigationDelegate, run: () => Promise<T>): Promise<T>;
   /** 释放一切：停止寻路、清除按键、停止挖掘/使用物品。 */
   stopAll(): void;
-
-  /** walk_route 身体桥：只暴露前向控制与实测实体，不暴露寻路/挖掘等。 */
-  walkBody?(): WalkBody;
-  /** 下一物理帧：由服务端 physicsTick 驱动；取消/断线返回 null。 */
-  walkTick?(): WalkTick;
 
   canHarvest(pos: Vec3Like): boolean;
   /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
   placeBlockAt(pos: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & PlacementEvidence & { attemptedFaces?: PlacementFaceAttempt[] }>;
+  /**
+   * 以当前身体的真实眼睛与已加载世界几何核对：能否看见 pos 的一个面（place:true 时是
+   * 能否从某个参照面放进这一格）。只用于实际动作后的完成验收，不作为规划证据。
+   */
+  canInteractAt?(pos: Vec3Like, opts?: { facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down'; place?: boolean }): boolean;
   /**
    * 跨空腔搭桥：在脚下实心方块的边缘潜行，向水平相邻、且在脚下一格或两格的空目标格放一块方块。
    * 脚下两格需要在支撑块下方有实心参照方块；没有时如实返回 EDGE_NO_REFERENCE，不伪造成功。

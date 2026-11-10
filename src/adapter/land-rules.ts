@@ -1,5 +1,5 @@
 import type { ClimbRegionProvider, LandMotionModel, LandRules } from 'curio-minecraft-3d-memory';
-import { walkCollisionProvider } from './walk-route.ts';
+import { walkCollisionProvider } from './walk-collision.ts';
 
 /**
  * Java 1.20.1 站立身体的跳跃几何上限。库的 LandMotionModel 只接受连续二次曲线；

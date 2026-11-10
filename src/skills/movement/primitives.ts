@@ -229,7 +229,7 @@ const moveStepSkill: Skill<MoveArgs> = {
         });
       }
       try {
-        await adapter.moveTo({ kind: 'xyz', x: target.x, y: ladderFoot, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false });
+        await adapter.moveTo({ kind: 'ladder', x: target.x, y: ladderFoot, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false });
       } catch (e) {
         if (isAbort(e)) {
           (e as Error & { partial?: Record<string, unknown> }).partial = partial({ targetFoot: ladderFoot });
