@@ -382,6 +382,50 @@ test('A19 move_step 部分位移：保留实测位置，续接从新位置开始
   assert.ok(Math.floor(adapter.pos.x) >= 20);
 });
 
+test('最后下落虽已达到方向距离，仍须真实落地才能完成并关闭 session', async (t) => {
+  for (const throws of [false, true]) {
+    const map = corridor(7);
+    fill(map, 'minecraft:grass_block', [8, 9, 10].flatMap((x) => [-1, 0, 1].map((z) => ({ x, y: 60, z }))));
+    fill(map, 'minecraft:air', [8, 9, 10].flatMap((x) => [-1, 0, 1].flatMap((z) =>
+      [61, 62, 63, 64, 65, 66].map((y) => ({ x, y, z })))));
+    const { adapter, ctx } = setup(map);
+    t.after(() => ctx.memory.close());
+    let moves = 0;
+    t.mock.method(adapter, 'moveTo', async (target) => {
+      assert.equal(target.kind, 'feet');
+      if (target.kind !== 'feet') return;
+      moves += 1;
+      adapter.pos = { x: target.x, y: target.y, z: target.z };
+      if (target.x === 8.5) {
+        assert.equal(target.y, 61, '最后一步确实是已规划的三格下落');
+        adapter.pos.y = 62.5;
+        adapter.onGround = false;
+        if (throws) throw Object.assign(new Error('drop still airborne'), { name: 'TimeoutError' });
+      }
+    });
+    const first = await advance.run(ctx, args({ direction: 'E', distance: 8 }));
+    assert.equal(first.status, 'failed', first.summary);
+    assert.equal((first.data?.stop as { reason: string }).reason, 'PHYSICAL_FAILURE');
+    assert.equal((first.data?.progress as { along: number }).along, 8, '保留已发生的水平位移');
+    assert.deepEqual(first.data?.position, { x: 8.5, y: 62.5, z: 0.5 });
+    assert.equal((first.data?.partialDisplacement as { atTarget: boolean }).atTarget, false);
+    assert.equal((first.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 7);
+    assert.equal(moves, 8);
+    const sessionId = (first.data?.continuation as { sessionId?: string }).sessionId;
+    assert.ok(sessionId, '悬空失败不能提前关闭冻结意图');
+
+    adapter.pos.y = 61;
+    adapter.onGround = true;
+    const landed = await advance.run(ctx, args({ direction: 'E', distance: 8, sessionId }));
+    assert.equal(landed.status, 'succeeded', landed.summary);
+    assert.equal((landed.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
+    const measured = landed.data?.measured as { current: Vec3Like; onGround: boolean };
+    assert.deepEqual(measured.current, { x: 8.5, y: 61, z: 0.5 });
+    assert.equal(measured.onGround, true);
+    assert.equal(moves, 8, '实测落地后确认完成，不再多走一步');
+  }
+});
+
 test('A5 UNKNOWN 边界链：定向观察、相关证据变化、重搜并继续', async (t) => {
   const map = corridor(9);
   const { adapter, ctx } = setup(map);

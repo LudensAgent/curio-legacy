@@ -44,7 +44,7 @@ export function progressOf(session: MovementSession, current: Vec3Like, sampledA
 
 /**
  * 关闭条件只看实测位置与冻结目标语义：
- * - advance：沿冻结方向的进度达到 distance，且横向偏移未超授权；
+ * - advance：已落地，沿冻结方向的进度达到 distance，且横向偏移未超授权；
  * - navigate 格目标：实测脚所在格一致且脚高在声明容差内；
  * - navigate 连续脚位：实测身体中心到精确脚位的水平/垂直距离在声明容差内。
  * `onGround` 是完成证据的一部分；悬空经过目标格不算到达。目标脚位由已证明
@@ -66,10 +66,10 @@ export function closeReasonOf(
         detail: `横向偏移 ${round2(projection.lateral)} 格超过授权 ${intent.maxLateralDrift} 格；不擅自改方向`,
       };
     }
-    if (projection.along >= intent.distance - 0.01) {
+    if (onGround && projection.along >= intent.distance - 0.01) {
       return {
         reason: 'DISTANCE_MET',
-        detail: `沿 ${intent.direction} 已推进 ${round2(projection.along)} 格，达到请求距离 ${intent.distance} 格（横向偏移 ${round2(projection.lateral)} 格）`,
+        detail: `沿 ${intent.direction} 已推进 ${round2(projection.along)} 格并落地，达到请求距离 ${intent.distance} 格（横向偏移 ${round2(projection.lateral)} 格）`,
       };
     }
     return null;
