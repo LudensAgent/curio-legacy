@@ -13,7 +13,7 @@ import { makeBridge } from '../src/codeskills/bridge.ts';
 import { EventBus } from '../src/events.ts';
 import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { BehaviorEngine } from '../src/mind/behaviors.ts';
+import { BehaviorEngine, VERIFY_REQUIRED } from '../src/mind/behaviors.ts';
 import { moveDetails, movesCatalog } from '../src/mind/prompt.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { SKILLS, skillCatalog } from '../src/skills/index.ts';
@@ -296,14 +296,15 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
     assert.equal(ore?.observedAt, 23_456);
     assert.equal(ore?.source.source, 'vision');
 
-    await t.test('真实 BehaviorEngine：实际 use_skill 结果按 noop/输入/物理语义记账', async () => {
+    await t.test('真实 BehaviorEngine：已保存无 verify 输入行为与新候选按 noop/输入/物理语义记账', async () => {
       const statsDir = mkdtempSync(join(tmpdir(), 'spatial-query-stats-'));
       const book = new SkillBook(null, statsDir);
       const engine = new BehaviorEngine(book, adapter, null, bus, { perceivedEntities: () => [], observeBlocks: () => [] }, join(statsDir, 'stats.json'));
       t.after(() => { engine.dispose(); rmSync(statsDir, { recursive: true, force: true }); });
 
       const register = (behavior: { name: string; description: string; body: string; code?: string; steps?: { skill: string; args?: unknown }[]; verify?: string }) => {
-        assert.ok(engine.write(behavior, { by: 'mind' }).ok);
+        const written = engine.write(behavior, { by: 'mind' });
+        assert.ok(written.ok, written.ok ? '' : written.error);
         setBehaviorRegistry({ get: (name) => name === behavior.name ? { ...behavior, steps: behavior.steps ?? [] } : undefined, list: () => [{ name: behavior.name }] });
       };
       // 实际执行 use_skill，再把真实结果交给 BehaviorEngine 的正式记账入口。
@@ -338,9 +339,18 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
           ] });
         assert.ok(learned.ok, learned.ok ? '' : learned.error);
       }
+      // 2) 已保存的无 verify 输入行为：不是这次由心智新建的候选；新注册仍必须被拒绝，
+      // 已保存行为走无 opts.by 的导入入口，registry 用它实际加载到的同一份契约执行。
       const inputBehavior = { name: 'input-only-macro', description: '宏只执行使用输入', body: '执行物品使用输入，不声称效果。',
         steps: [{ skill: 'macro:input_macro' }] };
-      register(inputBehavior);
+      const refused = engine.write(inputBehavior, { by: 'mind' });
+      assert.equal(refused.ok, false, '新注册没有 verify 必须被拒绝');
+      if (!refused.ok) assert.equal(refused.error, VERIFY_REQUIRED, '拒绝原因必须是缺少 verify');
+      const imported = engine.write(inputBehavior);
+      assert.ok(imported.ok, imported.ok ? '' : imported.error);
+      const savedInput = engine.get(inputBehavior.name);
+      assert.ok(savedInput, '已保存的无 verify 行为应能加载');
+      setBehaviorRegistry({ get: (name) => name === inputBehavior.name ? savedInput : undefined, list: () => [{ name: inputBehavior.name }] });
       const inputResult = await execute(inputBehavior);
       assert.equal(inputResult.status, 'succeeded', inputResult.summary);
       assert.equal(inputResult.data?.inputCompleted, true);
@@ -350,7 +360,8 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.equal(inputStats.uses, 1);
       assert.equal(inputStats.skipped ?? 0, 0);
       assert.deepEqual(engine.currentStats(inputBehavior.name, true), { ok: 0, fail: 0 }, '输入未确认不能晋升为成功');
-      assert.equal(engine.get(inputBehavior.name)?.candidate, true);
+      assert.equal(engine.get(inputBehavior.name)?.candidate, undefined, '已保存行为不因这次执行变成候选');
+      assert.equal(engine.get(inputBehavior.name)?.mode, 'manual', '保持导入时的模式，不伪造晋升');
 
       // 3) 真实物理对比：同一具身动作路径里 effectEvidence verified+changed，成功仍按成功记账。
       adapter.inv.set('water_bucket', 1);

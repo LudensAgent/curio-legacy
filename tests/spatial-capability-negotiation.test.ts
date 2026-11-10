@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { composeCapabilities } from 'curio-minecraft-3d-memory';
+import { composeCapabilities, CONTRACT_VERSION } from 'curio-minecraft-3d-memory';
 import type { MemoryHostCapabilities, SpatialQueryResult } from 'curio-minecraft-3d-memory';
 import {
   capabilityGate,
@@ -177,5 +177,5 @@ test('读取失败或契约版本不符时拒绝启动，不把缺失当成全 f
       },
     }),
   };
-  assert.throws(() => readHostCapabilities(wrongContract), /not memory-host-contract\/1/);
+  assert.throws(() => readHostCapabilities(wrongContract), new RegExp(`is not ${CONTRACT_VERSION}$`));
 });
