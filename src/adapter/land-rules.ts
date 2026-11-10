@@ -18,6 +18,11 @@ export const walkJumpModel: LandMotionModel = {
 
 const CLIMBABLE = new Set(['ladder', 'vine', 'scaffolding']);
 
+/** Same explicit climbable set as `walkClimbProvider`; no collision inference. */
+export function isClimbableBlockName(name: string): boolean {
+  return CLIMBABLE.has(name.replace(/^minecraft:/, ''));
+}
+
 /** 可攀爬方块由 blockstate + 身体尺寸显式声明；不从“碰撞为空”反推是梯子。 */
 export const walkClimbProvider: ClimbRegionProvider = {
   version: 'curio-java-1.20.1-climbable-v1',

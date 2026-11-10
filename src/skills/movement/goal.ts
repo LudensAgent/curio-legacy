@@ -100,9 +100,19 @@ export function cellReached(point: Vec3Like, measured: Vec3Like, onGround: boole
     && Math.abs(measured.y - point.y) <= CELL_FOOT_TOLERANCE;
 }
 
-/** 冻结目标的完成判定；格目标与连续目标使用不同谓词。 */
-export function goalReached(goal: NavigationGoal, measured: Vec3Like, onGround: boolean): boolean {
+/**
+ * 冻结目标的完成判定；格目标与连续目标使用不同谓词。
+ * `airborneLadderGoal` 只允许目标脚位本身由已证明的攀爬源支撑时免除
+ * onGround：真实停在梯子上通常 onGround=false，位置已满足仍应完成。
+ */
+export function goalReached(
+  goal: NavigationGoal,
+  measured: Vec3Like,
+  onGround: boolean,
+  airborneLadderGoal = false,
+): boolean {
+  const grounded = onGround || airborneLadderGoal;
   return goal.kind === 'cell'
-    ? cellReached({ x: goal.cell.x + 0.5, y: goal.footY, z: goal.cell.z + 0.5 }, measured, onGround)
-    : feetReached(goal.feet, measured, onGround);
+    ? cellReached({ x: goal.cell.x + 0.5, y: goal.footY, z: goal.cell.z + 0.5 }, measured, grounded)
+    : feetReached(goal.feet, measured, grounded);
 }

@@ -766,7 +766,7 @@ async function runNavigationSegmentInner(
       }
       try {
         await ctx.adapter.moveTo(
-          { kind: 'xyz', x: Math.floor(transition.to.x), y: transition.to.y, z: Math.floor(transition.to.z) },
+          { kind: 'ladder', x: Math.floor(transition.to.x), y: transition.to.y, z: Math.floor(transition.to.z) },
           {
             signal: ctx.signal,
             timeoutMs: Math.min(6000, Math.floor(remaining)),

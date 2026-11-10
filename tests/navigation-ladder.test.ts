@@ -93,7 +93,37 @@ test('navigate_to climbs an explicitly allowed ladder column with measured feet'
     ['ladder', 64, 65],
     ['ladder', 65, 66],
   ]);
-  assert.ok(adapter.actions.some((action) => action === 'moveTo:xyz'), 'ladder body control must use the explicit xyz target');
+  assert.ok(adapter.actions.some((action) => action === 'moveTo:ladder'), 'ladder body control must use the strict ladder target');
+});
+
+test('navigate_to completes on a ladder while the body is not onGround', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: { x: number; y: number; z: number }[] = [];
+  for (let x = -1; x <= 1; x++) for (let y = 64; y <= 68; y++) for (let z = -1; z <= 1; z++) air.push({ x, y, z });
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', [{ x: 0, y: 63, z: 0 }]);
+  fill(map, 'minecraft:ladder', [{ x: 0, y: 64, z: 0 }, { x: 0, y: 65, z: 0 }, { x: 0, y: 66, z: 0 }], { facing: 'north' });
+
+  class AirborneLadderAdapter extends FakeAdapter {
+    override state() { return { ...super.state(), onGround: false }; }
+  }
+  const adapter = new AirborneLadderAdapter();
+  adapter.pos = { x: 0.5, y: 66, z: 0.5 };
+  adapter.worldId = WORLD;
+  adapter.sessionId = SESSION;
+  adapter.dim = DIM;
+  adapter.speed = 100_000;
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const validated = navigateTo.validate({
+    to: { x: 0, y: 64, z: 0 }, allowed: ['ladder'], historical: false, maxSteps: 8,
+  }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await navigateTo.run(ctx, validated.args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(adapter.pos.y, 64);
+  assert.equal(adapter.state().onGround, false);
 });
 
 test('navigate_to enters a hanging ladder from ground and exits onto an adjacent platform', async (t) => {
@@ -174,7 +204,7 @@ test('navigate_to reports ladder cancellation with the measured partial position
   const controller = new AbortController();
   class AbortOnLadderAdapter extends FakeAdapter {
     override async moveTo(target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) {
-      if (target.kind === 'xyz') setTimeout(() => controller.abort(), 60);
+      if (target.kind === 'ladder') setTimeout(() => controller.abort(), 60);
       return super.moveTo(target, opts);
     }
   }
@@ -209,7 +239,7 @@ test('navigate_to stops when a ladder cell changes before the next measured step
     changed = false;
     override async moveTo(target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) {
       await super.moveTo(target, opts);
-      if (target.kind === 'xyz' && !this.changed) {
+      if (target.kind === 'ladder' && !this.changed) {
         this.changed = true;
         // The already-confirmed first step is kept; the next ladder cell is
         // gone in the newer observation and must not be executed.

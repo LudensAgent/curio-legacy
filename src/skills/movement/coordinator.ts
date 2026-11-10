@@ -5,11 +5,35 @@ import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './i
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, type LandSearchBoundary } from '../../spatial/land-search.ts';
 import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
+import { isClimbableBlockName } from '../../adapter/land-rules.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
   type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
 } from './session.ts';
+
+/**
+ * A ladder goal may legitimately finish with `onGround=false` while the body is
+ * still held by the ladder. The exemption is derived from observed state at the
+ * exact goal cell (or the source block below a ladder top), never from the fact
+ * that the caller allowed a ladder transition somewhere on the route.
+ */
+function airborneLadderGoal(ctx: SkillCtx, intent: MovementIntent): boolean {
+  if (intent.kind !== 'navigate') return false;
+  const voxel = ctx.spatial?.session?.voxel;
+  if (!voxel) return false;
+  const goal = goalFromIntent(intent.to, intent.targetKind);
+  const foot = goal.kind === 'cell'
+    ? { x: goal.cell.x, y: Math.floor(goal.footY), z: goal.cell.z }
+    : { x: Math.floor(goal.feet.x), y: Math.floor(goal.feet.y), z: Math.floor(goal.feet.z) };
+  const dim = ctx.adapter.state().dim;
+  const climbable = (y: number): boolean => {
+    const view = voxel.cellAt(dim, foot.x, y, foot.z);
+    return view.observed && view.evidence.observation.stateComplete
+      && isClimbableBlockName(view.evidence.observation.state.name);
+  };
+  return climbable(foot.y) || climbable(foot.y - 1);
+}
 
 /**
  * 统一跨段协调内核：advance 与多段 navigate_to 共用。
@@ -290,7 +314,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         onGround: state.onGround, inWater: state.inWater,
       };
       session.progress = progressOf(session, state.pos, Date.now());
-      const close = closeReasonOf(session, state.pos, Date.now(), state.onGround);
+      const close = closeReasonOf(
+        session, state.pos, Date.now(), state.onGround,
+        airborneLadderGoal(ctx, session.intent),
+      );
       if (close !== null) {
         stop = stopOf(close.reason, close.detail);
         break;
@@ -388,7 +415,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       // 段内的实测位置已经达到冻结意图时，先按实测收工；剩余边界只说明“再往后未知”，
       // 不能推翻已经真实完成的沿方向/到达条件。横向超授权仍由 closeReasonOf 先拦。
-      const closeAfterSegment = closeReasonOf(session, after.pos, Date.now(), after.onGround);
+      const closeAfterSegment = closeReasonOf(
+        session, after.pos, Date.now(), after.onGround,
+        airborneLadderGoal(ctx, session.intent),
+      );
       if (closeAfterSegment !== null) {
         stop = stopOf(closeAfterSegment.reason, closeAfterSegment.detail);
         break;

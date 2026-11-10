@@ -178,6 +178,12 @@ export type MoveTarget =
   | { kind: 'xyz'; x: number; y: number; z: number }
   /** 精确连续脚位（x/z 是身体中心连续坐标，不取格心）；用于 land-search 的格点执行，不改变 xyz 的旧语义。 */
   | { kind: 'feet'; x: number; y: number; z: number }
+  /**
+   * 已复验的梯子过渡：从当前格列进入/退出到相邻一格，或在同一列上下。
+   * 身体控制只允许在这两个格列内移动，不挖、不放、不绕行；到达仍由调用方
+   * 实测端点验收。
+   */
+  | { kind: 'ladder'; x: number; y: number; z: number }
   | { kind: 'reach_block'; pos: Vec3Like }
   | { kind: 'place_block'; pos: Vec3Like; facing?: 'north' | 'south' | 'east' | 'west' | 'up' | 'down' }
   | { kind: 'follow_entity'; entityId: number; range: number }

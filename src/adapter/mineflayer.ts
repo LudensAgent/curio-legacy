@@ -1020,7 +1020,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // （2026-11-10 两次：补支撑的退后站位正对身后的下界门，思考还没回来人已回到主世界）。
     // 只有 travel_portal（enterPortalAt）自己能把身体送进门格；其余精确落点一律拒绝，交回事实。
     if (!this.inPortalTransition) {
-      const cell = target.kind === 'xyz' ? { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) }
+      const cell = target.kind === 'xyz' || target.kind === 'ladder'
+        ? { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) }
         : target.kind === 'feet' ? { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) }
           : target.kind === 'near' && target.range < 1 ? { x: Math.floor(target.pos.x), y: Math.floor(target.pos.y), z: Math.floor(target.pos.z) } : null;
       const portal = cell && [0, 1].map((dy) => this.blockAt({ ...cell, y: cell.y + dy })).find((n): n is string => !!n && PORTAL_KINDS.has(n));
@@ -1064,6 +1065,40 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           banned.has(`${block.position.x},${block.position.y},${block.position.z}`) ? 1000 : 0];
       }
       movements.allowParkour = false;
+      if (target.kind === 'ladder') {
+        // A ladder transition has already been proved as one exact vertical or
+        // adjacent same-height move. Restrict pathfinder nodes to those columns:
+        // it may not walk around, dig, place, tower, parkour or drop elsewhere.
+        const from = b.entity.position.floored();
+        const columns = new Set([
+          `${from.x},${from.z}`,
+          `${Math.floor(target.x)},${Math.floor(target.z)}`,
+        ]);
+        const minY = Math.min(from.y, target.y) - 1;
+        const maxY = Math.max(from.y, target.y) + 1;
+        const inLadderScope = (node: any): boolean =>
+          columns.has(`${node.x},${node.z}`) && node.y >= minY && node.y <= maxY;
+        movements.canDig = false;
+        movements.allow1by1towers = false;
+        movements.scafoldingBlocks = [];
+        movements.allowParkour = false;
+        movements.allowSprinting = false;
+        movements.allowFreeMotion = false;
+        const getNeighbors = movements.getNeighbors;
+        if (typeof getNeighbors === 'function') {
+          movements.getNeighbors = function (node: any, ...args: any[]) {
+            return (getNeighbors.call(this, node, ...args) as any[])
+              .filter((next) => inLadderScope(next) && next.toBreak?.length === 0 && next.toPlace?.length === 0);
+          };
+        }
+        const getLandingBlock = movements.getLandingBlock;
+        if (typeof getLandingBlock === 'function') {
+          movements.getLandingBlock = function (node: any, ...args: any[]) {
+            const landing = getLandingBlock.call(this, node, ...args);
+            return landing && inLadderScope(landing.position) ? landing : null;
+          };
+        }
+      }
       // 这一趟要绕开的方块（比如吃过亏的浆果丛、仙人掌）：由调用的人决定，身体不替它定
       if (opts.avoid?.length) {
         movements.blocksToAvoid = new Set(movements.blocksToAvoid);
@@ -1213,6 +1248,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         break;
       }
       case 'xyz':
+      case 'ladder':
         // y 是脚高（可为分数）。pathfinder 的节点是“脚下那块 +1”：整块脚高 64 → 节点 64，
         // 半砖脚高 64.5 → 节点 65（见 pathfinder getPathFromTo 的 offset）。
         goal = new goals.GoalBlock(Math.floor(target.x), Math.ceil(target.y - 0.001), Math.floor(target.z));

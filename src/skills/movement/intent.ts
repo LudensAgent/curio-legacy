@@ -47,10 +47,13 @@ export function progressOf(session: MovementSession, current: Vec3Like, sampledA
  * - advance：沿冻结方向的进度达到 distance，且横向偏移未超授权；
  * - navigate 格目标：实测脚所在格一致且脚高在声明容差内；
  * - navigate 连续脚位：实测身体中心到精确脚位的水平/垂直距离在声明容差内。
- * `onGround` 是完成证据的一部分；悬空经过目标格不算到达。返回 null 表示尚未满足，也不是失败。
+ * `onGround` 是完成证据的一部分；悬空经过目标格不算到达。目标脚位由已证明
+ * 攀爬源支撑时，调用方可用 `airborneLadderGoal` 表示“停在梯子上”也是完成。
+ * 返回 null 表示尚未满足，也不是失败。
  */
 export function closeReasonOf(
   session: MovementSession, current: Vec3Like, now: number, onGround = true,
+  airborneLadderGoal = false,
 ): { reason: StopReason; detail: string } | null {
   const intent = session.intent;
   if (intent.kind === 'advance') {
@@ -72,7 +75,7 @@ export function closeReasonOf(
     return null;
   }
   const goal = goalFromIntent(intent.to, intent.targetKind);
-  if (goalReached(goal, current, onGround)) {
+  if (goalReached(goal, current, onGround, airborneLadderGoal)) {
     const where = `实测脚位 (${round2(current.x)},${round2(current.y)},${round2(current.z)})`;
     return goal.kind === 'cell'
       ? { reason: 'ARRIVED', detail: `${where} 在目标格 (${goal.cell.x},${goal.footY},${goal.cell.z})，脚高在容差内` }
