@@ -118,14 +118,14 @@ export const goNear: Skill<ApproachArgs> = {
       });
     }
     const usable = strictResults.flatMap((entry) =>
-      entry.result.status === 'FOUND' && !entry.result.transitions.some((transition) => !args.allowed.includes(transition.kind))
+      entry.result.status === 'FOUND' && !entry.result.transitions.some((transition) => !(args.allowed as readonly string[]).includes(transition.kind))
         ? [entry] : []);
     if (!usable.length && args.historical) {
       for (const entry of strictResults) {
         if (entry.result.status === 'FOUND' || ctx.signal.aborted) continue;
         const historical = await searchLandRouteAsync(spatial.session.voxel, { ...request, goal: entry.goal, evidenceMode: 'remembered' });
         if (historical.status === 'FOUND'
-          && !historical.transitions.some((transition) => !args.allowed.includes(transition.kind))) {
+          && !historical.transitions.some((transition) => !(args.allowed as readonly string[]).includes(transition.kind))) {
           usable.push({ ...entry, result: historical });
         }
       }

@@ -999,7 +999,7 @@ export const approachVisible: Skill<Args> = {
         candidate, strict, result, mode,
         planned,
         // navigate_to 会对整条计划做 allowed 检查（不只看执行窗口），这里保持一致。
-        disallowed: planned.find((transition) => !args.allowed.includes(transition.kind)) ?? null,
+        disallowed: planned.find((transition) => !(args.allowed as readonly string[]).includes(transition.kind)) ?? null,
         boundaries: summarizeBoundaries(strict.boundaries),
         executableSteps,
         deadRoute: historicalDead,

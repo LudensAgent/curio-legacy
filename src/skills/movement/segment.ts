@@ -132,10 +132,22 @@ export interface SegmentReceipt {
   detail?: string;
 }
 
-const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop'];
+const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'ladder'];
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
 
 const cell = (p: Vec3Like): Vec3Like => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });
+/** Ladder transitions may legitimately end with onGround=false; use the declared body precision. */
+const ladderReached = (to: Vec3Like, point: Vec3Like): boolean =>
+  Math.hypot(point.x - to.x, point.z - to.z) <= 0.12 && Math.abs(point.y - to.y) <= 0.05;
+const transitionReached = (transition: LandSearchTransition, point: Vec3Like, onGround: boolean): boolean =>
+  transition.kind === 'ladder'
+    ? ladderReached(transition.to, point)
+    : transition.kind === 'drop' && transition.drop > 1
+      ? cellReached(transition.to, point, onGround)
+      : feetReached(transition.to, point, onGround);
+const centeredXZ = (point: Vec3Like): boolean =>
+  Math.abs(point.x - (Math.floor(point.x) + 0.5)) <= 1e-9
+  && Math.abs(point.z - (Math.floor(point.z) + 0.5)) <= 1e-9;
 const sameCell = (a: Vec3Like, b: Vec3Like) => a.x === b.x && a.y === b.y && a.z === b.z;
 
 function facingOf(from: Vec3Like, to: Vec3Like): 'N' | 'E' | 'S' | 'W' {
@@ -498,9 +510,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     const stopped = { ...stoppedState.pos };
     // 与普通失败分支同一套“实测端点”谓词：取消发生在身体已经到位之后时，
     // 这段是真实完成的进展，不能因为取消就把已确认的 transition 丢掉。
-    const atTarget = transition.kind === 'drop' && transition.drop > 1
-      ? cellReached(transition.to, stopped, stoppedState.onGround)
-      : feetReached(transition.to, stopped, stoppedState.onGround);
+    const atTarget = transitionReached(transition, stopped, stoppedState.onGround);
     const horizontal = Math.hypot(stopped.x - from.x, stopped.z - from.z);
     const vertical = Math.abs(stopped.y - from.y);
     if (atTarget) {
@@ -609,7 +619,36 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     }
     let step: SkillResult | null = null;
     let actionError: unknown = null;
-    if (transition.kind === 'drop' && transition.drop > 1 && request.goal.kind === 'feet') {
+    if (transition.kind === 'ladder') {
+      // Ladder body control uses the explicit xyz target and requires the
+      // measured start/endpoint to be cell-centered; a continuous offset would
+      // be silently moved by the cell-centered adapter and is not executable.
+      if (!centeredXZ(current.pos) || !centeredXZ(transition.to)) {
+        return receipt('unsupported', {
+          stopCode: 'unsupported_ladder_endpoint',
+          detail: `第 ${index + 1} 段是梯子过渡，但实测起点或计划 endpoint 不是格心；现有梯子身体控制只接受格心列，未执行`,
+          failureCode: 'BAD_ARGS', stepIndex: index, transition,
+        });
+      }
+      const remaining = request.deadline - Date.now();
+      if (remaining < 1) {
+        return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出梯子控制前耗尽：已执行 ${executed}/${planned.length} 段` });
+      }
+      try {
+        await ctx.adapter.moveTo(
+          { kind: 'xyz', x: Math.floor(transition.to.x), y: transition.to.y, z: Math.floor(transition.to.z) },
+          {
+            signal: ctx.signal,
+            timeoutMs: Math.min(6000, Math.floor(remaining)),
+            allowTerrainChanges: false,
+            ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
+          },
+        );
+      } catch (error) {
+        if (isAbort(error)) return cancelledHere(index, transition, current.pos);
+        actionError = error;
+      }
+    } else if (transition.kind === 'drop' && transition.drop > 1 && request.goal.kind === 'feet') {
       // 连续精确目标不能被多格下落的格心落点执行；前面已确认的段保留。
       return receipt('unsupported', {
         stopCode: 'unsupported_drop_endpoint',
@@ -669,7 +708,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
 
     if (actionError !== null) {
       const stopped = { ...ctx.adapter.state().pos };
-      const atTarget = feetReached(transition.to, stopped, ctx.adapter.state().onGround);
+      const atTarget = transitionReached(transition, stopped, ctx.adapter.state().onGround);
       const partial = {
         from: { ...current.pos }, to: stopped,
         horizontal: Math.hypot(stopped.x - current.pos.x, stopped.z - current.pos.z),
@@ -714,9 +753,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     if (step !== null && step.status !== 'succeeded') {
       const stopped = { ...ctx.adapter.state().pos };
       // 多格下落由 descend_to 落到格心：格目标的完成谓词按格验收；连续目标已在上面拒绝。
-      const atTarget = transition.kind === 'drop' && transition.drop > 1
-        ? cellReached(transition.to, stopped, ctx.adapter.state().onGround)
-        : feetReached(transition.to, stopped, ctx.adapter.state().onGround);
+      const atTarget = transitionReached(transition, stopped, ctx.adapter.state().onGround);
       const partial = {
         from: { ...current.pos }, to: stopped,
         horizontal: Math.hypot(stopped.x - current.pos.x, stopped.z - current.pos.z),
@@ -779,9 +816,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
 
     const arrived = ctx.adapter.state();
     // 多格下落的 descend_to 按格落地；其余 transition 必须连续到位。
-    const reached = transition.kind === 'drop' && transition.drop > 1
-      ? cellReached(transition.to, arrived.pos, arrived.onGround)
-      : feetReached(transition.to, arrived.pos, arrived.onGround);
+    const reached = transitionReached(transition, arrived.pos, arrived.onGround);
     if (!reached) {
       return {
         ...receipt('physical_failure', {

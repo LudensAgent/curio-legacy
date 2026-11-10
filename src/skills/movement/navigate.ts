@@ -27,7 +27,7 @@ type NavigateArgs = {
   deadlineMs?: number;
 };
 
-const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop'];
+const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'ladder'];
 
 const point = (v: unknown): Vec3Like | null => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
@@ -92,7 +92,7 @@ export const navigateTo: Skill<NavigateArgs> = {
     if (!to) return { ok: false, error: 'to 需要 {x,y,z} 站立脚位；箱子/门请改用旁边的站立格' };
     const allowedRaw = a.allowed === undefined ? KINDS : a.allowed;
     if (!Array.isArray(allowedRaw) || !allowedRaw.length || allowedRaw.some((k) => !KINDS.includes(k as MoveMode))) {
-      return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop' };
+      return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop、ladder' };
     }
     if (a.historical !== undefined && typeof a.historical !== 'boolean') return { ok: false, error: 'historical 需要布尔值' };
     if (a.maxSteps !== undefined && (!Number.isInteger(a.maxSteps) || a.maxSteps < 1 || a.maxSteps > 64)) {
