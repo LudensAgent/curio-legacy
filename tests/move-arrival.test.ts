@@ -13,6 +13,7 @@ function fixture() {
     entity: { position: new Vec3(0.5, 64, 0.5), onGround: false },
     entities: {} as Record<number, { position: Vec3 }>,
     game: { dimension: 'overworld' },
+    blockAt: () => null,
     pathfinder: { async goto(_goal: unknown) {}, stop() {}, setGoal(_goal: unknown) {} },
   });
   const adapter = new MineflayerAdapter(config, new EventBus());
@@ -30,6 +31,21 @@ test('installed Pathfinder empty noPath resolution is not arrival', async () => 
   await assert.rejects(adapter.moveTo({ kind: 'xyz', x: 4, y: 64, z: 0 }, opts), /No path: 寻路结束但尚未到达目标.*0\.50,64\.00,0\.50/);
   assert.equal(bot.listenerCount('path_update'), 0);
   assert.equal(bot.listenerCount('physicsTick'), 0);
+});
+
+test('installed Pathfinder empty timeout stays TIMEOUT, empty partial is not confirmed', async () => {
+  const pathfinderGoto = createRequire(import.meta.url)('mineflayer-pathfinder/lib/goto');
+  for (const target of [{ kind: 'xyz', x: 4, y: 64, z: 0 }, { kind: 'xz', x: 4, z: 0, range: 2 }] as MoveTarget[]) {
+    const timed = fixture();
+    timed.bot.pathfinder.goto = (goal) => pathfinderGoto(timed.bot, goal);
+    timed.bot.pathfinder.setGoal = () => { timed.bot.emit('path_update', { status: 'timeout', path: [] }); };
+    await assert.rejects(timed.adapter.moveTo(target, timed.opts), (e: Error & { name?: string }) => e.name === 'Timeout' && /TIMEOUT/.test(e.message));
+
+    const partial = fixture();
+    partial.bot.pathfinder.goto = (goal) => pathfinderGoto(partial.bot, goal);
+    partial.bot.pathfinder.setGoal = () => { partial.bot.emit('path_update', { status: 'partial', path: [] }); };
+    await assert.rejects(partial.adapter.moveTo(target, partial.opts), (e: Error & { name?: string }) => e.name !== 'NoPath' && e.name !== 'Timeout' && /NOT_CONFIRMED/.test(e.message));
+  }
 });
 
 test('moving sideways without reaching the requested cell is not arrival', async () => {

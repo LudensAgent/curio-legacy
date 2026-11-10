@@ -14,7 +14,7 @@ import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError }
 import { installClientGuard } from './click-guard.ts';
 import { cornerSafe } from './corner-safe.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
-import { feetCell, facingOfYaw } from '../perception/local.ts';
+import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import type { WalkBody, WalkTick } from './walk-route.ts';
 
@@ -1014,6 +1014,16 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) throw new Error('NOT_CONNECTED');
     const b = this.bot;
     if (b.vehicle) throw new Error(`RIDING：正在乘坐 ${b.vehicle.name}，走路前先 dismount，或用 boat_path 操控它前进`);
+    // 传送门方块没有碰撞箱，按几何算是“能站”的空格；可身体在里面待满几秒就会换维度。
+    // 换站位、补支撑、贴近目标这类辅助移动把精确落点选进门格，会让 Agent 没选穿门就被送走
+    // （2026-11-10 两次：补支撑的退后站位正对身后的下界门，思考还没回来人已回到主世界）。
+    // 只有 travel_portal（enterPortalAt）自己能把身体送进门格；其余精确落点一律拒绝，交回事实。
+    if (!this.inPortalTransition) {
+      const cell = target.kind === 'xyz' ? { x: Math.floor(target.x), y: Math.ceil(target.y - 0.001), z: Math.floor(target.z) }
+        : target.kind === 'near' && target.range < 1 ? { x: Math.floor(target.pos.x), y: Math.floor(target.pos.y), z: Math.floor(target.pos.z) } : null;
+      const portal = cell && [0, 1].map((dy) => this.blockAt({ ...cell, y: cell.y + dy })).find((n): n is string => !!n && PORTAL_KINDS.has(n));
+      if (cell && portal) throw new Error(`PORTAL_CELL: 目标站位 (${cell.x},${cell.y},${cell.z}) 是 ${portal} 方块，进去会被传送；没有移动。要穿门用 travel_portal`);
+    }
     this.pathDigTool = opts.digTool ?? null;
     if (opts.maxDropDown !== undefined && (!this.normalMovements || typeof b.pathfinder.setMovements !== 'function')) throw new Error('No path: 当前寻路器不能配置明确下行范围');
     if (this.normalMovements && typeof b.pathfinder.setMovements === 'function') {
@@ -1235,6 +1245,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         goal = new goals.GoalFollow(ent, target.range);
         break;
       }
+      case 'advance': {
+        // 节点是脚所在格，按格心算沿方向推进与横向偏离；启发值 = 还差的推进 + 超出的横向偏离（都按格数，不高估）。
+        const { origin, dir, minAlong, maxLateral } = target;
+        const along = (n: any) => (n.x + 0.5 - origin.x) * dir.x + (n.z + 0.5 - origin.z) * dir.z;
+        const lateral = (n: any) => Math.abs((n.z + 0.5 - origin.z) * dir.x - (n.x + 0.5 - origin.x) * dir.z);
+        goal = Object.assign(new goals.Goal(), {
+          heuristic: (n: any) => Math.max(0, minAlong - along(n)) + Math.max(0, lateral(n) - maxLateral),
+          isEnd: (n: any) => along(n) >= minAlong && lateral(n) <= maxLateral,
+        });
+        break;
+      }
       case 'away_from': {
         const me = b.entity.position;
         let dx = me.x - target.pos.x;
@@ -1254,10 +1275,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const where = `(${at.x.toFixed(2)},${at.y.toFixed(2)},${at.z.toFixed(2)})`;
       const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
       if (outcome === 'arrived') return;
-      if (outcome === 'timeout') throw new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`);
+      if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
       throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '身体控制没有完成相邻一步'}，实际位于 ${where}`);
     }
-    const reached = await this.gotoUnstalled(goal, opts, check);
+    const navigation = await this.gotoUnstalled(goal, opts, check);
+    const reached = navigation.reached;
     check();
     // Pathfinder can resolve an empty noPath result without reaching its goal.
     // Following is measured against the entity's current cell, not its old one.
@@ -1292,7 +1314,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         // 期限用完仍悬空：finishAdjacentStep 在未触地时也无法前推，直接如实报告超时。
         if (!atTarget() && inTargetCell() && settling()) {
-          throw new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`);
+          throw Object.assign(new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`), { name: 'Timeout' });
         }
       }
       // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；有路径但停在相邻格不是“无路”。
@@ -1301,19 +1323,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
         // helper 的 arrived 已经过连续稳定验收，直接采纳，不再用较宽的瞬时坐标检查覆盖它。
         if (outcome === 'arrived') return;
-        if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
+        if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`), { name: 'Timeout' });
         throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
       }
       if (!atTarget()) {
         if (inTargetCell()) {
           throw new Error(`NOT_CONFIRMED: 已到目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}（实际脚高 ${b.entity.position.y.toFixed(2)}），实际位于 ${here()}`);
         }
-        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有空 noPath 才报 PATH_NOT_FOUND。
-        throw new Error(reached
-          ? `NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`
-          : `No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
+        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有明确的 noPath 才报 PATH_NOT_FOUND。
+        // 空 timeout/partial/停止/目标变更没有被库判成 noPath 时，也不能升级成“没有路”。
+        if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`), { name: 'NoPath' });
+        if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${here()}`), { name: 'Timeout' });
+        throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`);
       }
-    } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
+    } else if (!goal.isEnd(position.floored())) {
+      const at = `(${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`;
+      if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${at}`), { name: 'NoPath' });
+      if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${at}`), { name: 'Timeout' });
+      throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${at}`);
+    }
   }
 
   /**
@@ -1362,7 +1390,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const p = e.position, cell = p.floored();
     const offX = Math.abs(p.x - (cell.x + 0.5)), offZ = Math.abs(p.z - (cell.z + 0.5));
     if (offX <= 0.2 + 1e-6 && offZ <= 0.2 + 1e-6) return null;
-    const below = b.blockAt(cell.offset(0, -1, 0));
+    // 中心列真正托着身体的方块：灵魂沙、半砖上脚高 x.875/x.5，支撑是 floor(脚高) 那格本身，不是它下面一格。
+    const below = b.blockAt(new Vec3(cell.x, supportCell(p).y, cell.z));
     if (!below || below.boundingBox !== 'block') return null;
     return { x: cell.x, z: cell.z };
   }
@@ -1392,7 +1421,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   /** Check the actual player's head sweep before jumping high enough to place a block underfoot. */
   private pillarClearance(): PillarClearance | null {
-    const b = this.bot, p = b.entity.position, feetY = Math.floor(p.y), epsilon = 1e-6;
+    // 跳到放置格之上才能放：放置格是支撑方块上面一格（不足一格的支撑上，它高于 floor(脚高)）。
+    const b = this.bot, p = b.entity.position, feetY = supportCell(p).y + 1, epsilon = 1e-6;
     const top = feetY + 1.02 + 1.8;
     const min = { x: Math.floor(p.x - 0.3 + epsilon), y: Math.floor(p.y + 1.8), z: Math.floor(p.z - 0.3 + epsilon) };
     const max = { x: Math.floor(p.x + 0.3 - epsilon), y: Math.floor(top - epsilon), z: Math.floor(p.z + 0.3 - epsilon) };
@@ -1415,7 +1445,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
-  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<boolean> {
+  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<{ reached: boolean; noPath: boolean; pathStatus: string | null }> {
     const b = this.bot;
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
@@ -1439,9 +1469,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
       let plannedPath: { status: string; nodes: { x: number; y: number; z: number }[] } | null = null;
-      let emptyPath = false;
+      let emptyPath = false, pathStatus: string | null = null;
       const onPathUpdate = (result: { status: string; path: { x: number; y: number; z: number }[] }) => {
         plannedPath = { status: result.status, nodes: result.path.slice(0, 6).map(({ x, y, z }) => ({ x, y, z })) };
+        pathStatus = result.status;
         emptyPath = result.path.length === 0;
       };
       const onPhysicsTick = () => {
@@ -1497,15 +1528,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }, 300);
       try {
         const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new Error('TIMEOUT');
+        if (remaining <= 0) throw Object.assign(new Error('TIMEOUT: 本次移动预算已用完'), { name: 'Timeout' });
         await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); else this.actionEpoch++; }), check);
         // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
         if (blockedPillar) stalled = true;
-        // 已安装 Pathfinder 的 goto 在 path:[] 的 noPath 时也会正常返回；这不等于到达，返回 false 让上层别当有效路径补推。
-        if (!stalled) return !emptyPath;
+        // 已安装 Pathfinder 的 goto 在任意 path:[]（noPath/timeout/partial）时都会正常返回。
+        // 只有库明确给出 noPath 才算“没有路”；空 timeout/partial/停止只是没有到达，返回 NOT_CONFIRMED。
+        if (!stalled) return { reached: !emptyPath, noPath: pathStatus === 'noPath', pathStatus };
       } catch (e: any) {
         if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') stalled = true;
-        if (!stalled || e?.name === 'AbortedError') throw e;
+        // 搜索超时/取消/调用方改目标都不是“执行停滞”，原样交回，别用 nudge 改写成别的结局。
+        if (!stalled || e?.name === 'AbortedError' || e?.name === 'Timeout' || e?.name === 'GoalChanged') throw e;
       } finally {
         clearInterval(watch);
         b.removeListener?.('physicsTick', onPhysicsTick);
@@ -1514,13 +1547,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       // 搭柱被头顶/侧上方挡住是确定性失败：nudge 后重新寻路还会得到同一条搭柱，直接报障碍让心智挖头顶或换路线
       if (blockedPillar) throw new PillarClearanceError(blockedPillar);
-      if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
-      if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
+      // 这些是“有路但执行走不动/调整不动”，不是寻路器给出 noPath；上层不能据此升级挖/放。
+      const stuck = (message: string) => Object.assign(new Error(message), { name: 'Stuck' });
+      if (opts.maxDropDown !== undefined) throw stuck('STUCK: 明确下行未能完成，未改走其他边缘');
+      if (corrections >= 3) throw stuck('STUCK: 附近连续调整后仍无法前进，换条路线');
       const action = await this.nudge(attempted, opts);
       check();
-      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error(b.entity.isInWater
-        ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
-        : 'No path: 附近没有可确认安全的调整空间，换条路线');
+      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : stuck(b.entity.isInWater
+        ? 'STUCK: 当前在水中，寻路没有取得进展，未另选上岸位置'
+        : 'STUCK: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
       // nudge 会横挪半格左右、可能重新压线；下一次规划前允许再归位一次。
       attempted.delete('align');
@@ -1968,9 +2003,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     this.digStart = started;
     // 取消/异常时清掉，免得下一次挖掘把这次的开始时间当成自己的（被中途打断的挖掘没有实测耗时）
     try {
-      // forceLook 'ignore'：挖掘不夺视线。以前传 true 会让 mineflayer 在每格挖前 lookAt 方块中心，
-      // 连续开挖/先垫后挖时镜头被底层动作来回抢；1.20.1 服务端只校验距离和命中面，不校验朝向。
-      await this.afterAction(() => raceAbort(b.dig(block, 'ignore'), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
+      // 挖哪格就看着哪格：服务端虽不校验朝向，但不转头时视线停在走路方向，旁观看到的是背对方块在挖，
+      // 视野也看不到正在挖的东西。
+      await this.afterAction(() => raceAbort(b.dig(block, true), signal, Math.max(20000, (Number.isFinite(ms) ? ms : 0) + 5000), () => {
         try { b.stopDigging(); } catch { /* ignore */ }
       }), check);
     } finally {
@@ -2088,7 +2123,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!item) return { ok: false, reason: 'NO_ITEM', attemptedFaces: tried };
     const epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
-    const gaze = { yaw: b.entity.yaw ?? 0, pitch: b.entity.pitch ?? 0 };
     const cx = feet.x + 0.5 + dx * 0.6, cz = feet.z + 0.5 + dz * 0.6;
     b.clearControlStates?.();
     b.setControlState('sneak', true);
@@ -2117,8 +2151,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const ref = b.blockAt(refAt);
       if (!ref || ref.boundingBox !== 'block') return { ok: false, reason: 'EDGE_LOST_SUPPORT:挪到边缘后脚下支撑或参照方块不见了', stance, attemptedFaces: tried };
       await this.afterAction(() => b.equip(item, 'hand'), check);
-      // 放置本身不需要再低头看参照面：forceLook 'ignore' 不夺视线，朝向由收尾那次恢复负责。
-      await this.afterAction(() => raceAbort(b._placeBlockWithOptions(ref, new Vec3(dx, 0, dz), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+      // b.placeBlock 会看向被点的参照面：和挖掘一样朝向自己正在操作的方块。
+      await this.afterAction(() => raceAbort(b.placeBlock(ref, new Vec3(dx, 0, dz)), signal, 5000, () => {}), check);
       const now = b.blockAt(tgt);
       if (!now || now.boundingBox !== 'block') return { ok: false, reason: 'NOT_PLACED:边缘放置后目标格仍是空的', stance, attemptedFaces: tried };
       // 目标格出现了碰撞方块不等于请求材料已放下；核对实际方块名再给 confirmed。
@@ -2143,8 +2177,6 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (ownsControls()) {
         b.setControlState('forward', false);
         b.setControlState('sneak', false);
-        // 走位借用了视线，收尾把它还给调用方；取消/换主后不再动身体。
-        if (!signal.aborted) { try { await b.look(gaze.yaw, gaze.pitch, true); } catch { /* 收尾失败不覆盖原始结果 */ } }
       }
     }
   }
@@ -2184,6 +2216,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       .sort((x, y) => Number(OPENS_ON_CLICK.test(x.ref.name)) - Number(OPENS_ON_CLICK.test(y.ref.name)));
     const at = `(${target.x},${target.y},${target.z})`;
     if (!refs.length && attach) return { ok: false, reason: attach === 'side' ? 'NO_WALL' : 'NO_FLOOR_OR_WALL', detail: `${at} 四周没有已加载的实心方块面`, attemptedFaces: [] };
+    // 整块方块不能放进和自己身体碰撞箱重叠的格子：服务器会直接拒绝，只回一句“仍是空气”。
+    // 身体中心离格边不到 0.3 时碰撞箱会压进相邻格（2026-11-10 x=-50.71 压进 x=-52..-51 那列 0.008 格，连拒 4 次）。
+    // 目标不是自己脚下这一列时，先潜行回到脚下格中心再放；仍重叠就如实报出，不再盲目点。
+    if (!attach && this.mcData?.blocksByName?.[item.name]?.boundingBox === 'block') {
+      const overlaps = () => {
+        const q = b.entity.position;
+        return q.x + 0.3 > target.x && q.x - 0.3 < target.x + 1 && q.z + 0.3 > target.z && q.z - 0.3 < target.z + 1
+          && q.y + 1.8 > target.y && q.y < target.y + 1;
+      };
+      const feet = b.entity.position.floored();
+      if (overlaps() && (feet.x !== target.x || feet.z !== target.z)) await this.steady({ x: feet.x, z: feet.z }, signal, check);
+      if (overlaps()) return { ok: false, reason: `BODY_IN_TARGET:身体碰撞箱和目标格 ${at} 重叠，服务器不允许把方块放进自己身体所在的格`, attemptedFaces: [] };
+    }
     // 实际尝试过的参照方块/面：失败回执要给结构化事实，不能只给一句文本。
     const attemptedFaces: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] = [];
     for (const { f, ref } of refs) {
@@ -2198,10 +2243,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         await this.afterAction(() => b.equip(item, 'hand'), check);
         if (sneak) { b.setControlState('sneak', true); await this.afterAction(() => sleep(120, signal), check); }
         try {
-          // forceLook 'ignore'：放置不夺视线。b.placeBlock 内部会 lookAt 被点面中心，
-          // 每垫一块镜头就转一次；与 placeBlockStateAt 走同一条可指定朝向的放置路径。
-          // 面是否看得见仍由上面的 canClickPlacementFace 射线预检保证。
-          await this.afterAction(() => raceAbort(b._placeBlockWithOptions(ref, f.scaled(-1), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+          // 放置时看着被点的面（面是否看得见由上面的 canClickPlacementFace 射线预检保证）。
+          await this.afterAction(() => raceAbort(b.placeBlock(ref, f.scaled(-1)), signal, 5000, () => {}), check);
         } finally { if (sneak) b.setControlState('sneak', false); }
         // 动作回执成功不等于请求材料已经放下：读一次目标格再标 attempted/confirmed。
         const evidence = this.placementEvidence(pos, itemNames, item.name);
@@ -2221,7 +2264,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         if (floor && floor.boundingBox === 'block') {
           try {
             await this.afterAction(() => b.equip(item, 'hand'), check);
-            await this.afterAction(() => raceAbort(b._placeBlockWithOptions(floor, new Vec3(0, 1, 0), { forceLook: 'ignore', swingArm: 'right' }), signal, 5000, () => {}), check);
+            await this.afterAction(() => raceAbort(b.placeBlock(floor, new Vec3(0, 1, 0)), signal, 5000, () => {}), check);
             const evidence = this.placementEvidence(pos, itemNames, item.name);
             this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
             return { ok: true, ...evidence };
@@ -2456,6 +2499,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (typeof b.waitForTicks === 'function') await this.afterAction(() => raceAbort(b.waitForTicks(1), signal, 2000, () => {}), check);
       else await this.afterAction(() => sleep(60, signal), check);
     }
+    // 这里不再转头：方块朝向（楼梯/门/箱子）取决于上面按 facing 设好的 yaw，再看向参照面会改掉它。
     await this.afterAction(() => raceAbort(b._placeBlockWithOptions(reference.block, face, { forceLook: 'ignore', swingArm: 'right', half, delta }), signal, 5000, () => {}), check);
     // Paired block updates may arrive one packet after the foot/lower block.
     for (let retry = 0; paired && !matches() && retry < 5; retry++) await this.afterAction(() => sleep(50, signal), check);
@@ -3932,9 +3976,32 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 一批的上限由料决定：每格最多放一组（大多 64，鸡蛋/雪球 16，桶 1），背包放不下的产物服务器会停在那里。
    * 返回这一批实际做出了几次（按背包变化算）；仅无法执行批量操作时返回 null，由调用方退回逐个合成。
    */
+  /**
+   * 合成产物要进背包：按配方先扣掉材料（整叠用光的槽会空出来），再看产物能不能叠进已有的同类堆或空槽。
+   * 放不下时 mineflayer 会一直等产物入包、20 秒后才报 “updateSlot:0 did not fire”，回执只像界面卡了。
+   * 2026-11-09/10 四次合成超时都是背包 0 空槽。放不下就在点格子前如实报出，返回 null 表示放得下。
+   */
+  private craftResultShort(recipe: any, times: number): string | null {
+    const inv = this.bot.inventory;
+    // 没有槽位模型就判断不了，交给合成本身
+    if (!Array.isArray(inv?.slots) || !recipe.result) return null;
+    const start = inv.inventoryStart ?? 9, end = inv.inventoryEnd ?? 45;
+    const slots = Array.from({ length: end - start }, (_, k) => inv.slots[start + k]).map((it) => it ? { type: it.type, count: it.count } : null);
+    for (const d of (recipe.delta ?? []).filter((x: any) => x.count < 0)) {
+      let need = -d.count * times;
+      for (const it of slots) { if (need <= 0) break; if (it && it.type === d.id) { const take = Math.min(need, it.count); it.count -= take; need -= take; } }
+    }
+    const id = recipe.result.id, max = this.mcData.items[id]?.stackSize ?? 64;
+    const total = recipe.result.count * times;
+    const room = slots.reduce((n, it) => n + (!it || it.count <= 0 ? max : it.type === id ? Math.max(0, max - it.count) : 0), 0);
+    return room >= total ? null : `INVENTORY_FULL: 背包放不下合成产物 ${this.mcData.items[id]?.name ?? id}×${total}（用掉材料后最多还能放 ${room} 个）；没有点合成格，材料没动。先腾出一格再合成`;
+  }
+
   private async craftBatch(recipe: any, times: number, table: any, signal: AbortSignal): Promise<number | null> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
+    const short = this.craftResultShort(recipe, times);
+    if (short) throw new Error(short);
     if (typeof b._syncWindow !== 'function' || typeof b.transfer !== 'function') return null;
     const w = table ? 3 : 2;
     const cells: { slot: number; id: number }[] = [];
@@ -3990,6 +4057,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private async craftOnce(recipe: any, table: any, signal: AbortSignal, times = 1) {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
+    const short = this.craftResultShort(recipe, times);
+    if (short) throw new Error(short);
     const pace = this.cfg.ui?.pacingMs ?? 0;
     const timeout = 10000 + (this.cfg.ui?.openHoldMs ?? 0) + (this.cfg.ui?.closeHoldMs ?? 0) + (pace > 0 ? 3000 + pace * 12 * times : 0);
     const attempt = new AbortController();
@@ -4073,13 +4142,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const afford = (r: any) => Math.min(...(r.delta ?? []).filter((d: any) => d.count < 0).map((d: any) => Math.floor(this.invCount(d.id) / -d.count)));
       const recipe = bulk ?? any;
       const want = Math.max(1, Math.min(times, afford(recipe) || 1));
-      const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check);
-      if (batched === null) {
-        if (bulk) {
-          await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
-        } else {
-          await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+      try {
+        const batched = await this.afterAction(() => this.craftBatch(recipe, want, table, signal), check);
+        if (batched === null) {
+          if (bulk) {
+            await this.afterAction(() => this.craftOnce(bulk, table, signal, times), check);
+          } else {
+            await this.afterAction(() => this.craftOnce(any, table, signal, 1), check);
+          }
         }
+      } catch (e) {
+        // 已经做出一部分、剩下的放不进背包：保留已做成的数量，由 craft 回执说明“背包满了”
+        if (made > 0 && /^INVENTORY_FULL/.test(String((e as Error)?.message))) break;
+        throw e;
       }
       const produced = this.invCount(id) - before;
       if (produced <= 0) break;
@@ -4285,7 +4360,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot, epoch = this.actionEpoch;
-    const feet = b.entity.position.floored();
+    // 要放方块的是脚踩着的那块上面一格：站在灵魂沙、半砖这类不足一格的方块上时，floor(脚高)
+    // 是支撑方块自己（脚高 x.875 之类），不能拿它当放置格、拿它下面一格当贴面。
+    const support = supportCell(b.entity.position);
+    const feet = new Vec3(support.x, support.y + 1, support.z);
     const below = b.blockAt(feet.offset(0, -1, 0));
     const here = b.blockAt(feet);
     const inWater = !!here && here.name === 'water';

@@ -1245,7 +1245,9 @@ const pillarOneSkill: Skill<{ item?: string }> = {
     if (!names.length || countItems(adapter, names) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, { ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('movement') });
     const beforeCount = countItems(adapter, names);
     const startState = adapter.state();
-    const feet = feetCell(startState.pos);
+    // 垫脚块放在脚踩的支撑方块上面一格；灵魂沙/半砖上 feetCell 是支撑方块本身，不能当放置格。
+    const support0 = supportCell(startState.pos);
+    const feet = { ...support0, y: support0.y + 1 };
     // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
     const dim = startState.dim;
     // 回执按这次实际 yaw 解析朝向；eye 不可用时朝向未知，不伪造北向。

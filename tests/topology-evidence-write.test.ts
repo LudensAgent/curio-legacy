@@ -363,3 +363,70 @@ test('spatial_query 宿主能力上报与真实接线一致：recordNode/upsertE
   assert.equal(envelope.data.capabilities.memory.upsertEdge, true);
 });
 
+
+function fragmentIds(svc: SharedSpatialSession): Set<string> {
+  const ids = new Set<string>();
+  for (let after: string | undefined; ;) {
+    const result = svc.query({ kind: 'fragments', limit: 100, ...(after === undefined ? {} : { after }) });
+    if (result.data?.kind !== 'fragments') assert.fail(`expected fragments page, got ${result.data?.kind}`);
+    for (const f of result.data.items) ids.add(f.id);
+    if (result.data.nextAfter === undefined) return ids;
+    after = result.data.nextAfter;
+  }
+}
+
+/** 两点一段的通道；at 同时作 createdAt/lastUsedAt，决定“最旧”。 */
+function writeStep(svc: SharedSpatialSession, id: string, from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }, at: number) {
+  const points = [from, to];
+  return svc.recordWalkCorridor({
+    fragment: { ...corridorFragment(id, points), createdAt: at, lastUsedAt: at },
+    segments: corridorSegments(points, id),
+  });
+}
+
+test('路径片段写满：先忘每格别处也有、已无边引用的重复片段，独有的旧路保留', async () => {
+  const { svc, dir } = await openEvidenceSession();
+  try {
+    // 最旧的一段独有路径（模拟走到过的最远处），之后是 499 对“同一对格子走了两遍”。
+    assert.equal(writeStep(svc, 'far', { x: 500, y: 64, z: 0 }, { x: 501, y: 64, z: 0 }, 1).status, 'written');
+    for (let i = 0; i < 499; i++) {
+      writeStep(svc, `old:${i}`, { x: 0, y: 64, z: i }, { x: 1, y: 64, z: i }, 10 + i);
+      writeStep(svc, `new:${i}`, { x: 0, y: 64, z: i }, { x: 1, y: 64, z: i }, 10_000 + i);
+    }
+    assert.equal(writeStep(svc, 'filler', { x: 600, y: 64, z: 0 }, { x: 601, y: 64, z: 0 }, 20_000).status, 'written');
+    assert.equal(svc.query({ kind: 'fragments' }).total, 1000);
+    const edgesBefore = svc.query({ kind: 'edges' }).total ?? 0;
+
+    const outcome = writeStep(svc, 'next', { x: 700, y: 64, z: 0 }, { x: 701, y: 64, z: 0 }, 30_000);
+    assert.equal(outcome.status, 'written', '写满后仍能写入新路径');
+    assert.deepEqual(outcome.forgotten, { fragments: 50, redundant: 50, edges: 0, nodes: 0 });
+    assert.equal(svc.query({ kind: 'fragments' }).total, 951);
+    const ids = fragmentIds(svc);
+    assert.equal(ids.has('far'), true, '独有的最旧路径不因为旧就被忘');
+    assert.equal(ids.has('old:0') || ids.has('old:49'), false, '先忘最旧的重复片段');
+    assert.equal(ids.has('new:0'), true);
+    assert.equal(svc.query({ kind: 'edges' }).total, edgesBefore + 1, '重复片段已无边引用，拓扑不丢');
+  } finally {
+    await closeEvidenceSession(svc, dir);
+  }
+});
+
+test('路径片段写满且没有重复：从最拥挤的区块忘，远处稀疏的旧路保留', async () => {
+  const { svc, dir } = await openEvidenceSession();
+  try {
+    // 最旧的 20 段各在一个远处区块（走到过的远处只留一条记录）；之后 980 段挤在门口同一区块、每段格子各不相同。
+    for (let i = 0; i < 20; i++) writeStep(svc, `far:${i}`, { x: 0, y: 64, z: -100 * (i + 1) }, { x: 1, y: 64, z: -100 * (i + 1) }, 1 + i);
+    for (let i = 0; i < 980; i++) writeStep(svc, `near:${i}`, { x: 0, y: 64 + Math.floor(i / 16), z: i % 16 }, { x: 1, y: 64 + Math.floor(i / 16), z: i % 16 }, 100 + i);
+    assert.equal(svc.query({ kind: 'fragments' }).total, 1000);
+    const outcome = writeStep(svc, 'next', { x: 700, y: 64, z: 0 }, { x: 701, y: 64, z: 0 }, 30_000);
+    assert.equal(outcome.status, 'written');
+    assert.deepEqual(outcome.forgotten, { fragments: 50, redundant: 0, edges: 50, nodes: 100 });
+    const ids = fragmentIds(svc);
+    assert.equal([...Array(20).keys()].every((i) => ids.has(`far:${i}`)), true, '远处稀疏的旧路一条不少');
+    assert.equal(ids.has('near:49'), false, '拥挤处先忘旧的');
+    assert.equal(ids.has('near:50'), true);
+    assert.equal(svc.query({ kind: 'edges' }).total, 951);
+  } finally {
+    await closeEvidenceSession(svc, dir);
+  }
+});

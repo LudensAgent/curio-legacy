@@ -297,3 +297,29 @@ test('写入回执有界保留；每次确认段都真实写入，旧回执被�
   assert.equal(recorder.receipts(2).length, 2);
   assert.equal(recorder.receipts(2).at(-1)!.sequence, MAX_TRAVERSAL_RECEIPTS + 4);
 });
+
+test('落地的掉落记成单向 drop 段，与前后行走段在同一格接上；空中位置不记', () => {
+  const { calls, recorder } = recorderWithCalls();
+  const o = (x: number, y: number, z: number, onGround: boolean) => recorder.observe({ worldId: 'w', dim: 'the_nether', sessionId: 's', pos: at(x, y, z), onGround });
+  o(0.5, 70, 0.5, true);
+  o(1.5, 70, 0.5, true);
+  o(2.2, 66, 0.5, false); // 离地下落
+  o(2.5, 58, 0.5, false);
+  o(2.5, 52, 0.5, true); // 落地
+  o(3.5, 52, 0.5, true);
+  recorder.flush();
+  assert.equal(calls.length, 3, JSON.stringify(calls.map((c) => c.fragment.polyline)));
+  const [walk, drop, after] = calls;
+  assert.deepEqual(drop!.fragment.polyline, [at(1.5, 70, 0.5), at(2.5, 52, 0.5)]);
+  assert.equal(drop!.segments.length, 1);
+  assert.equal(drop!.segments[0]!.mode, 'drop');
+  assert.deepEqual(walk!.fragment.polyline.at(-1), drop!.fragment.polyline[0]);
+  assert.deepEqual(after!.fragment.polyline[0], drop!.fragment.polyline[1]);
+});
+
+test('不知道是否着地时不推断掉落，仍按断点处理', () => {
+  const { calls, recorder } = recorderWithCalls();
+  for (const p of [at(0.5, 70, 0.5), at(1.5, 70, 0.5), at(2.5, 60, 0.5), at(3.5, 60, 0.5)]) recorder.observe({ worldId: 'w', dim: 'the_nether', sessionId: 's', pos: p });
+  recorder.flush();
+  assert.ok(calls.every((c) => c.segments.every((s) => s.mode !== 'drop')));
+});

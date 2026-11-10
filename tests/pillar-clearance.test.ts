@@ -195,3 +195,31 @@ test('pillar retries a fast still-air refusal while the body is off the cell', a
   assert.equal(result.ok, true, result.reason);
   assert.equal(attempts, 2, '一次 still air 后应趁落回前再放一次');
 });
+
+test('pillar on soul sand places onto the soul sand top, not into its own cell', async () => {
+  // 灵魂沙顶面 63.875，下面悬空：floor(脚高)=63 是灵魂沙自己，放置格应是 64，贴面是灵魂沙顶。
+  const w = fixture(0.5);
+  w.put(0, 63, 0, 'soul_sand'); w.put(0, 62, 0, 'air');
+  w.bot.entity.position.y = 63.875;
+  const placedOn: string[] = [];
+  w.bot.setControlState = (key: string, value: boolean) => {
+    w.controls[key] = value;
+    if (key === 'jump' && value) { w.bot.entity.position.y = 65.1; w.bot.entity.onGround = false; }
+  };
+  w.bot.placeBlock = async (ref: any, face: any) => {
+    placedOn.push(`${ref.name}@${ref.position.y}+${face.y}`);
+    w.put(0, 64, 0, 'cobblestone');
+    w.bot.entity.position.y = 65; w.bot.entity.onGround = true;
+  };
+  const result = await w.adapter.pillarUp(['cobblestone'], new AbortController().signal);
+  assert.deepEqual(placedOn, ['soul_sand@63+1']);
+  assert.equal(result.ok, true, String(result.reason));
+});
+
+test('straddling detection on floating soul sand uses the soul sand as the centre support', () => {
+  // 线上：脚高 32.875 站在悬空灵魂沙上、偏到格边 z=.785，找不到“脚下一格实心”就不归位，相邻一步直接被拒。
+  const w = fixture(0.5);
+  w.put(0, 63, 0, 'soul_sand'); w.put(0, 62, 0, 'air');
+  w.bot.entity.position.y = 63.875; w.bot.entity.position.z = 0.785;
+  assert.deepEqual((w.adapter as any).spanningCell(), { x: 0, z: 0 });
+});

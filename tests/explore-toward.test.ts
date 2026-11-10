@@ -5,7 +5,7 @@ import { SKILLS } from '../src/skills/index.ts';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
 
-function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => boolean; bricksFromX?: number; walk?: (goal: MoveTarget, from: Vec3Like) => Vec3Like; signal?: AbortSignal } = {}) {
+function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like, opts: { allowTerrainChanges?: boolean; digTool?: string }) => boolean; bricksFromX?: number; walk?: (goal: MoveTarget, from: Vec3Like) => Vec3Like; signal?: AbortSignal } = {}) {
   let pos: Vec3Like = { x: 0.5, y: 64, z: 0.5 };
   const goals: MoveTarget[] = [];
   const looks: number[] = [];
@@ -14,11 +14,12 @@ function harness(options: { blocked?: (goal: MoveTarget, from: Vec3Like) => bool
     eye: () => ({ x: pos.x, y: pos.y + 1.62, z: pos.z, yaw: 0, pitch: 0 }),
     async look(yaw: number) { looks.push(yaw); },
     resolveBlockNames: (n: string) => [n],
-    async moveTo(target: MoveTarget) {
+    async moveTo(target: MoveTarget, opts: { allowTerrainChanges?: boolean; digTool?: string }) {
       goals.push(target);
-      if (options.blocked?.(target, pos)) throw new Error('No path');
+      if (options.blocked?.(target, pos, opts)) throw Object.assign(new Error('No path'), { name: 'NoPath' });
       if (options.walk) pos = options.walk(target, pos);
       else if (target.kind === 'xz') pos = { x: target.x + 0.5, y: pos.y, z: target.z + 0.5 };
+      else if (target.kind === 'advance') pos = { x: target.origin.x + target.dir.x * target.minAlong, y: pos.y, z: target.origin.z + target.dir.z * target.minAlong };
     },
     recentDug: () => [], recentPlaced: () => [],
   } as unknown as GameAdapter;
@@ -59,11 +60,12 @@ test('explore_toward 沿冻结方向分段走完并每段朝该方向扫视；�
   const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 64 }, h.adapter));
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.stopReason, 'DISTANCE_MET');
-  assert.ok(h.goals.every((g) => g.kind === 'xz' && Math.abs(g.z) <= 1), '目标都在冻结射线上');
+  assert.ok(h.goals.length > 0 && h.goals.every((g) => g.kind === 'advance' && g.dir.x === 1 && g.dir.z === 0 && g.origin.z === 0.5 && g.maxLateral === 16),
+    '每段按冻结方向的推进委托，不追射线上的某个点');
   assert.ok((r.data?.segmentCount as number) >= 2);
   assert.ok(h.looks.length >= 2 * 5, '每段结束朝探索方向扫视');
   assert.equal(r.data?.backend, 'pathfinder');
-  assert.ok((r.data?.progress as { along: number }).along >= 62);
+  assert.ok((r.data?.progress as { along: number }).along >= 61, '到达半径 3 以内就算走完');
   assert.ok(typeof r.data?.newChunks === 'number');
 });
 
@@ -104,8 +106,8 @@ test('explore_toward 按沿方向的实测推进验收：被绕到侧面超出 m
 test('explore_toward 被打断时把已走出的推进与偏离挂在取消回执上', async () => {
   const controller = new AbortController();
   const h = harness({ signal: controller.signal, walk: (goal, from) => {
-    if (goal.kind === 'xz' && goal.x > 40) controller.abort();
-    return goal.kind === 'xz' ? { x: goal.x + 0.5, y: from.y, z: goal.z + 0.5 } : from;
+    if (goal.kind === 'advance' && goal.origin.x + goal.minAlong > 40) controller.abort();
+    return goal.kind === 'advance' ? { x: goal.origin.x + goal.minAlong, y: from.y, z: from.z } : from;
   } });
   const error = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 200 }, h.adapter)).then(() => null, (e: unknown) => e);
   const partial = (error as { partial?: Record<string, unknown> }).partial;
@@ -116,8 +118,8 @@ test('explore_toward 被打断时把已走出的推进与偏离挂在取消回�
 });
 
 test('explore_toward 末段按 travel_to 的到达半径算走完：停在 93/96 也算走完，不再报“没挪动”', async () => {
-  // 模拟寻路在到达半径（3 格）边缘就收手：每跳停在目标前 3 格。
-  const h = harness({ walk: (goal, from) => goal.kind === 'xz' ? { x: Math.max(from.x, goal.x - 2.9), y: from.y, z: goal.z + 0.5 } : from });
+  // 模拟寻路一满足推进量就收手：末段 minAlong = 96 − 到达半径 3。
+  const h = harness({ walk: (goal, from) => goal.kind === 'advance' ? { x: Math.max(from.x, goal.origin.x + goal.minAlong), y: from.y, z: from.z } : from });
   const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 96 }, h.adapter));
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(r.data?.stopReason, 'DISTANCE_MET');
@@ -137,12 +139,51 @@ test('explore_toward 段终点一直没走到、只顺带往前蹭几格：算�
 });
 
 test('explore_toward 把 tool 原样交给每段 travel_to 的寻路挖掘', async () => {
-  const h = harness();
-  const opts: (string | undefined)[] = [];
+  const h = harness({ blocked: (_goal, _from, opts) => opts.allowTerrainChanges !== true });
+  const opts: { digTool?: string; allowTerrainChanges?: boolean }[] = [];
   const move = h.adapter.moveTo.bind(h.adapter);
   (h.adapter as { state: () => unknown }).state = ((orig) => () => ({ ...(orig() as object), inventory: [{ name: 'stone_pickaxe', count: 1 }] }))(h.adapter.state.bind(h.adapter));
-  h.adapter.moveTo = (async (target: MoveTarget, o: { digTool?: string }) => { opts.push(o.digTool); return move(target, o as never); }) as typeof h.adapter.moveTo;
+  h.adapter.moveTo = (async (target: MoveTarget, o: { digTool?: string; allowTerrainChanges?: boolean }) => { opts.push({ digTool: o.digTool, allowTerrainChanges: o.allowTerrainChanges }); return move(target, o as never); }) as typeof h.adapter.moveTo;
   await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 64, allowDig: true, tool: 'stone_pickaxe' }, h.adapter));
-  assert.ok(opts.length > 0 && opts.every((t) => t === 'stone_pickaxe'), JSON.stringify(opts));
+  assert.ok(opts.some((o) => o.allowTerrainChanges !== true && o.digTool === undefined), '不施工搜索不携带挖掘工具');
+  assert.ok(opts.some((o) => o.allowTerrainChanges === true && o.digTool === 'stone_pickaxe'), '明确 NoPath 后使用授权施工并透传 tool');
   assert.equal(exploreToward.validate({ direction: 'E', distance: 64, tool: 'stone_pickaxe' }, h.adapter).ok, false, 'tool 需要 allowDig');
+});
+
+test('explore_toward 256/512 全程使用内部短段推进，不会把累计距离塞给单次 travel_to', async () => {
+  for (const distance of [256, 512]) {
+    const h = harness();
+    const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance }, h.adapter));
+    assert.equal(r.status, 'succeeded', r.summary);
+    assert.equal(r.data?.stopReason, 'DISTANCE_MET');
+    const advances = h.goals.filter((goal): goal is Extract<MoveTarget, { kind: 'advance' }> => goal.kind === 'advance');
+    assert.ok(advances.length >= Math.ceil(distance / 32) - 1, `${distance} 格应分成足够多段，实际 ${advances.length}`);
+    assert.ok(advances.every((goal) => goal.minAlong <= 45), '每段内部 minAlong 只属于本段，不随累计距离增长');
+    assert.ok(advances.at(-1)!.origin.x > 200, `后段起点沿冻结射线平移，实际 ${advances.at(-1)!.origin.x}`);
+    assert.ok((r.data?.progress as { along: number }).along >= distance - 3);
+  }
+});
+
+test('explore_toward 保留非零冻结起点与斜向 corridor，段起点沿原射线平移', async () => {
+  const h = harness();
+  const origin = { x: 100.5, y: 70, z: -40.5 };
+  const r = await exploreToward.run(h.ctx, argsOf({ direction: 'NE', distance: 256, origin, segment: 24, maxLateralDrift: 20 }, h.adapter));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual((r.data?.continuation as { origin: Vec3Like }).origin, origin);
+  const advances = h.goals.filter((goal): goal is Extract<MoveTarget, { kind: 'advance' }> => goal.kind === 'advance');
+  assert.ok(advances.length > 0);
+  assert.ok(advances.every((goal) => Math.abs(Math.abs(goal.dir.x) - Math.SQRT1_2) < 1e-9 && Math.abs(Math.abs(goal.dir.z) - Math.SQRT1_2) < 1e-9));
+  assert.ok(advances.every((goal) => goal.maxLateral === 20));
+  assert.ok(advances.every((goal) => Math.abs((goal.origin.x - origin.x) + (goal.origin.z - origin.z)) < 1e-9), '段起点都在原冻结射线上');
+  assert.ok(advances.at(-1)!.origin.x > origin.x + 150, '后段从原射线上平移后的起点出发');
+});
+
+test('explore_toward 中途走不通时保留已经沿方向推进的实测进度', async () => {
+  const h = harness({ blocked: (_goal, from) => from.x > 80 });
+  const r = await exploreToward.run(h.ctx, argsOf({ direction: 'E', distance: 256 }, h.adapter));
+  assert.equal(r.status, 'failed');
+  const progressed = (r.data?.progress as { along: number }).along;
+  assert.ok(progressed >= 60 && progressed < 256, `已走出的进度要保留，实际 ${progressed}`);
+  assert.ok(['BLOCKED', 'NO_ALONG_PROGRESS', 'TIMEOUT'].includes(String(r.data?.stopReason)), String(r.data?.stopReason));
+  assert.match(r.summary, /沿 E 推进/);
 });

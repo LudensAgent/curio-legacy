@@ -15,6 +15,7 @@ import type {
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, shortId } from '../util.ts';
+import { buildPathGraph, pathComponents } from './path-graph.ts';
 import type { ContainerLedger } from '../memory/container-ledger.ts';
 import { applyContents, chestLocation, isContainerLandmark, recall, totalStock, type ChestContents, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from '../memory/chest-memory.ts';
 import type { FarmRecord, FurnaceRecord, GoneSpot, Hazard, HazardKind, Landmark, LandmarkKind, PassageRecord } from '../memory/store.ts';
@@ -1094,6 +1095,52 @@ export class SpatialSemanticStore {
 
   get visitedChunkCount(): number {
     return this.session.ledger.chunkVisits().length;
+  }
+
+  /**
+   * 身边记录过的路：把本维度亲历的路径片段（走过/搭过/挖过）拼成路网，取 radius 格内碰到的每一条，
+   * 报离自己最近的那格、这条路一直通到哪（离自己最远的记录格）、由哪些来源组成、自己是否正站在上面。
+   * 只是历史几何，不代表现在还通；接不接、怎么走由 Agent 决定。
+   */
+  nearbyPaths(dim: string, here: Vec3Like, radius: number) {
+    const fragments = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal');
+    const graph = buildPathGraph(fragments);
+    const kindOf = new Map(fragments.map((f) => [f.id, f.kind]));
+    const { componentOf } = pathComponents(graph);
+    const flat = (c: Vec3Like) => Math.hypot(c.x + 0.5 - here.x, c.z + 0.5 - here.z);
+    const roads = new Map<string, { nearest: Vec3Like; nearestDist: number; far: Vec3Like; farDist: number; cells: number; kinds: Set<string> }>();
+    for (const [key, cell] of graph.cells) {
+      const id = componentOf.get(key)!, d = flat(cell);
+      const road = roads.get(id) ?? roads.set(id, { nearest: cell, nearestDist: Infinity, far: cell, farDist: -1, cells: 0, kinds: new Set() }).get(id)!;
+      road.cells++;
+      road.kinds.add(kindOf.get(graph.fragmentOf.get(key)!) ?? 'walked');
+      if (Math.abs(cell.y - here.y) <= 8 && d < road.nearestDist) { road.nearest = cell; road.nearestDist = d; }
+      if (d > road.farDist) { road.far = cell; road.farDist = d; }
+    }
+    return [...roads.values()].filter((r) => r.nearestDist <= radius).sort((a, b) => a.nearestDist - b.nearestDist)
+      .map((r) => ({ nearest: { ...r.nearest }, nearestDist: r.nearestDist, far: { ...r.far }, farDist: r.farDist, cells: r.cells, kinds: [...r.kinds] as PathFragment['kind'][],
+        onIt: r.nearestDist <= 1.5 && Math.abs(r.nearest.y - Math.floor(here.y)) <= 1 }));
+  }
+
+  /**
+   * 本维度去过的历史范围：区块访问数与外框，以及记录路径（亲历的 traversal 片段）在东南西北四向
+   * 最远的脚点和那段路最后记录的时间。只是历史记录，不代表现在还通、也不代表那片看全了。
+   */
+  visitedExtent(dim: string) {
+    const visits = this.session.ledger.chunkVisits(dim);
+    const bounds = visits.length === 0 ? null : {
+      minX: Math.min(...visits.map((v) => v.cx)) * 16, maxX: Math.max(...visits.map((v) => v.cx)) * 16 + 15,
+      minZ: Math.min(...visits.map((v) => v.cz)) * 16, maxZ: Math.max(...visits.map((v) => v.cz)) * 16 + 15,
+    };
+    const points = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal')
+      .flatMap((f) => f.polyline.map((p) => ({ pos: point(p), at: f.lastUsedAt })));
+    const pick = (better: (a: Vec3Like, b: Vec3Like) => boolean) =>
+      points.reduce<(typeof points)[number] | null>((best, p) => best === null || better(p.pos, best.pos) ? p : best, null);
+    const farthest = points.length === 0 ? null : {
+      N: pick((a, b) => a.z < b.z)!, S: pick((a, b) => a.z > b.z)!,
+      E: pick((a, b) => a.x > b.x)!, W: pick((a, b) => a.x < b.x)!,
+    };
+    return { chunks: visits.length, bounds, farthest };
   }
 
   novelty(dim: string, x: number, z: number): number {

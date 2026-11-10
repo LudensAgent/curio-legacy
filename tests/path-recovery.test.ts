@@ -116,7 +116,7 @@ test('repeated jumping at the same place is not treated as path progress', async
     isBuilding: () => true, stop() { stops++; rejectPath(new Error('Path was stopped')); }, setGoal() {} };
   (w.adapter as any).nudge = async () => null;
   const pending = (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
-  const rejected = assert.rejects(pending, /No path/);
+  const rejected = assert.rejects(pending, { name: 'Stuck', message: /^STUCK:/ });
   for (let i = 0; i < 18 && !stops; i++) {
     const height = [0.5, 1.05, 0.5, 0][i % 4];
     w.bot.entity.position.y = 64 + height;
@@ -137,7 +137,7 @@ test('a stalled path records its last planned nodes and collision state, then re
     stop() { rejectPath(new Error('Path was stopped')); }, setGoal() {} };
   (w.adapter as any).nudge = async () => null;
   const pending = (w.adapter as any).gotoUnstalled({ x: 2, y: 65, z: 0 }, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
-  const rejected = assert.rejects(pending, /No path/);
+  const rejected = assert.rejects(pending, { name: 'Stuck', message: /^STUCK:/ });
   events.emit('path_update', { status: 'success', path: [{ x: 1, y: 65, z: 0 }, { x: 2, y: 65, z: 0 }] });
   await advance(2700);
   await rejected;
@@ -229,7 +229,7 @@ test('failed corrections are bounded at one obstruction and reset after real rou
     };
     let finished = false;
     const pending = (w.adapter as any).gotoUnstalled({}, w.opts, (w.adapter as any).actionCheckpoint(w.opts.signal));
-    const rejected = assert.rejects(pending, /No path/).then(() => { finished = true; });
+    const rejected = assert.rejects(pending, { name: 'Stuck', message: /^STUCK:/ }).then(() => { finished = true; });
     for (let i = 0; i < 7 && !finished; i++) await advance(2700);
     await rejected;
     assert.equal(corrections, progress ? 5 : 3);

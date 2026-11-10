@@ -124,7 +124,7 @@ test('boat and raft placement forces the look at the water surface then sends us
     const pending = f.adapter.useItemOn(item, { kind: 'block', pos: water }, new AbortController().signal);
     await flush();
     const result = await pending;
-    assert.equal(result.ok, true, result.reason);
+    assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.spawned, 'boat');
     // 液面在 y+8/9；瞄 0.85 与放桶路径一致，瞄 y+1 在斜视时会从水面上方掠过。
     assert.ok(looks.some((l) => l.force === true && l.point.distanceTo(water.offset(0.5, 0.85, 0.5)) < 0.01), '强制看向水面（略低于 8/9 液面）');
@@ -147,7 +147,7 @@ test('boat placement succeeds when the item is consumed even if the entity is no
   f.put('water', water);
   f.bot._client.write = async () => { f.consume(); };
   const result = await f.adapter.useItemOn('oak_boat', { kind: 'block', pos: water }, new AbortController().signal);
-  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.spawned, 'oak_boat', '没确认实体但背包已扣船，仍按放置成功并报物品名');
   assert.equal(result.effectEvidence?.changed, true);
 });
@@ -218,6 +218,44 @@ test('useItemOn 成功时报告 air→nether_portal 的实际变化', async (t) 
   const pending = w.adapter.useItemOn('flint_and_steel', { kind: 'block', pos: w.ground }, new AbortController().signal);
   await advance();
   const result = await pending;
-  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.match(result.effectEvidence?.reasons?.join('；') ?? '', /\(2,64,0\) air→nether_portal/);
+});
+
+test('placing a full block into a cell the body hitbox overlaps first steps back to the feet cell centre', async () => {
+  // 身体中心 x=1.71：碰撞箱 maxX=2.01 压进目标列 x=2；服务器会拒绝，先潜行回脚下格中心再放。
+  const w = fixture(), target = new Vec3(2, 64, 0);
+  w.bot.entity.position = new Vec3(1.71, 64, 0.5);
+  const controls: string[] = [];
+  let placed = 0;
+  w.bot.placeBlock = async (reference: any, face: any) => { placed++; w.put('cobblestone', reference.position.plus(face)); };
+  w.bot.look = async () => {};
+  w.bot.setControlState = (name: string, on: boolean) => {
+    if (on) controls.push(name);
+    if (name === 'forward' && on) w.bot.entity.position = new Vec3(1.5, 64, 0.5);
+  };
+  const result = await w.adapter.placeBlockAt(target, ['cobblestone'], new AbortController().signal);
+  assert.ok(controls.includes('forward') && controls.includes('sneak'), '先潜行挪回格心');
+  assert.equal(placed, 1, JSON.stringify(result));
+  assert.equal(result.ok, true, JSON.stringify(result));
+  // 目标就是自己脚下这一列：挪不开，如实报出，不发放置包
+  const own = fixture();
+  own.bot.entity.position = new Vec3(2.5, 64, 0.5);
+  const refused = await own.adapter.placeBlockAt(new Vec3(2, 64, 0), ['cobblestone'], new AbortController().signal);
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason ?? '', /^BODY_IN_TARGET/);
+  assert.equal(own.placements(), 0);
+});
+
+test('helper moves refuse a precise stance inside a portal block; only travel_portal may enter it', async () => {
+  // 补支撑换站位“退后一格”正对身后的下界门：不能把身体送进门格，被动传送不是这次委托。
+  const w = fixture();
+  w.put('nether_portal', new Vec3(0, 64, -1));
+  w.put('nether_portal', new Vec3(0, 65, -1));
+  let pathed = 0;
+  w.bot.pathfinder = { stop() {}, setGoal() {}, goto: async () => { pathed++; } };
+  const real = Object.getPrototypeOf(w.adapter).moveTo.bind(w.adapter);
+  await assert.rejects(real({ kind: 'near', pos: { x: 0.5, y: 64, z: -0.5 }, range: 0.3 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /PORTAL_CELL/);
+  await assert.rejects(real({ kind: 'xyz', x: 0.5, y: 64, z: -0.5 }, { signal: new AbortController().signal, timeoutMs: 1000 }), /PORTAL_CELL/);
+  assert.equal(pathed, 0, '没有发起移动');
 });

@@ -13,6 +13,9 @@
 import type { PathFragment, Vec3Like } from 'curio-minecraft-3d-memory';
 
 const BUCKET = 8;
+/** 记录里相邻两点高差超过普通步行（2 格）的是一次掉落：往下走照常，逆着它往上要爬升，按这个倍数加代价。 */
+const DROP_STEP = 2;
+const CLIMB_PENALTY = 4;
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 const dist = (a: Vec3Like, b: Vec3Like) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const bucketKey = (x: number, y: number, z: number, size: number) => `${Math.floor(x / size)},${Math.floor(y / size)},${Math.floor(z / size)}`;
@@ -24,6 +27,10 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
   const adj = new Map<string, Map<string, number>>();
   const fragmentOf = new Map<string, string>();
   const joined = new Set<string>();
+  /** 两个记录格之间真实记录过的边（links/polyline）；joins 不在这里。 */
+  const recordedEdges = new Set<string>();
+  /** `低格|高格`：从低处沿这条边往上，是逆着一次记录过的掉落爬回去 */
+  const climbs = new Set<string>();
   let recorded = 0;
   const cell = (p: Vec3Like, fragmentId: string) => {
     const c = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
@@ -42,7 +49,15 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
     const pairs = fragment.links?.length
       ? fragment.links.map((l) => [l.a, l.b] as const)
       : fragment.polyline.slice(1).map((p, i) => [fragment.polyline[i]!, p] as const);
-    for (const [a, b] of pairs) if (link(cell(a, fragment.id), cell(b, fragment.id))) recorded++;
+    for (const [a, b] of pairs) {
+      const ka = cell(a, fragment.id), kb = cell(b, fragment.id);
+      if (link(ka, kb)) {
+        recorded++;
+        recordedEdges.add(`${ka}|${kb}`);
+        recordedEdges.add(`${kb}|${ka}`);
+      }
+      if (Math.abs(a.y - b.y) > DROP_STEP) climbs.add(a.y < b.y ? `${ka}|${kb}` : `${kb}|${ka}`);
+    }
     if (pairs.length === 0) for (const p of fragment.polyline) cell(p, fragment.id);
   }
   for (const [k, c] of cells) {
@@ -57,7 +72,7 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
     const list = buckets.get(b);
     if (list) list.push(k); else buckets.set(b, [k]);
   }
-  return { cells, adj, fragmentOf, joined, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2 } };
+  return { cells, adj, fragmentOf, joined, recordedEdges, climbs, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2, drops: climbs.size } };
 }
 
 /** 半径内离 p 最近的记录格；只扫覆盖半径的网格桶。 */
@@ -108,8 +123,13 @@ function heap() {
   };
 }
 
+/** 不在记录路径上的移动（上路、路接路、下路）按走记录路的这么多倍算：离开记录可能要挖或垫，pathfinder 里开一格通道约是走一格的 3 倍多。 */
+const OFF_ROAD = 3;
+
 export type PathGraphRoute =
   | { status: 'START_NOT_RECORDED'; message: string }
+  /** 记录路径加上上路/下路的离路代价，不比直接走过去省：沿记录走没有好处。 */
+  | { status: 'NO_BENEFIT'; message: string }
   | {
     /** FOUND = 终点格离目标不超过 near；PARTIAL = 目标不在同一连通的记录里，走到记录里离目标最近的格 */
     status: 'FOUND' | 'PARTIAL';
@@ -117,56 +137,214 @@ export type PathGraphRoute =
     fragments: string[];
     /** 路线里用到的 26 邻域贴合连接数（不是走过的边） */
     joinsUsed: number;
+    /** 路线里逆着记录过的掉落往上的段（当初是掉下来的，原路返回要爬升 height 格） */
+    climbs: { from: Vec3Like; to: Vec3Like; height: number }[];
     length: number;
     startSnap: number;
     endDistance: number;
+    /** 路线里跨过的“路与路之间”的离路连接（两片记录不相连，中间要自己走过去） */
+    connectors: { from: Vec3Like; to: Vec3Like; distance: number }[];
+    /** 是否只用了真实记录边；false 表示用了 26 邻接/跨片假想连接，仍需逐段实测。 */
+    recordedOnly?: boolean;
+    hypothetical?: boolean;
+    /** 目标脚格是否本身就在记录里；false 时状态最多是 PARTIAL，最后一段未记录。 */
+    targetRecorded?: boolean;
     message: string;
   };
 
 /**
- * 在历史路径图上从 from 附近的记录格走到 to 附近的记录格。to 不在同一连通部分时返回
- * PARTIAL：走到该连通部分里离 to 最近的格（只是历史几何，不是到达证明）。
+ * 在历史路径图上找从 from 到 to 最省的“上路 → 沿记录走（可在路与路之间跨过去） → 下路”。
+ * 不在记录上的移动（上路、跨路、下路）按 offRoad 倍距离计代价：离旧路几十格但能省几百格时先接上旧路，
+ * 方向不对或绕得太远的记录就不用。默认只从 near 格内上路、不跨路，与只沿脚下这条路走的旧口径一致；
+ * travel_to 传更大的 reach/maxGap。终点格离 to 不超过 near 为 FOUND，否则 PARTIAL（记录只到半路）；
+ * 记录路线算上离路代价也不比直接走省就是 NO_BENEFIT。只是历史几何，不是到达证明。
+ * preferRecorded 只从最近的记录锚点上路，优先返回真正连到目标附近的连续记录；不用未证明可走的
+ * 直线代价否掉旧路，也不允许从墙另一侧/旧路中段的任意近格吸附上路。
  */
-export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like, near: number, deadline: number): PathGraphRoute {
-  const start = nearestCell(graph, from, near);
-  if (start === null) return { status: 'START_NOT_RECORDED', message: `起点 ${near} 格内没有记录过的路径格` };
-  const goal = nearestCell(graph, to, near);
-  const cost = new Map<string, number>([[start.key, 0]]);
-  const parent = new Map<string, string>();
+export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like, near: number, deadline: number,
+  opts: { reach?: number; maxGap?: number; offRoad?: number; preferRecorded?: boolean } = {}): PathGraphRoute {
+  const reach = opts.reach ?? near, off = opts.offRoad ?? OFF_ROAD, prefer = opts.preferRecorded === true;
+  // 离路一段的代价：距离按 off 倍计，往上的高差另按记录里爬升同样的倍数加（没有记录时往上要搭柱或开阶梯）。
+  const offCost = (a: Vec3Like, b: Vec3Like) => off * dist(a, b) + Math.max(0, b.y - a.y) * CLIMB_PENALTY;
+  const entries = cellsWithin(graph, from, reach);
+  if (entries.length === 0) return { status: 'START_NOT_RECORDED', message: `起点 ${reach} 格内没有记录过的路径格` };
+  // 路与路之间的离路连接：每对不相连的记录只取最近的一对格，按离路代价连起来。
+  const connectors = new Map<string, { key: string; w: number; distance: number }[]>();
+  if (opts.maxGap) {
+    const { componentOf } = pathComponents(graph);
+    for (const g of pathGaps(graph, componentOf, opts.maxGap, deadline).gaps) {
+      const a = keyOf(g.a.x, g.a.y, g.a.z), b = keyOf(g.b.x, g.b.y, g.b.z);
+      (connectors.get(a) ?? connectors.set(a, []).get(a)!).push({ key: b, w: offCost(g.a, g.b), distance: g.distance });
+      (connectors.get(b) ?? connectors.set(b, []).get(b)!).push({ key: a, w: offCost(g.b, g.a), distance: g.distance });
+    }
+  }
+  if (prefer) {
+    // 按目标确定记录锚点：目标脚格在记录里时，必须走到那一格，不能用“进入 near 半径的第一个墙前点”替代。
+    // 目标脚格不在记录里时，终点只能是未记录余程之前的记录末端，状态保持 PARTIAL。
+    const targetKey = keyOf(Math.floor(to.x), Math.floor(to.y), Math.floor(to.z));
+    const targetRecorded = graph.cells.has(targetKey);
+    // 起点：身体实际脚格有记录时优先这一格；不能被另一个欧氏距离更近、但可能在墙另一侧的记录格替代。
+    const footKey = keyOf(Math.floor(from.x), Math.floor(from.y), Math.floor(from.z));
+    const foot = graph.cells.get(footKey);
+    const nearest = foot ? null : nearestCell(graph, from, reach);
+    if (!foot && !nearest) return { status: 'START_NOT_RECORDED', message: `起点 ${reach} 格内没有记录过的路径格` };
+    const entryKey = foot ? footKey : nearest!.key;
+    const entryDistance = foot ? dist(foot, from) : nearest!.distance;
+
+    /** 只走真实记录边；hypothetical 时才允许 26 邻接和跨片接点。 */
+    const search = (hypothetical: boolean) => {
+      const cost = new Map<string, number>(), parent = new Map<string, string>(), entryOf = new Map<string, number>();
+      const queue = heap();
+      const begin = offCost(from, graph.cells.get(entryKey)!);
+      cost.set(entryKey, begin); entryOf.set(entryKey, entryDistance); queue.push({ key: entryKey, cost: begin });
+      let target: string | null = null;
+      let end: string | null = null, endDistance = Infinity, endCost = Infinity;
+      let expanded = 0;
+      while (queue.size) {
+        const { key, cost: c } = queue.pop();
+        if (c > cost.get(key)!) continue;
+        const cell = graph.cells.get(key)!;
+        const d = dist(cell, to);
+        // PARTIAL 端按“离原目标更近”选，而不是按 cost+假想离路权重把起点选成最优；
+        // 只有同一终点格才用路径代价选短路。
+        if (d < endDistance - 1e-9 || (Math.abs(d - endDistance) <= 1e-9 && c < endCost)) { end = key; endDistance = d; endCost = c; }
+        if (targetKey && key === targetKey) { target = key; break; }
+        if (++expanded % 4096 === 0 && Date.now() > deadline) break;
+        const step = (next: string, nc: number) => {
+          if (nc < (cost.get(next) ?? Infinity)) { cost.set(next, nc); parent.set(next, key); entryOf.delete(next); queue.push({ key: next, cost: nc }); }
+        };
+        for (const [next, w] of graph.adj.get(key)!) {
+          if (!hypothetical && !graph.recordedEdges.has(`${key}|${next}`)) continue;
+          step(next, c + (graph.climbs.has(`${key}|${next}`) ? w * CLIMB_PENALTY : w));
+        }
+        if (hypothetical) for (const link of connectors.get(key) ?? []) step(link.key, c + link.w);
+      }
+      const finalKey = target ?? end;
+      if (!finalKey) return { complete: false, keys: [] as string[], endpoint: null as string | null, endDistance, cost: endCost };
+      const keys = [finalKey];
+      while (!entryOf.has(keys[0]!)) {
+        const prev = parent.get(keys[0]!);
+        if (prev === undefined) break;
+        keys.unshift(prev);
+      }
+      return { complete: target !== null, keys, endpoint: finalKey, endDistance: target ? dist(graph.cells.get(target)!, to) : endDistance, cost: target ? cost.get(target)! : endCost };
+    };
+    const recorded = search(false);
+    const startDistance = dist(from, to);
+    let chosen = recorded, usedHypothetical = false;
+    if (targetRecorded && !recorded.complete) {
+      const hypothetical = search(true);
+      if (hypothetical.complete) { chosen = hypothetical; usedHypothetical = true; }
+      else if (hypothetical.endpoint && hypothetical.endDistance < recorded.endDistance - 1) { chosen = hypothetical; usedHypothetical = true; }
+    } else if (!targetRecorded) {
+      // 目标格不在记录里：真实记录路线若确实把身体带向目标就先走它；否则才考虑未验证邻接/接片。
+      const improves = recorded.endDistance < startDistance - 2;
+      if (!improves) {
+        const hypothetical = search(true);
+        if (hypothetical.endpoint && hypothetical.endDistance < recorded.endDistance - 1) { chosen = hypothetical; usedHypothetical = true; }
+      }
+    }
+    if (!chosen.endpoint) return { status: 'NO_BENEFIT', message: '记录路径没有可用的终点' };
+    const keys = chosen.keys;
+    const points = keys.map((k) => ({ ...graph.cells.get(k)! }));
+    const fragments = [...new Set(keys.map((k) => graph.fragmentOf.get(k)!))];
+    const pairs = keys.slice(1).map((k, i) => [keys[i]!, k] as const);
+    const isConnector = ([a, b]: readonly [string, string]) => !graph.adj.get(a)!.has(b);
+    const joinsUsed = pairs.filter(([a, b]) => !isConnector([a, b]) && graph.joined.has(`${a}|${b}`)).length;
+    const climbs = pairs.flatMap(([a, b]) => {
+      if (!graph.climbs.has(`${a}|${b}`)) return [];
+      const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+      return [{ from: { ...p }, to: { ...q }, height: q.y - p.y }];
+    });
+    const usedConnectors = pairs.filter(isConnector).map(([a, b]) => {
+      const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+      return { from: { ...p }, to: { ...q }, distance: Math.round(dist(p, q) * 10) / 10 };
+    });
+    const endDistance = chosen.endDistance;
+    // 以实际路线用到的边为准：经过 joins 或跨片 connectors 就不是完整记录路线。
+    const hypotheticalPath = usedConnectors.length > 0 || joinsUsed > 0;
+    const status = chosen.complete && !hypotheticalPath ? 'FOUND' as const : 'PARTIAL' as const;
+    return {
+      status, points, fragments, joinsUsed, climbs, connectors: usedConnectors,
+      length: Math.round(pairs.reduce((sum, [a, b]) => sum + dist(graph.cells.get(a)!, graph.cells.get(b)!), 0) * 10) / 10,
+      startSnap: Math.round(entryDistance * 10) / 10,
+      endDistance: Math.round(endDistance * 10) / 10,
+      recordedOnly: !hypotheticalPath,
+      hypothetical: hypotheticalPath,
+      targetRecorded,
+      message: status === 'FOUND'
+        ? `记录里有连到目标记录格的连续路径（${points.length} 格，经过 ${fragments.length} 条片段${usedConnectors.length ? `，其中 ${usedConnectors.length} 处要跨过两片记录之间的空当` : ''}）`
+        : hypotheticalPath
+          ? `记录路线要跨过未验证邻接/跨片连接才能接到目标附近（${points.length} 格记录点，最后 ${Math.round(endDistance)} 格未记录/待实测）`
+          : `记录路径最多到离目标 ${Math.round(endDistance)} 格处（最后一段未记录）`,
+    };
+  }
+  const startEntries = entries;
+  const cost = new Map<string, number>(), parent = new Map<string, string>(), entryOf = new Map<string, number>();
   const queue = heap();
-  queue.push({ key: start.key, cost: 0 });
-  let closest = start.key, closestDistance = dist(graph.cells.get(start.key)!, to);
-  let reached: string | null = null;
-  let expanded = 0;
+  for (const e of startEntries) {
+    const c = offCost(from, graph.cells.get(e.key)!);
+    cost.set(e.key, c); entryOf.set(e.key, e.distance); queue.push({ key: e.key, cost: c });
+  }
+  let best: string | null = null, bestScore = Infinity, expanded = 0;
   while (queue.size) {
     const { key, cost: c } = queue.pop();
     if (c > cost.get(key)!) continue;
-    if (key === goal?.key) { reached = key; break; }
-    const d = dist(graph.cells.get(key)!, to);
-    if (d < closestDistance) { closest = key; closestDistance = d; }
+    const score = c + offCost(graph.cells.get(key)!, to);
+    if (score < bestScore) { best = key; bestScore = score; }
     if (++expanded % 4096 === 0 && Date.now() > deadline) break;
-    for (const [next, w] of graph.adj.get(key)!) {
-      const nc = c + w;
-      if (nc < (cost.get(next) ?? Infinity)) { cost.set(next, nc); parent.set(next, key); queue.push({ key: next, cost: nc }); }
-    }
+    const step = (next: string, nc: number) => {
+      if (nc < (cost.get(next) ?? Infinity)) { cost.set(next, nc); parent.set(next, key); entryOf.delete(next); queue.push({ key: next, cost: nc }); }
+    };
+    for (const [next, w] of graph.adj.get(key)!) step(next, c + (graph.climbs.has(`${key}|${next}`) ? w * CLIMB_PENALTY : w));
+    for (const link of connectors.get(key) ?? []) step(link.key, c + link.w);
   }
-  const end = reached ?? closest;
-  const keys = [end];
-  while (keys[0] !== start.key) keys.unshift(parent.get(keys[0]!)!);
+  // 默认口径保留原来的“直接走更省就不沿记录”；preferRecorded 在上面走两阶段选择，不在这里比较。
+  if (best === null || bestScore >= offCost(from, to)) {
+    return { status: 'NO_BENEFIT', message: `记录路径算上离路的代价也不比直接走省（离路按 ${off} 倍计）` };
+  }
+  const keys = [best];
+  while (!entryOf.has(keys[0]!)) keys.unshift(parent.get(keys[0]!)!);
   const points = keys.map((k) => ({ ...graph.cells.get(k)! }));
   const fragments = [...new Set(keys.map((k) => graph.fragmentOf.get(k)!))];
-  const joinsUsed = keys.slice(1).filter((k, i) => graph.joined.has(`${keys[i]}|${k}`)).length;
-  const endDistance = dist(graph.cells.get(end)!, to);
-  const status = reached !== null || endDistance <= near ? 'FOUND' : 'PARTIAL';
+  const pairs = keys.slice(1).map((k, i) => [keys[i]!, k] as const);
+  const isConnector = ([a, b]: readonly [string, string]) => !graph.adj.get(a)!.has(b);
+  const joinsUsed = pairs.filter(([a, b]) => !isConnector([a, b]) && graph.joined.has(`${a}|${b}`)).length;
+  const climbs = pairs.flatMap(([a, b]) => {
+    if (!graph.climbs.has(`${a}|${b}`)) return [];
+    const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+    return [{ from: { ...p }, to: { ...q }, height: q.y - p.y }];
+  });
+  const usedConnectors = pairs.filter(isConnector).map(([a, b]) => {
+    const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+    return { from: { ...p }, to: { ...q }, distance: Math.round(dist(p, q) * 10) / 10 };
+  });
+  const endDistance = dist(graph.cells.get(best)!, to);
+  const status = endDistance <= near ? 'FOUND' : 'PARTIAL';
   return {
-    status, points, fragments, joinsUsed,
-    length: Math.round(cost.get(end)! * 10) / 10,
-    startSnap: Math.round(start.distance * 10) / 10,
+    status, points, fragments, joinsUsed, climbs, connectors: usedConnectors,
+    // 路程按实际几何算，不含爬升惩罚
+    length: Math.round(pairs.reduce((sum, [a, b]) => sum + dist(graph.cells.get(a)!, graph.cells.get(b)!), 0) * 10) / 10,
+    startSnap: Math.round(entryOf.get(keys[0]!)! * 10) / 10,
     endDistance: Math.round(endDistance * 10) / 10,
     message: status === 'FOUND'
-      ? `记录里有连到目标附近的路径（${points.length} 格，经过 ${fragments.length} 条片段）`
-      : `目标不在起点所在的这片记录里；记录路径最多到离目标 ${Math.round(endDistance)} 格处`,
+      ? `记录里有连到目标附近的路径（${points.length} 格，经过 ${fragments.length} 条片段${usedConnectors.length ? `，其中 ${usedConnectors.length} 处要跨过两片记录之间的空当` : ''}）`
+      : `记录路径最多到离目标 ${Math.round(endDistance)} 格处`,
   };
+}
+
+/** 半径内的全部记录格（按距离升序）；只扫覆盖半径的网格桶。 */
+function cellsWithin(graph: PathGraph, p: Vec3Like, radius: number) {
+  const r = Math.ceil(radius / BUCKET);
+  const bx = Math.floor(p.x / BUCKET), by = Math.floor(p.y / BUCKET), bz = Math.floor(p.z / BUCKET);
+  const out: { key: string; distance: number }[] = [];
+  for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) for (let dz = -r; dz <= r; dz++) {
+    for (const k of graph.buckets.get(`${bx + dx},${by + dy},${bz + dz}`) ?? []) {
+      const d = dist(graph.cells.get(k)!, p);
+      if (d <= radius) out.push({ key: k, distance: d });
+    }
+  }
+  return out.sort((a, b) => a.distance - b.distance);
 }
 
 /** 连通分量（并查集，按路径压缩） */

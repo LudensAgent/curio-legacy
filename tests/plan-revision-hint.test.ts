@@ -68,3 +68,37 @@ test('没有停滞、或瞥一眼，不提示改清单', (t) => {
     audience: null, notes: [], mySkills: [], persona: 'P' });
   assert.doesNotMatch(glanced.content, /别写成新步骤/);
 });
+
+test('改过清单后，要等新清单也卡住两段才再提示改清单；改写次数作为事实列在【专注】里', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  t.after(() => memory.close());
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  self.setPlan('挖够粗铁做装备', ['下到 y16 找铁', '挖到 24 个粗铁']);
+  self.setOnline(true, now);
+  const stall = () => {
+    const plan = self.plan()!;
+    plan.progressAt = now - 30 * 60_000;
+    plan.stalledOnlineMs = 30 * 60_000;
+    plan.stalledObservedSince = now - 30 * 60_000;
+    plan.stalledHistoryUnknown = false;
+    return plan;
+  };
+  stall();
+  self.data.history.push(rec('挖竖井', 'stuck', now - 9 * 60_000), rec('挖竖井', 'stuck', now - 8 * 60_000), rec('挖竖井', 'unmet', now - 7 * 60_000));
+  const think = () => buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
+    self, memory, plan: self.plan()!, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
+    audience: null, notes: [], mySkills: [], persona: 'P' })[1].content;
+  assert.match(think(), /清单可以按实际情况改/);
+  now += 60_000;
+  self.setPlan(self.plan()!.agendaId, ['换个地方挖竖井', '挖到 24 个粗铁']);
+  stall();
+  const afterRewrite = think();
+  assert.doesNotMatch(afterRewrite, /清单可以按实际情况改/, '刚改过清单，旧的卡住记录不再催改');
+  assert.match(afterRewrite, /"checklist_rewrites_since_progress":1/);
+  now += 60_000;
+  self.data.history.push(rec('换地方挖竖井', 'stuck', now - 30_000), rec('换地方挖竖井', 'unmet', now - 10_000));
+  assert.match(think(), /清单可以按实际情况改/, '新清单也卡住两段，再提示');
+});

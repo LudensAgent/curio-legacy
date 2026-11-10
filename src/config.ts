@@ -236,7 +236,7 @@ export const config = {
       showNames: bool('LIVE_SHOW_NAMES', false),
       /** 是否把弹幕纳入思考（进入 LLM 上下文）；关掉后弹幕仍显示/存档/参与「房子够了」共识，只是不再喂给模型 */
       inPrompt: bool('AUDIENCE_IN_PROMPT', true),
-      maxInPrompt: num('AUDIENCE_MAX_IN_PROMPT', 6),
+      maxInPrompt: num('AUDIENCE_MAX_IN_PROMPT', 3),
       windowSec: num('AUDIENCE_WINDOW_SEC', 180),
       perUserGapSec: num('AUDIENCE_PER_USER_GAP_SEC', 8),
       blockWords: str('AUDIENCE_BLOCK_WORDS').split(',').map((s) => s.trim()).filter(Boolean),

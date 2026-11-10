@@ -1,4 +1,4 @@
-import type { AgentState } from '../adapter/types.ts';
+import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
 import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
@@ -13,7 +13,7 @@ import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { portalAgeText, travelStore } from '../travel/store.ts';
 import { describeActivity } from './activity.ts';
-import { describeBuild, homeOf, myBuilds } from './home.ts';
+import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
@@ -46,6 +46,8 @@ export interface MindContext {
   /** 读一格方块：给 my_bed 就近核对床还在不在（离得近、看得见不是床就把旧地标删掉） */
   blockAt?: (p: { x: number; y: number; z: number }) => string | null;
   activity: Activity | null;
+  /** 调度器里正在执行的实际动作；用于区分“仍在执行”和“已失败/被取消”。 */
+  runningStep?: { skill: string; args: unknown; source: string; startedAt: number } | null;
   suspended: Activity[];
   /** 提前想好、手上的活做完就接上的下一段（模型自己写的 next，如实回显，不加引导） */
   next?: { what: string; why?: string } | null;
@@ -210,12 +212,12 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near，可以用 exploration 写有界探索（min_distance / find）；没把握就省略 done_when，做完再看结果。`;
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。只写本段 steps 能直接产生或确认的条件：只有走、看、评估、规划时不要写 inventory_min 或 location_near；exploration 的 min_distance（1–256 的整数）只能用在这段 steps 里有会移动身体的动作时，只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when，做完再看结果。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
- "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
+ "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后无条件接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next}}
 手上还有活要接着做就只写 decision:"continue"，不要写 activity；要做新的一段或换做法，写 decision:"new"/"adjust"/"switch"（不要写 continue）。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
@@ -244,7 +246,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
-【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有坐标或记得的地标/base/死亡点/传送门，不论远近 → travel_to {"to":{"x":0,"y":64,"z":0}} 或 {"to":"地标名"}（已加载区块寻路，默认走路〔sprint:true 才跑，快但耗饥饿〕、不下水、不挖不放，回执报实测位置与剩余距离）；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要逐格核实的精确站位、或只走空间记忆里看清的格 → navigate_to（几格外没观察就停在边界）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时原样传回 sessionId。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
+【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有坐标或记得的地标/base/死亡点/传送门，不论远近 → travel_to {"to":{"x":0,"y":64,"z":0}} 或 {"to":"地标名"}（已加载区块寻路，默认走路〔sprint:true 才跑，快但耗饥饿〕、不下水、不挖不放；默认 auto 先从起点附近实际旧路锚点沿记录路线走、跟随旧路时不施工，旧路走不通就停在实测进度并报该路点；没有可用旧路或走到记录末端后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权挖/垫；via:"direct" 才是直接按授权寻路；回执报实测位置与剩余距离）；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要逐格核实的精确站位、或只走空间记忆里看清的格 → navigate_to（几格外没观察就停在边界）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时原样传回 sessionId。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。上下台阶用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格都空：两格高的隧道/矿道里改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -381,7 +383,9 @@ function planRevisionHint(ctx: MindContext): string | null {
   const since = plan.progressAt ?? plan.setAt;
   const acts = ctx.self.history(60).filter((r) => r.at > since);
   if (acts.length < 3) return null;
-  const stuck = acts.filter((r) => r.outcome === 'stuck' || r.outcome === 'unmet');
+  // 改过清单之后，要等新清单也卡住两段才再提：否则停滞期间每次认真想都收到“可以改清单”，一念一改
+  const revised = Math.max(since, plan.revisedAt?.at(-1) ?? 0);
+  const stuck = acts.filter((r) => r.at > revised && (r.outcome === 'stuck' || r.outcome === 'unmet'));
   if (stuck.length < 2) return null;
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
@@ -504,7 +508,9 @@ export function situationalReminders(ctx: MindContext): string[] {
   const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
   if (pathFails.length >= 3) {
     const f = pathFails[0];
-    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。这段地形没有可执行的 walk/step/drop 路线；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标，或用 excavate_run/place_support/pillar_one 施工，或 assess_landings 后再 descend_to；由你决定。`);
+    // 失败只说明这几次授权下走不通：没开挖/放时不能断言“地形没有路线”，也要让带施工授权的寻路和手动直线施工并列可见。
+    const unbuilt = pathFails.every((x) => { const a = x.args as { allowDig?: unknown; allowPlace?: unknown }; return a.allowDig !== true && a.allowPlace !== true; });
+    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（默认先从起点附近的实际旧路锚点沿连续记录路线走，跟随旧路时不施工；没有可用旧路或走完记录后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权重试；超时、卡住不会升级成挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
@@ -606,7 +612,12 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
     }), ...(next >= 0 ? { next_item: next } : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
-      activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length } : { checklist: '还没有：写 plan' }),
+      activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,
+      // 改写清单不算推进：把这段时间改了几次、上次改在多久前摆出来，改不改仍由它定
+      ...(() => {
+        const rewrites = (plan.revisedAt ?? []).filter((t) => t > (plan.progressAt ?? plan.setAt));
+        return rewrites.length ? { checklist_rewrites_since_progress: rewrites.length, last_rewrite_wall_clock_min_ago: Math.round((Date.now() - rewrites.at(-1)!) / 60000) } : {};
+      })() } : { checklist: '还没有：写 plan' }),
     ...(ctx.activity ? { current_activity_for_goal: ctx.activity.agendaId === (plan?.agendaId ?? item!.id) } : {}),
     ...(ctx.suspended.length ? { will_resume_after_detour: ctx.suspended.map((a) => a.what) } : {}),
   };
@@ -707,6 +718,13 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
   const n = tier === 'glance' ? 5 : 10;
   const here = p.self.pos;
   const placed = memory.queryPlacedNear({ x: here[0], y: here[1], z: here[2] }, 8, p.self.dim);
+  // 身边记录过的路：方块图只有 ±4 格、nearby_placed 只列最近 5 块（刚搭的那几块就占满），10 格外自己的旧桥/旧路从来看不到。
+  // 按连成一条的路报最近处和通到哪；只给历史事实，接不接由 Agent 定。
+  const at = { x: here[0], y: here[1], z: here[2] };
+  const where = (c: Vec3Like) => { const d = Math.round(Math.hypot(c.x + 0.5 - at.x, c.z + 0.5 - at.z)), dy = Math.round(c.y - at.y); return `(${c.x},${c.y},${c.z}) ${d ? `${dirName(c.x + 0.5 - at.x, c.z + 0.5 - at.z)} ${d}格` : '就在脚下'}${dy ? `，${dy > 0 ? '高' : '低'} ${Math.abs(dy)} 格` : ''}`; };
+  const KIND = { bridge: '搭过', dug: '挖过', walked: '走过', built: '建过' } as const;
+  const paths = tier === 'deliberate' ? memory.nearbyPaths(p.self.dim, at, 16).slice(0, 3).map((r) =>
+    `${r.kinds.map((k) => KIND[k]).join('/')}的路（${r.cells} 格记录）：${r.onIt ? '你正站在这条上' : `最近处 ${where(r.nearest)}`}；它一直通到 ${where(r.far)}`) : [];
   return {
     ...(p.self.local ? { local: p.self.local } : {}),
     ...(p.self.around ? { around: p.self.around } : {}),
@@ -718,6 +736,7 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
     exits: p.self.exits ?? null,
     hostile: p.nearby.hostile.slice(0, 5), passive: p.nearby.passive.slice(0, 6), players: p.nearby.players,
     see_now: p.nearby.resources.filter((r) => r.seen === 'now').slice(0, n).map((r) => `${r.block}×${r.count} ${r.dir ?? ''}${r.nearest}格`),
+    ...(paths.length ? { nearby_paths: [...paths, '以上是自己以前亲历的路径记录，不代表现在还通；travel_to 默认（via:"auto"）在沿记录走更省时会按记录的路点走'] } : {}),
     ...(placed.length ? { nearby_placed: placed.slice(0, 5).map((b) => `${b.name}（${dirName(b.pos.x - here[0], b.pos.z - here[2])} ${Math.round(b.dist)}格，自己放的）`).join('、') } : {}),
     ...(v ? { facing: v.facing, view: v.view, ...((v as any).visible_drops?.length ? { drops: (v as any).visible_drops.slice(0, 4) } : {}),
       ...(v.nearest_land ? { nearest_land: v.nearest_land } : {}),
@@ -736,12 +755,17 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
 function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  // 相对自己的方位、水平距离与高差：坐标换算方向容易算反，直接给出
+  const bearing = (pos: Vec3Like) => {
+    const d = Math.round(Math.hypot(pos.x - here.x, pos.z - here.z)), dy = Math.round(pos.y - here.y);
+    return `${d ? `${dirOf(here, pos)} ` : ''}${d}格${dy ? `，${dy > 0 ? '高' : '低'} ${Math.abs(dy)} 格` : ''}`;
+  };
   // 自己的设施（箱子、工作站、床）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
   const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
-    .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
-    .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格`);
+    .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 8)
+    .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
   const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).slice(0, 8).map((f) => f.text) : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
@@ -752,21 +776,40 @@ function worldKnowledge(ctx: MindContext) {
   });
   const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
-  const portals = portalSnapshot.endpoints.slice(-4).map((e) => {
-    // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
-    const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
-      .map((r) => [`${r.toId}:${r.returnVerified}`, { to: r.toId, return_verified: r.returnVerified }])).values()];
-    const nowBlock = ctx.blockAt?.(e.pos) ?? null;
-    const now = nowBlock === e.kind ? `仍是 ${e.kind}`
-      : nowBlock === null ? '未加载(未知)'
-      : `现为 ${nowBlock}`;
-    return {
-      id: e.id, dim: e.dim, kind: e.kind, pos: e.pos,
-      portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
-      recorded_ago: portalAgeText(e.observedAt),
-      ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
-    };
-  });
+  const endpointById = new Map(portalSnapshot.endpoints.map((e) => [e.id, e]));
+  // 只列当前维度、离自己最近的几处门：别的维度的门走不过去，只在 leads_to 里说明落点；
+  // 方块核对用的是当前维度的区块数据，跨维度的坐标查出来的不是那扇门。
+  const portals = portalSnapshot.endpoints.filter((e) => e.dim === p.self.dim)
+    .map((e) => ({ e, d: Math.hypot(e.pos.x - here.x, e.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 4)
+    .map(({ e }) => {
+      // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
+      const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
+        .map((r) => {
+          const to = endpointById.get(r.toId);
+          return [`${r.toId}:${r.returnVerified}`, { to: r.toId, ...(to ? { dim: to.dim, pos: to.pos } : {}), return_verified: r.returnVerified }];
+        })).values()];
+      const nowBlock = ctx.blockAt?.(e.pos) ?? null;
+      // 证据是客户端已加载的区块数据，只核对记录坐标这一格，不是这次视野亲眼看见
+      const now = nowBlock === null ? '区块未加载(未知)'
+        : nowBlock === e.kind ? `记录格仍是 ${e.kind}（区块数据）`
+        : `记录格现为 ${nowBlock}（区块数据，非视野所见）`;
+      return {
+        id: e.id, kind: e.kind, pos: e.pos, from_here: bearing(e.pos),
+        portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
+        recorded_ago: portalAgeText(e.observedAt),
+        ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
+      };
+    });
+  // 本维度去过多远：explored_around 只抽样身边 32–128 格，看不到更远处走过的路；这里只给历史事实，不选方向。
+  const extent = ctx.tier === 'deliberate' ? m.visitedExtent(p.self.dim) : null;
+  const visitedExtent = extent === null || extent.bounds === null ? null : [
+    `访问过 ${extent.chunks} 个区块，外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}`,
+    ...(extent.farthest === null ? [] : [`记录路径四向最远脚点：${(['N', 'S', 'E', 'W'] as const).map((d) => {
+      const f = extent.farthest![d];
+      return `${d} (${f.pos.x},${f.pos.y},${f.pos.z}) ${bearing(f.pos)}（这段路${portalAgeText(f.at)}记录）`;
+    }).join('；')}`]),
+    '只是走过的历史记录，不代表现在还通，也不代表那片看全了',
+  ].join('；');
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
@@ -790,7 +833,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(remember.length ? { resources_seen_before: remember } : {}),
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos) } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
     ...(lastDeaths.length ? { last_deaths: lastDeaths } : {}),
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子
@@ -812,13 +855,17 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...p.nearby.resources.slice(0, 6).map((r) => r.block), ...s.inventory.slice(0, 10).map((i) => i.name)].filter(Boolean).join(' ');
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
+  const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
   // 分块，越往后越要紧：背景 → 记得的 → 最近 → 手上的活 → 身边 → 身体 → 此刻
   const sections: [string, Record<string, unknown>][] = [
     ['我', {
       traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}),
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}),
       agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}) })),
-      know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true })),
+      know_how: knowHow.map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true, source: k.source,
+        ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
+        ...(k.applications?.length ? { applications: k.applications.reduce((n, a) => ({ count: n.count + 1, done: n.done + Number(a.outcome === 'done' && a.completion !== 'condition'), stuck: n.stuck + Number(a.outcome === 'stuck') }), { count: 0, done: 0, stuck: 0 }) } : {}) })),
+      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；evidence=none 是没有动作签名或应用证据的暂定结论；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：技能书里会动手的技能（use_skill 调用）+ 从经历里验证过的做法（直接写成一步）
@@ -844,7 +891,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '[此前想法，未经核实]' : `[${t.kind}]`} ${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],
     ['手上的活', {
-      current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
+      current_activity: ctx.activity ? describeActivity(ctx.activity, s, p, ctx.runningStep ?? undefined) : null,
       ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
       ...(ctx.next ? { queued_next: `已经想好接下来做「${ctx.next.what}」${ctx.next.why ? `（${ctx.next.why}）` : ''}` } : {}),
@@ -865,9 +912,11 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       since_last_thought: ctx.changes,
       ...(ctx.gameMessages?.length ? { game_messages: ctx.gameMessages } : {}),
       ...(ctx.userSuggestion && !ctx.operatorOrder ? { operator_suggestion: ctx.userSuggestion } : {}),
-      ...(audienceBlock(ctx.audience, glance ? 'light' : 'full') ?? {}),
     }],
   ];
+  // 弹幕单独成段、放在最前面：越靠近结尾的内容模型越当真，弹幕是最低优先级的外部意见，不和【此刻】的现场事实挤在一起。
+  const audience = audienceBlock(ctx.audience, glance ? 'light' : 'full');
+  if (audience) sections.unshift(['直播间', audience]);
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);
@@ -909,8 +958,9 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 
 你在 Minecraft 里歇下来了（休息、睡觉或者告一段落），回想一下这段时间：哪些办法真的好用，哪些想法被事实推翻了，哪些说的是同一回事。像人一样把零碎的经验整理成少数几条靠谱的窍门。
 规则：
-- 只依据给出的窍门、成败次数（wins/losses）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
-- 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，60 字以内，写清“什么情况下、怎么做、会怎样”）。
+- 只依据给出的窍门、成败次数（wins/losses）、来源（source）、应用证据（applications）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
+- 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，120 字以内，写清“什么情况下、怎么做、会怎样”）。
+- 改写或合并时保留来源和适用条件（地形、方向、材料、授权、工具等）；一次有限情形的失败/成功只写成那次的具体情况，不要升级成普遍规则。unverified 且没有应用证据的条目仍只是暂定结论，没有新证据支持就不要当成已经成立的规律。
 - 失败明显多于成功、或被后来的经历推翻的丢掉（drop）；只是一次性的流水账也丢掉。
 - 零碎想法里被最近经历证实的，才整理成新的窍门（add，最多 5 条）；没证实的就让它过去。
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
@@ -924,10 +974,32 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 只输出一个 JSON 对象：
 {"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const payload = {
-    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
+    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses,
+      unverified: k.unverified === true, source: k.source, ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
+      ...(k.kind ? { kind: k.kind } : {}), ...(k.tags.length ? { tags: k.tags } : {}),
+      ...(k.applications?.length ? { applications: k.applications.slice(-5).map((a) => ({ at: new Date(a.at).toISOString(), activity_id: a.activityId,
+        outcome: a.completion === 'condition' ? 'condition_met' : a.outcome,
+        ...(a.completion && a.completion !== 'condition' ? { completion: a.completion } : {}),
+        ...(a.failure ? { failure: { skill: a.failure.skill, ...(a.failure.args !== undefined ? { args: a.failure.args } : {}), code: a.failure.code,
+          summary: historical(a.failure.summary, a.failure.at), ...(Number.isFinite(a.failure.at) ? { at: new Date(a.failure.at).toISOString() } : {}),
+          ...(a.failure.worldId ? { world_id: a.failure.worldId } : {}), ...(a.failure.dim ? { dim: a.failure.dim } : {}),
+          ...(a.failure.pos ? { pos: a.failure.pos } : {}) } } : {}),
+        summary: historical(a.summary, a.at) })) } : {}),
       age_min: Math.round((now - k.createdAt) / 60000) })),
     insights: self.insights().map((i) => historical(`${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`)),
-    recent: self.history(20).map((r) => historical(`${r.what} → ${r.completion === 'condition' ? 'condition_met' : r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}：${r.summary.slice(0, 180)}`, r.at)),
+    recent: self.history(20).map((r) => ({
+      at: new Date(r.at).toISOString(), what: historical(r.what, r.at), kind: r.kind,
+      outcome: r.completion === 'condition' ? 'condition_met' : r.outcome,
+      ...(r.completion && r.completion !== 'condition' ? { completion: r.completion } : {}),
+      duration_real_s: r.durationSec, failures: r.failures,
+      ...(r.applying ? { applying: r.applying, applying_at_start: r.applyingText ?? 'unknown' } : {}),
+      ...(r.failure ? { failed_action: { skill: r.failure.skill, ...(r.failure.args !== undefined ? { args: r.failure.args } : {}), code: r.failure.code,
+        summary: historical(r.failure.summary, r.at), ...(Number.isFinite(r.failure.at) ? { at: new Date(r.failure.at).toISOString() } : {}),
+        ...(r.failure.worldId ? { world_id: r.failure.worldId } : {}), ...(r.failure.dim ? { dim: r.failure.dim } : {}),
+        ...(r.failure.pos ? { pos: r.failure.pos } : {}) } } : {}),
+      ...(Object.keys(r.gained).length ? { gained: r.gained } : {}), ...(Object.keys(r.lost).length ? { used: r.lost } : {}),
+      summary: historical(r.summary, r.at),
+    })),
     experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
     agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
     diary: self.diary(5).map((d) => historical(d.text)),

@@ -67,6 +67,15 @@ export const MAX_FRAGMENT_LINKS = 16_384;
 /** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
 export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
+/** 路径片段上限（整个世界、各维度合计）。不往上调：travel_to via:"history"、spatial_extrema 每次最多扫 1000 片，
+ *  调大只会让它们看不全；写满时由 recordCorridor 腾位。 */
+export const MAX_PATH_FRAGMENTS = 1000;
+/** 体素观测只保留最近观测的这么多格（每次落盘前修剪），更早的格回到未知；不修剪的话观测格只增不减，
+ *  线上约 4 小时就超过快照上限 maxObservedCells(1,000,000)，此后每次保存都失败、再也落不了盘。 */
+export const MAX_OBSERVED_CELLS = 25_600;
+/** 写满时一次腾出的片数：腾位要整表扫描片段和边，按批摊薄。 */
+const FRAGMENT_PRUNE_BATCH = 50;
+
 /** 单条已确认通道写入拓扑层的节点/边上限；超出时失败关闭，不静默丢弃。 */
 const MAX_WALK_TOPOLOGY_NODES = 8;
 const MAX_WALK_TOPOLOGY_EDGES = 8;
@@ -251,7 +260,10 @@ export interface WalkMemoryTopology {
  * `stage` 只来自库/共享会话实际返回的结构化拒绝；调用方 sink 抛出不是本类型，
  * 由 recorder 侧另行如实表达（不得把异常改写成这里的阶段）。
  */
-export type WalkMemoryOutcome =
+/** 写满腾位时实际忘掉的路径记录；redundant 是其中“每格别处也记着、且已无边指向”的片数，其余取自最拥挤的区块。 */
+export interface PathRetention { fragments: number; redundant: number; edges: number; nodes: number }
+
+export type WalkMemoryOutcome = (
   | {
       status: 'written';
       fragmentId: string;
@@ -267,7 +279,8 @@ export type WalkMemoryOutcome =
       fragmentId: string;
       traversalIds: string[];
       topology: WalkMemoryTopology;
-    };
+    }
+) & { forgotten?: PathRetention };
 
 /** 结构化缺口类别；只描述宿主实际拒绝/未完成的事实。 */
 export type SharedSpatialGapKind =
@@ -752,7 +765,7 @@ export class SharedSpatialSession {
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
-      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS },
+      fragmentOptions: { maxLinks: MAX_FRAGMENT_LINKS, maxFragments: MAX_PATH_FRAGMENTS },
     });
     return new SharedSpatialSession(
       session,
@@ -1015,7 +1028,7 @@ export class SharedSpatialSession {
   }
 
   private recordCorridor(input: WalkCorridorEvidence, opts: CorridorWriteOptions): WalkMemoryOutcome {
-    const base = { fragmentId: input.fragment.id, traversalIds: [] as string[] };
+    const base: { fragmentId: string; traversalIds: string[]; forgotten?: PathRetention } = { fragmentId: input.fragment.id, traversalIds: [] };
     const emptyTopology: WalkMemoryTopology = { nodes: 0, edges: 0, written: false };
     // 能力/生命周期先fail-closed：recordNode/upsertEdge 不可用时连历史证据也不写，
     // 不留下“fragment/traversal 成功但拓扑永远缺失”的半套事实。
@@ -1035,6 +1048,8 @@ export class SharedSpatialSession {
     if (sessionId === undefined) {
       return { status: 'failed', stage: 'not_ready', message: 'shared spatial session has no trusted scope', ...base, topology: emptyTopology };
     }
+    const forgotten = this.makeRoomForFragment();
+    if (forgotten !== null) base.forgotten = forgotten;
 
     const traversals = input.segments.map((segment) => ({ ...segment, fragmentId: segment.fragmentId }));
     const topology = input.segments.length === 0
@@ -1124,6 +1139,75 @@ export class SharedSpatialSession {
       status: 'written', ...base, stancesMarked: base.traversalIds.length, deliveryError,
       topology: { ...topologyCounts, written: topology !== null },
     };
+  }
+
+  /**
+   * 路径片段写满时腾出一批位置；不腾的话此后亲历的路径全被库拒写（线上约 4 小时写满）。
+   * 先忘重复片段：已没有拓扑边指向它（同一对格子被后来的行走改写过），且它记的每一格
+   * 别的片段也记着——忘掉它不丢几何覆盖，也不断拓扑。重复片段不够时，再从片段最拥挤的区块
+   * 忘（同等拥挤先忘旧的），连同指向它的边和因此成孤点的 walk: 通道节点。只动 traversal 来源的片段；
+   * 地标、资源、区块访问、传送门记录不碰。没写满时返回 null。
+   */
+  private makeRoomForFragment(): PathRetention | null {
+    const { history, topology } = this.session;
+    const total = history.fragments({ limit: 1 }).total;
+    if (total < MAX_PATH_FRAGMENTS) return null;
+    const fragments: PathFragment[] = [];
+    for (let after: string | undefined; ;) {
+      const page = history.fragments({ limit: 100, ...(after === undefined ? {} : { after }) });
+      fragments.push(...page.items);
+      if (page.nextAfter === undefined) break;
+      after = page.nextAfter;
+    }
+    const edges: { id: string; from: string; to: string; fragmentId?: string }[] = [];
+    for (let after: string | undefined; ;) {
+      const page = topology.edges({ limit: 100, ...(after === undefined ? {} : { after }) });
+      edges.push(...page.items);
+      if (page.nextAfter === undefined) break;
+      after = page.nextAfter;
+    }
+    const referenced = new Set(edges.flatMap((edge) => edge.fragmentId === undefined ? [] : [edge.fragmentId]));
+    const cellsOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`))];
+    const coverage = new Map<string, number>();
+    for (const cell of fragments.flatMap(cellsOf)) coverage.set(cell, (coverage.get(cell) ?? 0) + 1);
+    const oldestFirst = fragments.filter((f) => f.geometrySource === 'traversal').sort((a, b) => a.lastUsedAt - b.lastUsedAt);
+    const need = total - (MAX_PATH_FRAGMENTS - FRAGMENT_PRUNE_BATCH);
+    const chosen = new Set<string>();
+    for (const f of oldestFirst) {
+      if (chosen.size >= need) break;
+      const cells = cellsOf(f);
+      if (referenced.has(f.id) || cells.some((cell) => coverage.get(cell)! < 2)) continue;
+      for (const cell of cells) coverage.set(cell, coverage.get(cell)! - 1);
+      chosen.add(f.id);
+    }
+    const redundant = chosen.size;
+    // 不够时从最拥挤的地方忘：片段所经区块里“最稀疏那块”还有多少片段算它的拥挤度，挑最拥挤的、
+    // 同等拥挤先忘旧的。按“最旧”忘会先删最早走到的远处（下界门几百格外的那条路），而那里往往只有一条记录。
+    const chunksOf = (f: PathFragment) => [...new Set(f.polyline.map((p) => `${f.dim}:${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}`))];
+    const rest = oldestFirst.filter((f) => !chosen.has(f.id)).map((f) => ({ f, chunks: chunksOf(f) }));
+    const crowd = new Map<string, number>();
+    for (const chunk of rest.flatMap((entry) => entry.chunks)) crowd.set(chunk, (crowd.get(chunk) ?? 0) + 1);
+    while (chosen.size < need && rest.length > 0) {
+      const crowdOf = (chunks: string[]) => Math.min(...chunks.map((chunk) => crowd.get(chunk)!));
+      // rest 已按 lastUsedAt 升序；严格大于才换，所以同等拥挤时忘的是更旧的那个。
+      const best = rest.reduce((top, entry, index) => crowdOf(entry.chunks) > crowdOf(rest[top]!.chunks) ? index : top, 0);
+      const [{ f, chunks }] = rest.splice(best, 1);
+      for (const chunk of chunks) crowd.set(chunk, crowd.get(chunk)! - 1);
+      chosen.add(f.id);
+    }
+    const doomedEdges = edges.filter((edge) => edge.fragmentId !== undefined && chosen.has(edge.fragmentId));
+    const endpoints = new Set(doomedEdges.flatMap((edge) => [edge.from, edge.to]).filter((id) => id.startsWith('walk:')));
+    let nodes = 0;
+    history.runAtomic(() => topology.runAtomic(() => {
+      for (const edge of doomedEdges) topology.forgetEdge(edge.id);
+      for (const id of chosen) history.forgetFragment(id);
+      for (const id of endpoints) {
+        if (topology.incidentEdgeIds(id).length > 0 || topology.incidentPortalEdgeIds(id).length > 0) continue;
+        topology.forgetNode(id);
+        nodes += 1;
+      }
+    }));
+    return { fragments: chosen.size, redundant, edges: doomedEdges.length, nodes };
   }
 
   /**
@@ -1317,7 +1401,14 @@ export class SharedSpatialSession {
     if (this.closingFlag) {
       return Promise.reject(new PersistenceError('closing', 'shared spatial session is closing; checkpoint is rejected'));
     }
+    this.retainObservations();
     return this.session.checkpoint();
+  }
+
+  /** 落盘前修剪体素观测：只留最近 MAX_OBSERVED_CELLS 格。按需驻留时库无法和未驻留区段统一排序，不修剪。 */
+  private retainObservations(): void {
+    if (this.session.voxelLoading === 'manual') return;
+    this.session.voxel.retainNewestObservedCells(MAX_OBSERVED_CELLS);
   }
 
   getPersistenceState(): SpatialPersistenceState {
@@ -1385,6 +1476,7 @@ export class SharedSpatialSession {
 
       // 捕获最终 checkpoint 并核对实际返回值与已确认状态。
       try {
+        this.retainObservations();
         checkpoint = await this.session.checkpoint();
         const state = this.session.getPersistenceState();
         if (

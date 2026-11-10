@@ -41,3 +41,24 @@ test('logs off-heap memory and module stats, and writes one heap snapshot past t
   assert.equal(files.length, 1);
   assert.match(files[0], /heap-.*\.heapsnapshot$/);
 });
+
+test('skips the heap snapshot when the directory already has one from the cooldown window (across restarts)', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'heap-cooldown-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'heap-earlier.heapsnapshot'), '');
+    const b = bus(); const files: string[] = [];
+    const read = () => ({ rss: 1, heapUsed: 1.5 * 2 ** 30, heapLimit: 4 * 2 ** 30, ratio: 0.375 });
+    const h = installProcessHealth(b, { onShutdown() {}, onMemoryRestart() {}, read, send: null,
+      snapshotAtBytes: 2 ** 30, snapshotDir: dir, writeSnapshot: (f) => { files.push(f); return f; } });
+    h.check(); h.check(); h.dispose();
+    assert.equal(files.length, 0);
+    assert.equal(b.evs.filter((e: any) => e.type === 'memory_snapshot').length, 1, '只说一次为什么没写');
+    const old = Date.now() / 1000 - 2 * 86_400;
+    fs.utimesSync(path.join(dir, 'heap-earlier.heapsnapshot'), old, old);
+    const h2 = installProcessHealth(bus(), { onShutdown() {}, onMemoryRestart() {}, read, send: null,
+      snapshotAtBytes: 2 ** 30, snapshotDir: dir, writeSnapshot: (f) => { files.push(f); return f; } });
+    h2.check(); h2.dispose();
+    assert.equal(files.length, 1, '旧快照超过冷却期，照常写');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});

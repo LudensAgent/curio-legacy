@@ -251,6 +251,7 @@ export function codeFromError(e: any): FailureCode {
   if (/NOT_CONNECTED/.test(msg)) return 'NOT_CONNECTED';
   if (/NO_EFFECT|NOT_CONFIRMED|STATE_UNCHANGED|INVENTORY_UNCHANGED|NO_PLACEMENT_FACE/.test(msg)) return 'EFFECT_NOT_CONFIRMED';
   if (/ENTITY_GONE/.test(msg)) return 'TARGET_GONE';
+  if (/^INVENTORY_FULL/.test(msg)) return 'INVENTORY_FULL';
   return 'ERROR';
 }
 

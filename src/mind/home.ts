@@ -9,7 +9,7 @@ import { buildingArchiveFor } from '../skills/build.ts';
 export interface BuildNote { id: string; name: string; status: string; pos: Vec3Like; dist: number; missing: number; accepted?: boolean; attempts: number; lastWorkedAt: number; recentProgress: number | null }
 export interface HomeNote { label: string; pos: Vec3Like; dist: number; dir: string }
 
-const dirOf = (from: Vec3Like, to: Vec3Like) => {
+export const dirOf = (from: Vec3Like, to: Vec3Like) => {
   const a = Math.atan2(to.x - from.x, -(to.z - from.z)) * 180 / Math.PI;
   return ['北', '东北', '东', '东南', '南', '西南', '西', '西北'][Math.round(((a + 360) % 360) / 45) % 8];
 };

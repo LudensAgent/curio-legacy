@@ -9,7 +9,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { afterStep, createActivity, nextStep, recordOf, remainingSteps, signatureOf } from '../src/mind/activity.ts';
 import { Attention } from '../src/mind/attention.ts';
 import { Mind } from '../src/mind/mind.ts';
-import { buildMindMessages } from '../src/mind/prompt.ts';
+import { buildMindMessages, buildReflectionMessages } from '../src/mind/prompt.ts';
 import { DEFAULT_MOOD, feel, moodWords, SelfModel } from '../src/mind/self.ts';
 import { embeddedQuery, parseDecision, Thinker } from '../src/mind/thinker.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -410,6 +410,9 @@ test('被生存反射打断的那一步，等身体安全了再做一遍，不�
   await w.tick();
   assert.deepEqual(w.arbiter.info()?.args, { n: 2 }, '回到被打断的那一步');
   assert.equal(w.pending.length, 1, '没有为此额外调用模型');
+  assert.equal(w.mind.activity?.interruptions, 1, '身体反射打断被记在活动状态里');
+  assert.equal(w.mind.activity?.lastInterruption?.kind, 'body_reflex');
+  assert.match(w.mind.activity?.lastInterruption?.reason ?? '', /躲闪反应/);
 });
 
 test('死亡后放下手上的活，复活后认真想想，并记进日记和情绪', async (t) => {
@@ -686,6 +689,8 @@ test('提前规划明确选择调整时仍执行新的动作', async (t) => {
   await w.tick();
   await w.reply(1, { decision: 'adjust', activity: { what: '采石头', steps: [step(2)] } });
   assert.equal(w.mind.activity?.what, '采石头');
+  assert.equal(w.mind.activity?.lastInterruption?.kind, 'adjusted', '主动改做法也留下未完成事实');
+  assert.match(w.mind.activity?.lastInterruption?.reason ?? '', /调整取消了正在执行/);
   assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
 });
 
@@ -766,6 +771,50 @@ test('模型在活动成功后写出的结论不能直接继承活动验证结�
   assert.equal(lesson.signature, undefined);
 });
 
+test('活动显式 applying 把结果交给对应窍门，并快照开工时的说法', async (t) => {
+  const w = fixture(t);
+  const lesson = w.self.learn('先看看再走', { source: 'reflection' })!;
+  await w.tick();
+  await w.reply(0, { monologue: '按这条窍门试试', decision: 'new', activity: { what: '按窍门走一步', applying: lesson.id, steps: [step()] } });
+  assert.equal(w.mind.activity?.applying, lesson.id);
+  assert.equal(w.mind.activity?.applyingText, lesson.text);
+  await w.finish(ok('走通了'));
+  assert.equal(lesson.applications?.length, 1);
+  assert.equal(lesson.applications?.[0].outcome, 'done');
+  assert.equal(lesson.unverified, true, '应用证据不等于自动验证结论');
+});
+
+test('活动按窍门开工后同一 id 在后台被改写，旧活动不记到新结论', async (t) => {
+  const w = fixture(t);
+  const lesson = w.self.learn('卡住时向上开巷', { source: 'reflection' })!;
+  const startedText = lesson.text;
+  await w.tick();
+  await w.reply(0, { monologue: '按这条窍门试试', decision: 'new', activity: { what: '按窍门走一步', applying: lesson.id, steps: [step()] } });
+  assert.equal(w.mind.activity?.applyingText, startedText);
+  w.self.learn('卡住时向下开巷', { source: 'reflection', revise: lesson.id });
+  await w.finish(ok('走通了'));
+  assert.equal(lesson.wins, 0, '改写后的新结论不能继承旧活动的成功');
+  assert.equal(lesson.applications, undefined);
+  const payload = JSON.parse(buildReflectionMessages(w.self, 'P', [], [], w.memory)[1].content.split('\n')[0]);
+  const recent = payload.recent.find((entry: { applying?: string }) => entry.applying === lesson.id);
+  assert.equal(recent.applying_at_start, startedText, '反思并列显示开工时的旧说法，不把新结论和旧成功放一起');
+});
+
+test('不存在的 applying id 保留为未解析关联，且不回退签名误记其他窍门', async (t) => {
+  const w = fixture(t);
+  const unrelated = w.self.learn('另一个做法', { source: 'reflection', signature: 'mind_step' })!;
+  await w.tick();
+  await w.reply(0, { monologue: '用一个不存在的 id', decision: 'new', activity: { what: '不该关联', applying: 'k_missing', steps: [step()] } });
+  assert.equal(w.mind.activity?.applying, 'k_missing', '保留明确声明的原 id');
+  assert.equal(w.mind.activity?.applyingText, undefined, '找不到原文，快照未知');
+  await w.finish(ok('走通了'));
+  assert.equal(unrelated.wins, 0, '未解析的显式关联不能回退签名');
+  assert.equal(unrelated.applications, undefined);
+  const payload = JSON.parse(buildReflectionMessages(w.self, 'P', [], [], w.memory)[1].content.split('\n')[0]);
+  const recent = payload.recent.find((entry: { applying?: string }) => entry.applying === 'k_missing');
+  assert.equal(recent.applying_at_start, 'unknown', '旧记录缺快照时明确 unknown');
+});
+
 test('改写结论后，旧动作的结果不能替新结论验证', () => {
   const self = new SelfModel(null);
   const old = self.learn('站干岸浇水', { source: 'reflection', signature: 'pour', outcome: 'done' })!;
@@ -808,19 +857,25 @@ test('回想合并或改写结论不能继承旧做法的验证证据', () => {
   const self = new SelfModel(null);
   const old = self.learn('用水接触岩浆形成黑曜石', { source: 'reflection', signature: 'pour', outcome: 'done' })!;
   const guess = self.learn('铁镐可以采收黑曜石', { source: 'reflection' })!;
+  self.record({ id: 'apply-old', what: '按旧结论做', kind: 'gather', applying: old.id, applyingText: old.text, outcome: 'done', summary: '按旧结论做成了', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'other', failures: 0 });
+  assert.equal(old.applications?.length, 1);
   self.consolidate({ merge: [{ ids: [old.id, guess.id], text: '用水接触岩浆形成黑曜石；铁镐可以采收' }], rewrite: [], drop: [], add: [], agendaDrop: [] });
   assert.equal(old.wins, 0);
   assert.equal(old.unverified, true);
   assert.equal(old.signature, undefined);
+  assert.equal(old.applications, undefined, '改写后的结论不能继承旧结论的应用证据');
   self.record({ id: 'a', what: '浇水', kind: 'gather', outcome: 'done', summary: '', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'pour', failures: 0 });
   assert.equal(old.wins, 0, '重复旧做法不能验证加入的新结论');
   assert.equal(old.unverified, true);
 
   const original = self.learn('下矿时用镐挖石头', { source: 'reflection', signature: 'dig', outcome: 'done' })!;
+  self.record({ id: 'apply-original', what: '按旧结论挖', kind: 'gather', applying: original.id, applyingText: original.text, outcome: 'stuck', summary: '按旧结论没挖通', durationSec: 1, gained: {}, lost: {}, at: Date.now(), signature: 'other', failures: 1 });
+  assert.equal(original.applications?.length, 1);
   self.consolidate({ merge: [], rewrite: [{ id: original.id, text: '下矿时用镐挖石头，铁镐能采收黑曜石' }], drop: [], add: [], agendaDrop: [] });
   assert.equal(original.wins, 0);
   assert.equal(original.unverified, true);
   assert.equal(original.signature, undefined);
+  assert.equal(original.applications, undefined);
 });
 
 test('回想完全保留同一结论及做法时仍可合并成败记录', () => {

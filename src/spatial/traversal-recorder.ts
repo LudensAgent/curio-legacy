@@ -12,6 +12,8 @@ export interface TraversalObservation {
   inWater?: boolean;
   inLava?: boolean;
   riding?: boolean;
+  /** 是否站在地面上；用于判断一次下落在哪里落地。不写按未知处理，不记录下落。 */
+  onGround?: boolean;
   /** 本次观测前实际挖掉的格子（由适配器 recentDug 提供）。 */
   dug?: readonly { pos: Vec3Like; name: string; ts: number }[];
   /** 该位置脚下是否是自放的方块；只用于给 fragment 标来源，不参与导航。 */
@@ -32,6 +34,8 @@ const DUG_PROXIMITY = 6;
  * 主动落盘短段，否则一次短距离步行会一直留在内存里，直到下次断点或进程退出才写入。
  */
 const IDLE_FLUSH_MS = 3000;
+/** 下落：两次观测间竖直下降超过普通步行（dy>2），水平偏移不超过这个距离才当作同一次掉落。 */
+const FALL_HORIZONTAL = 4;
 
 /**
  * 回执有界保留条数。回执只用于证据链观察/报告已发生的写入，旧回执被淘汰；
@@ -123,6 +127,8 @@ export class TraversalRecorder {
   private sequence = 0;
   /** 因 8 点上限 flush 后，把上一段末点带进下一段的 seam；瞬移/换会话/水里不携带。 */
   private pendingStart: { worldId: string; dim: string; sessionId: string; pos: Vec3Like } | null = null;
+  /** 正在下落：起跳点（最后一处行走记录位置）。落地后写成一条单向 drop 段，离地期间的空中位置不记。 */
+  private fall: { worldId: string; dim: string; sessionId: string; from: Vec3Like } | null = null;
   /** 有界写入回执（旧→新）；证据链只读，不重放。 */
   private readonly receiptsLog: TraversalWriteReceipt[] = [];
   private receiptSequence = 0;
@@ -131,6 +137,8 @@ export class TraversalRecorder {
     private readonly sink: Pick<SharedSpatialSession, 'recordWalkCorridor'> | undefined,
     private readonly now: () => number = Date.now,
     private readonly onFailure?: (message: string) => void,
+    /** 写满腾位时实际忘掉了哪些旧路径记录（事实，不是失败）。 */
+    private readonly onForgotten?: (message: string) => void,
   ) {}
 
   observe(observation: TraversalObservation): void {
@@ -144,6 +152,31 @@ export class TraversalRecorder {
     if (previous !== null && moved === 0) {
       if (this.run !== null && this.now() - this.run.lastAt >= IDLE_FLUSH_MS) this.flush(true);
       return;
+    }
+    // 掉落：竖直下降超过步行范围、水平基本不动。普通行走口径会把它当断点，记录图就在每个坑边断开，
+    // 以后既不知道这里连着下面，也不知道原路返回要爬升。落地后单独写一条 mode:'drop' 的单向段。
+    const sameScope = previous !== null && previous.worldId === worldId && previous.dim === dim && previous.sessionId === sessionId;
+    const horizontal = previous === null ? Infinity : Math.hypot(pos.x - previous.pos.x, pos.z - previous.pos.z);
+    if (observation.inWater || observation.inLava || observation.riding || !sameScope || observation.onGround === undefined) this.fall = null;
+    else if (this.fall !== null || (previous.pos.y - pos.y > 2 && horizontal <= FALL_HORIZONTAL && moved <= TELEPORT)) {
+      // 离地期间只接受继续往下的位置；落地那一帧可以与上一帧同高。悬空不降、往上或横移过远都不算这次掉落。
+      const descending = (pos.y < previous.pos.y - 1e-6 || observation.onGround === true) && horizontal <= FALL_HORIZONTAL;
+      if (this.fall === null || descending) {
+        if (this.fall === null) {
+          // 起跳点取当前行走段最后一个记录点，让 drop 段与前一段落在同一格上接起来。
+          const from = this.run !== null && d3(this.run.points.at(-1)!, previous.pos) <= 1.5 ? this.run.points.at(-1)! : previous.pos;
+          this.fall = { worldId, dim, sessionId, from: { ...from } };
+          this.flush();
+        }
+        this.last = { worldId, dim, sessionId, pos: { ...pos } };
+        if (observation.onGround === true) {
+          const fall = this.fall;
+          this.fall = null;
+          if (fall.from.y - pos.y > 2) this.recordDrop(fall, pos);
+        }
+        return;
+      }
+      this.fall = null;
     }
     const discontinuous = previous !== null && (
       previous.worldId !== worldId
@@ -223,6 +256,24 @@ export class TraversalRecorder {
     if (this.run.points.length >= MAX_POINTS) this.flush(true);
   }
 
+  /** 一次已落地的掉落：起跳点 → 落地点两点一段，mode:'drop'；落地点作为下一段行走的起点。 */
+  private recordDrop(fall: { worldId: string; dim: string; sessionId: string; from: Vec3Like }, to: Vec3Like): void {
+    const at = this.now();
+    const id = `trail:${fall.worldId}:${fall.dim}:${at}:${this.sequence++}`;
+    this.run = {
+      id, worldId: fall.worldId, dim: fall.dim, sessionId: fall.sessionId,
+      startedAt: at, lastAt: at,
+      points: [{ ...fall.from }, { ...to }],
+      segments: [{
+        id: `${id}:0`, fragmentId: id, from: { ...fall.from }, to: { ...to },
+        worldId: fall.worldId, dim: fall.dim, sessionId: fall.sessionId,
+        observedAt: at, source: 'confirmed_traversal', executionId: id, mode: 'drop',
+      }],
+      hasDug: false, bridgeSupports: 0,
+    };
+    this.flush(true);
+  }
+
   /** 最近的有界写入回执（旧→新）。只报告已发生的真实写入，不触发重试。 */
   receipts(limit = MAX_TRAVERSAL_RECEIPTS): readonly TraversalWriteReceipt[] {
     return this.receiptsLog.slice(Math.max(0, this.receiptsLog.length - Math.max(0, limit)));
@@ -282,6 +333,10 @@ export class TraversalRecorder {
       this.receiptsLog.splice(0, this.receiptsLog.length - MAX_TRAVERSAL_RECEIPTS);
     }
     // 回执先定稿入日志，再通知失败；回调抛错不得改写已记录的证据。
+    const f = 'forgotten' in outcome ? outcome.forgotten : undefined;
+    if (f !== undefined) {
+      this.onForgotten?.(`路径记录已满，忘掉 ${f.fragments} 段旧路径（其中 ${f.redundant} 段的每一格别的记录里也有、已无路线边引用；其余取自记录最拥挤的区块），连带 ${f.edges} 条路线边、${f.nodes} 个通道节点`);
+    }
     if (exceptionMessage !== null) this.onFailure?.(exceptionMessage);
     else if (outcome.status === 'failed') this.onFailure?.(`空间记忆写入失败：${outcome.stage} ${outcome.message}`);
     return receipt;
