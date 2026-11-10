@@ -71,6 +71,7 @@ function checkpoint(id: string, revisions = { voxel: 5, fragment: 4, topology: 3
     journalRevision: 0,
     ledgerRevision: 0,
     factsRevision: 0,
+    factsCommitted: false,
   };
 }
 

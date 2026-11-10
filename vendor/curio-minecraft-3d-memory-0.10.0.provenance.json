@@ -3,12 +3,12 @@
     "name": "curio-minecraft-3d-memory",
     "version": "0.10.0"
   },
-  "sourceHEAD": "922546e305892c436267182ac73566240b61f401",
-  "artifactSHA256": "8a102e41716b8e8443e90eb369c68efd94d9753d30040197d72a7754809019f3",
-  "npmIntegrity": "sha512-A5/0NmOfERIu+1fnXGxlvAhcm/1ClakaW4hm5Jdus7zCfPo0Ne4I0QRWsHSqWOSTrYe7kj8xbSDpNUWJCihc0g==",
+  "sourceHEAD": "fe7e49112c602b7f25bdb67d30b5615c5982d365",
+  "artifactSHA256": "12ed4a8427ff4b2fe7564f2a429bc17827352440c554946185cbd6e136b10861",
+  "npmIntegrity": "sha512-fg9fAsxZcCsro9OTY1A27VUVqq/Q1fvDSg7DfDpD1g6aZh0F6nawkm42eN4r1kPE4DlFXWeG+3huBHPVnvuKkQ==",
   "sourceBinding": {
     "clean": true,
-    "head": "922546e305892c436267182ac73566240b61f401",
-    "note": "Built from a clean detached worktree at sourceHEAD. The main library checkout's unrelated uncommitted design doc and untracked workspace files were not present."
+    "head": "fe7e49112c602b7f25bdb67d30b5615c5982d365",
+    "note": "Built from git archive of sourceHEAD in a separate directory, using the existing library TypeScript and type dependencies through an explicit typeRoots path. No working-tree source or design edits were included."
   }
 }
