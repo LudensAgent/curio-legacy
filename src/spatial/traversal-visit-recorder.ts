@@ -5,9 +5,8 @@ import type { SharedSpatialSession } from './shared-session.ts';
  * 普通移动的实测到访记录器。
  *
  * v0.11 起普通移动只把“实际确认站过的格”写进 VoxelMap 的到访位，不再生成
- * Fragment、traversal、拓扑节点或路线边。历史几何的显式兼容写入仍由
- * `TraversalRecorder` / `SharedSpatialSession.recordWalkCorridor` 提供，但不属于
- * 普通感知/移动流程。
+ * Fragment、traversal、拓扑节点或路线边；历史路线的显式兼容写入器已退役，
+ * 不属于普通感知/移动流程。
  *
  * 与旧 recorder 相同的边界：不记录瞬移、断线/换维/换会话、水里/岩浆/骑乘位移，
  * 不把计划点或采样间隔内的中间格插值成到访。一次确认观测只标记实测脚位所在的

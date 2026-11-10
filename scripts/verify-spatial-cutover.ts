@@ -7,11 +7,14 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
-import type { SpatialNode } from 'curio-minecraft-3d-memory';
+import type { PathFragment, SpatialNode } from 'curio-minecraft-3d-memory';
 import { ContainerLedger } from '../src/memory/container-ledger.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { SpatialSemanticStore } from '../src/spatial/semantic-store.ts';
-import { DEFAULT_SNAPSHOT_MAX_MB, MAX_FRAGMENT_LINKS } from '../src/spatial/shared-session.ts';
+import { DEFAULT_SNAPSHOT_MAX_MB } from '../src/spatial/shared-session.ts';
+
+/** Offline mirror of the runtime link cap; scripts must not depend on retired route constants in src. */
+const MAX_FRAGMENT_LINKS = 16_384;
 
 const [database, worldId, dim = 'overworld', containerLedger] = process.argv.slice(2);
 if (!database || !worldId) {
@@ -31,7 +34,25 @@ if (!database || !worldId) {
     const containers = new ContainerLedger(containerLedger ? resolve(containerLedger) : null, worldId);
     const semantic = new SpatialSemanticStore(session, containers, { worldId });
     const memory = new WorldMemory(null, { semantic });
-    const passages = memory.allPassages(dim);
+    const fragments = (() => {
+      const out: PathFragment[] = [];
+      let after: string | undefined;
+      for (let guard = 0; guard < 10_000; guard++) {
+        const page = session.history.fragments({ after, limit: 100 });
+        out.push(...page.items);
+        if (page.nextAfter === undefined) break;
+        after = page.nextAfter;
+      }
+      return out;
+    })();
+    const passages = fragments.filter((fragment) => {
+      const curio = (fragment.metadata as { curio?: { type?: unknown; archivedAt?: unknown } } | undefined)?.curio;
+      return fragment.dim === dim && curio?.type === 'passage';
+    });
+    const archivedPassages = passages.filter((fragment) => {
+      const curio = (fragment.metadata as { curio?: { archivedAt?: unknown } } | undefined)?.curio;
+      return typeof curio?.archivedAt === 'number';
+    });
     const landmarks = memory.landmarks().filter((l) => l.dim === dim);
     const chests = memory.chests(dim);
     const farms = memory.farms().filter((f) => f.dim === dim);
@@ -62,7 +83,7 @@ if (!database || !worldId) {
       contentsInMetadata,
       loaded: {
         passages: passages.length,
-        archivedPassages: passages.filter((p) => p.archivedAt !== undefined).length,
+        archivedPassages: archivedPassages.length,
         landmarks: landmarks.length,
         chests: chests.length,
         farms: farms.length,

@@ -313,12 +313,6 @@ test('提示词不再宣传旧 passage/附近路径', () => {
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const percept = perception.update();
   const state = adapter.state();
-  const passage = (id: string, x: number, deepestY: number) => ({
-    id, worldId: state.worldId, dim: state.dim, kind: 'dug' as const, entrances: [], path: [{ x, y: 60, z: 0 }],
-    links: [{ a: { x, y: 60, z: 0 }, b: { x, y: deepestY, z: 1 } }], deepestY, dug: 10, ores: {}, createdAt: 1, lastUsedAt: 1, uses: 1,
-  });
-  memory.savePassage(passage('psg_near', 20, -40));
-  memory.savePassage(passage('psg_far', 900, -60));
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self: new SelfModel(null),
     memory, activity: createActivity({ what: '下矿找钻石，下到 y=-50', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', state),
     suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };

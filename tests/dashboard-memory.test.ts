@@ -16,8 +16,6 @@ function populate(memory: WorldMemory, worldId: string) {
     memory.noteChestUse(dim, pos, { put: [{ name: 'coal', count: 64 }], day: 1 });
     memory.addHazard({ dim, pos, kind: 'fall' });
     memory.addFarm({ id: `${worldId}:${dim}`, dim, crop: 'wheat', cells: [pos], harvests: 0, plantedAt: Date.now() });
-    memory.savePassage({ id: `${worldId}:${dim}`, worldId, dim, entrances: [pos], path: [pos], deepestY: 64,
-      dug: 4, ores: {}, createdAt: Date.now(), lastUsedAt: Date.now(), uses: 1 });
     memory.addNote('fact', `${worldId}:${dim}`, dim, pos);
     memory.recordGoal({ dimension: dim, goal: `${worldId}:${dim}`, goalType: 'explore', source: 'test', status: 'succeeded', summary: dim });
   });

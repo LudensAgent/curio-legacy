@@ -1,9 +1,7 @@
 import type {
-  FragmentChanges,
   FragmentStore,
   JsonObject,
   JsonValue,
-  PathFragment,
   TopologyStore,
 } from 'curio-minecraft-3d-memory';
 import type {
@@ -11,10 +9,9 @@ import type {
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, shortId } from '../util.ts';
-import { buildPathGraph, pathComponents } from './path-graph.ts';
 import type { ContainerLedger } from '../memory/container-ledger.ts';
 import { chestLocation, isContainerLandmark, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from '../memory/chest-memory.ts';
-import type { FarmRecord, FurnaceRecord, GoneSpot, Hazard, HazardKind, Landmark, LandmarkKind, PassageRecord } from '../memory/store.ts';
+import type { FarmRecord, FurnaceRecord, GoneSpot, Hazard, HazardKind, Landmark, LandmarkKind } from '../memory/store.ts';
 import {
   containerLedgerKey,
   goneReasonOf,
@@ -33,9 +30,9 @@ import {
 export interface SpatialLibraryStores {
   /** Semantic facts (places, exact resources, container anchors). */
   readonly facts: HostFactsPort;
-  /** Route/passage history. Passage methods remain on the legacy fragment surface. */
+  /** World binding for this library session; passage/route methods are retired. */
   readonly history: FragmentStore;
-  /** Topology remains for the compatibility migration marker and route-only consumers. */
+  /** Topology remains for the compatibility migration marker. */
   readonly topology: TopologyStore;
   readonly ledger: LedgerStore;
 }
@@ -44,9 +41,6 @@ export interface SpatialLibraryStores {
 export const LANDMARK_CAP = 200;
 export const DISCOVERY_LABEL_CAP = 8;
 export const EXCAVATION_WAYPOINT_CAP = 8;
-export const PASSAGE_LIVE_CAP = 24;
-export const PASSAGE_ARCHIVE_CAP = 512;
-export const PASSAGE_BRIDGE_ARCHIVE_CAP = 64;
 export const BASE_CAP = 64;
 export const HERD_CAP = 40;
 export const HAZARD_CAP = 40;
@@ -54,14 +48,7 @@ export const GONE_CAP = 120;
 
 type Vec = { x: number; y: number; z: number };
 
-interface PassageCurioMeta {
-  type?: string;
-  dug?: number;
-  ores?: Record<string, number>;
-  archivedAt?: number;
-  linkMeta?: unknown;
-}
-interface CurioMetadata { curio?: PassageCurioMeta }
+interface CurioMetadata { curio?: unknown }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -80,122 +67,6 @@ const LANDMARK_REFRESH_MS = 60_000;
 /** 内部淘汰（容量、过期、被“我的 X”替换）不是世界消失，不进入 goneNear。 */
 const CONTROL_GONE_REASONS = new Set(['capacity', 'faded', 'replaced', 'forgotten']);
 const HAZARD_KINDS: ReadonlySet<string> = new Set<HazardKind>(['drowning', 'lava', 'fall', 'mob', 'explosion', 'starvation', 'suffocation', 'unknown']);
-
-const encoderFlags = (flags: boolean[]): string | undefined => {
-  if (!flags.some(Boolean)) return undefined;
-  const bytes = new Uint8Array(Math.ceil(flags.length / 8));
-  flags.forEach((flag, i) => { if (flag) bytes[i >> 3]! |= 1 << (i & 7); });
-  return Buffer.from(bytes).toString('base64');
-};
-const decodeFlags = (value: unknown): Uint8Array | undefined =>
-  typeof value === 'string' ? new Uint8Array(Buffer.from(value, 'base64')) : undefined;
-const flagAt = (bytes: Uint8Array | undefined, i: number) =>
-  !!bytes && (i >> 3) < bytes.length && (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
-
-function allFragments(history: FragmentStore): PathFragment[] {
-  const out: PathFragment[] = [];
-  let after: string | undefined;
-  for (let guard = 0; guard < 10_000; guard++) {
-    const page = history.fragments({ after, limit: 100 });
-    out.push(...page.items);
-    if (page.nextAfter === undefined) break;
-    after = page.nextAfter;
-  }
-  return out;
-}
-
-export function fragmentRecord(fragment: PathFragment): PassageRecord {
-  const curio = (isRecord(fragment.metadata) ? (fragment.metadata as CurioMetadata).curio : undefined);
-  const legacy = new Map<number, { cut?: boolean; reverse?: boolean }>();
-  let cutBits: Uint8Array | undefined, reverseBits: Uint8Array | undefined;
-  const rawMeta = curio?.linkMeta;
-  if (Array.isArray(rawMeta)) {
-    for (const item of rawMeta) {
-      if (!item || typeof item !== 'object') continue;
-      const { i, cut, reverse } = item as { i?: unknown; cut?: unknown; reverse?: unknown };
-      if (typeof i !== 'number') continue;
-      legacy.set(i, { ...(cut === true ? { cut: true } : {}), ...(reverse === true ? { reverse: true } : {}) });
-    }
-  } else if (rawMeta && typeof rawMeta === 'object') {
-    cutBits = decodeFlags((rawMeta as { cut?: unknown }).cut);
-    reverseBits = decodeFlags((rawMeta as { reverse?: unknown }).reverse);
-  }
-  const flagsOf = (i: number) => ({
-    ...(legacy.get(i) ?? {}),
-    ...(flagAt(cutBits, i) ? { cut: true } : {}),
-    ...(flagAt(reverseBits, i) ? { reverse: true } : {}),
-  });
-  return {
-    id: fragment.id,
-    worldId: fragment.worldId,
-    dim: fragment.dim,
-    kind: fragment.kind === 'built' ? 'dug' : fragment.kind,
-    entrances: fragment.entrances.map(point),
-    path: fragment.polyline.map(point),
-    ...(fragment.links ? { links: fragment.links.map((link, i) => ({ a: point(link.a), b: point(link.b), ...flagsOf(i) })) } : {}),
-    deepestY: fragment.deepestY,
-    dug: typeof curio?.dug === 'number' ? curio.dug : 0,
-    ores: curio?.ores && typeof curio.ores === 'object' ? (curio.ores as Record<string, number>) : {},
-    createdAt: fragment.createdAt,
-    lastUsedAt: fragment.lastUsedAt,
-    uses: fragment.uses,
-    ...(typeof curio?.archivedAt === 'number' ? { archivedAt: curio.archivedAt } : {}),
-    ...(fragment.geometrySource ? { geometrySource: fragment.geometrySource } : {}),
-  };
-}
-
-function passageMetadata(rec: PassageRecord): JsonObject {
-  const cutBits = encoderFlags(rec.links?.map((link) => !!link.cut) ?? []);
-  const reverseBits = encoderFlags(rec.links?.map((link) => !!link.reverse) ?? []);
-  const linkMeta = cutBits || reverseBits
-    ? { ...(cutBits ? { cut: cutBits } : {}), ...(reverseBits ? { reverse: reverseBits } : {}) }
-    : undefined;
-  return {
-    curio: {
-      v: 2,
-      type: 'passage',
-      geometrySource: rec.geometrySource ?? 'traversal',
-      dug: rec.dug,
-      ores: rec.ores,
-      ...(rec.archivedAt !== undefined ? { archivedAt: rec.archivedAt } : {}),
-      ...(linkMeta ? { linkMeta } : {}),
-    },
-  } as unknown as JsonObject;
-}
-
-function fragmentFor(rec: PassageRecord, worldId: string): PathFragment {
-  return {
-    id: rec.id,
-    worldId: rec.worldId ?? worldId,
-    dim: rec.dim,
-    kind: rec.kind ?? 'walked',
-    entrances: rec.entrances.map(point),
-    polyline: rec.path.map(point),
-    geometrySource: rec.geometrySource ?? 'traversal',
-    ...(rec.links ? { links: rec.links.map((link) => ({ a: point(link.a), b: point(link.b) })) } : {}),
-    deepestY: rec.deepestY,
-    createdAt: rec.createdAt,
-    lastUsedAt: rec.lastUsedAt,
-    uses: rec.uses,
-    externalRef: rec.id,
-    metadata: passageMetadata(rec),
-  };
-}
-
-function fragmentChanges(rec: PassageRecord): FragmentChanges {
-  return {
-    kind: rec.kind ?? 'walked',
-    entrances: rec.entrances.map(point),
-    polyline: rec.path.map(point),
-    geometrySource: rec.geometrySource ?? 'traversal',
-    links: rec.links?.map((link) => ({ a: point(link.a), b: point(link.b) })),
-    deepestY: rec.deepestY,
-    lastUsedAt: rec.lastUsedAt,
-    uses: rec.uses,
-    externalRef: rec.id,
-    metadata: passageMetadata(rec),
-  };
-}
 
 function areaOf(cells: Vec3Like[]): FactLocation {
   if (!cells.length) return { kind: 'exact', pos: { x: 0, y: 64, z: 0 } };
@@ -244,9 +115,8 @@ type PlaceRole = LandmarkKind | 'farm' | 'portal' | 'hazard' | 'station' | 'gone
  * Native host view over the semantic facts, route history and ledger.
  *
  * The library fact layer owns place/resource/container identity, scope, time
- * and gone state. The host precise container ledger owns contents. Route and
- * passage surfaces remain legacy-compatible and are not part of the facts
- * domain.
+ * and gone state. The host precise container ledger owns contents. Legacy
+ * route and passage surfaces are retired and are not part of the facts domain.
  */
 export class SpatialSemanticStore {
   readonly worldId: string;
@@ -1267,87 +1137,6 @@ export class SpatialSemanticStore {
     return best ? clone(best) : null;
   }
 
-  // ----------------------------------------------------------------- passages
-
-  private allFragments(): PathFragment[] { return allFragments(this.session.history); }
-
-  private passageFragments(archived: boolean, dim?: string): PathFragment[] {
-    return this.allFragments().filter((fragment) => {
-      const curio = isRecord(fragment.metadata) ? (fragment.metadata as CurioMetadata).curio : undefined;
-      if (curio?.type !== 'passage') return false;
-      if (dim && fragment.dim !== dim) return false;
-      return (typeof curio.archivedAt === 'number') === archived;
-    });
-  }
-
-  passages(dim?: string): PassageRecord[] {
-    return this.passageFragments(false, dim).map(fragmentRecord);
-  }
-
-  archivedPassages(dim?: string): PassageRecord[] {
-    return this.passageFragments(true, dim).map(fragmentRecord);
-  }
-
-  allPassages(dim?: string): PassageRecord[] {
-    const live = this.passages(dim);
-    const ids = new Set(live.map((record) => record.id));
-    return [...live, ...this.archivedPassages(dim).filter((record) => !ids.has(record.id))];
-  }
-
-  private writePassage(rec: PassageRecord) {
-    const fragment = fragmentFor(rec, this.worldId);
-    const existing = this.session.history.getFragment(rec.id);
-    if (!existing) { this.session.history.saveFragment(fragment); return; }
-    if (existing.createdAt !== fragment.createdAt) {
-      this.session.history.forgetFragment(rec.id);
-      this.session.history.saveFragment(fragment);
-      return;
-    }
-    this.session.history.updateFragment(rec.id, fragmentChanges(rec));
-  }
-
-  archivePassage(rec: PassageRecord) {
-    const archived = { ...rec, worldId: rec.worldId ?? this.worldId, archivedAt: Date.now() };
-    this.writePassage(archived);
-    this.trimPassageArchive();
-  }
-
-  savePassage(rec: PassageRecord) {
-    const copy = { ...rec, worldId: rec.worldId ?? this.worldId };
-    delete copy.archivedAt;
-    this.writePassage(copy);
-    const live = this.passages();
-    if (live.length > PASSAGE_LIVE_CAP) {
-      const rank = (record: PassageRecord) => {
-        const kind = record.kind ?? 'dug';
-        const protectedDug = kind === 'dug' && (record.path.length >= 24 || record.deepestY <= -16) ? 1 : 0;
-        return [protectedDug, kind === 'bridge' ? 0 : kind === 'walked' ? 1 : 2, record.path.length, record.lastUsedAt] as const;
-      };
-      const victim = live.filter((record) => record.id !== copy.id).sort((a, b) => {
-        const ka = rank(a), kb = rank(b);
-        for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i]! - kb[i]!;
-        return 0;
-      })[0];
-      if (victim) this.archivePassage(victim);
-    }
-  }
-
-  forgetPassage(id: string) {
-    if (this.session.history.getFragment(id)) this.session.history.forgetFragment(id);
-  }
-
-  private trimPassageArchive() {
-    const archived = this.archivedPassages();
-    const bridges = archived.filter((record) => record.kind === 'bridge').sort((a, b) => b.lastUsedAt - a.lastUsedAt);
-    if (bridges.length > PASSAGE_BRIDGE_ARCHIVE_CAP) {
-      for (const record of bridges.slice(PASSAGE_BRIDGE_ARCHIVE_CAP)) this.forgetPassage(record.id);
-    }
-    const left = this.archivedPassages();
-    if (left.length > PASSAGE_ARCHIVE_CAP) {
-      for (const record of left.sort((a, b) => a.lastUsedAt - b.lastUsedAt).slice(0, left.length - PASSAGE_ARCHIVE_CAP)) this.forgetPassage(record.id);
-    }
-  }
-
   // ---------------------------------------------------- ledger-backed records
 
   putPlaced(pos: Vec3Like, name: string, dim?: string) {
@@ -1406,42 +1195,13 @@ export class SpatialSemanticStore {
     return this.session.ledger.chunkVisits().length;
   }
 
-  /** 身边记录过的历史路网（路线几何，不是事实层）。 */
-  nearbyPaths(dim: string, here: Vec3Like, radius: number) {
-    const fragments = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal');
-    const graph = buildPathGraph(fragments);
-    const kindOf = new Map(fragments.map((f) => [f.id, f.kind]));
-    const { componentOf } = pathComponents(graph);
-    const flat = (c: Vec3Like) => Math.hypot(c.x + 0.5 - here.x, c.z + 0.5 - here.z);
-    const roads = new Map<string, { nearest: Vec3Like; nearestDist: number; far: Vec3Like; farDist: number; cells: number; kinds: Set<string> }>();
-    for (const [key, cell] of graph.cells) {
-      const id = componentOf.get(key)!, d = flat(cell);
-      const road = roads.get(id) ?? roads.set(id, { nearest: cell, nearestDist: Infinity, far: cell, farDist: -1, cells: 0, kinds: new Set() }).get(id)!;
-      road.cells++;
-      road.kinds.add(kindOf.get(graph.fragmentOf.get(key)!) ?? 'walked');
-      if (Math.abs(cell.y - here.y) <= 8 && d < road.nearestDist) { road.nearest = cell; road.nearestDist = d; }
-      if (d > road.farDist) { road.far = cell; road.farDist = d; }
-    }
-    return [...roads.values()].filter((r) => r.nearestDist <= radius).sort((a, b) => a.nearestDist - b.nearestDist)
-      .map((r) => ({ nearest: { ...r.nearest }, nearestDist: r.nearestDist, far: { ...r.far }, farDist: r.farDist, cells: r.cells, kinds: [...r.kinds] as PathFragment['kind'][],
-        onIt: r.nearestDist <= 1.5 && Math.abs(r.nearest.y - Math.floor(here.y)) <= 1 }));
-  }
-
   visitedExtent(dim: string) {
     const visits = this.session.ledger.chunkVisits(dim);
     const bounds = visits.length === 0 ? null : {
       minX: Math.min(...visits.map((v) => v.cx)) * 16, maxX: Math.max(...visits.map((v) => v.cx)) * 16 + 15,
       minZ: Math.min(...visits.map((v) => v.cz)) * 16, maxZ: Math.max(...visits.map((v) => v.cz)) * 16 + 15,
     };
-    const points = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal')
-      .flatMap((f) => f.polyline.map((p) => ({ pos: point(p), at: f.lastUsedAt })));
-    const pick = (better: (a: Vec3Like, b: Vec3Like) => boolean) =>
-      points.reduce<(typeof points)[number] | null>((best, p) => best === null || better(p.pos, best.pos) ? p : best, null);
-    const farthest = points.length === 0 ? null : {
-      N: pick((a, b) => a.z < b.z)!, S: pick((a, b) => a.z > b.z)!,
-      E: pick((a, b) => a.x > b.x)!, W: pick((a, b) => a.x < b.x)!,
-    };
-    return { chunks: visits.length, bounds, farthest };
+    return { chunks: visits.length, bounds };
   }
 
   novelty(dim: string, x: number, z: number): number {
@@ -1479,7 +1239,6 @@ export class SpatialSemanticStore {
   hasManagedRecords(): boolean {
     const snapshot = this.snapshot();
     return snapshot.places.length > 0 || snapshot.resources.length > 0 || snapshot.containers.length > 0
-      || this.allFragments().length > 0
       || this.session.ledger.placedBlocks().length > 0 || this.session.ledger.chunkVisits().length > 0
       || this.session.ledger.portalTraversals().length > 0;
   }
@@ -1498,7 +1257,6 @@ export class SpatialSemanticStore {
       gone: places.filter((fact) => fact.gone && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.goneSource) ?? '')).length
         + snapshot.resources.filter((fact) => fact.revoked && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.revokedSource) ?? '')).length
         + snapshot.containers.filter((fact) => fact.gone && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.goneSource) ?? '')).length,
-      fragments: this.allFragments().filter((fragment) => isRecord(fragment.metadata) && (fragment.metadata as CurioMetadata).curio?.type === 'passage').length,
       placed: this.session.ledger.placedBlocks().length,
       visits: this.session.ledger.chunkVisits().length,
       containersLedger: this.containerLedgerStore.chests().length + this.containerLedgerStore.furnaces().length,

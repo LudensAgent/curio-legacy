@@ -12,9 +12,6 @@ import {
   EXCAVATION_WAYPOINT_CAP,
   HERD_CAP,
   LANDMARK_CAP,
-  PASSAGE_ARCHIVE_CAP,
-  PASSAGE_BRIDGE_ARCHIVE_CAP,
-  PASSAGE_LIVE_CAP,
   SpatialSemanticStore,
   type SpatialLibraryStores,
 } from '../spatial/semantic-store.ts';
@@ -22,7 +19,7 @@ import { createInMemoryLibraryStores } from '../spatial/in-memory.ts';
 import { ContainerLedger } from './container-ledger.ts';
 
 export type { ChestRecord, ChestRecall, ChestContents, ChestUse } from './chest-memory.ts';
-export { BASE_CAP, DISCOVERY_LABEL_CAP, EXCAVATION_WAYPOINT_CAP, HERD_CAP, LANDMARK_CAP, PASSAGE_ARCHIVE_CAP, PASSAGE_BRIDGE_ARCHIVE_CAP, PASSAGE_LIVE_CAP };
+export { BASE_CAP, DISCOVERY_LABEL_CAP, EXCAVATION_WAYPOINT_CAP, HERD_CAP, LANDMARK_CAP };
 
 export type LandmarkKind = 'base' | 'resource' | 'danger' | 'discovery' | 'death' | 'waypoint' | 'herd';
 
@@ -61,39 +58,6 @@ export interface GoalRecord {
   plan?: { skill: string; args?: unknown }[];
   /** 实测动作成效，与任务返回 succeeded、目标是否完成分别记录。 */
   effectEvidence?: EffectEvidence;
-}
-
-/**
- * 自己挖出来的一条通道（台阶井、矿道、脱困挖的洞都算）：从地表钻下去、在地下一路挖着走、再回到地表，记成一条。
- * 只记亲身走过的点（脚下的位置），不透视；这些是历史线索，不保证点间或当前地形仍可通行。
- */
-export interface PassageRecord {
-  id: string;
-  worldId?: string;
-  dim: string;
-  /** 'dug' = 自己挖出来的通道（台阶井/矿道）；'walked' = 只是走进去的天然洞穴，只用于原路返回；'bridge' = 自己搭的桥/路（连续放下的方块） */
-  kind?: 'dug' | 'walked' | 'bridge';
-  /** 从地表钻下去的地方（可能有好几个口），不知道就空着 */
-  entrances: Vec3Like[];
-  /** 沿途脚下的点，每隔几格记一个 */
-  path: Vec3Like[];
-  /** 亲自走过的边（无瞬移；相邻单步或一次观测间隔内的位移）：历史路径图（spatial/path-graph）用它们连格建路线。
-   *  run = 同一段连续观测的编号，建图只在这一段内部补漏采的小缺口；
-   *  cut = 这一段从这条边开始（合并/去重拼接的边界），不能把数组前一条当成连续行程；
-   *  reverse = 同一对格子后来反方向走过，记录顺序不再能证明单向（路由按双向处理）。 */
-  links?: { a: Vec3Like; b: Vec3Like; run?: number; cut?: boolean; reverse?: boolean }[];
-  deepestY: number;
-  /** 这条通道里自己挖掉了多少格 */
-  dug: number;
-  /** 沿途挖到的矿 */
-  ores: Record<string, number>;
-  createdAt: number;
-  lastUsedAt: number;
-  uses: number;
-  /** 被当前工作集淘汰、移入历史归档的时间；live 记录没有这个字段 */
-  archivedAt?: number;
-  /** 路径几何来源；迁移进来的旧记录为 legacy，运行期记录保持 traversal。 */
-  geometrySource?: 'traversal' | 'observed_structure' | 'legacy';
 }
 
 /**
@@ -481,10 +445,6 @@ export class WorldMemory {
     return this.semantic.visitedExtent(dim);
   }
 
-  nearbyPaths(dim: string, here: Vec3Like, radius: number) {
-    return this.semantic.nearbyPaths(dim, here, radius);
-  }
-
   /** 计数式新颖性：1/sqrt(n+1)，取目标点周围 3x3 区块平均。 */
   novelty(dim: string, x: number, z: number): number {
     return this.semantic.novelty(dim, x, z);
@@ -715,33 +675,6 @@ export class WorldMemory {
   recentDigs(windowMs = 20 * 60_000): DigRecord[] {
     const cut = Date.now() - windowMs;
     return (this.data.digs ?? []).filter((d) => d.ts >= cut);
-  }
-
-  // ------------------------------------------------ 自己挖的通道（library fragments）
-  passages(dim?: string): PassageRecord[] {
-    return this.semantic.passages(dim);
-  }
-
-  /** 被 live 工作集淘汰的历史通道；显式查询和旧路导航可读。 */
-  archivedPassages(dim?: string): PassageRecord[] {
-    return this.semantic.archivedPassages(dim);
-  }
-
-  /** live 工作集 + 历史归档；同 ID 以 live 为准。 */
-  allPassages(dim?: string): PassageRecord[] {
-    return this.semantic.allPassages(dim);
-  }
-
-  archivePassage(rec: PassageRecord) {
-    this.semantic.archivePassage(rec);
-  }
-
-  savePassage(rec: PassageRecord) {
-    this.semantic.savePassage(rec);
-  }
-
-  forgetPassage(id: string) {
-    this.semantic.forgetPassage(id);
   }
 
   // ------------------------------------------------ 仓储（宿主精确账本 + 空间锚点）

@@ -777,11 +777,7 @@ function worldKnowledge(ctx: MindContext) {
   const extent = ctx.tier === 'deliberate' ? m.visitedExtent(p.self.dim) : null;
   const visitedExtent = extent === null || extent.bounds === null ? null : [
     `访问过 ${extent.chunks} 个区块，外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}`,
-    ...(extent.farthest === null ? [] : [`记录路径四向最远脚点：${(['N', 'S', 'E', 'W'] as const).map((d) => {
-      const f = extent.farthest![d];
-      return `${d} (${f.pos.x},${f.pos.y},${f.pos.z}) ${bearing(f.pos)}（这段路${portalAgeText(f.at)}记录）`;
-    }).join('；')}`]),
-    '只是走过的历史记录，不代表现在还通，也不代表那片看全了',
+    '只是走过的历史记录，不代表那片看全了',
   ].join('；');
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });

@@ -14,7 +14,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import type { Vec3Like } from '../src/adapter/types.ts';
-import type { PassageRecord } from '../src/memory/store.ts';
+
+/** Offline migration shape for world-memory.json passages; the runtime type has been retired. */
+interface PassageRecord {
+  id: string;
+  worldId: string;
+  dim: string;
+  kind: 'dug' | 'walked' | 'bridge';
+  entrances: Vec3Like[];
+  path: Vec3Like[];
+  links?: { a: Vec3Like; b: Vec3Like }[];
+  deepestY: number;
+  dug: number;
+  ores: Record<string, number>;
+  createdAt: number;
+  lastUsedAt: number;
+  uses: number;
+}
 
 interface Cli {
   source: string;
