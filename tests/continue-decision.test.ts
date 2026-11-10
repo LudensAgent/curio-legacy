@@ -42,6 +42,33 @@ test('continue 与另一段 activity 矛盾时要求澄清，不能自动中断�
   memory.close();
 });
 
+test('continue 带 activity 时一律要求澄清，包括同名同技能只改了参数；纯独白 continue 仍有效', () => {
+  const adapter = new FakeAdapter();
+  const memory = new WorldMemory(null);
+  try {
+    const changedArgs = parseDecision({ decision: 'continue', activity: {
+      what: '寻找铁矿', steps: [{ skill: 'look_around', args: { seconds: 9 } }],
+    } }, adapter, memory, true, '寻找铁矿', ['look_around']);
+    assert.ok('error' in changedArgs);
+    assert.match(changedArgs.error, /continue.*adjust.*next/);
+    assert.match(changedArgs.error, /同名|改了参数/);
+
+    const adjusting = parseDecision({ decision: 'adjust', activity: {
+      what: '寻找铁矿', steps: [{ skill: 'look_around', args: { seconds: 9 } }],
+    } }, adapter, memory, true, '寻找铁矿', ['look_around']);
+    assert.ok(!('error' in adjusting));
+    assert.equal(adjusting.kind, 'adjust');
+
+    // 只写独白的 continue 没有可执行的 activity，仍是合法的继续：无法可靠从文字推断它想改策略。
+    const pure = parseDecision({ decision: 'continue', monologue: '继续按原计划' }, adapter, memory, true, '寻找铁矿', ['look_around']);
+    assert.ok(!('error' in pure));
+    assert.equal(pure.kind, 'continue');
+    assert.equal(pure.activity, undefined);
+  } finally {
+    memory.close();
+  }
+});
+
 test('真实 Thinker 对矛盾回复要求重答，当前动作继续并可排队下一段', async (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);

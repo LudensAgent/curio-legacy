@@ -8,7 +8,7 @@ import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
-import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, NavigationProgress } from './types.ts';
+import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, CollectionReceipt, NavigationProgress } from './types.ts';
 
 /**
  * 截断长反馈时同时保留头尾：开头交代是哪一步/什么失败，结尾常带可执行事实
@@ -575,7 +575,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const navStage = reportedStage(result);
   // 只留能判定“定位/取得/位移/覆盖”的回执字段；整份 data（尤其 local 图）不进活动历史。
   const RECEIPT_KEYS = new Set(['found', 'foundPos', 'foundRef', 'foundEntityId', 'visibleEntities', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
-    'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall']);
+    'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall', 'collection']);
   const receipt = result.data
     ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
     : undefined;
@@ -1007,6 +1007,9 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const attemptOnly = !!a.attemptOnly;
   const exploration = explorationOf(a, state.pos, info.newChunks ?? null);
   const failed = [...a.results].reverse().find((result) => result.status === 'failed');
+  // 采集回执只在活动期间的结果里有；结束时要把它带进最近记录，否则单步 gather 结束就只剩一句摘要。
+  const collectionResult = [...a.results].reverse().find((result) => !!result.data?.collection);
+  const collectionReceipt = collectionResult?.data?.collection as CollectionReceipt | undefined;
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1015,6 +1018,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
     ...(intent || attemptOnly ? { resource: { intent, located, acquired, goalIncomplete: attemptOnly || (intent && !acquired) } } : {}),
+    ...(collectionResult && collectionReceipt ? { collection: { ...collectionReceipt, skill: collectionResult.skill, ...(collectionResult.args !== undefined ? { args: collectionResult.args } : {}), at: collectionResult.at } } : {}),
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
@@ -1045,7 +1049,38 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept)) : null;
   const stageOf = (r: Activity['results'][number]) => (r as { stage?: unknown }).stage;
   const lastStage = [...a.results].reverse().find((r) => typeof stageOf(r) === 'string');
+  const lastCollection = [...a.results].reverse().find((r) => r.data?.collection)?.data?.collection;
   const explore = explorationOf(a, state.pos, null);
+  // 继续 = 原样执行剩下的 routine；这里按调度器正在跑的步骤和剩余 index/repeat 说明会发生什么，
+  // 不把独白、what、expect 或注意到的事当成执行内容。
+  const remaining = remainingSteps(a);
+  const roundsLeft = Math.max(0, a.repeat - a.iteration - 1);
+  const nextOwn = a.index < a.steps.length ? a.steps[a.index] : undefined;
+  // 只有这段活自己的步骤才算“继续时会照原参数执行”；filler/reflex 是身体自己的动作，不是 routine。
+  // 后续步骤/轮次都可能被失败、取消或 done_when 提前打断，不能承诺它们一定全部执行。
+  const stopCaveat = a.doneWhen ? '若收工条件未触发且没有失败/取消' : '若没有失败/取消';
+  const continueEffect = running && running.source !== 'filler' && running.source !== 'reflex'
+    ? {
+        executing: `${running.skill} ${argsLabel({ skill: running.skill, args: running.args })}`,
+        position: a.index >= a.steps.length ? 'in_flight_final_step' : 'in_flight_with_following_steps',
+        executes_if_continue: a.index >= a.steps.length
+          ? `这一步照原参数执行完；本轮已无已排后续步骤${roundsLeft ? `，${stopCaveat}，之后还有 ${roundsLeft} 轮` : ''}`
+          : `这一步照原参数执行完，${stopCaveat}，再按原 routine 做本轮剩余 ${a.steps.length - a.index} 步${roundsLeft ? `，之后还有 ${roundsLeft} 轮` : ''}`,
+        // 不含正在执行的这一步；它与剩余轮次分开数。
+        remaining_steps_after_running: remaining,
+        remaining_rounds: roundsLeft,
+        done_when_can_stop_early: !!a.doneWhen,
+      }
+    : {
+        executing: null,
+        position: 'between_steps',
+        executes_if_continue: nextOwn
+          ? `从下一步「${nextOwn.skill} ${argsLabel(nextOwn)}」按原参数继续（${stopCaveat}）${roundsLeft ? `；本轮之后还有 ${roundsLeft} 轮` : ''}`
+          : roundsLeft ? `本轮结束，进入下一轮第 1 步（${stopCaveat}）${roundsLeft > 1 ? `；共剩 ${roundsLeft} 轮` : ''}` : '没有剩余步骤，这段活会收工',
+        remaining_steps: remaining,
+        remaining_rounds: roundsLeft,
+        done_when_can_stop_early: !!a.doneWhen,
+      };
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1053,6 +1088,8 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(running ? { running_step: { skill: running.skill, args: running.args, source: running.source, elapsed_real_s: Math.round((Date.now() - running.startedAt) / 1000) } } : {}),
+    continue_effect: continueEffect,
+    ...(lastCollection ? { last_collection: lastCollection } : {}),
     ...(a.applying ? { applying: a.applying, applying_at_start: a.applyingText ?? 'unknown' } : {}),
     ...(a.interruptions ? { interruptions: a.interruptions } : {}),
     ...(a.lastInterruption ? { last_interruption: { at: new Date(a.lastInterruption.at).toISOString(), kind: a.lastInterruption.kind, skill: a.lastInterruption.skill, reason: a.lastInterruption.reason, ...(a.lastInterruption.pos ? { pos: a.lastInterruption.pos } : {}) } } : {}),
