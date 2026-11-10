@@ -12,7 +12,7 @@ const NAVIGATION_SKILLS = new Set(['navigate_to', 'advance']);
  * 游泳、旅行、沿方向探索、下行、攀爬、载具、上浮和下潜。普通非恢复调用不受影响。
  */
 const NAVIGATION_BYPASS = new Set([
-  'walk_path', 'plan_route', 'move_step', 'press_keys', 'pillar_one', 'swim_path', 'boat_path', 'descend_to',
+  'plan_route', 'move_step', 'press_keys', 'pillar_one', 'swim_path', 'boat_path', 'descend_to',
   'excavate_run', 'travel_to', 'explore_toward', 'go_near', 'approach_visible',
 ]);
 

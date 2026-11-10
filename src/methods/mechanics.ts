@@ -3,7 +3,7 @@ import { isSkillDisabled } from '../skills/disabled.ts';
 
 // These are general operations exposed by the current registry, not recipes
 // for situations. Specialized workflows remain searchable as composites.
-const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'boat_path', 'dismount', 'excavate_run', 'mine_cell', 'move_step', 'place_cell', 'place_support', 'pillar_one', 'hit_entity', 'inspect_block', 'craft', 'look', 'look_around', 'resolve_target', 'plan_route', 'walk_path', 'fly_to', 'pickup_items', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'assess_landings', 'assess_flight', 'descend_to', 'swim_path', 'eat', 'wait', 'guard'];
+const PRIMITIVES = ['use_item', 'interact_block', 'interact', 'boat_path', 'dismount', 'excavate_run', 'mine_cell', 'move_step', 'place_cell', 'place_support', 'pillar_one', 'hit_entity', 'inspect_block', 'craft', 'look', 'look_around', 'resolve_target', 'plan_route', 'navigate_to', 'advance', 'fly_to', 'pickup_items', 'hold_item', 'inspect_inventory', 'toss_item', 'use_gui', 'sign_text', 'edit_book', 'assess_landings', 'assess_flight', 'descend_to', 'swim_path', 'eat', 'wait', 'guard'];
 const ALIASES: Record<string, string[]> = {
   use_item: ['右键', '使用物品', '放置', '放下', 'right click', 'use item', 'place', 'place block'],
   interact_block: ['空手右键', '方块交互', '开门', '关门', '点击方块', '门', '按钮', '拉杆', 'activate block', 'right click block', 'door', 'button', 'lever'],

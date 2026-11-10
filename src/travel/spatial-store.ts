@@ -62,7 +62,9 @@ export class SpatialTravelStore {
       id: endpoint.id,
       kind: 'portal',
       label: endpoint.kind,
-      worldId: this.worldId,
+      // Endpoint observations carry the actual world; the memory facade may not
+      // have been switched to it yet in tests/early startup.
+      worldId: endpoint.worldId,
       dim: endpoint.dim,
       location: { kind: 'exact', pos: { ...endpoint.pos } },
       observedAt: endpoint.observedAt,

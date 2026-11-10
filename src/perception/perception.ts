@@ -885,5 +885,5 @@ function doorText(adapter: Pick<GameAdapter, 'blockAt'>, x: number, y: number, z
     if (!best || d < best.d) best = { dx, dz, d };
   }
   if (!best) return '出去要走门；没看到门的话，在墙上开一格（mine_cell 写 "own":true），出去再补上';
-  return `出去走门：门在 ${dirName(best.dx, best.dz)} 边 ${Math.max(1, Math.round(best.d))} 格（门能直接走过，plan_route → walk_path 过去就行）`;
+  return `出去走门：门在 ${dirName(best.dx, best.dz)} 边 ${Math.max(1, Math.round(best.d))} 格（门能直接走过，navigate_to 过去就行）`;
 }

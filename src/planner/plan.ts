@@ -152,7 +152,7 @@ function baseRule(p: Percept, memory?: WorldMemory): Record<string, unknown> {
   const animals = (p.vision?.seen_entities ?? []).filter((e) => ['cow', 'pig', 'sheep', 'chicken', 'rabbit'].includes(e.name));
 
   const mk = (thought: string, goal: string, goal_type: string, steps: Step[], extra: Record<string, unknown> = {}) => ({ thought, goal, goal_type, steps, ...extra });
-  // 旧 explore/goto 已移除：规则兜底只解析目标或环顾，具体走法由 Agent 用 plan_route → walk_path 决定。
+  // 旧 explore/goto 已移除：规则兜底只解析目标或环顾，具体走法由 Agent 用 navigate_to/advance 决定。
   const seek = (target: string): Step => ({ skill: 'resolve_target', args: { target } });
   const scout = (dir: string, distance: number): Step =>
     dir && dir !== 'auto' ? seek(`${dir} ${Math.max(1, Math.min(200, Math.round(distance)))}`) : { skill: 'look_around' };
