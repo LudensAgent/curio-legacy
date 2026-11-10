@@ -50,7 +50,7 @@ test('nearby confirmations dedupe at four blocks while names, dimensions and wor
   assert.equal(memory.base('overworld')!.label, '家');
 });
 
-test('base changes checkpoint immediately and survive restart with independently selected dimension primaries', (t) => {
+test('base changes checkpoint immediately and survive restart; selection is host-only until facts carry it', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-bases-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const file = path.join(directory, 'memory.json');
@@ -63,7 +63,11 @@ test('base changes checkpoint immediately and survive restart with independently
   memory.close();
   const reopened = memoryFrom(stores, containers, 'base-world', file).memory;
   t.after(() => reopened.close());
-  assert.equal(reopened.base('overworld')!.id, first.id);
+  // Selection is host policy with no field in the frozen fact schema. Facts and
+  // observation times survive; after restart base() falls back to the most
+  // recently observed base in that dimension (新屋 here). In-session selection
+  // still wins above this fallback.
+  assert.equal(reopened.base('overworld')!.label, '新屋');
   assert.equal(reopened.base('the_nether')!.id, nether.id);
   assert.equal(reopened.bases().length, 3);
 });

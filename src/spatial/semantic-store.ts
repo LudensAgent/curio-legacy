@@ -3,31 +3,44 @@ import type {
   FragmentStore,
   JsonObject,
   JsonValue,
-  LandmarkTag,
   PathFragment,
-  SpatialNode,
   TopologyStore,
 } from 'curio-minecraft-3d-memory';
 import type {
-  ChunkVisitRecord,
   LedgerStore,
-  PlacedBlockRecord,
 } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { Vec3Like } from '../adapter/types.ts';
 import { dist3, shortId } from '../util.ts';
 import { buildPathGraph, pathComponents } from './path-graph.ts';
 import type { ContainerLedger } from '../memory/container-ledger.ts';
-import { applyContents, chestLocation, isContainerLandmark, recall, totalStock, type ChestContents, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from '../memory/chest-memory.ts';
+import { chestLocation, isContainerLandmark, recall, type ChestRecall, type ChestRecord, type ChestUse, type Clock } from '../memory/chest-memory.ts';
 import type { FarmRecord, FurnaceRecord, GoneSpot, Hazard, HazardKind, Landmark, LandmarkKind, PassageRecord } from '../memory/store.ts';
+import {
+  containerLedgerKey,
+  goneReasonOf,
+  goneSourceProvenance,
+  isPlaceFact,
+  isResourceFact,
+  type ContainerAnchorFact,
+  type FactGoneEvidence,
+  type FactLocation,
+  type HostFactsPort,
+  type PlaceFact,
+  type ResourceAnchorFact,
+} from './facts-adapter.ts';
 
-/** The three in-memory library stores a spatial session exposes. */
+/** The in-memory library stores a spatial session exposes. */
 export interface SpatialLibraryStores {
+  /** Semantic facts (places, exact resources, container anchors). */
+  readonly facts: HostFactsPort;
+  /** Route/passage history. Passage methods remain on the legacy fragment surface. */
   readonly history: FragmentStore;
+  /** Topology remains for the compatibility migration marker and route-only consumers. */
   readonly topology: TopologyStore;
   readonly ledger: LedgerStore;
 }
 
-/** Old WorldMemory policy constants, now applied over library nodes. */
+/** Old WorldMemory policy constants, now applied over fact views. */
 export const LANDMARK_CAP = 200;
 export const DISCOVERY_LABEL_CAP = 8;
 export const EXCAVATION_WAYPOINT_CAP = 8;
@@ -40,41 +53,44 @@ export const HAZARD_CAP = 40;
 export const GONE_CAP = 120;
 
 type Vec = { x: number; y: number; z: number };
-type CurioType = 'landmark' | 'station' | 'container' | 'chest' | 'furnace' | 'farm' | 'hazard' | 'gone' | 'migration' | 'passage';
 
-interface CurioMeta {
-  v: 2;
-  type: CurioType;
-  /** Additional roles for a shared anchor (e.g. station + furnace). */
-  types?: CurioType[];
-  /** Whether this node is exposed through the legacy landmark view. */
-  view?: 'landmark' | 'station';
-  record?: JsonValue;
-  primary?: boolean;
-  block?: string;
-  /** Passage metadata (fragment metadata only). */
-  geometrySource?: 'traversal' | 'observed_structure' | 'legacy';
+interface PassageCurioMeta {
+  type?: string;
   dug?: number;
   ores?: Record<string, number>;
   archivedAt?: number;
   linkMeta?: unknown;
 }
-
-interface CurioMetadata {
-  curio?: CurioMeta;
-}
+interface CurioMetadata { curio?: PassageCurioMeta }
 
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
-const metaOf = (node: SpatialNode): CurioMeta | undefined =>
-  (isRecord(node.metadata) ? (node.metadata as CurioMetadata).curio : undefined);
 const clone = <T>(value: T): T => structuredClone(value);
 const jsonRecord = (value: object): JsonValue => JSON.parse(JSON.stringify(value)) as JsonValue;
 const point = (p: Vec3Like): Vec => ({ x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) });
 const keyOf = (p: Vec3Like) => `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`;
-const chestKey = (worldId: string, dim: string, pos: Vec3Like) =>
-  `${worldId}:${dim}:${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`;
-const metadata = (meta: CurioMeta): JsonObject => ({ curio: meta }) as unknown as JsonObject;
+const sourcePoint = (fact: PlaceFact): Vec3Like =>
+  fact.location.kind === 'exact' ? fact.location.pos : fact.location.center;
+
+/** 语义事实全量重扫间隔：只用来发现其他写入方新增的事实。 */
+const SEMANTIC_RESCAN_MS = 30_000;
+/** 重复看见已记地标时，至少隔这么久才刷新一次它的观察时间。 */
+const LANDMARK_REFRESH_MS = 60_000;
+
+/** 内部淘汰（容量、过期、被“我的 X”替换）不是世界消失，不进入 goneNear。 */
+const CONTROL_GONE_REASONS = new Set(['capacity', 'faded', 'replaced', 'forgotten']);
+const HAZARD_KINDS: ReadonlySet<string> = new Set<HazardKind>(['drowning', 'lava', 'fall', 'mob', 'explosion', 'starvation', 'suffocation', 'unknown']);
+
+const encoderFlags = (flags: boolean[]): string | undefined => {
+  if (!flags.some(Boolean)) return undefined;
+  const bytes = new Uint8Array(Math.ceil(flags.length / 8));
+  flags.forEach((flag, i) => { if (flag) bytes[i >> 3]! |= 1 << (i & 7); });
+  return Buffer.from(bytes).toString('base64');
+};
+const decodeFlags = (value: unknown): Uint8Array | undefined =>
+  typeof value === 'string' ? new Uint8Array(Buffer.from(value, 'base64')) : undefined;
+const flagAt = (bytes: Uint8Array | undefined, i: number) =>
+  !!bytes && (i >> 3) < bytes.length && (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
 
 function allFragments(history: FragmentStore): PathFragment[] {
   const out: PathFragment[] = [];
@@ -87,34 +103,6 @@ function allFragments(history: FragmentStore): PathFragment[] {
   }
   return out;
 }
-
-/** 语义节点 id 集合的全量重扫间隔：只用来补上其他写入方新增的语义节点。 */
-const SEMANTIC_RESCAN_MS = 30_000;
-/** 重复看见已记地标时，至少隔这么久才刷新一次它的观察时间。 */
-const LANDMARK_REFRESH_MS = 60_000;
-
-function allNodes(topology: TopologyStore): SpatialNode[] {
-  const out: SpatialNode[] = [];
-  let after: string | undefined;
-  for (let guard = 0; guard < 10_000; guard++) {
-    const page = topology.nodes({ after, limit: 100 });
-    out.push(...page.items);
-    if (page.nextAfter === undefined) break;
-    after = page.nextAfter;
-  }
-  return out;
-}
-
-const encodeFlags = (flags: boolean[]): string | undefined => {
-  if (!flags.some(Boolean)) return undefined;
-  const bytes = new Uint8Array(Math.ceil(flags.length / 8));
-  flags.forEach((flag, i) => { if (flag) bytes[i >> 3]! |= 1 << (i & 7); });
-  return Buffer.from(bytes).toString('base64');
-};
-const decodeFlags = (value: unknown): Uint8Array | undefined =>
-  typeof value === 'string' ? new Uint8Array(Buffer.from(value, 'base64')) : undefined;
-const flagAt = (bytes: Uint8Array | undefined, i: number) =>
-  !!bytes && (i >> 3) < bytes.length && (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
 
 export function fragmentRecord(fragment: PathFragment): PassageRecord {
   const curio = (isRecord(fragment.metadata) ? (fragment.metadata as CurioMetadata).curio : undefined);
@@ -157,8 +145,8 @@ export function fragmentRecord(fragment: PathFragment): PassageRecord {
 }
 
 function passageMetadata(rec: PassageRecord): JsonObject {
-  const cutBits = encodeFlags(rec.links?.map((link) => !!link.cut) ?? []);
-  const reverseBits = encodeFlags(rec.links?.map((link) => !!link.reverse) ?? []);
+  const cutBits = encoderFlags(rec.links?.map((link) => !!link.cut) ?? []);
+  const reverseBits = encoderFlags(rec.links?.map((link) => !!link.reverse) ?? []);
   const linkMeta = cutBits || reverseBits
     ? { ...(cutBits ? { cut: cutBits } : {}), ...(reverseBits ? { reverse: reverseBits } : {}) }
     : undefined;
@@ -209,14 +197,15 @@ function fragmentChanges(rec: PassageRecord): FragmentChanges {
   };
 }
 
-function regionOf(cells: Vec3Like[]): SpatialNode['location'] {
+function areaOf(cells: Vec3Like[]): FactLocation {
   if (!cells.length) return { kind: 'exact', pos: { x: 0, y: 64, z: 0 } };
+  if (cells.length === 1) return { kind: 'exact', pos: point(cells[0]!) };
   const center = {
     x: Math.round(cells.reduce((sum, cell) => sum + cell.x, 0) / cells.length),
     y: Math.round(cells.reduce((sum, cell) => sum + cell.y, 0) / cells.length),
     z: Math.round(cells.reduce((sum, cell) => sum + cell.z, 0) / cells.length),
   };
-  return { kind: 'region', center, radius: Math.max(1, ...cells.map((cell) => dist3(cell, center))) };
+  return { kind: 'area', center, radius: Math.max(1, ...cells.map((cell) => dist3(cell, center))) };
 }
 
 function effectiveHazard(z: Hazard, now = Date.now()): Hazard | null {
@@ -228,12 +217,42 @@ function effectiveHazard(z: Hazard, now = Date.now()): Hazard | null {
 }
 
 /**
- * Native host view over the spatial library's topology, history and ledger.
+ * Host-only business fields that the frozen fact schema cannot carry (herd
+ * counts, farm cell lists, hazard repeat counters, base selection). They are a
+ * host view cache keyed by fact id: positions, scope, observation times and
+ * gone state all come from facts; this map never outlives the process and is
+ * never a second spatial authority. Facts rebuilt on restart still answer every
+ * query, with the documented lossy fallbacks.
+ */
+interface HostPlaceRecord {
+  /** Exact host landmark kind (facts only have coarse place kinds). */
+  kind?: LandmarkKind;
+  /** Base selection is host policy, not an observed fact. */
+  primary?: boolean;
+  /** herd */
+  count?: number;
+  detail?: string;
+  /** hazard */
+  hazard?: { kind: HazardKind; count: number; firstTs: number; during?: string; note?: string };
+  /** farm */
+  farm?: { cells: Vec3Like[]; harvests: number };
+}
+interface HostContainerRecord {
+  block?: string;
+  /** View label for a container that disappeared from the legacy landmark view. */
+  label?: string;
+}
+
+/** Place role derived from the coarse fact kind plus host id/annotation hints. */
+type PlaceRole = LandmarkKind | 'farm' | 'portal' | 'hazard' | 'station' | 'gone' | 'place';
+
+/**
+ * Native host view over the semantic facts, route history and ledger.
  *
- * The library does not type stations/furnaces/farms/hazards/containers; their
- * host meaning lives in opaque `metadata.curio`. All reads page the library's
- * nodes/fragments and apply the old WorldMemory proximity/dedupe/cap policy here.
- * No second in-memory spatial store exists.
+ * The library fact layer owns place/resource/container identity, scope, time
+ * and gone state. The host precise container ledger owns contents. Route and
+ * passage surfaces remain legacy-compatible and are not part of the facts
+ * domain.
  */
 export class SpatialSemanticStore {
   readonly worldId: string;
@@ -245,496 +264,573 @@ export class SpatialSemanticStore {
     options: { sessionId?: string; worldId?: string } = {},
   ) {
     this.worldId = options.worldId ?? session.history.worldId;
-    if (session.topology.worldId !== this.worldId) {
-      throw new Error(`spatial semantic world mismatch: ${session.topology.worldId} != ${this.worldId}`);
+    if (session.history.worldId !== this.worldId) {
+      throw new Error(`spatial semantic world mismatch: ${session.history.worldId} != ${this.worldId}`);
     }
     this.sessionId = options.sessionId ?? 'semantic-store';
   }
 
   get stores(): SpatialLibraryStores { return this.session; }
+  get facts(): HostFactsPort { return this.session.facts; }
   get containers(): ContainerLedger { return this.containerLedgerStore; }
   get world(): string { return this.worldId; }
 
-  /**
-   * 自己的语义节点 id（地标、herd、gone、容器……）：查询只按 id 逐个 getNode（O(1)、读的是实时内容），
-   * 不再分页列出整张拓扑。拓扑里大部分是走路记下的路线节点，每走一步都会写；列表接口每次写后都要重建
-   * 全量索引并克隆全部节点，下界实测感知每帧都触发，主线程一卡 3–6 秒。
-   * 自己写入时立即登记；其他写入方新增的语义节点由定期全量扫描补上。
-   */
-  private semanticIds: Set<string> | null = null;
-  private semanticIdsAt = 0;
-  /**
-   * Incremented only when the periodic external scan discovers a different
-   * semantic-id set. Ordinary topology revisions (walk nodes, edge writes) do
-   * not invalidate the resource index; this class updates it by node id.
-   */
-  private semanticIdsVersion = 0;
-  /** Full resource-index rebuilds; own node writes update buckets without one. */
-  private resourceIndexRebuilds = 0;
-  /**
-   * 按拓扑 revision 缓存的语义节点拷贝。getNode 每次都深拷贝 metadata；感知一帧里会按视野方块逐格
-   * 调 landmarks()/addLandmark()，不缓存就是「视野方块数 × 语义节点数」次深拷贝（下界岩浆多时
-   * 每次感知 100–200ms，画面周期性顿一下）。任何写入都会推进 revision，缓存随之失效。
-   * 缓存的节点只在本类内部只读使用，对外一律经 landmarkView/typedRecord 等再复制。
-   */
-  private nodesCache: { revision: number; nodes: SpatialNode[] } | null = null;
-  /**
-   * Resource anchors projected by 16³ Section bucket for bounded near queries.
-   * Its authority is the topology nodes. This class updates one id at a time on
-   * its own writes; a full rebuild happens only when the periodic external scan
-   * finds a different semantic-id set. Never a second authority over node facts.
-   */
-  private resourceIndex: {
-    semanticIdsVersion: number;
-    buckets: Map<string, string[]>;
-    nodes: Map<string, SpatialNode>;
+  // ---------------------------------------------------------------- fact cache
+
+  private cache: {
+    at: number;
+    places: PlaceFact[];
+    resources: ResourceAnchorFact[];
+    containers: ContainerAnchorFact[];
   } | null = null;
-  private getResourceIndex(): {
-    semanticIdsVersion: number;
-    buckets: Map<string, string[]>;
-    nodes: Map<string, SpatialNode>;
-  } {
-    this.refreshSemanticIds();
-    if (this.resourceIndex?.semanticIdsVersion === this.semanticIdsVersion) return this.resourceIndex;
-    const buckets = new Map<string, string[]>();
-    const nodes = new Map<string, SpatialNode>();
-    for (const id of this.semanticIds ?? []) {
-      const node = this.session.topology.getNode(id);
-      if (node === null || !this.isResourceAnchor(node)) continue;
-      this.addResourceBucket(buckets, node);
-      nodes.set(node.id, node);
-    }
-    this.resourceIndex = { semanticIdsVersion: this.semanticIdsVersion, buckets, nodes };
-    this.resourceIndexRebuilds += 1;
-    return this.resourceIndex;
-  }
-  private refreshSemanticIds(): void {
-    const topology = this.session.topology;
-    if (this.semanticIds !== null && Date.now() - this.semanticIdsAt <= SEMANTIC_RESCAN_MS) return;
-    const next = new Set(allNodes(topology)
-      .filter((node) => node.tag !== undefined || metaOf(node) !== undefined)
-      .map((node) => node.id));
-    const previous = this.semanticIds;
-    const changed = previous === null
-      || previous.size !== next.size
-      || [...next].some((id) => !previous.has(id));
-    this.semanticIds = next;
-    this.semanticIdsAt = Date.now();
-    if (changed) {
-      this.semanticIdsVersion += 1;
-      this.nodesCache = null;
-    }
-  }
-  private isResourceAnchor(node: SpatialNode): boolean {
-    return node.tag === 'resource' && !node.gone && node.location.kind === 'exact';
-  }
-  private resourceBucketKey(node: SpatialNode): string {
-    if (node.location.kind !== 'exact') return '';
-    const p = node.location.pos;
-    return `${node.dim}|${Math.floor(p.x / 16)}|${Math.floor(p.y / 16)}|${Math.floor(p.z / 16)}`;
-  }
-  private addResourceBucket(buckets: Map<string, string[]>, node: SpatialNode): void {
-    const key = this.resourceBucketKey(node);
-    const list = buckets.get(key);
-    if (list === undefined) buckets.set(key, [node.id]);
-    else list.push(node.id);
-  }
-  private applyResourceIndexNode(id: string, node: SpatialNode | null): void {
-    const index = this.resourceIndex;
-    if (index === null) return;
-    const previous = index.nodes.get(id);
-    if (previous !== undefined) {
-      const key = this.resourceBucketKey(previous);
-      const list = index.buckets.get(key);
-      if (list !== undefined) {
-        const at = list.indexOf(id);
-        if (at >= 0) list.splice(at, 1);
-        if (list.length === 0) index.buckets.delete(key);
-      }
-      index.nodes.delete(id);
-    }
-    if (node !== null && this.isResourceAnchor(node)) {
-      this.addResourceBucket(index.buckets, node);
-      index.nodes.set(id, node);
-    }
-  }
-  private allNodes(): SpatialNode[] {
-    const topology = this.session.topology;
-    this.refreshSemanticIds();
-    if (this.nodesCache?.revision !== topology.revision) {
-      const ids = this.semanticIds!;
-      const nodes = [...ids].sort().flatMap((id) => {
-        const node = topology.getNode(id);
-        if (!node) { ids.delete(id); return []; }
-        return [node];
-      });
-      this.nodesCache = { revision: topology.revision, nodes };
-    }
-    return [...this.nodesCache.nodes];
+
+  private invalidate(): void {
+    this.cache = null;
   }
 
-  /** 写入语义节点并登记 id；所有 saveNode 都经过这里，查询才不会漏掉刚写的节点。 */
-  private saveTracked(node: SpatialNode) {
-    this.session.topology.saveNode(node);
-    this.semanticIds?.add(node.id);
-    this.nodesCache = null;
-    this.applyResourceIndexNode(node.id, node);
-  }
-  private allFragments(): PathFragment[] { return allFragments(this.session.history); }
-
-  private viewOf(node: SpatialNode): 'landmark' | 'station' | undefined {
-    const meta = metaOf(node);
-    if (!meta || node.gone) return undefined;
-    if (meta.view === 'landmark' || meta.view === 'station') return meta.view;
-    return undefined;
+  private page<T>(query: (after: string | undefined) => { items: T[]; nextAfter?: string }): T[] {
+    const out: T[] = [];
+    let after: string | undefined;
+    for (let guard = 0; guard < 10_000; guard++) {
+      const page = query(after);
+      out.push(...page.items);
+      if (page.nextAfter === undefined) break;
+      after = page.nextAfter;
+    }
+    return out;
   }
 
-  private hasType(node: SpatialNode, type: CurioType): boolean {
-    const meta = metaOf(node);
-    if (type === 'container' && meta?.type === 'chest') return true;
-    return meta?.type === type || !!meta?.types?.includes(type);
+  private snapshot(): { places: PlaceFact[]; resources: ResourceAnchorFact[]; containers: ContainerAnchorFact[] } {
+    const now = Date.now();
+    if (this.cache !== null && now - this.cache.at <= SEMANTIC_RESCAN_MS) return this.cache;
+    const places = this.page((after) => this.session.facts.places({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
+    const resources = this.page((after) => this.session.facts.resources({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
+    const containers = this.page((after) => this.session.facts.containers({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
+    this.cache = { at: now, places, resources, containers };
+    return this.cache;
   }
 
-  private landmarkView(node: SpatialNode): Landmark | undefined {
-    const meta = metaOf(node);
-    if (!meta || node.gone) return undefined;
-    const rec = isRecord(meta.record) ? meta.record : {};
-    const kind = (typeof rec.kind === 'string' ? rec.kind : node.tag ?? 'discovery') as LandmarkKind;
-    const pos = node.location.kind === 'exact' ? { ...node.location.pos } : { ...node.location.center };
-    const ts = typeof rec.ts === 'number' ? rec.ts : node.observedAt ?? 0;
-    const container = this.hasType(node, 'container');
-    const entry = container ? this.containerLedgerStore.chestAt(node.dim, pos) : undefined;
+  // ------------------------------------------------------------- business state
+
+  private readonly placeRecords = new Map<string, HostPlaceRecord>();
+  private readonly containerRecords = new Map<string, HostContainerRecord>();
+
+  private placeRecord(id: string): HostPlaceRecord | undefined {
+    return this.placeRecords.get(id);
+  }
+
+  private notePlaceRecord(id: string, patch: Partial<HostPlaceRecord>): void {
+    this.placeRecords.set(id, { ...(this.placeRecords.get(id) ?? {}), ...patch });
+  }
+
+  private noteContainerRecord(id: string, patch: Partial<HostContainerRecord>): void {
+    this.containerRecords.set(id, { ...(this.containerRecords.get(id) ?? {}), ...patch });
+  }
+
+  // --------------------------------------------------------------- write paths
+
+  private upsertPlace(fact: PlaceFact): PlaceFact {
+    const result = this.session.facts.upsertPlace(fact);
+    this.invalidate();
+    return result.record;
+  }
+
+  private upsertResource(fact: ResourceAnchorFact): ResourceAnchorFact {
+    const result = this.session.facts.upsertResource(fact);
+    this.invalidate();
+    this.applyResourceFact(result.record);
+    return result.record;
+  }
+
+  private upsertContainer(fact: ContainerAnchorFact): ContainerAnchorFact {
+    const result = this.session.facts.upsertContainer(fact);
+    this.invalidate();
+    return result.record;
+  }
+
+  /**
+   * Observation times order updates. Two real observations can land in the
+   * same millisecond; a changed record then needs a strictly newer time or the
+   * fact store correctly reports a same-time conflict instead of overwriting.
+   */
+  private observedNow(previous?: number): number {
+    const now = Date.now();
+    return previous === undefined ? now : Math.max(now, previous + 1);
+  }
+
+  private placeGoneEvidence(reason: string | undefined, fact?: { observedAt: number }): FactGoneEvidence {
     return {
-      id: node.id,
+      observedAt: Math.max(Date.now(), fact?.observedAt ?? 0),
+      source: goneSourceProvenance(reason, { source: 'program', sessionId: this.sessionId }),
+    };
+  }
+
+  private markPlaceFactGone(fact: PlaceFact, reason?: string): void {
+    const evidence = this.placeGoneEvidence(reason, fact);
+    this.session.facts.markPlaceGone(fact.id, evidence);
+    this.invalidate();
+  }
+
+  private revokeResourceFact(fact: ResourceAnchorFact, reason?: string): void {
+    const evidence = this.placeGoneEvidence(reason, fact);
+    this.session.facts.revokeResource(fact.id, evidence);
+    this.invalidate();
+    this.applyResourceFact({ ...fact, revoked: true, revokedAt: evidence.observedAt, revokedSource: evidence.source });
+  }
+
+  private markContainerFactGone(fact: ContainerAnchorFact, reason?: string): void {
+    const evidence = this.placeGoneEvidence(reason, fact);
+    this.session.facts.markContainerGone(fact.id, evidence);
+    this.invalidate();
+  }
+
+  // --------------------------------------------------------------- role views
+
+  private placeRoleOf(fact: PlaceFact): PlaceRole {
+    const annotated = this.placeRecord(fact.id)?.kind;
+    if (annotated !== undefined) return annotated;
+    if (fact.kind === 'base') return 'base';
+    if (fact.kind === 'death') return 'death';
+    if (fact.kind === 'hazard') return 'hazard';
+    if (fact.kind === 'portal') return 'portal';
+    if (fact.kind === 'station') return fact.label.startsWith('farm: ') ? 'farm' : 'station';
+    if (fact.id.startsWith('her_')) return 'herd';
+    if (fact.id.startsWith('way_')) return 'waypoint';
+    if (fact.id.startsWith('dan_')) return 'danger';
+    if (fact.id.startsWith('bas_')) return 'base';
+    if (fact.id.startsWith('dea_')) return 'death';
+    if (fact.id.startsWith('gone:')) return 'gone';
+    return 'discovery';
+  }
+
+  private landmarkKindOf(fact: PlaceFact): LandmarkKind | undefined {
+    const role = this.placeRoleOf(fact);
+    // Legacy station-view nodes were landmarks; farms are excluded by role.
+    if (role === 'station') return 'discovery';
+    return role === 'base' || role === 'death' || role === 'danger' || role === 'discovery'
+      || role === 'waypoint' || role === 'herd'
+      ? role
+      : undefined;
+  }
+
+  private landmarkView(fact: PlaceFact): Landmark | undefined {
+    if (fact.gone) return undefined;
+    const kind = this.landmarkKindOf(fact);
+    if (kind === undefined) return undefined;
+    const record = this.placeRecord(fact.id);
+    const pos = sourcePoint(fact);
+    const container = isContainerLandmark(fact.label);
+    const entry = container ? this.containerLedgerStore.chestAt(fact.dim, pos) : undefined;
+    return {
+      id: fact.id,
       kind,
-      label: node.label ?? (typeof rec.label === 'string' ? rec.label : ''),
-      dim: node.dim,
-      pos,
-      ts,
-      ...(typeof rec.primary === 'boolean' || meta.primary !== undefined ? { primary: rec.primary === true || meta.primary === true } : {}),
-      worldId: node.worldId,
-      ...(typeof rec.count === 'number' ? { count: rec.count } : {}),
-      ...(typeof rec.detail === 'string' ? { detail: rec.detail } : {}),
+      label: fact.label,
+      dim: fact.dim,
+      pos: { ...pos },
+      ts: fact.observedAt,
+      ...(kind === 'base' && record?.primary === true ? { primary: true } : {}),
+      ...(kind === 'herd' && record?.count !== undefined ? { count: record.count } : {}),
+      ...(kind === 'herd' && record?.detail !== undefined ? { detail: record.detail } : {}),
+      worldId: fact.worldId,
       ...(container ? {
         radius: 0,
         precise: true,
-        observedAt: entry?.contents?.observedAt || entry?.ts || ts,
+        observedAt: entry?.contents?.observedAt || entry?.ts || fact.observedAt,
       } : {}),
     };
   }
 
-  private typedRecord<T>(node: SpatialNode): T | undefined {
-    const rec = metaOf(node)?.record;
-    return isRecord(rec) ? clone(rec as T) : undefined;
-  }
-
-  private saveNode(node: SpatialNode) {
-    const existing = this.session.topology.getNode(node.id);
-    if (!existing) { this.saveTracked(node); return; }
-    if (existing.source !== node.source) {
-      this.forgetNode(node.id);
-      this.saveTracked(node);
-      return;
-    }
-    this.updateNode(node.id, {
-      kind: node.kind,
-      tag: node.tag,
-      label: node.label,
-      location: node.location,
-      observedAt: node.observedAt,
-      externalRef: node.externalRef,
-      durable: node.durable,
-      metadata: node.metadata,
-    });
-  }
-
-  private updateNode(id: string, changes: Parameters<TopologyStore['updateNode']>[1]) {
-    const result = this.session.topology.updateNode(id, changes);
-    if (result.status === 'updated') this.applyResourceIndexNode(id, this.session.topology.getNode(id));
-    return result;
-  }
-
-  private forgetNode(id: string): void {
-    this.session.topology.forgetNode(id);
-    this.semanticIds?.delete(id);
-    this.nodesCache = null;
-    this.applyResourceIndexNode(id, null);
-  }
-
-  private mergeMeta(node: SpatialNode, patch: Partial<CurioMeta>): CurioMeta {
-    const current = metaOf(node) ?? { v: 2, type: 'landmark' as const };
-    return { ...current, ...patch };
-  }
-
-  /** All legacy landmark views, including stations but excluding typed records. */
-  landmarks(): Landmark[] {
-    return this.allNodes()
-      .filter((node) => this.viewOf(node) !== undefined)
-      .flatMap((node) => {
-        const view = this.landmarkView(node);
-        return view ? [view] : [];
-      });
-  }
-
-  addLandmark(kind: LandmarkKind, label: string, dim: string, pos: Vec3Like, dedupeRadius = 24): Landmark | null {
-    const radius = kind === 'discovery' && isContainerLandmark(label) ? 0.1 : dedupeRadius;
-    const at = point(pos);
-    const nodes = this.allNodes();
-    const near = nodes.find((node) => !node.gone && node.dim === dim && node.tag === kind && node.label === label
-      && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) < radius);
-    if (near) {
-      // 每帧都会重复看见同一处资源/危险：最近刚确认过就不再写（每次写都会让整张拓扑的列表索引重建）。
-      if (Date.now() - (near.observedAt ?? 0) < LANDMARK_REFRESH_MS) return null;
-      const meta = metaOf(near);
-      if (meta && isRecord(meta.record)) {
-        this.updateNode(near.id, { observedAt: Date.now(), metadata: metadata(this.mergeMeta(near, { record: { ...meta.record, ts: Date.now(), kind, label, dim, pos: at } })) });
-      } else {
-        this.updateNode(near.id, { observedAt: Date.now() });
-      }
-      return null;
-    }
-
-    if (kind === 'discovery') {
-      if (!label.startsWith('我的')) {
-        const own = nodes.find((node) => !node.gone && node.dim === dim && node.label === `我的${label}`
-          && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) <= radius);
-        if (own) {
-          if (Date.now() - (own.observedAt ?? 0) >= LANDMARK_REFRESH_MS) this.updateNode(own.id, { observedAt: Date.now() });
-          return null;
-        }
-      } else {
-        const plain = label.slice(2);
-        for (const node of nodes) {
-          if (node.gone || node.dim !== dim || node.label !== plain) continue;
-          if (node.tag !== 'discovery' && !this.hasType(node, 'container') && !this.hasType(node, 'furnace')) continue;
-          if (dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) > (isContainerLandmark(plain) ? 0.1 : 2)) continue;
-          this.dropLandmarkView(node);
-        }
-      }
-    }
-
-    // Merge with an existing typed anchor at the same cell (container/furnace/station).
-    if (kind === 'discovery') {
-      const typed = nodes.find((node) => !node.gone && node.dim === dim
-        && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) <= (isContainerLandmark(label) ? 0.1 : 2)
-        && (this.hasType(node, 'container') || this.hasType(node, 'furnace')));
-      if (typed) {
-        const meta = this.mergeMeta(typed, {
-          view: label.startsWith('我的') ? 'station' : 'landmark',
-          types: [...new Set([...(metaOf(typed)?.types ?? []), metaOf(typed)?.type ?? 'landmark', 'station' as const])],
-          record: jsonRecord({ kind, label, dim, pos: at, ts: Date.now(), worldId: this.worldId }),
-        });
-        this.updateNode(typed.id, {
-          label,
-          observedAt: Date.now(),
-          metadata: metadata(meta),
-        });
-        const merged = this.session.topology.getNode(typed.id);
-        return merged ? this.landmarkView(merged) ?? null : null;
-      }
-    }
-
-    const id = shortId(`${kind.slice(0, 3)}_`);
-    const source = kind === 'base' || kind === 'discovery' || kind === 'waypoint' || kind === 'death' ? 'agent' as const : 'program' as const;
-    const type: CurioType = isContainerLandmark(label) ? 'container' : 'landmark';
-    const node: SpatialNode = {
-      id,
-      kind: 'place',
-      source,
-      tag: kind as LandmarkTag,
-      label,
-      worldId: this.worldId,
-      dim,
-      location: { kind: 'exact', pos: at },
-      observedAt: Date.now(),
-      externalRef: id,
-      durable: source === 'agent',
-      metadata: metadata({
-        v: 2,
-        type,
-        view: label.startsWith('我的') ? 'station' : 'landmark',
-        record: jsonRecord({ kind, label, dim, pos: at, ts: Date.now(), worldId: this.worldId }),
-      }),
+  private resourceView(fact: ResourceAnchorFact): Landmark | undefined {
+    if (fact.revoked) return undefined;
+    return {
+      id: fact.id,
+      kind: 'resource',
+      label: fact.label,
+      dim: fact.dim,
+      pos: { ...fact.sourceCell },
+      ts: fact.observedAt,
+      worldId: fact.worldId,
     };
-    this.saveNode(node);
-    this.enforceLandmarkCaps();
-    const saved = this.session.topology.getNode(id);
-    return saved ? this.landmarkView(saved) ?? null : null;
   }
 
-  private dropLandmarkView(node: SpatialNode) {
-    const meta = metaOf(node);
-    if (!meta) return;
-    if (this.hasType(node, 'container') || this.hasType(node, 'furnace')) {
-      const next = { ...meta };
-      delete next.view;
-      this.updateNode(node.id, { metadata: metadata(next) });
-    } else {
-      this.forgetNode(node.id);
-    }
+  private livePlaces(): PlaceFact[] {
+    return this.snapshot().places.filter((fact) => !fact.gone);
+  }
+  private liveResources(): ResourceAnchorFact[] {
+    return this.snapshot().resources.filter((fact) => !fact.revoked);
+  }
+  private allResources(): ResourceAnchorFact[] {
+    return this.snapshot().resources;
+  }
+  private liveContainers(): ContainerAnchorFact[] {
+    return this.snapshot().containers.filter((fact) => !fact.gone);
   }
 
-  private enforceLandmarkCaps() {
-    const nodes = this.allNodes().filter((node) => this.viewOf(node) !== undefined);
-    const byTs = (a: SpatialNode, b: SpatialNode) => (metaOf(a)?.record as { ts?: number } | undefined)?.ts ?? a.observedAt ?? 0
-      - ((metaOf(b)?.record as { ts?: number } | undefined)?.ts ?? b.observedAt ?? 0);
-    const forgetOldest = (list: SpatialNode[]) => {
-      const oldest = [...list].sort(byTs)[0];
-      if (oldest) this.forgetNode(oldest.id);
-    };
-    for (const [label, group] of Object.entries(nodes.filter((n) => n.tag === 'discovery').reduce<Record<string, SpatialNode[]>>((groups, node) => {
-      (groups[node.label ?? ''] ??= []).push(node);
-      return groups;
-    }, {}))) {
-      if (label && group.length > DISCOVERY_LABEL_CAP) forgetOldest(group.slice().sort(byTs).slice(0, group.length - DISCOVERY_LABEL_CAP));
-    }
-    const herds = nodes.filter((node) => node.tag === 'herd');
-    if (herds.length > HERD_CAP) forgetOldest(herds.slice().sort(byTs).slice(0, herds.length - HERD_CAP));
-    if (nodes.length <= LANDMARK_CAP) return;
-    const tiers: ((node: SpatialNode) => boolean)[] = [
-      (node) => ['herd', 'danger', 'death'].includes(node.tag ?? ''),
-      (node) => node.tag === 'resource',
-      (node) => node.tag === 'waypoint',
-      (node) => node.tag === 'discovery' && !(node.label ?? '').startsWith('我的') && !isContainerLandmark(node.label ?? ''),
-    ];
-    for (const tier of tiers) {
-      const candidate = nodes.filter(tier).sort(byTs)[0];
-      if (candidate) { this.forgetNode(candidate.id); return; }
-    }
-  }
-
-  markGone(label: string, dim: string, pos: Vec3Like, now: string) {
-    const at = point(pos);
-    const live = this.allNodes().find((node) => !node.gone && node.dim === dim && node.label === label
-      && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) <= 1);
-    const observedAt = Date.now();
-    if (live) {
-      const evidence = { sessionId: this.sessionId, observedAt: Math.max(observedAt, live.observedAt ?? 0), source: 'program' as const, reason: now };
-      const meta = metaOf(live);
-      if (meta && isRecord(meta.record)) {
-        this.updateNode(live.id, { metadata: metadata({ ...meta, record: { ...meta.record, now, ts: observedAt } }) });
-      }
-      this.session.topology.markGone(live.id, evidence);
-      this.applyResourceIndexNode(live.id, this.session.topology.getNode(live.id));
-      return;
-    }
-    const id = `gone:${this.worldId}:${dim}:${keyOf(at)}:${label}`;
-    const existing = this.session.topology.getNode(id);
-    const record = { worldId: this.worldId, dim, label, pos: at, now, ts: observedAt };
-    if (existing) {
-      this.updateNode(id, { observedAt, metadata: metadata({ v: 2, type: 'gone', record: jsonRecord(record) }) });
-      if (!existing.gone) {
-        this.session.topology.markGone(id, { sessionId: this.sessionId, observedAt: Math.max(observedAt, existing.observedAt ?? 0), source: 'program', reason: now });
-        this.applyResourceIndexNode(id, this.session.topology.getNode(id));
-      }
-      return;
-    }
-    this.saveTracked({
-      id,
-      kind: 'place',
-      source: 'program',
-      tag: 'discovery',
-      label: `gone: ${label}`,
-      worldId: this.worldId,
-      dim,
-      location: { kind: 'exact', pos: at },
-      observedAt,
-      externalRef: id,
-      metadata: metadata({ v: 2, type: 'gone', record: jsonRecord(record) }),
-    });
-    this.session.topology.markGone(id, { sessionId: this.sessionId, observedAt, source: 'program', reason: now });
-    const gone = this.allNodes().filter((node) => this.hasType(node, 'gone') && node.gone);
-    if (gone.length > GONE_CAP) {
-      const oldest = gone.sort((a, b) => (a.goneAt ?? 0) - (b.goneAt ?? 0))[0];
-      if (oldest) this.forgetNode(oldest.id);
-    }
-  }
-
-  goneNear(dim: string, pos: Vec3Like, radius = 3): GoneSpot[] {
-    const live = this.allNodes().filter((node) => !node.gone && node.dim === dim);
-    return this.session.topology.goneNear(dim, point(pos), radius).flatMap((node) => {
-      const record = this.typedRecord<GoneSpot>(node) ?? {
-        worldId: node.worldId, dim: node.dim, label: (node.label ?? '').replace(/^gone: /, ''),
-        pos: node.location.kind === 'exact' ? node.location.pos : node.location.center,
-        now: node.goneEvidence?.reason ?? 'gone', ts: node.goneAt ?? node.observedAt ?? 0,
-      };
-      const label = record.label;
-      if (live.some((other) => other.label === label && dist3(other.location.kind === 'exact' ? other.location.pos : other.location.center, record.pos) <= 1)) return [];
-      return [{ ...record, worldId: this.worldId, pos: point(record.pos) }];
-    });
-  }
-
-  removeLandmark(id: string): boolean {
-    const node = this.session.topology.getNode(id);
-    if (!node || node.tag === 'base') return false;
-    if (this.hasType(node, 'container') || this.hasType(node, 'furnace')) {
-      this.dropLandmarkView(node);
-    } else {
-      this.forgetNode(id);
-    }
-    return true;
-  }
-
-  forgetLandmark(id: string): Landmark | null {
-    const node = this.session.topology.getNode(id);
-    if (!node) return null;
-    const view = this.landmarkView(node);
-    const pos = node.location.kind === 'exact' ? node.location.pos : node.location.center;
-    if (node.tag === 'base' && metaOf(node)?.record && (metaOf(node)!.record as { primary?: boolean }).primary) {
-      const next = this.bases(node.dim).filter((base) => base.id !== id).sort((a, b) => b.ts - a.ts)[0];
-      if (next) this.selectBase(next.id);
-    }
-    if (this.hasType(node, 'container')) this.containerLedgerStore.forgetChest(node.dim, pos);
-    if (this.hasType(node, 'furnace')) this.containerLedgerStore.forgetFurnace(node.dim, pos);
-    this.forgetNode(id);
-    return view ?? null;
-  }
-
-  noteHerd(label: string, dim: string, pos: Vec3Like, count: number, detail?: string): Landmark {
-    const at = point(pos);
-    const near = this.allNodes().find((node) => !node.gone && node.dim === dim && node.tag === 'herd' && node.label === label
-      && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) < 32);
-    const record = { kind: 'herd', label, dim, pos: at, ts: Date.now(), worldId: this.worldId, count, ...(detail ? { detail } : {}) };
-    if (near) {
-      this.updateNode(near.id, {
-        location: { kind: 'exact', pos: at }, observedAt: Date.now(),
-        metadata: metadata({ ...this.mergeMeta(near, { record: jsonRecord(record) }) }),
-      });
-      return this.landmarkView(this.session.topology.getNode(near.id)!)!;
-    }
-    const herds = this.allNodes().filter((node) => !node.gone && node.tag === 'herd').sort((a, b) => (a.observedAt ?? 0) - (b.observedAt ?? 0));
-    if (herds.length >= HERD_CAP) this.forgetNode(herds[0]!.id);
-    const id = shortId('herd_');
-    this.saveTracked({
-      id, kind: 'place', source: 'program', tag: 'herd', label, worldId: this.worldId, dim,
-      location: { kind: 'exact', pos: at }, observedAt: Date.now(), externalRef: id,
-      metadata: metadata({ v: 2, type: 'landmark', view: 'landmark', record: jsonRecord(record) }),
-    });
-    return this.landmarkView(this.session.topology.getNode(id)!)!;
-  }
-
-  resourceLandmarksNear(names: string[], dim: string, pos: Vec3Like, radius: number): Landmark[] {
-    return this.resourceLandmarksAround(dim, pos, radius, new Set(names));
-  }
+  // ---------------------------------------------------------------- resource index
 
   /**
-   * The resource projection is built from recorded semantic anchors, not from a
-   * full world scan. It never claims completeness: an empty near query only means
-   * no recorded anchor matched.
+   * Resource anchors projected by 16³ Section bucket for bounded near queries.
+   * The authority is the fact port; own writes update one id at a time and only
+   * an external rescan (or a cold start) rebuilds every bucket.
    */
+  private resourceIndex: {
+    at: number;
+    buckets: Map<string, string[]>;
+    facts: Map<string, ResourceAnchorFact>;
+  } | null = null;
+  private resourceIndexRebuilds = 0;
+
+  private resourceBucketKey(dim: string, cell: Vec3Like): string {
+    return `${dim}|${Math.floor(cell.x / 16)}|${Math.floor(cell.y / 16)}|${Math.floor(cell.z / 16)}`;
+  }
+
+  private addResourceBucket(buckets: Map<string, string[]>, fact: ResourceAnchorFact): void {
+    const key = this.resourceBucketKey(fact.dim, fact.sourceCell);
+    const list = buckets.get(key);
+    if (list === undefined) buckets.set(key, [fact.id]);
+    else list.push(fact.id);
+  }
+
+  private rebuildResourceIndex(): void {
+    const buckets = new Map<string, string[]>();
+    const facts = new Map<string, ResourceAnchorFact>();
+    for (const fact of this.allResources()) {
+      if (fact.revoked) continue;
+      this.addResourceBucket(buckets, fact);
+      facts.set(fact.id, fact);
+    }
+    this.resourceIndex = { at: Date.now(), buckets, facts };
+    this.resourceIndexRebuilds += 1;
+  }
+
+  private getResourceIndex(): NonNullable<SpatialSemanticStore['resourceIndex']> {
+    if (this.resourceIndex === null || Date.now() - this.resourceIndex.at > SEMANTIC_RESCAN_MS) this.rebuildResourceIndex();
+    return this.resourceIndex!;
+  }
+
+  private applyResourceFact(fact: ResourceAnchorFact): void {
+    const index = this.resourceIndex;
+    if (index === null) return;
+    const previous = index.facts.get(fact.id);
+    if (previous !== undefined) {
+      const key = this.resourceBucketKey(previous.dim, previous.sourceCell);
+      const list = index.buckets.get(key);
+      if (list !== undefined) {
+        const at = list.indexOf(fact.id);
+        if (at >= 0) list.splice(at, 1);
+        if (list.length === 0) index.buckets.delete(key);
+      }
+      index.facts.delete(fact.id);
+    }
+    if (!fact.revoked) {
+      this.addResourceBucket(index.buckets, fact);
+      index.facts.set(fact.id, fact);
+    }
+  }
+
   resourceIndexStatus(): {
     complete: false;
     reason: string;
     resourceAnchors: number;
-    /** Full rebuilds since construction; per-node writes do not increment this. */
     rebuilds: number;
   } {
     return {
       complete: false,
       reason: 'derived from recorded resource anchors; this is not a complete world resource scan',
-      resourceAnchors: this.getResourceIndex().nodes.size,
+      resourceAnchors: this.getResourceIndex().facts.size,
       rebuilds: this.resourceIndexRebuilds,
     };
+  }
+
+  // ---------------------------------------------------------------- landmarks
+
+  /** All legacy landmark views, including stations but excluding typed records. */
+  landmarks(): Landmark[] {
+    const snapshot = this.snapshot();
+    return [
+      ...snapshot.places.flatMap((fact) => {
+        const view = this.landmarkView(fact);
+        return view ? [view] : [];
+      }),
+      ...snapshot.resources.flatMap((fact) => {
+        const view = this.resourceView(fact);
+        return view ? [view] : [];
+      }),
+    ];
+  }
+
+  private findNearLivePlace(kind: LandmarkKind, label: string, dim: string, at: Vec3Like, radius: number): PlaceFact | undefined {
+    return this.livePlaces().find((fact) => this.landmarkKindOf(fact) === kind && fact.label === label
+      && fact.dim === dim && dist3(sourcePoint(fact), at) < radius);
+  }
+
+  private findNearLiveResource(label: string, dim: string, at: Vec3Like, radius: number): ResourceAnchorFact | undefined {
+    return this.liveResources().find((fact) => fact.label === label
+      && fact.dim === dim && dist3(fact.sourceCell, at) < radius);
+  }
+
+  private touchFact(fact: PlaceFact | ResourceAnchorFact): void {
+    const observedAt = this.observedNow(fact.observedAt);
+    if (isPlaceFact(fact)) this.upsertPlace({ ...fact, observedAt });
+    else this.upsertResource({ ...fact, observedAt });
+  }
+
+  addLandmark(kind: LandmarkKind, label: string, dim: string, pos: Vec3Like, dedupeRadius = 24): Landmark | null {
+    const radius = kind === 'discovery' && isContainerLandmark(label) ? 0.1 : dedupeRadius;
+    const at = point(pos);
+    const nearPlace = kind === 'resource' ? undefined : this.findNearLivePlace(kind, label, dim, at, radius);
+    const nearResource = kind === 'resource' ? this.findNearLiveResource(label, dim, at, radius) : undefined;
+    const near = nearPlace ?? nearResource;
+    if (near) {
+      // 每帧都会重复看见同一处资源/危险：最近刚确认过就不再写。
+      if (Date.now() - near.observedAt < LANDMARK_REFRESH_MS) return null;
+      this.touchFact(near);
+      return null;
+    }
+
+    if (kind === 'discovery') {
+      if (!label.startsWith('我的')) {
+        const own = this.findNearLivePlace('discovery', `我的${label}`, dim, at, radius);
+        if (own) {
+          if (Date.now() - own.observedAt >= LANDMARK_REFRESH_MS) this.touchFact(own);
+          return null;
+        }
+      } else {
+        const plain = label.slice(2);
+        const nearPlain = isContainerLandmark(plain) ? 0.1 : 2;
+        for (const fact of this.livePlaces()) {
+          const isView = this.landmarkKindOf(fact) === 'discovery' || isContainerLandmark(fact.label);
+          if (!isView || fact.label !== plain || fact.dim !== dim) continue;
+          if (dist3(sourcePoint(fact), at) > nearPlain) continue;
+          this.markPlaceFactGone(fact, 'replaced');
+        }
+        for (const fact of this.liveResources()) {
+          if (fact.label !== plain || fact.dim !== dim || dist3(fact.sourceCell, at) > 2) continue;
+          this.revokeResourceFact(fact, 'replaced');
+        }
+      }
+    }
+
+    const id = shortId(`${kind.slice(0, 3)}_`);
+    const source = kind === 'base' || kind === 'discovery' || kind === 'waypoint' || kind === 'death' ? 'agent' as const : 'program' as const;
+    if (kind === 'resource') {
+      const fact: ResourceAnchorFact = {
+        id,
+        worldId: this.worldId,
+        dim,
+        label,
+        sourceCell: at,
+        observedAt: Date.now(),
+        source: { source, sessionId: this.sessionId },
+        revoked: false,
+      };
+      this.upsertResource(fact);
+      this.enforceLandmarkCaps();
+      return this.resourceView(fact) ?? null;
+    }
+
+    const fact: PlaceFact = {
+      id,
+      kind: kind === 'base' ? 'base' : kind === 'death' ? 'death' : 'place',
+      label,
+      worldId: this.worldId,
+      dim,
+      location: { kind: 'exact', pos: at },
+      observedAt: Date.now(),
+      source: { source, sessionId: this.sessionId },
+      gone: false,
+    };
+    this.upsertPlace(fact);
+    this.notePlaceRecord(id, { kind });
+    this.enforceLandmarkCaps();
+    return this.landmarkView(fact) ?? null;
+  }
+
+  private retireLandmark(id: string, reason: 'capacity' | 'replaced'): void {
+    const snapshot = this.snapshot();
+    const place = snapshot.places.find((fact) => fact.id === id && !fact.gone);
+    if (place !== undefined) { this.markPlaceFactGone(place, reason); return; }
+    const resource = snapshot.resources.find((fact) => fact.id === id && !fact.revoked);
+    if (resource !== undefined) this.revokeResourceFact(resource, reason);
+  }
+
+  private enforceLandmarkCaps() {
+    const views = this.landmarks();
+    const byTs = (a: Landmark, b: Landmark) => a.ts - b.ts;
+    const forgetOldest = (list: Landmark[]) => {
+      const oldest = [...list].sort(byTs)[0];
+      if (oldest) this.retireLandmark(oldest.id, 'capacity');
+    };
+    for (const [label, group] of Object.entries(views.filter((view) => view.kind === 'discovery').reduce<Record<string, Landmark[]>>((groups, view) => {
+      (groups[view.label] ??= []).push(view);
+      return groups;
+    }, {}))) {
+      if (label && group.length > DISCOVERY_LABEL_CAP) forgetOldest(group.slice().sort(byTs).slice(0, group.length - DISCOVERY_LABEL_CAP));
+    }
+    const herds = views.filter((view) => view.kind === 'herd');
+    if (herds.length > HERD_CAP) forgetOldest(herds.slice().sort(byTs).slice(0, herds.length - HERD_CAP));
+    if (views.length <= LANDMARK_CAP) return;
+    const tiers: ((view: Landmark) => boolean)[] = [
+      (view) => ['herd', 'danger', 'death'].includes(view.kind),
+      (view) => view.kind === 'resource',
+      (view) => view.kind === 'waypoint',
+      (view) => view.kind === 'discovery' && !view.label.startsWith('我的') && !isContainerLandmark(view.label),
+    ];
+    for (const tier of tiers) {
+      const candidate = views.filter(tier).sort(byTs)[0];
+      if (candidate) { this.retireLandmark(candidate.id, 'capacity'); return; }
+    }
+  }
+
+  markGone(label: string, dim: string, pos: Vec3Like, now: string) {
+    const at = point(pos);
+    const livePlace = this.livePlaces().find((fact) => fact.label === label
+      && fact.dim === dim && dist3(sourcePoint(fact), at) <= 1);
+    if (livePlace) {
+      this.markPlaceFactGone(livePlace, now);
+      // A landmark view can sit on a container anchor; the shell disappeared too.
+      const container = this.liveContainers().find((fact) => fact.dim === dim && dist3(fact.pos, at) <= 0.1);
+      if (container) this.markContainerFactGone(container, now);
+      return;
+    }
+    const liveContainer = this.liveContainers().find((fact) => this.containerRecords.get(fact.id)?.label === label
+      && fact.dim === dim && dist3(fact.pos, at) <= 1);
+    if (liveContainer) { this.markContainerFactGone(liveContainer, now); return; }
+    const liveResource = this.liveResources().find((fact) => fact.label === label
+      && fact.dim === dim && dist3(fact.sourceCell, at) <= 1);
+    if (liveResource) { this.revokeResourceFact(liveResource, now); return; }
+
+    const id = `gone:${this.worldId}:${dim}:${keyOf(at)}:${label}`;
+    const existing = this.snapshot().places.find((fact) => fact.id === id);
+    const fact: PlaceFact = {
+      id,
+      kind: 'place',
+      label: `gone: ${label}`,
+      worldId: this.worldId,
+      dim,
+      location: { kind: 'exact', pos: at },
+      observedAt: this.observedNow(existing?.observedAt),
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: true,
+      goneAt: this.observedNow(existing?.goneAt),
+      goneSource: goneSourceProvenance(now, { source: 'program', sessionId: this.sessionId }),
+    };
+    this.upsertPlace(fact);
+    // Facts are retained state by contract; GONE_CAP cannot physically delete
+    // history. The cap is intentionally not enforced here (reported as a
+    // first-batch limitation).
+  }
+
+  goneNear(dim: string, pos: Vec3Like, radius = 3): GoneSpot[] {
+    const at = point(pos);
+    const livePlaces = this.livePlaces().filter((fact) => fact.dim === dim && this.landmarkKindOf(fact) !== undefined);
+    const liveResources = this.liveResources().filter((fact) => fact.dim === dim);
+    const live = [
+      ...livePlaces.map((fact) => ({ label: fact.label, pos: sourcePoint(fact) })),
+      ...liveResources.map((fact) => ({ label: fact.label, pos: fact.sourceCell })),
+    ];
+    const out: GoneSpot[] = [];
+    const push = (label: string, gonePos: Vec3Like, reason: string | undefined, ts: number) => {
+      if (reason !== undefined && CONTROL_GONE_REASONS.has(reason)) return;
+      if (live.some((other) => other.label === label && dist3(other.pos, gonePos) <= 1)) return;
+      out.push({ worldId: this.worldId, dim, label, pos: point(gonePos), now: reason ?? 'gone', ts });
+    };
+    for (const fact of this.snapshot().places) {
+      if (!fact.gone || fact.dim !== dim) continue;
+      const gonePos = sourcePoint(fact);
+      if (dist3(gonePos, at) > radius) continue;
+      push(fact.label.startsWith('gone: ') ? fact.label.slice('gone: '.length) : fact.label,
+        gonePos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
+    }
+    for (const fact of this.snapshot().resources) {
+      if (!fact.revoked || fact.dim !== dim || dist3(fact.sourceCell, at) > radius) continue;
+      push(fact.label, fact.sourceCell, goneReasonOf(fact.revokedSource), fact.revokedAt ?? fact.observedAt);
+    }
+    for (const fact of this.snapshot().containers) {
+      if (!fact.gone || fact.dim !== dim || dist3(fact.pos, at) > radius) continue;
+      const record = this.containerRecords.get(fact.id);
+      push(record?.label ?? (this.containerRole(fact) === 'furnace' ? 'furnace' : 'chest'),
+        fact.pos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
+    }
+    return out;
+  }
+
+  removeLandmark(id: string): boolean {
+    const snapshot = this.snapshot();
+    const place = snapshot.places.find((fact) => fact.id === id);
+    if (place !== undefined) {
+      if (this.placeRoleOf(place) === 'base' || place.gone) return false;
+      this.markPlaceFactGone(place, 'replaced');
+      return true;
+    }
+    const resource = snapshot.resources.find((fact) => fact.id === id);
+    if (resource !== undefined) {
+      if (resource.revoked) return false;
+      this.revokeResourceFact(resource, 'replaced');
+      return true;
+    }
+    return false;
+  }
+
+  forgetLandmark(id: string): Landmark | null {
+    const snapshot = this.snapshot();
+    const place = snapshot.places.find((fact) => fact.id === id);
+    const resource = place === undefined ? snapshot.resources.find((fact) => fact.id === id) : undefined;
+    const fact = place ?? resource;
+    if (fact === undefined) return null;
+    const view = place !== undefined ? this.landmarkView(place) : this.resourceView(resource!);
+    const pos = place !== undefined ? sourcePoint(place) : resource!.sourceCell;
+    if (place !== undefined && this.placeRoleOf(place) === 'base' && this.placeRecord(place.id)?.primary === true) {
+      const next = this.bases(place.dim).filter((base) => base.id !== id).sort((a, b) => b.ts - a.ts)[0];
+      if (next) this.selectBase(next.id);
+    }
+    const container = this.liveContainers().find((anchor) => anchor.dim === fact.dim && dist3(anchor.pos, pos) <= 0.1);
+    if (container !== undefined) {
+      if (this.containerRole(container) === 'furnace') this.containerLedgerStore.forgetFurnace(fact.dim, pos);
+      else this.containerLedgerStore.forgetChest(fact.dim, pos);
+      this.markContainerFactGone(container, 'replaced');
+    }
+    if (place !== undefined) this.markPlaceFactGone(place, 'forgotten');
+    else this.revokeResourceFact(resource!, 'forgotten');
+    return view ?? null;
+  }
+
+  noteHerd(label: string, dim: string, pos: Vec3Like, count: number, detail?: string): Landmark {
+    const at = point(pos);
+    const near = this.livePlaces().find((fact) => this.placeRoleOf(fact) === 'herd' && fact.dim === dim && fact.label === label
+      && dist3(sourcePoint(fact), at) < 32);
+    if (near) {
+      const record: HostPlaceRecord = {
+        kind: 'herd',
+        count,
+        ...(detail ? { detail } : {}),
+      };
+      const updated: PlaceFact = { ...near, location: { kind: 'exact', pos: at }, observedAt: this.observedNow(near.observedAt) };
+      this.upsertPlace(updated);
+      this.notePlaceRecord(near.id, record);
+      return this.landmarkView(updated)!;
+    }
+    const herds = this.landmarks().filter((view) => view.kind === 'herd').sort((a, b) => a.ts - b.ts);
+    if (herds.length >= HERD_CAP) this.retireLandmark(herds[0]!.id, 'capacity');
+    const id = shortId('her_');
+    const fact: PlaceFact = {
+      id,
+      kind: 'place',
+      label,
+      worldId: this.worldId,
+      dim,
+      location: { kind: 'exact', pos: at },
+      observedAt: Date.now(),
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: false,
+    };
+    this.upsertPlace(fact);
+    this.notePlaceRecord(id, { kind: 'herd', count, ...(detail ? { detail } : {}) });
+    return this.landmarkView(fact)!;
+  }
+
+  resourceLandmarksNear(names: string[], dim: string, pos: Vec3Like, radius: number): Landmark[] {
+    return this.resourceLandmarksAround(dim, pos, radius, new Set(names));
   }
 
   /** All resource anchors within `radius`, using the Section coordinate index. */
@@ -744,22 +840,24 @@ export class SpatialSemanticStore {
     const x0 = Math.floor((pos.x - radius) / 16), x1 = Math.floor((pos.x + radius) / 16);
     const y0 = Math.floor((pos.y - radius) / 16), y1 = Math.floor((pos.y + radius) / 16);
     const z0 = Math.floor((pos.z - radius) / 16), z1 = Math.floor((pos.z + radius) / 16);
-    const found: { node: SpatialNode; distance: number }[] = [];
+    const found: { fact: ResourceAnchorFact; distance: number }[] = [];
     for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) for (let cz = z0; cz <= z1; cz++) {
       for (const id of index.buckets.get(`${dim}|${cx}|${cy}|${cz}`) ?? []) {
-        const node = index.nodes.get(id);
-        if (node === undefined || node.gone || node.tag !== 'resource' || node.location.kind !== 'exact') continue;
-        if (names !== undefined && (node.label === undefined || !names.has(node.label))) continue;
-        const distance = dist3(node.location.pos, pos);
-        if (distance <= radius) found.push({ node, distance });
+        const fact = index.facts.get(id);
+        if (fact === undefined || fact.revoked) continue;
+        if (names !== undefined && !names.has(fact.label)) continue;
+        const distance = dist3(fact.sourceCell, pos);
+        if (distance <= radius) found.push({ fact, distance });
       }
     }
-    found.sort((a, b) => a.distance - b.distance || a.node.id.localeCompare(b.node.id));
-    return found.flatMap(({ node }) => {
-      const landmark = this.landmarkView(node);
-      return landmark === undefined ? [] : [landmark];
+    found.sort((a, b) => a.distance - b.distance || a.fact.id.localeCompare(b.fact.id));
+    return found.flatMap(({ fact }) => {
+      const view = this.resourceView(fact);
+      return view === undefined ? [] : [view];
     });
   }
+
+  // -------------------------------------------------------------------- bases
 
   setBase(dim: string, pos: Vec3Like, label?: string, opts: { select?: boolean } = {}): Landmark {
     if (typeof dim !== 'string' || !dim || !pos || [pos.x, pos.y, pos.z].some((n) => !Number.isFinite(n))) throw new Error('基地需要实际维度与有限坐标');
@@ -772,56 +870,67 @@ export class SpatialSemanticStore {
     if (!near && this.landmarks().length >= LANDMARK_CAP) {
       const disposable = this.landmarks().filter((landmark) => ['herd', 'resource', 'danger', 'death'].includes(landmark.kind)).sort((a, b) => a.ts - b.ts)[0];
       if (!disposable) throw new Error('地标档案已满；保留所有重要地点，无法新增基地');
-      this.forgetNode(disposable.id);
+      this.retireLandmark(disposable.id, 'capacity');
     }
     if (near) {
-      const node = this.session.topology.getNode(near.id)!;
-      const meta = metaOf(node);
-      const record = isRecord(meta?.record) ? meta.record : {};
-      const next = { ...record, kind: 'base', label: label?.trim() ?? near.label, dim, pos: basePos, ts: Date.now(), worldId: this.worldId };
-      this.updateNode(near.id, { label: label?.trim() ?? near.label, location: { kind: 'exact', pos: basePos }, observedAt: Date.now(), metadata: metadata({ ...this.mergeMeta(node, { record: jsonRecord(next) }) }) });
+      const fact = this.snapshot().places.find((candidate) => candidate.id === near.id && !candidate.gone);
+      if (fact === undefined) throw new Error('基地事实已不可用');
+      const finalLabel = label?.trim() ?? near.label;
+      const updated: PlaceFact = { ...fact, label: finalLabel, location: { kind: 'exact', pos: basePos }, observedAt: this.observedNow(fact.observedAt) };
+      this.upsertPlace(updated);
+      this.notePlaceRecord(near.id, { kind: 'base' });
       const select = opts.select ?? !hadPrimary;
-      return select ? this.selectBase(near.id) : this.landmarkView(this.session.topology.getNode(near.id)!)!;
+      return select ? this.selectBase(near.id) : this.landmarkView(updated)!;
     }
     const id = shortId('base_');
     const finalLabel = label?.trim() ?? `基地 ${bases.length + 1}`;
-    this.saveTracked({
-      id, kind: 'place', source: 'agent', tag: 'base', label: finalLabel, worldId: this.worldId, dim,
-      location: { kind: 'exact', pos: basePos }, observedAt: Date.now(), externalRef: id, durable: true,
-      metadata: metadata({ v: 2, type: 'landmark', view: 'landmark', record: jsonRecord({ kind: 'base', label: finalLabel, dim, pos: basePos, ts: Date.now(), worldId: this.worldId }) }),
-    });
+    const fact: PlaceFact = {
+      id,
+      kind: 'base',
+      label: finalLabel,
+      worldId: this.worldId,
+      dim,
+      location: { kind: 'exact', pos: basePos },
+      // Keep base observation order monotonic so the post-restart primary
+      // fallback (most recently observed base) is deterministic.
+      observedAt: this.observedNow(Math.max(0, ...bases.map((base) => base.ts))),
+      source: { source: 'agent', sessionId: this.sessionId },
+      gone: false,
+    };
+    this.upsertPlace(fact);
+    this.notePlaceRecord(id, { kind: 'base' });
     const select = opts.select ?? !hadPrimary;
-    return select ? this.selectBase(id) : this.landmarkView(this.session.topology.getNode(id)!)!;
+    return select ? this.selectBase(id) : this.landmarkView(fact)!;
   }
 
-  private baseNodes(dim?: string): SpatialNode[] {
-    return this.allNodes().filter((node) => !node.gone && node.tag === 'base' && (!dim || node.dim === dim));
+  private baseFacts(dim?: string): PlaceFact[] {
+    return this.livePlaces().filter((fact) => this.placeRoleOf(fact) === 'base' && (!dim || fact.dim === dim));
   }
 
   base(dim?: string): Landmark | undefined {
     const bases = this.bases(dim);
-    return bases.find((base) => base.primary) ?? bases[0];
+    // Selection is host policy and has no fact field; in-session the annotation
+    // wins. After a restart the most recently confirmed base is the documented
+    // fallback (selection bumps its observation time, as the legacy store did).
+    return bases.find((base) => base.primary) ?? [...bases].sort((a, b) => b.ts - a.ts)[0];
   }
 
   bases(dim?: string): Landmark[] {
-    return this.baseNodes(dim).flatMap((node) => {
-      const view = this.landmarkView(node);
+    return this.baseFacts(dim).flatMap((fact) => {
+      const view = this.landmarkView(fact);
       return view ? [view] : [];
     });
   }
 
   selectBase(id: string): Landmark {
-    const selected = this.session.topology.getNode(id);
-    if (!selected || selected.tag !== 'base') throw new Error('只能选择当前世界中实际记得的基地');
-    for (const node of this.baseNodes(selected.dim)) {
-      const meta = metaOf(node);
-      const rec = isRecord(meta?.record) ? meta.record : {};
-      this.updateNode(node.id, {
-        observedAt: node.id === id ? Date.now() : node.observedAt,
-        metadata: metadata({ ...this.mergeMeta(node, { primary: node.id === id, record: jsonRecord({ ...rec, primary: node.id === id }) }) }),
-      });
+    const selected = this.snapshot().places.find((fact) => fact.id === id && !fact.gone);
+    if (selected === undefined || this.placeRoleOf(selected) !== 'base') throw new Error('只能选择当前世界中实际记得的基地');
+    for (const fact of this.baseFacts(selected.dim)) {
+      this.notePlaceRecord(fact.id, { primary: fact.id === id });
     }
-    return this.landmarkView(this.session.topology.getNode(id)!)!;
+    const view = this.landmarkView(selected);
+    if (view === undefined) throw new Error('基地事实已不可用');
+    return view;
   }
 
   findLandmark(q: string, dim?: string): Landmark | undefined {
@@ -836,60 +945,67 @@ export class SpatialSemanticStore {
     return { ...found, pos: location.pos, radius: location.radius, precise: location.precise, observedAt: location.observedAt };
   }
 
-  // ---------------------------------------------------------------- containers
+  // --------------------------------------------------------------- containers
 
-  private containerNodes(): SpatialNode[] {
-    return this.allNodes().filter((node) => !node.gone && this.hasType(node, 'container'));
+  private containerRole(fact: ContainerAnchorFact): 'chest' | 'furnace' {
+    if (fact.id.startsWith('furnace:')) return 'furnace';
+    if (fact.id.startsWith('chest:')) return 'chest';
+    const record = this.containerRecords.get(fact.id);
+    const block = record?.block;
+    if (block === 'furnace' || block === 'blast_furnace' || block === 'smoker' || block?.endsWith('_furnace')) return 'furnace';
+    return record?.label?.startsWith('furnace') === true ? 'furnace' : 'chest';
   }
 
-  private containerNodeAt(dim: string, pos: Vec3Like): SpatialNode | undefined {
+  private containerFacts(dim?: string): ContainerAnchorFact[] {
+    return this.liveContainers().filter((fact) => this.containerRole(fact) === 'chest' && (!dim || fact.dim === dim));
+  }
+
+  private furnaceFacts(dim?: string): ContainerAnchorFact[] {
+    return this.liveContainers().filter((fact) => this.containerRole(fact) === 'furnace' && (!dim || fact.dim === dim));
+  }
+
+  private containerFactAt(dim: string, pos: Vec3Like, kinds: ('chest' | 'furnace')[] = ['chest', 'furnace']): ContainerAnchorFact | undefined {
     const at = point(pos);
-    return this.containerNodes().find((node) => node.dim === dim
-      && dist3(node.location.kind === 'exact' ? node.location.pos : node.location.center, at) <= 0.1);
+    return this.liveContainers().find((fact) => fact.dim === dim && kinds.includes(this.containerRole(fact))
+      && dist3(fact.pos, at) <= 0.1);
   }
 
-  private ensureContainerNode(dim: string, pos: Vec3Like, block = 'chest', note?: string): SpatialNode {
-    const existing = this.containerNodeAt(dim, pos);
+  private ensureContainerFact(dim: string, pos: Vec3Like, block = 'chest', note?: string): ContainerAnchorFact {
+    const existing = this.containerFactAt(dim, pos);
     if (existing) {
-      const meta = this.mergeMeta(existing, {
-        type: 'container',
-        types: [...new Set([...(metaOf(existing)?.types ?? []), metaOf(existing)?.type ?? 'landmark', 'container' as const])],
+      this.noteContainerRecord(existing.id, {
         block,
+        ...(note ? { label: `chest: ${note}` } : {}),
       });
-      if (metaOf(existing)?.type !== 'container') this.updateNode(existing.id, { metadata: metadata(meta) });
-      return this.session.topology.getNode(existing.id)!;
+      return existing;
     }
     const at = point(pos);
-    const id = `chest:${chestKey(this.worldId, dim, at)}`;
-    const now = Date.now();
-    const node: SpatialNode = {
-      id, kind: 'place', source: 'program', tag: 'resource', label: `chest${note ? `: ${note}` : ''}`,
-      worldId: this.worldId, dim, location: { kind: 'exact', pos: at }, observedAt: now, externalRef: chestKey(this.worldId, dim, at),
-      metadata: metadata({ v: 2, type: 'container', block, record: jsonRecord({ ts: now, uses: 0, block, ...(note ? { note } : {}) }) }),
+    const ledgerKey = containerLedgerKey(this.worldId, dim, at);
+    const fact: ContainerAnchorFact = {
+      id: `chest:${ledgerKey}`,
+      worldId: this.worldId,
+      dim,
+      pos: at,
+      externalRef: ledgerKey,
+      ledgerRef: ledgerKey,
+      observedAt: Date.now(),
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: false,
     };
-    this.saveTracked(node);
-    return node;
+    this.upsertContainer(fact);
+    this.noteContainerRecord(fact.id, { block, ...(note ? { label: `chest: ${note}` } : {}) });
+    return fact;
   }
 
-  private saveContainerMetadata(node: SpatialNode, entry: ChestRecord) {
-    const meta = metaOf(node) ?? { v: 2, type: 'container' as const };
-    const record = {
-      ts: entry.ts,
-      uses: entry.uses,
-      block: entry.block,
-      ...(entry.day !== undefined ? { day: entry.day } : {}),
-      ...(entry.note ? { note: entry.note } : {}),
-    };
-    this.updateNode(node.id, {
-      observedAt: entry.contents?.observedAt || entry.ts,
-      metadata: metadata({ ...meta, block: entry.block, record: jsonRecord(record) }),
-    });
+  private refreshContainerObservation(fact: ContainerAnchorFact, observedAt: number): void {
+    if (!Number.isFinite(observedAt) || observedAt <= fact.observedAt) return;
+    this.upsertContainer({ ...fact, observedAt });
   }
 
   noteChestUse(dim: string, pos: Vec3Like, use: ChestUse): ChestRecord {
-    const node = this.ensureContainerNode(dim, pos, use.block ?? 'chest', use.note);
+    const node = this.ensureContainerFact(dim, pos, use.block ?? 'chest', use.note);
     const entry = this.containerLedgerStore.noteChestUse(dim, pos, use, node.id);
-    this.saveContainerMetadata(node, entry);
+    this.refreshContainerObservation(node, entry.contents?.observedAt || entry.ts);
     return entry;
   }
 
@@ -899,17 +1015,8 @@ export class SpatialSemanticStore {
 
   forgetChest(dim: string, pos: Vec3Like) {
     this.containerLedgerStore.forgetChest(dim, pos);
-    const node = this.containerNodeAt(dim, pos);
-    if (!node) return;
-    const meta = metaOf(node);
-    if (!meta) { this.forgetNode(node.id); return; }
-    if (meta.view) {
-      const types = meta.types?.filter((type) => type !== 'container');
-      const next: CurioMeta = { ...meta, types, type: types?.[0] ?? 'landmark' };
-      this.updateNode(node.id, { metadata: metadata(next) });
-    } else {
-      this.forgetNode(node.id);
-    }
+    const node = this.containerFactAt(dim, pos, ['chest']);
+    if (node) this.markContainerFactGone(node, 'replaced');
   }
 
   /** Current-validity flag for known contents; quantities/time/position stay exact. */
@@ -918,15 +1025,15 @@ export class SpatialSemanticStore {
   }
 
   chests(dim?: string): ChestRecord[] {
-    const entries = new Map<string, ChestRecord>(this.containerLedgerStore.chests(dim).map((entry) => [chestKey(this.worldId, entry.dim, entry.pos), entry] as const));
-    for (const node of this.containerNodes()) {
-      if (dim && node.dim !== dim) continue;
-      const pos = node.location.kind === 'exact' ? node.location.pos : node.location.center;
-      const key = chestKey(this.worldId, node.dim, pos);
+    const entries = new Map<string, ChestRecord>(this.containerLedgerStore.chests(dim).map((entry) => [containerLedgerKey(this.worldId, entry.dim, entry.pos), entry] as const));
+    for (const fact of this.containerFacts()) {
+      if (dim && fact.dim !== dim) continue;
+      const key = containerLedgerKey(this.worldId, fact.dim, fact.pos);
       if (!entries.has(key)) {
         entries.set(key, {
-          worldId: this.worldId, dim: node.dim, pos: point(pos), block: metaOf(node)?.block ?? 'chest', uses: 0,
-          ts: node.observedAt ?? 0, contents: { items: [], observedAt: 0, possiblyStale: true }, nodeId: node.id,
+          worldId: this.worldId, dim: fact.dim, pos: point(fact.pos),
+          block: this.containerRecords.get(fact.id)?.block ?? 'chest', uses: 0,
+          ts: fact.observedAt, contents: { items: [], observedAt: 0, possiblyStale: true }, nodeId: fact.id,
         } as ChestRecord);
       }
     }
@@ -944,52 +1051,43 @@ export class SpatialSemanticStore {
     return recall(this.chests(opts.dim), fn, this.chestClock(opts.day), opts.from);
   }
 
-  // ---------------------------------------------------------------- furnaces
-
-  private furnaceNodes(): SpatialNode[] {
-    return this.allNodes().filter((node) => !node.gone && this.hasType(node, 'furnace'));
-  }
+  // ------------------------------------------------------------------ furnaces
 
   setFurnace(rec: Omit<FurnaceRecord, 'worldId' | 'ts'> & { ts?: number }) {
     const at = point(rec.pos);
-    const node = this.furnaceNodes().find((candidate) => candidate.dim === rec.dim
-      && dist3(candidate.location.kind === 'exact' ? candidate.location.pos : candidate.location.center, at) <= 2);
+    const node = this.furnaceFacts().find((candidate) => candidate.dim === rec.dim && dist3(candidate.pos, at) <= 2);
     const entry = this.containerLedgerStore.setFurnace(rec, node?.id);
     if (!entry) {
       this.containerLedgerStore.forgetFurnace(rec.dim, rec.pos);
-      if (!node) return;
-      const meta = metaOf(node);
-      if (!meta?.view) { this.forgetNode(node.id); return; }
-      this.updateNode(node.id, { metadata: metadata({ ...meta, types: meta.types?.filter((type) => type !== 'furnace'), type: meta.types?.find((type) => type !== 'furnace') ?? 'landmark' }) });
+      if (node) this.markContainerFactGone(node, 'replaced');
       return;
     }
+    const observedAt = rec.ts ?? Date.now();
     if (node) {
-      const meta = this.mergeMeta(node, {
-        type: 'furnace',
-        types: [...new Set([...(metaOf(node)?.types ?? []), metaOf(node)?.type ?? 'landmark', 'furnace' as const])],
-        block: rec.block,
-        record: jsonRecord({ ts: entry.ts, block: rec.block, ...(node.label ? {} : {}) }),
-      });
-      this.updateNode(node.id, { observedAt: rec.ts ?? Date.now(), metadata: metadata(meta) });
+      this.noteContainerRecord(node.id, { block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
+      this.refreshContainerObservation(node, observedAt);
       return;
     }
-    const id = `furnace:${chestKey(this.worldId, rec.dim, at)}`;
-    this.saveTracked({
-      id, kind: 'place', source: 'program', tag: 'resource', label: `furnace${rec.burning ? ' (burning)' : ''}`,
-      worldId: this.worldId, dim: rec.dim, location: { kind: 'exact', pos: at }, observedAt: rec.ts ?? Date.now(),
-      externalRef: chestKey(this.worldId, rec.dim, at),
-      metadata: metadata({ v: 2, type: 'furnace', block: rec.block, record: jsonRecord({ ts: entry.ts, block: rec.block }) }),
-    });
+    const ledgerKey = containerLedgerKey(this.worldId, rec.dim, at);
+    const fact: ContainerAnchorFact = {
+      id: `furnace:${ledgerKey}`,
+      worldId: this.worldId,
+      dim: rec.dim,
+      pos: at,
+      externalRef: ledgerKey,
+      ledgerRef: ledgerKey,
+      observedAt,
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: false,
+    };
+    this.upsertContainer(fact);
+    this.noteContainerRecord(fact.id, { block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });
   }
 
   forgetFurnace(dim: string, pos: Vec3Like) {
     this.containerLedgerStore.forgetFurnace(dim, pos);
-    const node = this.furnaceNodes().find((candidate) => candidate.dim === dim
-      && dist3(candidate.location.kind === 'exact' ? candidate.location.pos : candidate.location.center, pos) <= 2);
-    if (!node) return;
-    const meta = metaOf(node);
-    if (!meta?.view) { this.forgetNode(node.id); return; }
-    this.updateNode(node.id, { metadata: metadata({ ...meta, types: meta.types?.filter((type) => type !== 'furnace'), type: meta.types?.find((type) => type !== 'furnace') ?? 'landmark' }) });
+    const node = this.containerFactAt(dim, pos, ['furnace']);
+    if (node) this.markContainerFactGone(node, 'replaced');
   }
 
   furnaces(dim?: string): FurnaceRecord[] {
@@ -1000,54 +1098,97 @@ export class SpatialSemanticStore {
     }));
   }
 
-  // ---------------------------------------------------------------- farms
+  // -------------------------------------------------------------------- farms
 
   addFarm(f: FarmRecord) {
-    const at = point(f.cells[0] ?? { x: 0, y: 64, z: 0 });
-    const node: SpatialNode = {
-      id: f.id, kind: 'place', source: 'program', tag: 'resource', label: `farm: ${f.crop}`,
-      worldId: this.worldId, dim: f.dim, location: regionOf(f.cells), observedAt: f.plantedAt, externalRef: f.id,
-      metadata: metadata({ v: 2, type: 'farm', record: jsonRecord({ ...f, worldId: this.worldId, pos: at }) }),
+    const fact: PlaceFact = {
+      id: f.id,
+      kind: 'station',
+      label: `farm: ${f.crop}`,
+      worldId: this.worldId,
+      dim: f.dim,
+      location: areaOf(f.cells),
+      observedAt: f.plantedAt,
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: false,
     };
-    this.saveNode(node);
+    this.upsertPlace(fact);
+    // The coarse fact kind is `station`; the host annotation carries the cells
+    // and harvest counter that have no fact field.
+    this.notePlaceRecord(f.id, { farm: { cells: f.cells.map(point), harvests: f.harvests } });
+  }
+
+  private farmRecordOf(fact: PlaceFact): FarmRecord {
+    const annotated = this.placeRecord(fact.id)?.farm;
+    const center = sourcePoint(fact);
+    return {
+      id: fact.id,
+      worldId: this.worldId,
+      dim: fact.dim,
+      crop: fact.label.replace(/^farm:\s*/, '') || 'farm',
+      cells: annotated ? annotated.cells.map(point) : [{ ...center }],
+      plantedAt: fact.observedAt,
+      harvests: annotated?.harvests ?? 0,
+      ...(fact.location.kind === 'area' ? { area: { center: { ...fact.location.center }, radius: fact.location.radius } } : {}),
+    };
   }
 
   farms(): FarmRecord[] {
-    return this.allNodes().filter((node) => !node.gone && this.hasType(node, 'farm')).flatMap((node) => {
-      const record = this.typedRecord<FarmRecord>(node);
-      return record ? [{ ...record, worldId: this.worldId }] : [];
-    });
+    return this.livePlaces()
+      .filter((fact) => this.placeRoleOf(fact) === 'farm')
+      .map((fact) => this.farmRecordOf(fact));
   }
 
   updateFarm(id: string, patch: Partial<FarmRecord>) {
-    const node = this.session.topology.getNode(id);
-    if (!node) return;
-    const record = { ...(this.typedRecord<FarmRecord>(node) ?? {}), ...patch } as FarmRecord;
-    const meta = this.mergeMeta(node, { record: jsonRecord(record) });
-    this.updateNode(id, {
-      ...(record.cells ? { location: regionOf(record.cells) } : {}),
-      observedAt: record.plantedAt ?? node.observedAt,
-      metadata: metadata(meta),
-    });
+    const fact = this.snapshot().places.find((candidate) => candidate.id === id && !candidate.gone);
+    if (fact === undefined) return;
+    const current = this.farmRecordOf(fact);
+    const next: FarmRecord = { ...current, ...patch, id };
+    const updated: PlaceFact = {
+      ...fact,
+      label: `farm: ${next.crop}`,
+      location: areaOf(next.cells),
+      observedAt: this.observedNow(fact.observedAt),
+    };
+    this.upsertPlace(updated);
+    this.notePlaceRecord(id, { farm: { cells: next.cells.map(point), harvests: next.harvests } });
   }
 
-  // ---------------------------------------------------------------- hazards
+  // ------------------------------------------------------------------ hazards
 
-  private hazardRecords(): { node: SpatialNode; record: Hazard }[] {
-    return this.allNodes().filter((node) => !node.gone && this.hasType(node, 'hazard')).flatMap((node) => {
-      const record = this.typedRecord<Hazard>(node);
-      return record ? [{ node, record: { ...record, worldId: this.worldId } }] : [];
-    });
+  private hazardRecordOf(fact: PlaceFact): Hazard {
+    const annotated = this.placeRecord(fact.id)?.hazard;
+    const parsed = /^danger:\s*([^\s(]+)(?:\s*\(([^)]*)\))?$/.exec(fact.label);
+    const parsedKind = parsed?.[1];
+    const kind: HazardKind = annotated?.kind
+      ?? (parsedKind !== undefined && HAZARD_KINDS.has(parsedKind) ? parsedKind as HazardKind : 'unknown');
+    const note = annotated?.note ?? parsed?.[2];
+    const center = sourcePoint(fact);
+    return {
+      id: fact.id,
+      worldId: this.worldId,
+      dim: fact.dim,
+      pos: { ...center },
+      radius: fact.location.kind === 'area' ? fact.location.radius : 6,
+      kind,
+      count: annotated?.count ?? 1,
+      ...(annotated?.during !== undefined ? { during: annotated.during } : {}),
+      ...(note !== undefined && note !== '' ? { note } : {}),
+      firstTs: annotated?.firstTs ?? fact.observedAt,
+      ts: fact.observedAt,
+    };
   }
 
   addHazard(h: { dim: string; pos: Vec3Like; kind: HazardKind; during?: string; note?: string }): Hazard {
     const pos = point(h.pos);
     const now = Date.now();
-    const records = this.hazardRecords();
-    for (const { node, record } of records) {
-      if (!effectiveHazard(record, now - 40 * 60_000)) this.forgetNode(node.id);
+    for (const fact of this.livePlaces().filter((candidate) => this.placeRoleOf(candidate) === 'hazard')) {
+      const record = this.hazardRecordOf(fact);
+      if (effectiveHazard(record, now - 40 * 60_000) === null) this.markPlaceFactGone(fact, 'faded');
     }
-    const live = this.hazardRecords();
+    const live = this.livePlaces()
+      .filter((fact) => this.placeRoleOf(fact) === 'hazard')
+      .map((fact) => ({ fact, record: this.hazardRecordOf(fact) }));
     const old = live.find(({ record }) => record.dim === h.dim && record.kind === h.kind
       && effectiveHazard(record, now) && dist3(record.pos, pos) <= Math.max(6, record.radius));
     if (old) {
@@ -1057,37 +1198,49 @@ export class SpatialSemanticStore {
         ...(h.during ? { during: h.during.slice(0, 120) } : {}),
         ...(h.note ? { note: h.note.slice(0, 200) } : {}),
       };
-      this.updateNode(old.node.id, {
-        location: { kind: 'region', center: pos, radius: next.radius },
-        observedAt: now, metadata: metadata({ ...this.mergeMeta(old.node, { record: jsonRecord(next) }) }),
-      });
-      return clone(next);
+      const updated: PlaceFact = {
+        ...old.fact,
+        label: `danger: ${h.kind}${next.note ? ` (${next.note})` : ''}`,
+        location: { kind: 'area', center: pos, radius: next.radius },
+        observedAt: this.observedNow(old.fact.observedAt),
+      };
+      this.upsertPlace(updated);
+      this.notePlaceRecord(old.fact.id, { hazard: { kind: h.kind, count: next.count, firstTs: next.firstTs, ...(next.during ? { during: next.during } : {}), ...(next.note ? { note: next.note } : {}) } });
+      return clone({ ...next, ts: updated.observedAt });
     }
     const id = shortId('hz_');
     const hazard: Hazard = {
       id, worldId: this.worldId, dim: h.dim, pos, radius: 6, kind: h.kind, count: 1,
       ...(h.during ? { during: h.during.slice(0, 120) } : {}), ...(h.note ? { note: h.note.slice(0, 200) } : {}), firstTs: now, ts: now,
     };
-    this.saveTracked({
-      id, kind: 'place', source: 'program', tag: 'danger',
+    const fact: PlaceFact = {
+      id,
+      kind: 'hazard',
       label: `danger: ${h.kind}${h.note ? ` (${h.note})` : ''}`,
-      worldId: this.worldId, dim: h.dim, location: { kind: 'region', center: pos, radius: 6 },
-      observedAt: now, externalRef: id,
-      metadata: metadata({ v: 2, type: 'hazard', record: jsonRecord(hazard) }),
-    });
-    const hazards = this.hazardRecords();
+      worldId: this.worldId,
+      dim: h.dim,
+      location: { kind: 'area', center: pos, radius: 6 },
+      observedAt: now,
+      source: { source: 'program', sessionId: this.sessionId },
+      gone: false,
+    };
+    this.upsertPlace(fact);
+    this.notePlaceRecord(id, { hazard: { kind: hazard.kind, count: 1, firstTs: now, ...(h.during ? { during: hazard.during! } : {}), ...(h.note ? { note: hazard.note! } : {}) } });
+    const hazards = this.livePlaces().filter((candidate) => this.placeRoleOf(candidate) === 'hazard');
     if (hazards.length > HAZARD_CAP) {
-      const oldest = hazards.sort((a, b) => a.record.ts - b.record.ts)[0];
-      if (oldest) this.forgetNode(oldest.node.id);
+      const oldest = hazards.map((candidate) => this.hazardRecordOf(candidate)).sort((a, b) => a.ts - b.ts)[0];
+      if (oldest) this.retireLandmark(oldest.id, 'capacity');
     }
     return clone(hazard);
   }
 
   hazards(dim?: string): Hazard[] {
     const now = Date.now();
-    return this.hazardRecords()
-      .filter(({ record }) => !dim || record.dim === dim)
-      .flatMap(({ record }) => {
+    return this.livePlaces()
+      .filter((fact) => this.placeRoleOf(fact) === 'hazard')
+      .map((fact) => this.hazardRecordOf(fact))
+      .filter((record) => !dim || record.dim === dim)
+      .flatMap((record) => {
         const effective = effectiveHazard(record, now);
         return effective ? [clone(effective)] : [];
       })
@@ -1097,7 +1250,7 @@ export class SpatialSemanticStore {
   hazardAt(pos: Vec3Like, dim: string, kinds?: HazardKind[]): Hazard | null {
     let best: Hazard | null = null;
     const now = Date.now();
-    for (const { record } of this.hazardRecords()) {
+    for (const record of this.livePlaces().filter((fact) => this.placeRoleOf(fact) === 'hazard').map((fact) => this.hazardRecordOf(fact))) {
       if (record.dim !== dim || (kinds && !kinds.includes(record.kind))) continue;
       const effective = effectiveHazard(record, now);
       if (!effective || dist3(effective.pos, pos) > effective.radius) continue;
@@ -1106,7 +1259,9 @@ export class SpatialSemanticStore {
     return best ? clone(best) : null;
   }
 
-  // ---------------------------------------------------------------- passages
+  // ----------------------------------------------------------------- passages
+
+  private allFragments(): PathFragment[] { return allFragments(this.session.history); }
 
   private passageFragments(archived: boolean, dim?: string): PathFragment[] {
     return this.allFragments().filter((fragment) => {
@@ -1185,7 +1340,7 @@ export class SpatialSemanticStore {
     }
   }
 
-  // ---------------------------------------------------------------- ledger-backed facts
+  // ---------------------------------------------------- ledger-backed records
 
   putPlaced(pos: Vec3Like, name: string, dim?: string) {
     const at = point(pos);
@@ -1243,11 +1398,7 @@ export class SpatialSemanticStore {
     return this.session.ledger.chunkVisits().length;
   }
 
-  /**
-   * 身边记录过的路：把本维度亲历的路径片段（走过/搭过/挖过）拼成路网，取 radius 格内碰到的每一条，
-   * 报离自己最近的那格、这条路一直通到哪（离自己最远的记录格）、由哪些来源组成、自己是否正站在上面。
-   * 只是历史几何，不代表现在还通；接不接、怎么走由 Agent 决定。
-   */
+  /** 身边记录过的历史路网（路线几何，不是事实层）。 */
   nearbyPaths(dim: string, here: Vec3Like, radius: number) {
     const fragments = this.allFragments().filter((f) => f.dim === dim && f.geometrySource === 'traversal');
     const graph = buildPathGraph(fragments);
@@ -1268,10 +1419,6 @@ export class SpatialSemanticStore {
         onIt: r.nearestDist <= 1.5 && Math.abs(r.nearest.y - Math.floor(here.y)) <= 1 }));
   }
 
-  /**
-   * 本维度去过的历史范围：区块访问数与外框，以及记录路径（亲历的 traversal 片段）在东南西北四向
-   * 最远的脚点和那段路最后记录的时间。只是历史记录，不代表现在还通、也不代表那片看全了。
-   */
   visitedExtent(dim: string) {
     const visits = this.session.ledger.chunkVisits(dim);
     const bounds = visits.length === 0 ? null : {
@@ -1293,10 +1440,16 @@ export class SpatialSemanticStore {
     return this.session.ledger.novelty(dim, Math.floor(x / 16), Math.floor(z / 16));
   }
 
+  /**
+   * The compatibility migration marker intentionally stays on the topology
+   * node surface: the startup gate (integration-owned) reads it there. It is
+   * not a semantic fact and carries no world geometry.
+   */
   migrationMarker(): { version: number; completedAt: number; sources?: JsonValue } | null {
     const node = this.session.topology.getNode('curio:migration');
     if (!node) return null;
-    const record = metaOf(node)?.record;
+    const curio = isRecord(node.metadata) ? (node.metadata as CurioMetadata).curio : undefined;
+    const record = isRecord(curio) ? (curio as { record?: unknown }).record : undefined;
     if (!isRecord(record)) return null;
     return {
       version: typeof record.version === 'number' ? record.version : 0,
@@ -1306,34 +1459,38 @@ export class SpatialSemanticStore {
   }
 
   writeMigrationMarker(sources: JsonValue = {}, completedAt = Date.now()) {
-    const node: SpatialNode = {
+    this.session.topology.saveNode({
       id: 'curio:migration', kind: 'place', source: 'program', tag: 'discovery',
       label: 'spatial migration', worldId: this.worldId, dim: 'overworld',
       location: { kind: 'exact', pos: { x: 0, y: 0, z: 0 } }, observedAt: completedAt,
       externalRef: 'curio:migration',
-      metadata: metadata({ v: 2, type: 'migration', record: { version: 1, completedAt, sources } as JsonValue }),
-    };
-    this.saveNode(node);
+      metadata: { curio: { v: 2, type: 'migration', record: { version: 1, completedAt, sources } as JsonValue } },
+    });
   }
 
   hasManagedRecords(): boolean {
-    return this.allNodes().some((node) => !!metaOf(node)) || this.allFragments().length > 0
+    const snapshot = this.snapshot();
+    return snapshot.places.length > 0 || snapshot.resources.length > 0 || snapshot.containers.length > 0
+      || this.allFragments().length > 0
       || this.session.ledger.placedBlocks().length > 0 || this.session.ledger.chunkVisits().length > 0
       || this.session.ledger.portalTraversals().length > 0;
   }
 
   counts() {
-    const nodes = this.allNodes();
-    const fragments = this.allFragments();
+    const snapshot = this.snapshot();
+    const places = snapshot.places;
+    const views = this.landmarks();
     return {
-      nodes: nodes.length,
-      landmarks: nodes.filter((node) => this.viewOf(node) !== undefined).length,
-      containers: this.containerNodes().length,
-      furnaces: this.furnaceNodes().length,
-      farms: nodes.filter((node) => this.hasType(node, 'farm')).length,
-      hazards: nodes.filter((node) => this.hasType(node, 'hazard')).length,
-      gone: nodes.filter((node) => node.gone).length,
-      fragments: fragments.filter((fragment) => isRecord(fragment.metadata) && (fragment.metadata as CurioMetadata).curio?.type === 'passage').length,
+      nodes: places.length + snapshot.resources.length + snapshot.containers.length,
+      landmarks: views.length,
+      containers: this.containerFacts().length,
+      furnaces: this.furnaceFacts().length,
+      farms: places.filter((fact) => !fact.gone && this.placeRoleOf(fact) === 'farm').length,
+      hazards: places.filter((fact) => !fact.gone && this.placeRoleOf(fact) === 'hazard').length,
+      gone: places.filter((fact) => fact.gone && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.goneSource) ?? '')).length
+        + snapshot.resources.filter((fact) => fact.revoked && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.revokedSource) ?? '')).length
+        + snapshot.containers.filter((fact) => fact.gone && !CONTROL_GONE_REASONS.has(goneReasonOf(fact.goneSource) ?? '')).length,
+      fragments: this.allFragments().filter((fragment) => isRecord(fragment.metadata) && (fragment.metadata as CurioMetadata).curio?.type === 'passage').length,
       placed: this.session.ledger.placedBlocks().length,
       visits: this.session.ledger.chunkVisits().length,
       containersLedger: this.containerLedgerStore.chests().length + this.containerLedgerStore.furnaces().length,

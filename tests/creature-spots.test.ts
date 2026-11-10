@@ -38,8 +38,8 @@ test('看见羊群就记下（中心、只数、颜色）；后来没看见不�
     { name: 'zombie', kind: 'hostile', pos: { x: 5, y: 64, z: 0 } }, { name: 'bat', kind: 'passive', pos: { x: 3, y: 66, z: 0 } }];
   (perception as any).noteHerds({ dim: 'overworld', pos: { x: 0, y: 64, z: 0 } }, seen);
   const h = memory.landmarks().filter((l) => l.kind === 'herd');
-  assert.deepEqual(h.map((l) => [l.label, l.pos, l.count, l.detail]), [
-    ['sheep', { x: 11, y: 64, z: 1 }, 2, '白色×2、幼崽×1'], ['bat', { x: 3, y: 66, z: 0 }, 1, undefined],
+  assert.deepEqual(h.map((l) => [l.label, l.pos, l.count, l.detail]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))), [
+    ['bat', { x: 3, y: 66, z: 0 }, 1, undefined], ['sheep', { x: 11, y: 64, z: 1 }, 2, '白色×2、幼崽×1'],
   ]);
   // 靠近但背对、遮挡或光照不足时没有看到，不能据此删除历史出没点。
   const p = perception as any;

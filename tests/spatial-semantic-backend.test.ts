@@ -30,8 +30,9 @@ test('WorldMemory 从 library fragments/nodes/ledger 读写语义记录', () => 
   const fragment = stores.history.getFragment('psg_1');
   assert.equal((fragment?.metadata?.curio as { dug?: number } | undefined)?.dug, 2);
   assert.equal((fragment?.metadata?.curio as { type?: string } | undefined)?.type, 'passage');
-  const landmarkNode = stores.topology.nodes({ limit: 100 }).items.find((node) => node.id === first.landmarks().find((landmark) => landmark.kind === 'resource')!.id);
-  assert.equal((landmarkNode?.metadata?.curio as { type?: string } | undefined)?.type, 'landmark');
+  const resourceId = first.landmarks().find((landmark) => landmark.kind === 'resource')!.id;
+  const resourceFact = stores.facts.resources({ worldId: W, includeGone: true }).items.find((fact) => fact.id === resourceId);
+  assert.equal(resourceFact?.label, 'iron_ore');
   assert.equal(stores.ledger.placedBlocks()[0]?.name, 'torch');
   assert.equal(stores.ledger.chunkVisitCount(D, 1, 1), 1);
 
@@ -57,9 +58,40 @@ test('removed resource is revoked from the default anchor view but kept in histo
   memory.markGone('iron_ore', D, pos, 'stone');
 
   assert.equal(memory.landmarks().some((landmark) => landmark.label === 'iron_ore'), false);
-  assert.equal(stores.topology.nodes({ tag: 'resource', excludeGone: true }).items.length, 0);
-  assert.equal(stores.topology.nodes({ tag: 'resource' }).items.length, 1, 'history keeps the gone node');
-  assert.equal(stores.topology.nodes({ tag: 'resource' }).items[0]?.gone, true);
+  assert.equal(stores.facts.resources({ worldId: W }).items.length, 0);
+  assert.equal(stores.facts.resources({ worldId: W, includeGone: true }).items.length, 1, 'history keeps the revoked anchor');
+  assert.equal(stores.facts.resources({ worldId: W, includeGone: true }).items[0]?.revoked, true);
+});
+
+test('semantic records are written to the fact port, not topology nodes', () => {
+  const { memory, stores } = semanticMemory(W);
+  memory.addLandmark('resource', 'iron_ore', D, at(1, 64, 1), 0);
+  memory.setBase(D, at(0, 64, 0), 'home');
+  memory.setChest(D, at(2, 64, 2), [{ name: 'dirt', count: 1 }]);
+  memory.setFurnace({ dim: D, pos: at(3, 64, 3), block: 'furnace', input: { name: 'iron_ore', count: 1 }, output: null, fuel: null, burning: true });
+  memory.addFarm({ id: 'farm_1', dim: D, crop: 'wheat', cells: [at(4, 64, 4), at(5, 64, 4)], plantedAt: 123, harvests: 2 });
+  memory.addHazard({ dim: D, pos: at(6, 64, 6), kind: 'lava', note: 'x' });
+  memory.markGone('iron_ore', D, at(1, 64, 1), 'air');
+
+  const places = stores.facts.places({ worldId: W, includeGone: true }).items;
+  const resources = stores.facts.resources({ worldId: W, includeGone: true }).items;
+  const containers = stores.facts.containers({ worldId: W, includeGone: true }).items;
+
+  const base = places.find((fact) => fact.kind === 'base');
+  assert.equal(base?.label, 'home');
+  const farm = places.find((fact) => fact.id === 'farm_1');
+  assert.equal(farm?.kind, 'station');
+  assert.equal(farm?.label, 'farm: wheat');
+  assert.equal(farm?.location.kind, 'area', 'multi-cell farm stays an area');
+  assert.equal(places.find((fact) => fact.kind === 'hazard')?.location.kind, 'area');
+  assert.equal(resources.length, 1);
+  assert.equal(resources[0]?.label, 'iron_ore');
+  assert.equal(resources[0]?.revoked, true);
+  assert.equal(containers.length, 2);
+  for (const anchor of containers) {
+    assert.equal(anchor.ledgerRef, `${W}:${D}:${anchor.pos.x},${anchor.pos.y},${anchor.pos.z}`);
+  }
+  assert.equal(stores.topology.nodes({ limit: 10 }).total, 0, 'no semantic node is written to the topology');
 });
 
 test('WorldMemory JSON keeps only non-spatial facts', (t) => {

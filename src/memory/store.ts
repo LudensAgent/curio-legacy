@@ -125,6 +125,12 @@ export interface FarmRecord {
   cells: Vec3Like[]; // 耕地位置
   plantedAt: number;
   harvests: number;
+  /**
+   * Set when the fact layer could only retain the farm as an area. `cells` then
+   * holds one representative center cell, never a claim that it is the only
+   * farmland cell.
+   */
+  area?: { center: Vec3Like; radius: number };
 }
 
 /** 一次挖掘的耗时记录：用来发现“空手砍树太慢，该做斧头了” */
