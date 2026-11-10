@@ -1398,12 +1398,16 @@ export class SharedSpatialSession {
   }
 
   /** 关停开始后同步拒绝新的公开保存；已接受的保存仍可完成，内部最终保存另行执行。 */
-  checkpoint(): Promise<SpatialCheckpointResult> {
+  async checkpoint(): Promise<SpatialCheckpointResult> {
     if (this.closingFlag) {
-      return Promise.reject(new PersistenceError('closing', 'shared spatial session is closing; checkpoint is rejected'));
+      throw new PersistenceError('closing', 'shared spatial session is closing; checkpoint is rejected');
     }
     this.retainObservations();
-    return this.session.checkpoint();
+    const result = await this.session.checkpoint();
+    // 保存确认后淘汰已提交、非 pinned/dirty 的冷 Section；保存成功不因换出结果改写。
+    // manual 没有预存遗忘钩子；eager 仍走 retainObservations 的兼容路径。
+    if (!this.closingFlag && this.coordinator !== null) this.freeOnce();
+    return result;
   }
 
   /** 落盘前修剪体素观测：只留最近 MAX_OBSERVED_CELLS 格。按需驻留时库无法和未驻留区段统一排序，不修剪。 */

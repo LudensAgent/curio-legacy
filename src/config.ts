@@ -52,7 +52,9 @@ const bool = (k: string, d: boolean) => {
   return ['1', 'true', 'yes', 'on'].includes(v.toLowerCase());
 };
 // 体素驻留模式只在配置边界解析一次；拼错不静默回落到默认值。
-const voxelLoadingRaw = str('SPATIAL_VOXEL_LOADING', 'eager').toLowerCase();
+// 新主会话默认 manual：只加载目录，按需冷读；不再在保存前遗忘旧观测。
+// 显式 eager 保留为兼容路径，它仍使用旧的保存前修剪。
+const voxelLoadingRaw = str('SPATIAL_VOXEL_LOADING', 'manual').toLowerCase();
 if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
   throw new Error(`SPATIAL_VOXEL_LOADING 必须为 eager 或 manual，收到：${voxelLoadingRaw}`);
 }

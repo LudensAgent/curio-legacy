@@ -204,6 +204,62 @@ test('a saved manual update is applied with its original observation payload', {
   }
 });
 
+test('a confirmed checkpoint evicts saved manual sections; prepare reloads the original evidence', { timeout: 20_000 }, async () => {
+  const { dir, dbPath } = makeTempDb();
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    await seedSaved(dbPath, [toObservation(blockObservation(0, 64, 0, 100, 1, 'seed'))]);
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    shared.observe([blockObservation(0, 64, 0, 2000, 42, SESSION, 'minecraft:dirt', { axis: 'y' })]);
+    const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
+    assert.equal(drained.pending.observations, 0);
+    assert.equal(shared.session.sectionResidency(keyAt()).residency, 'resident');
+
+    await shared.checkpoint();
+    assert.equal(shared.session.sectionResidency(keyAt()).residency, 'not_resident',
+      '确认保存后应淘汰已提交冷页，而不是删除证据');
+
+    const prepared = await shared.prepare([keyAt()], { deadline: Date.now() + 5000 });
+    assert.equal(prepared.status, 'ready');
+    if (prepared.status !== 'ready') assert.fail('saved section must load on demand');
+    try {
+      const cell = shared.session.voxel.cellAt(DIM, 0, 64, 0);
+      assert.equal(cell.observed, true);
+      if (cell.observed) {
+        assert.equal(cell.evidence.observation.observedAt, 2000, '冷读不刷新原观测时间');
+        assert.equal(cell.evidence.observation.sessionId, SESSION);
+        assert.equal(cell.evidence.observation.state.name, 'minecraft:dirt');
+      }
+    } finally {
+      shared.release(prepared.lease.token);
+    }
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
+    assert.equal(shutdown.error, null);
+    assertClose(close);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (!failed) {
+      const result = await shutdownQuietly(shared);
+      if (close === null) close = result?.close ?? null;
+    } else {
+      close = (await shutdownQuietly(shared))?.close ?? null;
+    }
+    cleanup(dir, close);
+  }
+});
+
 test('a refused queued byte growth retains the original evidence and shutdown reports it unsaved', { timeout: 30_000 }, async () => {
   const { dir, dbPath } = makeTempDb();
   let shared: SharedSpatialSession | null = null;
