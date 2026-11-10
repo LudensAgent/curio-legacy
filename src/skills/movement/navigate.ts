@@ -104,7 +104,7 @@ export const navigateTo: Skill<NavigateArgs> = {
       return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
     }
     const ints: [string, number, number][] = [
-      ['maxSegments', 1, 16], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 256],
+      ['maxSegments', 1, 16], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 1024],
       ['maxSearches', 1, 32], ['maxObservations', 0, 8], ['maxObservedCells', 0, 512],
       ['maxNoProgressSegments', 1, 8],
     ];
