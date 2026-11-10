@@ -478,6 +478,7 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     repeat: Math.max(1, Math.min(12, draft.repeat || 1)), iteration: 0, index: 0,
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
     ...(draft.ifStuck ? { ifStuck: draft.ifStuck } : {}), ...(draft.agendaId ? { agendaId: draft.agendaId } : {}),
+    ...(draft.applying ? { applying: draft.applying } : {}),
     source, monologue, startedAt: Date.now(), startPos: { ...state.pos }, failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
@@ -610,7 +611,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
     ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
     : undefined;
   const recorded: Activity['results'][number] & { stage?: string } = {
-    skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: clipFeedback(result.summary), at: Date.now(), durationMs, pos: { ...state.pos }, ...(view !== undefined ? { view } : {}),
+    skill: step.skill, args: step.args, status: result.status, failureCode: result.failureCode, summary: clipFeedback(result.summary), at: Date.now(), durationMs,
+    pos: { ...state.pos }, ...(state.worldId ? { worldId: state.worldId } : {}), ...(state.dim ? { dim: state.dim } : {}), ...(view !== undefined ? { view } : {}),
     ...(receipt && Object.keys(receipt).length ? { data: receipt } : {}),
   };
   if (navStage) recorded.stage = navStage;
@@ -1045,6 +1047,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const intent = resourceIntentOf(a);
   const attemptOnly = !!a.attemptOnly;
   const exploration = explorationOf(a, state.pos, info.newChunks ?? null);
+  const failed = [...a.results].reverse().find((result) => result.status === 'failed');
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1056,6 +1059,9 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
+    ...(a.applying ? { applying: a.applying } : {}), ...(a.applyingText ? { applyingText: a.applyingText } : {}),
+    ...(failed ? { failure: { skill: failed.skill, ...(failed.args !== undefined ? { args: failed.args } : {}), code: failed.failureCode ?? null, summary: failed.summary.slice(0, 240),
+      at: failed.at, ...(failed.worldId ? { worldId: failed.worldId } : {}), ...(failed.dim ? { dim: failed.dim } : {}), ...(failed.pos ? { pos: { ...failed.pos } } : {}) } } : {}),
     at: Date.now(), signature: signatureOf(a.steps),
     failures: a.failures,
   };
@@ -1074,7 +1080,9 @@ export function argsLabel(step: Step): string {
 }
 
 /** 把一段活压成一行给模型看 */
-export function describeActivity(a: Activity, state: AgentState, percept?: Percept) {
+export function describeActivity(a: Activity, state: AgentState, percept?: Percept,
+  /** 正在执行的实际动作（来自调度器，不是活动计划）：让模型分清“仍在执行”和“已经失败/取消”。 */
+  running?: { skill: string; args: unknown; source: string; startedAt: number }) {
   const done = a.doneWhen ? evaluateCondition(a.doneWhen, state, state.worldId, [], activityPerception(a, state, percept)) : null;
   const stageOf = (r: Activity['results'][number]) => (r as { stage?: unknown }).stage;
   const lastStage = [...a.results].reverse().find((r) => typeof stageOf(r) === 'string');
@@ -1085,6 +1093,10 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.id ? ` #${s.id}` : ''}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
+    ...(running ? { running_step: { skill: running.skill, args: running.args, source: running.source, elapsed_real_s: Math.round((Date.now() - running.startedAt) / 1000) } } : {}),
+    ...(a.applying ? { applying: a.applying, applying_at_start: a.applyingText ?? 'unknown' } : {}),
+    ...(a.interruptions ? { interruptions: a.interruptions } : {}),
+    ...(a.lastInterruption ? { last_interruption: { at: new Date(a.lastInterruption.at).toISOString(), kind: a.lastInterruption.kind, skill: a.lastInterruption.skill, reason: a.lastInterruption.reason, ...(a.lastInterruption.pos ? { pos: a.lastInterruption.pos } : {}) } } : {}),
     ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),
     ...(a.attemptOnly ? { attempt_only: a.attemptOnly.reason, original_done_when: a.attemptOnly.originalDoneWhen } : {}),
     ...(a.planCoverageGap ? { plan_coverage_gap: a.planCoverageGap } : {}),

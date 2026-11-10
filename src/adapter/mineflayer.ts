@@ -1275,10 +1275,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const where = `(${at.x.toFixed(2)},${at.y.toFixed(2)},${at.z.toFixed(2)})`;
       const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
       if (outcome === 'arrived') return;
-      if (outcome === 'timeout') throw new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`);
+      if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 相邻一步没有在期限内站稳，实际位于 ${where}`), { name: 'Timeout' });
       throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '身体控制没有完成相邻一步'}，实际位于 ${where}`);
     }
-    const reached = await this.gotoUnstalled(goal, opts, check);
+    const navigation = await this.gotoUnstalled(goal, opts, check);
+    const reached = navigation.reached;
     check();
     // Pathfinder can resolve an empty noPath result without reaching its goal.
     // Following is measured against the entity's current cell, not its old one.
@@ -1313,7 +1314,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         // 期限用完仍悬空：finishAdjacentStep 在未触地时也无法前推，直接如实报告超时。
         if (!atTarget() && inTargetCell() && settling()) {
-          throw new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`);
+          throw Object.assign(new Error(`TIMEOUT: 已进入目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}，实际位于 ${here()}`), { name: 'Timeout' });
         }
       }
       // 末段收尾只在寻路确有有效路径（非空 noPath）时补推；有路径但停在相邻格不是“无路”。
@@ -1322,19 +1323,25 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const outcome = await this.finishAdjacentStep({ x: target.x, y: target.y, z: target.z }, deadline, check);
         // helper 的 arrived 已经过连续稳定验收，直接采纳，不再用较宽的瞬时坐标检查覆盖它。
         if (outcome === 'arrived') return;
-        if (outcome === 'timeout') throw new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`);
+        if (outcome === 'timeout') throw Object.assign(new Error(`TIMEOUT: 终段推进用尽时间预算，实际位于 ${here()}`), { name: 'Timeout' });
         throw new Error(`NOT_CONFIRMED: ${outcome === 'overshot' ? '越过了所选相邻落点' : '寻路结束但尚未到达目标'}，实际位于 ${here()}`);
       }
       if (!atTarget()) {
         if (inTargetCell()) {
           throw new Error(`NOT_CONFIRMED: 已到目标水平格，但尚未到达目标脚高 ${target.y.toFixed(2)}（实际脚高 ${b.entity.position.y.toFixed(2)}），实际位于 ${here()}`);
         }
-        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有空 noPath 才报 PATH_NOT_FOUND。
-        throw new Error(reached
-          ? `NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`
-          : `No path: 寻路结束但尚未到达目标，实际位于 ${here()}`);
+        // 有路径但没落到目标列：这是“还没到”，不是“没有路”；只有明确的 noPath 才报 PATH_NOT_FOUND。
+        // 空 timeout/partial/停止/目标变更没有被库判成 noPath 时，也不能升级成“没有路”。
+        if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${here()}`), { name: 'NoPath' });
+        if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${here()}`), { name: 'Timeout' });
+        throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${here()}`);
       }
-    } else if (!goal.isEnd(position.floored())) throw new Error(`No path: 寻路结束但尚未到达目标，实际位于 (${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`);
+    } else if (!goal.isEnd(position.floored())) {
+      const at = `(${position.x.toFixed(2)},${position.y.toFixed(2)},${position.z.toFixed(2)})`;
+      if (navigation.noPath) throw Object.assign(new Error(`No path: 寻路结束但尚未到达目标，实际位于 ${at}`), { name: 'NoPath' });
+      if (navigation.pathStatus === 'timeout') throw Object.assign(new Error(`TIMEOUT: 寻路在期限内没有到达目标，实际位于 ${at}`), { name: 'Timeout' });
+      throw new Error(`NOT_CONFIRMED: 寻路结束但尚未到达目标，实际位于 ${at}`);
+    }
   }
 
   /**
@@ -1438,7 +1445,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   }
 
   /** Inspect the nearby obstruction before trying a short correction, then replan. */
-  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<boolean> {
+  private async gotoUnstalled(goal: any, opts: MoveOpts, check: () => void): Promise<{ reached: boolean; noPath: boolean; pathStatus: string | null }> {
     const b = this.bot;
     const epoch = this.actionEpoch, dimension = this.currentDimension();
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot && dimension === this.currentDimension();
@@ -1462,9 +1469,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       let groundedY = b.entity?.onGround ? last?.y ?? null : null;
       let verticalY = last?.y ?? null;
       let plannedPath: { status: string; nodes: { x: number; y: number; z: number }[] } | null = null;
-      let emptyPath = false;
+      let emptyPath = false, pathStatus: string | null = null;
       const onPathUpdate = (result: { status: string; path: { x: number; y: number; z: number }[] }) => {
         plannedPath = { status: result.status, nodes: result.path.slice(0, 6).map(({ x, y, z }) => ({ x, y, z })) };
+        pathStatus = result.status;
         emptyPath = result.path.length === 0;
       };
       const onPhysicsTick = () => {
@@ -1520,15 +1528,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }, 300);
       try {
         const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new Error('TIMEOUT');
+        if (remaining <= 0) throw Object.assign(new Error('TIMEOUT: 本次移动预算已用完'), { name: 'Timeout' });
         await this.afterAction(() => raceAbort(b.pathfinder.goto(goal), opts.signal, remaining, () => { if (ownsControls()) this.stopAll(); else this.actionEpoch++; }), check);
         // 搭柱被头顶/侧上方挡住：先当成一次停滞，走下面的 nudge 退半步重新规划；只有退不动了才抛 PILLAR_CLEARANCE 让心智去挖头顶
         if (blockedPillar) stalled = true;
-        // 已安装 Pathfinder 的 goto 在 path:[] 的 noPath 时也会正常返回；这不等于到达，返回 false 让上层别当有效路径补推。
-        if (!stalled) return !emptyPath;
+        // 已安装 Pathfinder 的 goto 在任意 path:[]（noPath/timeout/partial）时都会正常返回。
+        // 只有库明确给出 noPath 才算“没有路”；空 timeout/partial/停止只是没有到达，返回 NOT_CONFIRMED。
+        if (!stalled) return { reached: !emptyPath, noPath: pathStatus === 'noPath', pathStatus };
       } catch (e: any) {
         if (blockedPillar && ownsControls() && e?.name !== 'AbortedError') stalled = true;
-        if (!stalled || e?.name === 'AbortedError') throw e;
+        // 搜索超时/取消/调用方改目标都不是“执行停滞”，原样交回，别用 nudge 改写成别的结局。
+        if (!stalled || e?.name === 'AbortedError' || e?.name === 'Timeout' || e?.name === 'GoalChanged') throw e;
       } finally {
         clearInterval(watch);
         b.removeListener?.('physicsTick', onPhysicsTick);
@@ -1537,13 +1547,15 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       check();
       // 搭柱被头顶/侧上方挡住是确定性失败：nudge 后重新寻路还会得到同一条搭柱，直接报障碍让心智挖头顶或换路线
       if (blockedPillar) throw new PillarClearanceError(blockedPillar);
-      if (opts.maxDropDown !== undefined) throw new Error('No path: 明确下行未能完成，未改走其他边缘');
-      if (corrections >= 3) throw new Error('No path: 附近连续调整后仍无法前进，换条路线');
+      // 这些是“有路但执行走不动/调整不动”，不是寻路器给出 noPath；上层不能据此升级挖/放。
+      const stuck = (message: string) => Object.assign(new Error(message), { name: 'Stuck' });
+      if (opts.maxDropDown !== undefined) throw stuck('STUCK: 明确下行未能完成，未改走其他边缘');
+      if (corrections >= 3) throw stuck('STUCK: 附近连续调整后仍无法前进，换条路线');
       const action = await this.nudge(attempted, opts);
       check();
-      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : new Error(b.entity.isInWater
-        ? 'No path: 当前在水中，寻路没有取得进展，未另选上岸位置'
-        : 'No path: 附近没有可确认安全的调整空间，换条路线');
+      if (!action) throw blockedPillar ? new PillarClearanceError(blockedPillar) : stuck(b.entity.isInWater
+        ? 'STUCK: 当前在水中，寻路没有取得进展，未另选上岸位置'
+        : 'STUCK: 附近没有可确认安全的调整空间，换条路线');
       corrections++;
       // nudge 会横挪半格左右、可能重新压线；下一次规划前允许再归位一次。
       attempted.delete('align');

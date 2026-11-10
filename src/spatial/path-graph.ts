@@ -27,6 +27,8 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
   const adj = new Map<string, Map<string, number>>();
   const fragmentOf = new Map<string, string>();
   const joined = new Set<string>();
+  /** 两个记录格之间真实记录过的边（links/polyline）；joins 不在这里。 */
+  const recordedEdges = new Set<string>();
   /** `低格|高格`：从低处沿这条边往上，是逆着一次记录过的掉落爬回去 */
   const climbs = new Set<string>();
   let recorded = 0;
@@ -49,7 +51,11 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
       : fragment.polyline.slice(1).map((p, i) => [fragment.polyline[i]!, p] as const);
     for (const [a, b] of pairs) {
       const ka = cell(a, fragment.id), kb = cell(b, fragment.id);
-      if (link(ka, kb)) recorded++;
+      if (link(ka, kb)) {
+        recorded++;
+        recordedEdges.add(`${ka}|${kb}`);
+        recordedEdges.add(`${kb}|${ka}`);
+      }
       if (Math.abs(a.y - b.y) > DROP_STEP) climbs.add(a.y < b.y ? `${ka}|${kb}` : `${kb}|${ka}`);
     }
     if (pairs.length === 0) for (const p of fragment.polyline) cell(p, fragment.id);
@@ -66,7 +72,7 @@ export function buildPathGraph(fragments: readonly PathFragment[]) {
     const list = buckets.get(b);
     if (list) list.push(k); else buckets.set(b, [k]);
   }
-  return { cells, adj, fragmentOf, joined, climbs, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2, drops: climbs.size } };
+  return { cells, adj, fragmentOf, joined, recordedEdges, climbs, buckets, stats: { cells: cells.size, recordedEdges: recorded, joins: joined.size / 2, drops: climbs.size } };
 }
 
 /** 半径内离 p 最近的记录格；只扫覆盖半径的网格桶。 */
@@ -138,6 +144,11 @@ export type PathGraphRoute =
     endDistance: number;
     /** 路线里跨过的“路与路之间”的离路连接（两片记录不相连，中间要自己走过去） */
     connectors: { from: Vec3Like; to: Vec3Like; distance: number }[];
+    /** 是否只用了真实记录边；false 表示用了 26 邻接/跨片假想连接，仍需逐段实测。 */
+    recordedOnly?: boolean;
+    hypothetical?: boolean;
+    /** 目标脚格是否本身就在记录里；false 时状态最多是 PARTIAL，最后一段未记录。 */
+    targetRecorded?: boolean;
     message: string;
   };
 
@@ -147,10 +158,12 @@ export type PathGraphRoute =
  * 方向不对或绕得太远的记录就不用。默认只从 near 格内上路、不跨路，与只沿脚下这条路走的旧口径一致；
  * travel_to 传更大的 reach/maxGap。终点格离 to 不超过 near 为 FOUND，否则 PARTIAL（记录只到半路）；
  * 记录路线算上离路代价也不比直接走省就是 NO_BENEFIT。只是历史几何，不是到达证明。
+ * preferRecorded 只从最近的记录锚点上路，优先返回真正连到目标附近的连续记录；不用未证明可走的
+ * 直线代价否掉旧路，也不允许从墙另一侧/旧路中段的任意近格吸附上路。
  */
 export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like, near: number, deadline: number,
-  opts: { reach?: number; maxGap?: number; offRoad?: number } = {}): PathGraphRoute {
-  const reach = opts.reach ?? near, off = opts.offRoad ?? OFF_ROAD;
+  opts: { reach?: number; maxGap?: number; offRoad?: number; preferRecorded?: boolean } = {}): PathGraphRoute {
+  const reach = opts.reach ?? near, off = opts.offRoad ?? OFF_ROAD, prefer = opts.preferRecorded === true;
   // 离路一段的代价：距离按 off 倍计，往上的高差另按记录里爬升同样的倍数加（没有记录时往上要搭柱或开阶梯）。
   const offCost = (a: Vec3Like, b: Vec3Like) => off * dist(a, b) + Math.max(0, b.y - a.y) * CLIMB_PENALTY;
   const entries = cellsWithin(graph, from, reach);
@@ -165,9 +178,111 @@ export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like,
       (connectors.get(b) ?? connectors.set(b, []).get(b)!).push({ key: a, w: offCost(g.b, g.a), distance: g.distance });
     }
   }
+  if (prefer) {
+    // 按目标确定记录锚点：目标脚格在记录里时，必须走到那一格，不能用“进入 near 半径的第一个墙前点”替代。
+    // 目标脚格不在记录里时，终点只能是未记录余程之前的记录末端，状态保持 PARTIAL。
+    const targetKey = keyOf(Math.floor(to.x), Math.floor(to.y), Math.floor(to.z));
+    const targetRecorded = graph.cells.has(targetKey);
+    // 起点：身体实际脚格有记录时优先这一格；不能被另一个欧氏距离更近、但可能在墙另一侧的记录格替代。
+    const footKey = keyOf(Math.floor(from.x), Math.floor(from.y), Math.floor(from.z));
+    const foot = graph.cells.get(footKey);
+    const nearest = foot ? null : nearestCell(graph, from, reach);
+    if (!foot && !nearest) return { status: 'START_NOT_RECORDED', message: `起点 ${reach} 格内没有记录过的路径格` };
+    const entryKey = foot ? footKey : nearest!.key;
+    const entryDistance = foot ? dist(foot, from) : nearest!.distance;
+
+    /** 只走真实记录边；hypothetical 时才允许 26 邻接和跨片接点。 */
+    const search = (hypothetical: boolean) => {
+      const cost = new Map<string, number>(), parent = new Map<string, string>(), entryOf = new Map<string, number>();
+      const queue = heap();
+      const begin = offCost(from, graph.cells.get(entryKey)!);
+      cost.set(entryKey, begin); entryOf.set(entryKey, entryDistance); queue.push({ key: entryKey, cost: begin });
+      let target: string | null = null;
+      let end: string | null = null, endDistance = Infinity, endCost = Infinity;
+      let expanded = 0;
+      while (queue.size) {
+        const { key, cost: c } = queue.pop();
+        if (c > cost.get(key)!) continue;
+        const cell = graph.cells.get(key)!;
+        const d = dist(cell, to);
+        // PARTIAL 端按“离原目标更近”选，而不是按 cost+假想离路权重把起点选成最优；
+        // 只有同一终点格才用路径代价选短路。
+        if (d < endDistance - 1e-9 || (Math.abs(d - endDistance) <= 1e-9 && c < endCost)) { end = key; endDistance = d; endCost = c; }
+        if (targetKey && key === targetKey) { target = key; break; }
+        if (++expanded % 4096 === 0 && Date.now() > deadline) break;
+        const step = (next: string, nc: number) => {
+          if (nc < (cost.get(next) ?? Infinity)) { cost.set(next, nc); parent.set(next, key); entryOf.delete(next); queue.push({ key: next, cost: nc }); }
+        };
+        for (const [next, w] of graph.adj.get(key)!) {
+          if (!hypothetical && !graph.recordedEdges.has(`${key}|${next}`)) continue;
+          step(next, c + (graph.climbs.has(`${key}|${next}`) ? w * CLIMB_PENALTY : w));
+        }
+        if (hypothetical) for (const link of connectors.get(key) ?? []) step(link.key, c + link.w);
+      }
+      const finalKey = target ?? end;
+      if (!finalKey) return { complete: false, keys: [] as string[], endpoint: null as string | null, endDistance, cost: endCost };
+      const keys = [finalKey];
+      while (!entryOf.has(keys[0]!)) {
+        const prev = parent.get(keys[0]!);
+        if (prev === undefined) break;
+        keys.unshift(prev);
+      }
+      return { complete: target !== null, keys, endpoint: finalKey, endDistance: target ? dist(graph.cells.get(target)!, to) : endDistance, cost: target ? cost.get(target)! : endCost };
+    };
+    const recorded = search(false);
+    const startDistance = dist(from, to);
+    let chosen = recorded, usedHypothetical = false;
+    if (targetRecorded && !recorded.complete) {
+      const hypothetical = search(true);
+      if (hypothetical.complete) { chosen = hypothetical; usedHypothetical = true; }
+      else if (hypothetical.endpoint && hypothetical.endDistance < recorded.endDistance - 1) { chosen = hypothetical; usedHypothetical = true; }
+    } else if (!targetRecorded) {
+      // 目标格不在记录里：真实记录路线若确实把身体带向目标就先走它；否则才考虑未验证邻接/接片。
+      const improves = recorded.endDistance < startDistance - 2;
+      if (!improves) {
+        const hypothetical = search(true);
+        if (hypothetical.endpoint && hypothetical.endDistance < recorded.endDistance - 1) { chosen = hypothetical; usedHypothetical = true; }
+      }
+    }
+    if (!chosen.endpoint) return { status: 'NO_BENEFIT', message: '记录路径没有可用的终点' };
+    const keys = chosen.keys;
+    const points = keys.map((k) => ({ ...graph.cells.get(k)! }));
+    const fragments = [...new Set(keys.map((k) => graph.fragmentOf.get(k)!))];
+    const pairs = keys.slice(1).map((k, i) => [keys[i]!, k] as const);
+    const isConnector = ([a, b]: readonly [string, string]) => !graph.adj.get(a)!.has(b);
+    const joinsUsed = pairs.filter(([a, b]) => !isConnector([a, b]) && graph.joined.has(`${a}|${b}`)).length;
+    const climbs = pairs.flatMap(([a, b]) => {
+      if (!graph.climbs.has(`${a}|${b}`)) return [];
+      const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+      return [{ from: { ...p }, to: { ...q }, height: q.y - p.y }];
+    });
+    const usedConnectors = pairs.filter(isConnector).map(([a, b]) => {
+      const p = graph.cells.get(a)!, q = graph.cells.get(b)!;
+      return { from: { ...p }, to: { ...q }, distance: Math.round(dist(p, q) * 10) / 10 };
+    });
+    const endDistance = chosen.endDistance;
+    // 以实际路线用到的边为准：经过 joins 或跨片 connectors 就不是完整记录路线。
+    const hypotheticalPath = usedConnectors.length > 0 || joinsUsed > 0;
+    const status = chosen.complete && !hypotheticalPath ? 'FOUND' as const : 'PARTIAL' as const;
+    return {
+      status, points, fragments, joinsUsed, climbs, connectors: usedConnectors,
+      length: Math.round(pairs.reduce((sum, [a, b]) => sum + dist(graph.cells.get(a)!, graph.cells.get(b)!), 0) * 10) / 10,
+      startSnap: Math.round(entryDistance * 10) / 10,
+      endDistance: Math.round(endDistance * 10) / 10,
+      recordedOnly: !hypotheticalPath,
+      hypothetical: hypotheticalPath,
+      targetRecorded,
+      message: status === 'FOUND'
+        ? `记录里有连到目标记录格的连续路径（${points.length} 格，经过 ${fragments.length} 条片段${usedConnectors.length ? `，其中 ${usedConnectors.length} 处要跨过两片记录之间的空当` : ''}）`
+        : hypotheticalPath
+          ? `记录路线要跨过未验证邻接/跨片连接才能接到目标附近（${points.length} 格记录点，最后 ${Math.round(endDistance)} 格未记录/待实测）`
+          : `记录路径最多到离目标 ${Math.round(endDistance)} 格处（最后一段未记录）`,
+    };
+  }
+  const startEntries = entries;
   const cost = new Map<string, number>(), parent = new Map<string, string>(), entryOf = new Map<string, number>();
   const queue = heap();
-  for (const e of entries) {
+  for (const e of startEntries) {
     const c = offCost(from, graph.cells.get(e.key)!);
     cost.set(e.key, c); entryOf.set(e.key, e.distance); queue.push({ key: e.key, cost: c });
   }
@@ -184,6 +299,7 @@ export function routeOnPathGraph(graph: PathGraph, from: Vec3Like, to: Vec3Like,
     for (const [next, w] of graph.adj.get(key)!) step(next, c + (graph.climbs.has(`${key}|${next}`) ? w * CLIMB_PENALTY : w));
     for (const link of connectors.get(key) ?? []) step(link.key, c + link.w);
   }
+  // 默认口径保留原来的“直接走更省就不沿记录”；preferRecorded 在上面走两阶段选择，不在这里比较。
   if (best === null || bestScore >= offCost(from, to)) {
     return { status: 'NO_BENEFIT', message: `记录路径算上离路的代价也不比直接走省（离路按 ${off} 倍计）` };
   }

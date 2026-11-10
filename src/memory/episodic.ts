@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentState } from '../adapter/types.ts';
 import { EventBus, type AgentEvent } from '../events.ts';
-import type { WorldMemory } from './store.ts';
+import { KNOW_HOW_LESSON_KEY_PREFIX, type WorldMemory } from './store.ts';
 import { registerMemoryBackend } from './registry.ts';
 import type { MemoryBackend, MemoryContext, MemoryEntry, MemoryEpisode, MemoryRecall, MemorySettings, RecallDiagnostics, RecallFailure } from './types.ts';
 import { MemoryRequestError } from './hindsight.ts';
@@ -16,7 +16,7 @@ interface Candidate { entry: MemoryEntry; ts: number; dimension?: string; worldI
 interface HistoricalScope { id?: string; worldId?: string; dimension?: string }
 interface MemoryExtensions {
   currentIntent?: () => { text: string } | undefined;
-  lessons?: (limit?: number) => { ts: number; text: string }[];
+  lessons?: (limit?: number) => { ts: number; text: string; key?: string; source?: 'model' | 'observed'; worldId?: string }[];
 }
 const EXPERIENCE_EVENTS = new Set(['discovery', 'death', 'attempt_end', 'goal_end', 'built']);
 const INFERENCE_EVENTS = new Set(['lesson', 'objective', 'skill_learned']);
@@ -264,7 +264,11 @@ export class EpisodicMemory implements MemoryRecall {
         const n = note as typeof note & HistoricalScope;
         return { entry: { id: n.id ?? `note:${n.ts}:${i}`, text: `${n.worldId ? '' : LEGACY_WARNING}${n.text}`, source: `${n.worldId ? '' : 'legacy:'}note:${n.kind}`, kind: n.worldId ? n.kind : 'inference', observedAt: new Date(n.ts).toISOString() }, ts: n.ts, dimension: n.dimension, worldId: n.worldId, searchText: n.text };
       }),
-      ...(extensions.lessons?.(40) ?? []).map((l, i) => ({ entry: { id: `lesson:${l.ts}:${i}`, text: LEGACY_WARNING + l.text, source: 'legacy:model reflection', kind: 'inference', observedAt: new Date(l.ts).toISOString() }, ts: l.ts, searchText: l.text })),
+      ...(extensions.lessons?.(40) ?? []).filter((l) => !l.key?.startsWith(KNOW_HOW_LESSON_KEY_PREFIX)).map((l, i) => {
+        const observed = l.source === 'observed';
+        return { entry: { id: `lesson:${l.ts}:${i}`, text: `${l.worldId ? '' : LEGACY_WARNING}${l.text}`, source: observed ? 'lesson:observed' : 'legacy:model reflection',
+          kind: observed ? 'experience' : 'inference', observedAt: new Date(l.ts).toISOString() }, ts: l.ts, worldId: l.worldId, searchText: l.text };
+      }),
       ...m.recentGoals(100).map((goal, i) => {
         const g = goal as typeof goal & HistoricalScope;
         return { entry: { id: g.id ?? `goal:${g.ts}:${i}`, text: `${g.worldId ? '' : LEGACY_WARNING}${g.goal} [${g.status}] ${g.summary}`, source: `${g.worldId ? '' : 'legacy:'}goal_end`, kind: g.worldId ? 'experience' : 'inference', observedAt: new Date(g.ts).toISOString() }, ts: g.ts, worldId: g.worldId, dimension: g.dimension, searchText: `${g.goal} ${g.summary}` };

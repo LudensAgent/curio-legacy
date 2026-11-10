@@ -456,8 +456,16 @@ export class SelfModel {
   record(r: ActivityRecord) {
     this.data.history.push(r);
     if (this.data.history.length > 60) this.data.history = this.data.history.slice(-60);
-    // 同一套做法后来的成败会修正“窍门”的可信度：这就是从实践里学
-    for (const k of this.data.knowHow) if (k.signature && k.signature === r.signature) {
+    // 同一套做法后来的成败会修正“窍门”的可信度：这就是从实践里学。
+    // 显式 applying 是稳定 id 关联，优先于动作签名；签名只覆盖动作/目标，不含 allowDig、allowPlace 等授权，
+    // 不能拿它代替“同一条件”。两者都只记反馈，不自动把未验证结论改判为已验证。
+    // 显式 applying 必须同时匹配开工时的原文快照：同一 id 在活动期间被反思改写成新结论时，
+    // 旧活动的结果只是历史事实，不能记到新结论名下；显式 id 失效也不能退回签名误记给别的条目。
+    const explicit = !!r.applying;
+    for (const k of this.data.knowHow) {
+      const applied = explicit && r.applying === k.id && r.applyingText !== undefined && cleanLesson(k.text) === cleanLesson(r.applyingText);
+      if (!applied && (explicit || !(k.signature && k.signature === r.signature))) continue;
+      if (applied) k.applications = [...(k.applications ?? []), { at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}), summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}) }].slice(-8);
       if (r.outcome === 'done' && r.completion !== 'condition') k.wins++; else if (r.outcome === 'stuck') k.losses++;
       k.updatedAt = Date.now();
     }
@@ -495,15 +503,16 @@ export class SelfModel {
     if (same) {
       const changed = cleanLesson(same.text) !== t;
       same.text = t;
-      // 新的说法不能继承旧结论的成功证据，尤其是失败后猜出的替代办法。
-      if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; same.signature = undefined; }
+      // 新的说法不能继承旧结论的成功证据或应用证据，尤其是失败后猜出的替代办法。
+      if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; same.signature = undefined; same.applications = undefined; }
       same.updatedAt = Date.now();
       if (opts.outcome === 'done') { same.wins++; same.unverified = false; }
       else if (opts.outcome === 'stuck') { same.losses++; if (!same.wins) same.unverified = true; }
       same.kind = opts.kind ?? same.kind;
       same.source = opts.source;
       same.tags = [...new Set([...same.tags, ...(opts.tags ?? []), ...[...k].filter((w) => /^[a-z]/.test(w))])].slice(0, 12);
-      if (opts.signature && (changed || !same.signature)) same.signature = opts.signature;
+      // 改写过结论时，这次带来的签名仍属于旧做法：新结论要等未来明确应用，不靠旧动作签名验证。
+      if (opts.signature && !changed && !same.signature) same.signature = opts.signature;
       this.touch();
       return same;
     }
@@ -526,7 +535,10 @@ export class SelfModel {
     return this.data.knowHow.map((h) => {
       const rel = overlap(keywords(h.text), k) + h.tags.filter((t) => k.has(t)).length * 2 + (kind && h.kind === kind ? 2 : 0);
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
-      return { h, score: (rel * (0.5 + trust) + (Date.now() - h.updatedAt < 20 * 60_000 ? 0.5 : 0)) * (h.unverified ? 0.5 : 1) };
+      // 既没动作签名、又没显式应用证据的未验证条目只是暂定结论：仍可因高度相关而召回，但排在
+      // 有证据的条目之后，避免旧的一次性推断长期占满窍门名额。不自动删除、不自动改判。
+      const noEvidence = h.unverified === true && !h.signature && !(h.applications?.length);
+      return { h, score: (rel * (0.5 + trust) + (Date.now() - h.updatedAt < 20 * 60_000 ? 0.5 : 0)) * (h.unverified ? (noEvidence ? 0.25 : 0.5) : 1) };
     }).filter((e) => e.score > 0.6).sort((a, b) => b.score - a.score).slice(0, n).map((e) => e.h);
   }
 
@@ -617,15 +629,21 @@ export class SelfModel {
       keep.text = m.text;
       keep.wins = unchanged ? parts.reduce((n, k) => n + k.wins, 0) : 0;
       keep.losses = unchanged ? parts.reduce((n, k) => n + k.losses, 0) : 0;
-      keep.unverified = unchanged ? parts.every((k) => k.unverified === true) && keep.wins === 0 : true;
-      if (!unchanged) keep.signature = undefined;
+      // 未验证状态只由各条自身的结论状态传播；应用成功会加 wins，但不能借此变成已验证。
+      keep.unverified = unchanged ? parts.every((k) => k.unverified === true) : true;
+      keep.applications = unchanged ? parts.flatMap((k) => k.applications ?? []).sort((a, b) => a.at - b.at).slice(-8) : undefined;
+      if (!unchanged) { keep.signature = undefined; keep.source = 'reflection'; }
       keep.tags = [...new Set(parts.flatMap((k) => k.tags))].slice(0, 12);
       keep.updatedAt = Date.now();
       const drop = new Set(rest.map((k) => k.id));
       this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id));
     }
     for (const r of c.rewrite) { const k = byId.get(r.id); if (k) {
-      if (cleanLesson(k.text) !== cleanLesson(r.text)) { k.wins = 0; k.losses = 0; k.unverified = true; k.signature = undefined; }
+      if (cleanLesson(k.text) !== cleanLesson(r.text)) {
+        k.wins = 0; k.losses = 0; k.unverified = true; k.signature = undefined; k.applications = undefined;
+        // 新说法来自这次反思，不再是原来的亲历观察；createdAt 保留原观察时间，不改成现在。
+        k.source = 'reflection';
+      }
       k.text = r.text; k.updatedAt = Date.now();
     } }
     if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }

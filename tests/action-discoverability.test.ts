@@ -43,6 +43,23 @@ test('approach_visible 在静态指导与目录里可发现，target 三种写�
   for (const marker of ['"target"', '"pos"', '"block"', '"entity"', '"radius"']) assert.ok(details.includes(marker), `缺少 ${marker}`);
 });
 
+test('公开目录说明旧路优先、跟随旧路不施工，换方法要显式 via:direct', () => {
+  const catalog = movesCatalog(28);
+  assert.match(catalog, /excavate_run .*不会改走旁边/);
+  assert.match(deliberateSystem(''), /默认 auto 先从起点附近实际旧路锚点沿记录路线走/);
+  assert.match(moveDetails(['excavate_run']), /不会自动绕旁路.*不会改走旁边/);
+  assert.match(moveDetails(['excavate_run']), /默认优先复用实际旧路，跟随旧路时不施工/);
+  assert.match(moveDetails(['excavate_run']), /via:"direct" 是直接按授权寻路的显式入口/);
+  const travel = moveDetails(['travel_to']);
+  assert.match(travel, /跟随历史路点时即使授权施工也不挖/);
+  assert.match(travel, /via:"direct" 跳过旧路优先/);
+  assert.match(travel, /现在是否还通需逐跳实测/);
+  const explore = moveDetails(['explore_toward']);
+  assert.match(explore, /每段始终沿同一条冻结射线推进/);
+  assert.match(explore, /跟随旧路不施工，旧路走不通就停/);
+  assert.match(explore, /仅没有可用旧路或走完记录后的新段，才先按不施工搜索，并在明确 NoPath 且原请求授权施工时重试/);
+});
+
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
   assert.match(directory, /常用动作.*travel_to/);

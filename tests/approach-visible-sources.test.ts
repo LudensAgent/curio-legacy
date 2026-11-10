@@ -14,6 +14,9 @@ function fakeSpatial(map: VoxelMap) {
   return {
     worldId: WORLD,
     session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
+    query: (q: { kind: string }) => q.kind === 'fragments'
+      ? { status: 'ok', data: { kind: 'fragments', items: [], total: 0 } }
+      : { status: 'ok', data: null },
     closing: false, paused: false, observationAdmitted: true,
     capabilities: () => ({ owner: 'host_composed', contract: 'memory-host-contract/1', library: { execute: { walk: true } }, host: {},
       effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } }, overclaims: [] }),

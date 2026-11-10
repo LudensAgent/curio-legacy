@@ -25,6 +25,8 @@ export type ActivityStep = Step & { optional?: boolean; /** 逻辑动作实例 I
 export interface StepResult {
   skill: string; args?: unknown; status: string; failureCode?: string; summary: string; at: number; durationMs: number;
   pos?: { x: number; y: number; z: number }; view?: string;
+  /** 动作结束观察到的世界/维度；用于反思时保留失败作用域，不拿活动结束时的位置回填。 */
+  worldId?: string; dim?: string;
   /** 只保留判定“定位/取得/移动/覆盖”用的回执字段，不把整份 local 图塞进活动历史。 */
   data?: Record<string, unknown>;
 }
@@ -127,6 +129,12 @@ export interface Activity {
   dropped?: string[];
   /** 被身体反射打断了几次 */
   interruptions?: number;
+  /** 最近一次还没完成这一步就被打断：身体反射或受伤；只记原因、动作与当时位置。 */
+  lastInterruption?: { at: number; kind: 'body_reflex' | 'hurt' | 'adjusted' | 'detour'; reason: string; skill: string; pos?: { x: number; y: number; z: number } };
+  /** 这段活在按哪条已学窍门做（k_…）：结果只作为那条窍门的应用证据，不自动证明结论正确。 */
+  applying?: string;
+  /** 开工时那条窍门的原文快照；同一 id 后来被改写时，旧活动不能替新结论记成功。 */
+  applyingText?: string;
   /** 刚试过的恢复技能：等重做的那一步出结果再给它记成败 */
   awaitingRecovery?: string;
   results: StepResult[];
@@ -167,6 +175,12 @@ export interface ActivityRecord {
   exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
+  /** 这段活显式关联的窍门（k_…）；用于把后续实际应用交给对应经验的证据账。 */
+  applying?: string;
+  /** 开工时那条窍门的原文快照：同一 id 后来被改写时，旧活动不能替新结论记成功。 */
+  applyingText?: string;
+  /** 最近一次失败步骤的真实动作、授权参数、时间、作用域、位置与回执；总结压缩后仍保留失败条件。 */
+  failure?: { skill: string; args?: unknown; code: string | null; summary: string; at: number; worldId?: string; dim?: string; pos?: { x: number; y: number; z: number } };
 }
 
 export interface AgendaItem {
@@ -193,6 +207,8 @@ export interface KnowHow {
   wins: number;
   losses: number;
   unverified?: boolean;
+  /** 后续活动显式声明 applying:<id> 时留下的应用证据；只供复核，不由程序自动宣告结论正确。 */
+  applications?: { at: number; activityId: string; outcome: ActivityOutcome; completion?: ActivityRecord['completion']; summary: string; failure?: ActivityRecord['failure'] }[];
   createdAt: number;
   updatedAt: number;
   source: 'reflection' | 'experiment' | 'observed';
@@ -292,6 +308,8 @@ export interface ActivityDraft {
   what: string; why: string; kind: ActivityKind; steps: ActivityStep[]; repeat: number;
   /** 相对坐标的前方参考系，独立于镜头朝向。 */
   facing?: Facing;
+  /** 这段活在按哪条已学窍门做（k_…）；只作为应用证据，不自动验证结论。 */
+  applying?: string;
   doneWhen?: Condition; expect?: string; ifStuck?: string; agendaId?: string;
   /** 写了但没法执行、被丢掉的步骤（让心智知道它们根本没做） */
   dropped?: string[];

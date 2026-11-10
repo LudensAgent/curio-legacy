@@ -645,9 +645,12 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   }
 }
 
+/** 两个公开开挖入口共用的路线范围说明：同一条文案，避免公开说明与实际调用链漂移。 */
+export const EXCAVATION_ROUTE_NOTE = '按指定方向和模式（stairs/stairs_up/tunnel）的直线施工：不会自动绕旁路，也不会改走旁边现成的路面、旧桥或旧巷道。travel_to/explore_toward 默认优先复用实际旧路，跟随旧路时不施工；没有可用旧路或走完记录后，新段先按不施工搜索，只有明确 NoPath 且原请求允许施工才按授权挖/垫；travel_to 的 via:"direct" 是直接按授权寻路的显式入口。';
+
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: '显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。固定方向、固定层的直线施工：不会改走旁边现成的路面、旧桥或已挖好的巷道，也不按代价挑路；要让辅助在现成地面/旧路与挖、垫之间按代价选路，用 travel_to/explore_toward 并授权 allowDig/allowPlace。',
+  description: `显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多8格，逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。${EXCAVATION_ROUTE_NOTE}`,
   argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-8,"tool"?:"物品注册名，如 iron_pickaxe（不掉落也会挖开并回报 noDrop）","fill"?:"<方块名>|any","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;

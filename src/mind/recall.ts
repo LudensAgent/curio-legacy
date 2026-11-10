@@ -1,5 +1,5 @@
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import type { WorldMemory } from '../memory/store.ts';
+import { KNOW_HOW_LESSON_KEY_PREFIX, type WorldMemory } from '../memory/store.ts';
 import type { LedgerView } from './ledger.ts';
 import { cleanLesson, keywords, type SelfModel } from './self.ts';
 import { oreAlias } from '../memory/ore-spots.ts';
@@ -51,10 +51,21 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   if (!skip.has('diary')) for (const d of src.self.diary(50)) push({ kind: 'diary', text: `${ago(d.at, now)}：${d.text}` }, score(d.text), d.at);
   if (!skip.has('know_how')) for (const k of src.self.data.knowHow) {
     const trust = (k.wins + 1) / (k.wins + k.losses + 2);
-    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}）`, ref: k.id }, score(k.text, k.tags) * (0.6 + trust), k.updatedAt);
+    const applied = k.applications?.length
+      ? `，应用${k.applications.filter((a) => a.outcome === 'done' && a.completion !== 'condition').length}成/${k.applications.filter((a) => a.outcome === 'stuck').length}败`
+      : '';
+    const source = k.source === 'observed' ? '亲眼观察' : k.source === 'experiment' ? '实验' : '反思';
+    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}）`, ref: k.id, source: `know_how:${k.id}` }, score(k.text, k.tags) * (0.6 + trust), k.updatedAt);
   }
   if (!skip.has('lesson')) {
-    try { for (const l of src.memory.lessonsFor(40)) push({ kind: 'lesson', text: l.text.slice(0, 120) }, score(l.text), l.ts); } catch { /* 记忆暂不可用 */ }
+    // addLesson 以 know_how:<id> 存的副本只是主窍门通道的镜像；主条目被合并/改写/删除后，
+    // 旧副本不能换个通道再作为独立教训出现。程序亲眼观察写下的教训没有这个 key，照常保留。
+    try {
+      for (const l of src.memory.lessonsFor(40).filter((l) => !l.key?.startsWith(KNOW_HOW_LESSON_KEY_PREFIX))) {
+        const provenance = l.source === 'observed' ? '亲历观察' : '模型推断（来源/验证状态未记录）';
+        push({ kind: 'lesson', text: `${provenance}：${l.text.slice(0, 120)}`, source: `lesson:${l.source ?? 'model'}` }, score(l.text), l.ts);
+      }
+    } catch { /* 记忆暂不可用 */ }
   }
   if (!skip.has('note')) {
     try { for (const n of src.memory.notesFor({ n: 30 })) push({ kind: 'note', text: `${n.text.slice(0, 120)}〔${n.kind}，${n.dimension ?? '维度未标注'}，${ago(n.ts, now)}的笔记〕`, worldId: n.worldId, dimension: n.dimension, source: `note:${n.kind}` }, score(n.text), n.ts); } catch { /* 记忆暂不可用 */ }

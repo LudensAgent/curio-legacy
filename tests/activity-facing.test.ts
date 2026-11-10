@@ -73,10 +73,43 @@ test('adjust replaces the activity reference frame and clears it when the new dr
   assert.equal(mind.activity?.id, activity.id);
   assert.equal(mind.activity?.facing, 'S');
 
+  const lesson = self.learn('向上开巷', { source: 'reflection' })!;
+  apply.call(mind, { ...decision, activity: { ...draft, facing: 'S', applying: lesson.id } }, activity.id);
+  assert.equal(mind.activity?.applying, lesson.id);
+  assert.equal(mind.activity?.applyingText, lesson.text, '调整时重新快照当前说法');
+
   const { facing: _, ...unframed } = draft;
   apply.call(mind, { ...decision, activity: unframed }, activity.id);
   assert.equal(Object.hasOwn(activity, 'facing'), false);
   assert.equal(Object.hasOwn(describeActivity(activity, adapter.state()), 'facing'), false);
+  assert.equal(mind.activity?.applying, undefined, '调整未重申 applying 时清掉旧关联');
+  assert.equal(mind.activity?.applyingText, undefined);
+});
+
+test('瞥一眼同时看到施工授权、仍在执行的动作、受伤中断和失败回执', (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
+  t.after(() => { memory.close(); self.close(); });
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const percept = perception.update(), state = adapter.state();
+  const args = { to: { heading: 'W', distance: 96 }, allowDig: true, allowPlace: true };
+  const draft: ActivityDraft = { what: '授权向西探索', why: '', kind: 'explore', repeat: 1, steps: [{ skill: 'travel_to', args }] };
+  const activity = createActivity(draft, '', 'llm', state);
+  activity.lastInterruption = { at: Date.now() - 5000, kind: 'hurt', reason: '挨打了（血 12，僵尸 3格），手上的事先停了', skill: 'travel_to', pos: { ...state.pos } };
+  activity.failures = 1;
+  activity.results.push({ skill: 'travel_to', args, status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '按当前授权没找到可执行路线', at: Date.now() - 1000, durationMs: 1000, pos: { ...state.pos } });
+  const runningStep = { skill: 'travel_to', args, source: 'llm', startedAt: Date.now() - 70_000 };
+  const [, user] = buildMindMessages({ tier: 'glance', reason: '核对执行状态', percept, state, self, memory, activity, runningStep, lastRecord: null,
+    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+  const line = user.content.split('\n').find((item) => item.startsWith('【手上的活】'))!;
+  const current = JSON.parse(line.slice('【手上的活】'.length)).current_activity;
+  assert.match(current.routine[0], /"allowDig":true/);
+  assert.match(current.routine[0], /"allowPlace":true/);
+  assert.equal(current.running_step.skill, 'travel_to');
+  assert.equal(current.running_step.args.allowDig, true);
+  assert.ok(current.running_step.elapsed_real_s >= 69);
+  assert.equal(current.last_interruption.kind, 'hurt');
+  assert.match(current.last_interruption.reason, /挨打了/);
+  assert.match(current.recent[0], /travel_to → failed\(PATH_NOT_FOUND\)/, '失败回执与“还在执行/被打断”分开显示');
 });
 
 test('both prompt tiers expose the current and previous reference frames separately from the view', (t) => {

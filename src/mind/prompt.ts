@@ -46,6 +46,8 @@ export interface MindContext {
   /** 读一格方块：给 my_bed 就近核对床还在不在（离得近、看得见不是床就把旧地标删掉） */
   blockAt?: (p: { x: number; y: number; z: number }) => string | null;
   activity: Activity | null;
+  /** 调度器里正在执行的实际动作；用于区分“仍在执行”和“已失败/被取消”。 */
+  runningStep?: { skill: string; args: unknown; source: string; startedAt: number } | null;
   suspended: Activity[];
   /** 提前想好、手上的活做完就接上的下一段（模型自己写的 next，如实回显，不加引导） */
   next?: { what: string; why?: string } | null;
@@ -215,7 +217,7 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
- "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办"},
+ "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后无条件接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next}}
 手上还有活要接着做就只写 decision:"continue"，不要写 activity；要做新的一段或换做法，写 decision:"new"/"adjust"/"switch"（不要写 continue）。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
@@ -244,7 +246,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
-【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有坐标或记得的地标/base/死亡点/传送门，不论远近 → travel_to {"to":{"x":0,"y":64,"z":0}} 或 {"to":"地标名"}（已加载区块寻路，默认走路〔sprint:true 才跑，快但耗饥饿〕、不下水、不挖不放，回执报实测位置与剩余距离）；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要逐格核实的精确站位、或只走空间记忆里看清的格 → navigate_to（几格外没观察就停在边界）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时原样传回 sessionId。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
+【走到哪】按目标选一个移动动作；失败先看回执再换手段：身边一格（含上下一级台阶）→ move_step；有坐标或记得的地标/base/死亡点/传送门，不论远近 → travel_to {"to":{"x":0,"y":64,"z":0}} 或 {"to":"地标名"}（已加载区块寻路，默认走路〔sprint:true 才跑，快但耗饥饿〕、不下水、不挖不放；默认 auto 先从起点附近实际旧路锚点沿记录路线走、跟随旧路时不施工，旧路走不通就停在实测进度并报该路点；没有可用旧路或走到记录末端后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权挖/垫；via:"direct" 才是直接按授权寻路；回执报实测位置与剩余距离）；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要逐格核实的精确站位、或只走空间记忆里看清的格 → navigate_to（几格外没观察就停在边界）。回执带 sessionId 且 continuation.canContinue=true、仍要完成同一意图时原样传回 sessionId。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】原地升降不用 move_step：往上只有脚下有梯子才能 move_step [0,1,0]，否则用 pillar_one {"item":"any"}（或指定材料）垫一块站上去；往下用 mine_cell [0,-1,0]（挖空脚下人会自己掉下去，不需要再 move_step）。上下台阶用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）；更大落差先 assess_landings 看清落点，再用 descend_to，move_step 报“要下去用 descend_to”时不要继续 move_step。垫高会跳起来、需要头顶上方两格都空：两格高的隧道/矿道里改用向上阶梯 mine_cell [0,2,0] → mine_cell [1,2,0] → mine_cell [1,1,0] → move_step [1,1,0]。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -508,7 +510,7 @@ export function situationalReminders(ctx: MindContext): string[] {
     const f = pathFails[0];
     // 失败只说明这几次授权下走不通：没开挖/放时不能断言“地形没有路线”，也要让带施工授权的寻路和手动直线施工并列可见。
     const unbuilt = pathFails.every((x) => { const a = x.args as { allowDig?: unknown; allowPlace?: unknown }; return a.allowDig !== true && a.allowPlace !== true; });
-    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（辅助按代价挑路：现成地面和已有的路优先，没有才挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
+    out.push(`【局部恢复】你在附近已经连续 ${pathFails.length} 次移动/规划失败（最近 ${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 90)}）。${unbuilt ? '这几次都没授权挖/放：只说明不施工时没找到 walk/step/drop 路线，不描述没看见的地形' : '按这几次的授权没找到可执行路线'}；下一步不要只写 move_step/plan_route/navigate_to。可以先 look_around 或换目标；或让 travel_to/explore_toward 带 allowDig/allowPlace（默认先从起点附近的实际旧路锚点沿连续记录路线走，跟随旧路时不施工；没有可用旧路或走完记录后，新段先按不施工搜索，只有明确 noPath 且原请求允许施工才按授权重试；超时、卡住不会升级成挖/垫，消耗方块与工具耐久）；或用 excavate_run（固定方向直线施工，不改走旁边的路）/place_support/pillar_one 手动施工；或 assess_landings 后再 descend_to；由你决定。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
@@ -853,13 +855,17 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...p.nearby.resources.slice(0, 6).map((r) => r.block), ...s.inventory.slice(0, 10).map((i) => i.name)].filter(Boolean).join(' ');
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
+  const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
   // 分块，越往后越要紧：背景 → 记得的 → 最近 → 手上的活 → 身边 → 身体 → 此刻
   const sections: [string, Record<string, unknown>][] = [
     ['我', {
       traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}),
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}),
       agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}) })),
-      know_how: self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6).map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true })),
+      know_how: knowHow.map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true, source: k.source,
+        ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
+        ...(k.applications?.length ? { applications: k.applications.reduce((n, a) => ({ count: n.count + 1, done: n.done + Number(a.outcome === 'done' && a.completion !== 'condition'), stuck: n.stuck + Number(a.outcome === 'stuck') }), { count: 0, done: 0, stuck: 0 }) } : {}) })),
+      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；evidence=none 是没有动作签名或应用证据的暂定结论；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：技能书里会动手的技能（use_skill 调用）+ 从经历里验证过的做法（直接写成一步）
@@ -885,7 +891,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '[此前想法，未经核实]' : `[${t.kind}]`} ${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],
     ['手上的活', {
-      current_activity: ctx.activity ? describeActivity(ctx.activity, s, p) : null,
+      current_activity: ctx.activity ? describeActivity(ctx.activity, s, p, ctx.runningStep ?? undefined) : null,
       ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
       ...(ctx.next ? { queued_next: `已经想好接下来做「${ctx.next.what}」${ctx.next.why ? `（${ctx.next.why}）` : ''}` } : {}),
@@ -952,8 +958,9 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 
 你在 Minecraft 里歇下来了（休息、睡觉或者告一段落），回想一下这段时间：哪些办法真的好用，哪些想法被事实推翻了，哪些说的是同一回事。像人一样把零碎的经验整理成少数几条靠谱的窍门。
 规则：
-- 只依据给出的窍门、成败次数（wins/losses）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
-- 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，60 字以内，写清“什么情况下、怎么做、会怎样”）。
+- 只依据给出的窍门、成败次数（wins/losses）、来源（source）、应用证据（applications）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
+- 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，120 字以内，写清“什么情况下、怎么做、会怎样”）。
+- 改写或合并时保留来源和适用条件（地形、方向、材料、授权、工具等）；一次有限情形的失败/成功只写成那次的具体情况，不要升级成普遍规则。unverified 且没有应用证据的条目仍只是暂定结论，没有新证据支持就不要当成已经成立的规律。
 - 失败明显多于成功、或被后来的经历推翻的丢掉（drop）；只是一次性的流水账也丢掉。
 - 零碎想法里被最近经历证实的，才整理成新的窍门（add，最多 5 条）；没证实的就让它过去。
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
@@ -967,10 +974,32 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 只输出一个 JSON 对象：
 {"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const payload = {
-    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, ...(k.unverified ? { unverified: true } : {}),
+    know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses,
+      unverified: k.unverified === true, source: k.source, ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
+      ...(k.kind ? { kind: k.kind } : {}), ...(k.tags.length ? { tags: k.tags } : {}),
+      ...(k.applications?.length ? { applications: k.applications.slice(-5).map((a) => ({ at: new Date(a.at).toISOString(), activity_id: a.activityId,
+        outcome: a.completion === 'condition' ? 'condition_met' : a.outcome,
+        ...(a.completion && a.completion !== 'condition' ? { completion: a.completion } : {}),
+        ...(a.failure ? { failure: { skill: a.failure.skill, ...(a.failure.args !== undefined ? { args: a.failure.args } : {}), code: a.failure.code,
+          summary: historical(a.failure.summary, a.failure.at), ...(Number.isFinite(a.failure.at) ? { at: new Date(a.failure.at).toISOString() } : {}),
+          ...(a.failure.worldId ? { world_id: a.failure.worldId } : {}), ...(a.failure.dim ? { dim: a.failure.dim } : {}),
+          ...(a.failure.pos ? { pos: a.failure.pos } : {}) } } : {}),
+        summary: historical(a.summary, a.at) })) } : {}),
       age_min: Math.round((now - k.createdAt) / 60000) })),
     insights: self.insights().map((i) => historical(`${i.text}${i.outcome ? `（当时结果：${i.outcome}）` : ''}`)),
-    recent: self.history(20).map((r) => historical(`${r.what} → ${r.completion === 'condition' ? 'condition_met' : r.outcome}${Object.keys(r.gained).length ? `，得到 ${Object.entries(r.gained).map(([k, v]) => `${k}×${v}`).join(' ')}` : ''}：${r.summary.slice(0, 180)}`, r.at)),
+    recent: self.history(20).map((r) => ({
+      at: new Date(r.at).toISOString(), what: historical(r.what, r.at), kind: r.kind,
+      outcome: r.completion === 'condition' ? 'condition_met' : r.outcome,
+      ...(r.completion && r.completion !== 'condition' ? { completion: r.completion } : {}),
+      duration_real_s: r.durationSec, failures: r.failures,
+      ...(r.applying ? { applying: r.applying, applying_at_start: r.applyingText ?? 'unknown' } : {}),
+      ...(r.failure ? { failed_action: { skill: r.failure.skill, ...(r.failure.args !== undefined ? { args: r.failure.args } : {}), code: r.failure.code,
+        summary: historical(r.failure.summary, r.at), ...(Number.isFinite(r.failure.at) ? { at: new Date(r.failure.at).toISOString() } : {}),
+        ...(r.failure.worldId ? { world_id: r.failure.worldId } : {}), ...(r.failure.dim ? { dim: r.failure.dim } : {}),
+        ...(r.failure.pos ? { pos: r.failure.pos } : {}) } } : {}),
+      ...(Object.keys(r.gained).length ? { gained: r.gained } : {}), ...(Object.keys(r.lost).length ? { used: r.lost } : {}),
+      summary: historical(r.summary, r.at),
+    })),
     experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
     agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
     diary: self.diary(5).map((d) => historical(d.text)),

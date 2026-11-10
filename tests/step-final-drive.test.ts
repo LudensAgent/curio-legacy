@@ -70,6 +70,7 @@ function physicsBot(world: ReturnType<typeof stepWorld>, startFootY: number) {
   const bot: any = Object.assign(new EventEmitter(), {
     version: '1.20.1', entity, control, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
     inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
+    blockAt: (pos: { floored(): { x: number; y: number; z: number } }) => world.getBlock(pos),
     setControlState(name: string, value: boolean) { control[name] = value; },
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
     async look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
@@ -96,6 +97,7 @@ function noPhysicsBot() {
     entity: { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, isInWater: false, isInLava: false, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false, yaw: 0, pitch: 0, effects: {}, attributes: {} },
     jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
     inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
+    blockAt: () => null,
     setControlState(name: string, value: boolean) { control[name] = value; if (name === 'forward') forwardSets.push(value); },
     clearControlStates() { for (const k of Object.keys(control)) control[k] = false; },
     look() {},
@@ -339,6 +341,7 @@ test('纯移动不改变地形：普通 moveTo 不允许寻路挖掘（含树叶
   const { Movements } = require('mineflayer-pathfinder');
   let selected: any;
   const bot: any = { registry: data, game: { dimension: 'overworld' }, entity: { position: new Vec3(2.5, 64, 0.5) }, inventory: { items: () => [] },
+    blockAt: () => null,
     pathfinder: { setMovements: (m: unknown) => { selected = m; }, goto: async () => {} } };
   const a = adapter(bot);
   (a as any).normalMovements = new Movements(bot);

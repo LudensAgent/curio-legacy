@@ -242,12 +242,16 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   const repeatRaw = o.repeat === 'until_done' ? (doneWhen ? 8 : 1) : Math.round(Number(o.repeat ?? 1));
   const repeat = Number.isFinite(repeatRaw) ? Math.max(1, Math.min(12, repeatRaw)) : 1;
   const kind = ACTIVITY_KINDS.includes(o.kind) ? o.kind as ActivityKind : inferKind(steps);
+  // 这一段如果在按某条窍门做，写 stable id；是否存在由 Mind 在开工时核对，不在这里猜。
+  const applying = str(o.applying, 80);
+  if (o.applying !== undefined && !/^k_[A-Za-z0-9_-]{1,64}$/.test(applying)) notes.push(`${label}.applying 需要现有窍门 id（k_…），已忽略`);
   return {
     what, why: str(o.why, 120), kind, steps, repeat, ...(facing ? { facing } : {}),
     ...(doneWhen ? { doneWhen } : {}),
     ...(str(o.expect, 120) ? { expect: str(o.expect, 120) } : {}),
     ...(str(o.if_stuck, 120) ? { ifStuck: str(o.if_stuck, 120) } : {}),
     ...(typeof o.agenda_id === 'string' ? { agendaId: o.agenda_id } : {}),
+    ...(/^k_[A-Za-z0-9_-]{1,64}$/.test(applying) ? { applying } : {}),
     ...(dropped.length ? { dropped } : {}),
   };
 }

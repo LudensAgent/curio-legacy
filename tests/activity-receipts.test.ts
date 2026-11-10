@@ -97,6 +97,20 @@ test('查询记录/到达都不算定位资源；真正看见或采到才算', (
   assert.equal(got.resource?.goalIncomplete, false);
 });
 
+test('失败回执保留动作发生时的世界/维度与实测时间，不用活动结束位置回填', () => {
+  const a = make('授权寻路', [{ skill: 'travel_to', args: { to: { x: 10, z: 0 }, allowDig: false } }]);
+  const step = nextStep(a)!;
+  afterStep(a, step, { status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '按当前授权没找到路线' }, 10, { ...state(), worldId: 'w', dim: 'the_nether' });
+  const failed = a.results.at(-1)!;
+  const record = recordOf(a, 'stuck', '没有走通', state());
+  assert.equal(record.failure?.skill, 'travel_to');
+  assert.equal(record.failure?.at, failed.at);
+  assert.equal(record.failure?.worldId, 'w');
+  assert.equal(record.failure?.dim, 'the_nether');
+  assert.equal((record.failure?.args as { allowDig?: boolean }).allowDig, false);
+  assert.equal(record.failure?.summary, '按当前授权没找到路线');
+});
+
 test('实测位置决定探索覆盖：同格观察不能算远处已搜索', () => {
   const local = make('找树砍原木', [{ skill: 'look_around', args: { for: 'log' } }]);
   local.results.push({ skill: 'look_around', args: {}, status: 'failed', failureCode: 'NOT_FOUND', summary: '视野内未见', at: Date.now(), durationMs: 2, pos: { x: 0.8, y: 64, z: 0.5 } });

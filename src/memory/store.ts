@@ -177,6 +177,9 @@ export interface Hazard {
   ts: number;
 }
 
+/** addLesson 里模型窍门镜像的 key 前缀：它们是主 know_how 通道的副本，不是独立教训。 */
+export const KNOW_HOW_LESSON_KEY_PREFIX = 'know_how:';
+
 /** 经验教训：model=模型反思写下的推断；observed=程序根据真实经历（死亡、反复失败）写下的 */
 export interface Lesson {
   ts: number;

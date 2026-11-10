@@ -5,7 +5,7 @@ import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
-import type { Hazard, WorldMemory } from '../memory/store.ts';
+import { KNOW_HOW_LESSON_KEY_PREFIX, type Hazard, type WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import { durationText, realSecondsToTicks, type Perception, type Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
@@ -28,7 +28,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
-import { cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
+import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
@@ -882,6 +882,11 @@ export class Mind {
   private beginActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], how: string, hypothesis?: string) {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
+    const appliedKnowHow = a.applying ? this.d.self.data.knowHow.find((k) => k.id === a.applying) : undefined;
+    if (a.applying && !appliedKnowHow) {
+      // 保留 Agent 明确写下的 id，但不设开工快照：记录时不能给任何窍门计数，也不能回退签名。
+      this.d.bus.publish('decision_normalized', 'P3', `applying "${a.applying}" 不是现有窍门 id（可能已删除/合并/改写）；保留为未解析关联，不关联任何窍门证据`);
+    } else if (appliedKnowHow) a.applyingText = cleanLesson(appliedKnowHow.text);
     a.startChunks = this.d.memory.visitedChunkCount;
     // 收工条件开工前就已经成立（比如 held=stone_axe）：它不能验收这段活的目标。
     // 保留原条件、把这段标成“有界尝试”，而不是静默换成“步骤做完就收工”让 done 冒充目标完成。
@@ -1260,6 +1265,7 @@ export class Mind {
         a.index = Math.max(0, a.index - 1);
         markContinuation(a, a.steps[a.index]); // 反射打断后的回放仍属同一次委托
         a.interruptions = (a.interruptions ?? 0) + 1;
+        a.lastInterruption = { at: Date.now(), kind: 'body_reflex', reason: '身体的躲闪反应打断了这一步，安全后会从这一步重做', skill: o.task.skill };
         // 一直被身体躲闪打断：这段活眼下做不成，先想想怎么对付周围的危险
         if (a.interruptions >= 3) this.finishActivity('stuck', `这段活被身体的躲闪反应打断了 ${a.interruptions} 次，周围有危险：先处理掉威胁（打、跑远、躲起来）再做`);
       }
@@ -1482,7 +1488,10 @@ export class Mind {
           this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
           return;
         }
-        if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
+        if (this.activity && cur.planId === this.activity.id) {
+          this.activity.index = Math.max(0, this.activity.index - 1);
+          this.activity.lastInterruption = { at: Date.now(), kind: 'hurt', reason: `掉血了（血 ${hp}，${why}），手上的事先停了`, skill: cur.skill, pos: { ...state.pos } };
+        }
         this.d.arbiter.cancel('掉血了');
         if (this.activity) this.resumeCheck = this.activity.id;
         this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；手上的事先停了，怎么脱离由你定`, 'glance');
@@ -1500,7 +1509,10 @@ export class Mind {
         return;
       }
       // 停下的那一步算没做（想完要是接着做，从这一步重新来）
-      if (this.activity && cur.planId === this.activity.id) this.activity.index = Math.max(0, this.activity.index - 1);
+      if (this.activity && cur.planId === this.activity.id) {
+        this.activity.index = Math.max(0, this.activity.index - 1);
+        this.activity.lastInterruption = { at: Date.now(), kind: 'hurt', reason: `挨打了（血 ${hp}，${hostileText}），手上的事先停了`, skill: cur.skill, pos: { ...state.pos } };
+      }
       this.d.arbiter.cancel('挨打了');
       // 想好之前别又把刚停下的那一步接着做
       if (this.activity) this.resumeCheck = this.activity.id;
@@ -1613,7 +1625,9 @@ export class Mind {
     }
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
-      percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity, suspended: this.suspended,
+      percept, state, self: this.d.self, memory: this.d.memory, blockAt: (p) => this.d.adapter.blockAt(p), activity: this.activity,
+      ...(thoughtRunning ? { runningStep: { skill: thoughtRunning.skill, args: thoughtRunning.args, source: thoughtRunning.source, startedAt: thoughtRunning.startedAt } } : {}),
+      suspended: this.suspended,
       log: (msg, data) => this.d.bus.publish('notice', 'P3', msg, { level: 'note', salience: 0.3, ...(data ?? {}) }),
       next: this.queuedNext?.draft ?? null,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
@@ -1761,7 +1775,7 @@ export class Mind {
       for (const g of keptGoals) this.keptHint = `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了`;
       for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在认真想时写 agenda_drop，或者换一个主目标`, { agendaId: g.id });
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
-        this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}` });
+        this.d.memory.addLesson(k.text, { source: 'model', key: `${KNOW_HOW_LESSON_KEY_PREFIX}${k.id}` });
       }
       if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || typeof c.skill.raw.code === 'string' || typeof c.skill.raw.improve === 'string' || c.skill.raw.when !== undefined)) {
         const w = this.safe(() => this.d.behaviors!.write(c.skill!.raw, { by: 'mind' }), { ok: false as const, error: '写技能时出错' });
@@ -1856,7 +1870,7 @@ export class Mind {
         this.lastLessonAt = Date.now();
         this.learnedActivities.add(activityId);
         if (this.learnedActivities.size > 256) this.learnedActivities.delete(this.learnedActivities.values().next().value!);
-        this.d.memory.addLesson(k.text, { source: 'model', key: `know_how:${k.id}`, replaces: previousTexts.get(k.id) });
+        this.d.memory.addLesson(k.text, { source: 'model', key: `${KNOW_HOW_LESSON_KEY_PREFIX}${k.id}`, replaces: previousTexts.get(k.id) });
         this.d.bus.publish('lesson', 'P2', `${k.unverified ? '暂时猜到（未验证）' : '学到'}：${k.text}`, { source: 'model', knowHowId: k.id });
       }
     };
@@ -1917,7 +1931,10 @@ export class Mind {
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
       // 全部校验通过后再取消旧任务：拒绝非法调整不得取消原动作，避免原动作被取消后活动仍被记为 done。
-      if (running?.planId === a.id && runningIndex < 0) this.d.arbiter.cancel('改了做法');
+      if (running?.planId === a.id && runningIndex < 0) {
+        this.d.arbiter.cancel('改了做法');
+        a.lastInterruption = { at: Date.now(), kind: 'adjusted', reason: '你的调整取消了正在执行的那个动作，它没有完成；接下来按新 routine 继续', skill: running.skill, pos: { ...this.d.adapter.state().pos } };
+      }
       // 3. 分配 ID：引用保留原 ID，新建分配新 ID。
       const steps = draft.steps.map((s) => ({ ...s, id: typeof s.id === 'string' && s.id ? s.id : shortId('st_') }));
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
@@ -1928,6 +1945,19 @@ export class Mind {
       retargetNavigation(a, a.steps);
       if (draft.expect) a.expect = draft.expect;
       if (draft.ifStuck) a.ifStuck = draft.ifStuck;
+      const appliedKnowHow = draft.applying ? this.d.self.data.knowHow.find((k) => k.id === draft.applying) : undefined;
+      if (appliedKnowHow) {
+        a.applying = appliedKnowHow.id;
+        a.applyingText = cleanLesson(appliedKnowHow.text);
+      } else if (draft.applying) {
+        // 调整时 Agent 仍明确声明了关联，但 id 已不可解析：保留原 id、快照未知，不记任何证据。
+        a.applying = draft.applying;
+        delete a.applyingText;
+        this.d.bus.publish('decision_normalized', 'P3', `applying "${draft.applying}" 不是现有窍门 id（可能已删除/合并/改写）；保留为未解析关联，不关联任何窍门证据`);
+      } else {
+        delete a.applying;
+        delete a.applyingText;
+      }
       this.activityThoughtAt = Date.now();
       this.d.bus.publish('activity_adjust', 'P2', `改一改做法：${a.what}`, { activity: describeActivity(a, this.d.adapter.state(), this.safe(() => this.d.perception.snapshot(), undefined)) });
       this.d.bus.publish('plan', 'P2', `[${decision.source}] ${a.what} —— ${decision.monologue}`, { thought: decision.monologue, source: decision.source, steps: a.steps, planId: a.id, ...(a.facing ? { facing: a.facing } : {}) });
@@ -1935,7 +1965,12 @@ export class Mind {
     }
     if (decision.kind === 'detour' && this.activity) {
       const a = this.activity;
-      if (this.d.arbiter.info()?.planId === a.id) { this.d.arbiter.cancel('先去处理别的事'); a.index = Math.max(0, a.index - 1); }
+      const running = this.d.arbiter.info();
+      if (running?.planId === a.id) {
+        this.d.arbiter.cancel('先去处理别的事');
+        a.index = Math.max(0, a.index - 1);
+        a.lastInterruption = { at: Date.now(), kind: 'detour', reason: '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做', skill: running.skill, pos: { ...this.d.adapter.state().pos } };
+      }
       a.suspendedAt = Date.now();
       this.suspended.push(a);
       if (this.suspended.length > 2) this.suspended.shift();

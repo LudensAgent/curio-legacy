@@ -40,7 +40,7 @@ const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round
  */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走（按沿方向推进验收，横向不超过 maxLateralDrift 的任意站位都算这段到了），每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段没走到段终点、沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to。',
+  description: '朝你选的方向走远路探索（后端 pathfinder，已加载区块）：沿冻结方向每段 ≤32 格交给 travel_to 走（按沿方向推进验收，横向不超过 maxLateralDrift 的任意站位都算这段到了），每段结束朝该方向扫视一次；until 写方块/生物名、类别（log、stem）或 "a|b" 时，本次视野看见其中之一就停。不换方向、不替你选路线；某段走不通会先在附近偏转绕行，连续 2 段没走到段终点、沿方向推进不足 2 格或横向偏离超过 maxLateralDrift 就停，回执报实测沿方向进度、横向偏离、新区块数、每段停止原因。默认不下水、不挖不放不搭柱（allowSwim:true 才走水路）；施工授权与副作用同 travel_to：跟随旧路不施工，旧路走不通就停；仅没有可用旧路或走完记录后的新段，才先按不施工搜索，并在明确 NoPath 且原请求授权施工时重试。超时、卡住、NOT_CONFIRMED、取消不会升级成挖/垫。每段始终沿同一条冻结射线推进，不会因分段而重新定向。',
   argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW", "distance":16-512, "until"?:"log"（看见就停；类别 log=各种原木、stem=菌柄，或 "crimson_stem|warped_stem" 列几种；写具体名如 oak_log 就只认这一种）, "segment"?:16-48（默认 32）, "maxLateralDrift"?:16（4-64，横向偏离超过就停）, "allowSwim"?:false（true 才下水；水里有溺水与溺尸风险）, "allowDig"?:false, "tool"?:"stone_pickaxe"（需 allowDig；寻路挖掘只用这件）, "allowPlace"?:false, "allowHazard"?:false, "sprint"?:false, "timeoutMs"?:300000（30000-600000）}',
   timeoutMs: 600000,
   movement: true,
@@ -127,15 +127,24 @@ export const exploreToward: Skill<ExploreArgs> = {
         if (left < 10000) { stop = 'TIMEOUT'; break; }
         ctx.progress(Math.max(0, along) / args.distance, `往 ${args.direction} 已推进 ${Math.round(along)}/${args.distance} 格`);
         // 下一段终点在冻结射线上，从实测沿方向进度往前一段；中途绕行由 travel_to 处理。
-        const reach = Math.min(args.distance, Math.max(0, along) + args.segment);
+        // travel_to 的 heading.distance 是“从 origin 起算”且单次上限 200：这里把段起点沿同一条冻结射线
+        // 平移到当前沿方向进度，只把本段长度交给它；总目标、方向和 corridor 仍由本技能保持不变。
+        const segmentStart = Math.max(0, along);
+        const segmentDistance = Math.max(1, Math.min(args.segment, Math.ceil(args.distance - segmentStart)));
+        const reach = Math.min(args.distance, segmentStart + segmentDistance);
         const target = { x: Math.round(args.origin.x + ux * reach), z: Math.round(args.origin.z + uz * reach) };
-        // 段终点只是参考：交给 travel_to 的是“沿冻结方向推进到 reach、横向不超过 maxLateralDrift”，
-        // 下界碎地形里射线上那个点常在岩浆/半空里，旁边几格就有能往前走的路。
+        const segmentOrigin = { x: args.origin.x + ux * segmentStart, y: args.origin.y, z: args.origin.z + uz * segmentStart };
         const parsed = travelTo.validate({
-          to: { heading: args.direction, distance: Math.min(args.distance, Math.ceil(reach)), origin: args.origin, corridor: args.maxLateralDrift }, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
+          to: { heading: args.direction, distance: segmentDistance, origin: segmentOrigin, corridor: args.maxLateralDrift }, range: SEGMENT_RANGE, allowDig: args.allowDig, allowPlace: args.allowPlace, allowSwim: args.allowSwim,
           allowHazard: args.allowHazard, sprint: args.sprint, timeoutMs: Math.min(120000, left), ...(args.tool ? { tool: args.tool } : {}),
         }, adapter);
-        if (!parsed.ok) return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；没有移动`, { backend });
+        if (!parsed.ok) {
+          const { end, progress, measured } = factsNow();
+          return fail('BAD_ARGS', `内部分段参数无效：${parsed.error}；${measured}`, {
+            backend, direction: args.direction, distance: args.distance, origin: args.origin, position: end, progress, measured,
+            segments: segments.slice(-24), segmentCount: segments.length, continuation: { direction: args.direction, distance: args.distance, origin: args.origin },
+          });
+        }
         const segStart = { ...adapter.state().pos };
         const hop = await travelTo.run(ctx, parsed.args);
         const end = { ...adapter.state().pos };

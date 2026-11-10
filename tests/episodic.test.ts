@@ -88,6 +88,19 @@ test('episodic: associative local recall finds older relevant memories and scope
   assert.equal(x.backend.retained.length, 0);
 });
 
+test('episodic: configured recall path drops know_how mirror lessons but keeps independent observations', async (t) => {
+  const x = setup(t, settings({ provider: 'local' }));
+  x.memory.addLesson('卡住时向上开巷', { source: 'model', key: 'know_how:k_deleted' });
+  x.memory.addLesson('河对岸有露天铁矿', { source: 'observed' });
+  const recalled = await x.service.recall(context(), '卡住时向上开巷 河对岸 铁矿');
+  assert.equal(recalled.source, 'local');
+  assert.ok(!JSON.stringify(recalled.memories).includes('卡住时向上开巷'), '被删除/合并的 know_how 镜像不能经 recall 服务入口重新出现');
+  const observation = recalled.memories.find((entry) => entry.text.includes('河对岸有露天铁矿'));
+  assert.ok(observation, '独立真实观察保留');
+  assert.equal(observation.kind, 'experience');
+  assert.match(observation.source, /observed/);
+});
+
 test('episodic: events without a known dimension stay local and cannot contaminate a remote scope', async (t) => {
   const x = setup(t);
   x.adapter.dim = 'unknown';
