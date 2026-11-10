@@ -3,9 +3,9 @@ import { shortId } from '../../util.ts';
 import { fail, isAbort, ok, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
-import { observedFootY, type LandSearchBoundary } from '../../spatial/land-search.ts';
-import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
-import { isClimbableBlockName } from '../../adapter/land-rules.ts';
+import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../spatial/land-search.ts';
+import { cellGoal, feetReached, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
+import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -560,6 +560,19 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (boundary !== undefined && executedSegments >= request.maxSegments && !frontierObservation) {
           stop = stopOf('UNKNOWN_BOUNDARY', segment.detail ?? '搜索边界证据不足；未进入 UNKNOWN/STALE', { boundaries: [boundary] });
           break;
+        }
+        // 感知在走前缀期间仍会更新地图。旧搜索边界已可通时，不能要求本次
+        // observe 再产生一次变化；只复验当前脚边这条边，OPEN 才从实测位置重搜。
+        if (boundary !== undefined && feetReached(boundary.from, after.pos, after.onGround)) {
+          const check = verifyLandRoute(voxel, {
+            ...scope, body: { feet: { ...after.pos }, width: 0.6, height: 1.8, pose: 'standing' },
+            rules: walkLandRules, measuredStart: after.pos,
+          }, [{ kind: boundary.kind, from: boundary.from, to: boundary.to,
+            drop: Math.max(0, boundary.from.y - boundary.to.y) }], Date.now());
+          if (check.transitions[0]?.status === 'OPEN') {
+            session.phase = 'replanning';
+            continue;
+          }
         }
         const boundaryKey = boundary === undefined ? undefined : boundaryKeyOf(boundary, after.pos);
         const boundaryDone = boundaryKey !== undefined && session.observedBoundaries?.includes(boundaryKey) === true;

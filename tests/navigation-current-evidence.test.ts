@@ -79,3 +79,25 @@ test('cancellation during stale evidence refresh prevents any later movement', a
   assert.equal(result.status, 'cancelled', result.summary);
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
 });
+
+test('ongoing perception can resolve a search boundary before explicit observation begins', async (t) => {
+  const { adapter, ctx, observe } = setup();
+  t.after(() => ctx.memory.close());
+  let refreshed = false;
+  ctx.setStationaryWait = (waiting) => {
+    if (waiting || refreshed) return;
+    refreshed = true;
+    Array.from({ length: 5 }, (_, x) => x - 1).forEach((x) =>
+      Array.from({ length: 3 }, (_, z) => z - 1).forEach((z) =>
+        [63, 64, 65, 66].forEach((y) => observe({ x, y, z }))));
+  };
+  ctx.senses.observeBlocks = () => { assert.fail('already current geometry needs no redundant turn or observation'); };
+
+  const result = await navigateTo.run(ctx, args);
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 });
+  const counters = result.data?.counters as { searches: number; observations: number };
+  assert.equal(counters.searches, 2);
+  assert.equal(counters.observations, 0);
+});
