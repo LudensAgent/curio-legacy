@@ -86,6 +86,14 @@ export function boundaryProbeCells(
   // 先补齐真实起/终脚位的身体与支撑；侧向探测不能挤掉非整数头部或跨列接触格。
   // corridor 限制脚位；合法脚位的身体可能压到边界外的相邻格，不能按格心丢掉这些接触格。
   for (const feet of [boundary.to, boundary.from]) standingContactCells(feet).forEach((cell) => add(cell, feet));
+  if (boundary.kind === 'step' || boundary.kind === 'drop') {
+    // step 先在起点上升再横移；drop 先在原高度横移再沿终点列下降。
+    // 两端站位之间的身体扫掠也需要可见证据，不能只补终点脚/头两格。
+    const column = boundary.kind === 'step' ? boundary.from : boundary.to;
+    const bottom = Math.min(boundary.from.y, boundary.to.y), top = Math.max(boundary.from.y, boundary.to.y);
+    for (let y = bottom; y < top; y += 1) standingContactCells({ ...column, y }).forEach((cell) => add(cell, column));
+    standingContactCells({ ...column, y: top }).forEach((cell) => add(cell, column));
+  }
   add({ x: to.x + step.x, y: to.y, z: to.z + step.z });
   add({ x: to.x + step.x, y: to.y - 1, z: to.z + step.z });
 

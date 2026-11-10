@@ -47,6 +47,20 @@ test('exact body contact at a column boundary does not include the untouched nei
   assert.ok(cells.some((cell) => key(cell) === '0,63,0'), 'the original integer stance support is included');
 });
 
+test('step probes include headroom above the original column before horizontal movement', () => {
+  const from = { x: 0.5, y: 64, z: 0.5 }, to = { x: 1.5, y: 65, z: 0.5 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'step', direction: 'E' }).cells;
+  assert.ok(cells.some((cell) => key(cell) === '0,66,0'), 'rising at the original column sweeps the head through y=66');
+});
+
+test('drop probes cover the destination column from the original height through landing', () => {
+  const from = { x: 0.5, y: 66, z: 0.5 }, to = { x: 1.5, y: 62, z: 0.5 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'drop', direction: 'E' }).cells;
+  const keys = new Set(cells.map(key));
+  for (let y = 61; y <= 67; y++) assert.ok(keys.has(`1,${y},0`), `drop destination sweep requires y=${y}`);
+  assert.ok(cells.length <= 32);
+});
+
 function setup() {
   const adapter = new FakeAdapter();
   adapter.pos = { ...boundary.from };
