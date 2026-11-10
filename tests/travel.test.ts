@@ -6,7 +6,8 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { equipmentSkills } from '../src/skills/equipment.ts';
 import { SKILLS } from '../src/skills/index.ts';
-import { travelSkills, useEndGateway } from '../src/skills/travel.ts';
+import { buildPortal, travelSkills, useEndGateway } from '../src/skills/travel.ts';
+import type { SkillCtx } from '../src/skills/types.ts';
 import { travel } from '../src/skills/overland.ts';
 import { travelStore } from '../src/travel/store.ts';
 import { AbortedError, sleep } from '../src/util.ts';
@@ -46,22 +47,195 @@ test('build_portal places exactly ten obsidian and records only the activated po
   assert.deepEqual(snapshot.routes, []);
 });
 
-test('build_portal allowTower 授权寻路垫脚，且禁止往门框与门内放方块', async (t) => {
+test('build_portal allowTower 用显式 pillarUp 站高，不把垫脚交给寻路的隐式地形操作', async (t) => {
   const { adapter, run } = setup();
   adapter.inv.set('obsidian', 10);
   adapter.inv.set('flint_and_steel', 1);
   adapter.inv.set('cobblestone', 4);
   const calls: { pos: { x: number; y: number; z: number }; opts: Parameters<FakeAdapter['moveTo']>[1] }[] = [];
-  const moveTo = adapter.moveTo.bind(adapter);
+  const towerStances: { pos: { x: number; y: number; z: number }; names: string[] }[] = [];
+  const moveTo = adapter.moveTo.bind(adapter), pillarUp = adapter.pillarUp.bind(adapter);
+  // 模拟“够不到上方门框”：只有原地垫高之后，同一放置目标才变得可达。
   t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
-    if (target.kind === 'place_block') calls.push({ pos: target.pos, opts });
+    if (target.kind === 'reach_block' || target.kind === 'near') return;
+    if (target.kind === 'place_block') {
+      calls.push({ pos: target.pos, opts });
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
     return moveTo(target, opts);
+  });
+  t.mock.method(adapter, 'pillarUp', async (names: string[], signal: AbortSignal) => {
+    towerStances.push({ pos: { ...adapter.pos }, names: [...names] });
+    return pillarUp(names, signal);
   });
   const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
   assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
-  assert.ok(calls.length > 0 && calls.every((c) => c.opts.allowPlace === true && c.opts.allowTower === true));
-  const banned = new Set(calls[0].opts.noPlaceAt!.map((p) => `${p.x},${p.y},${p.z}`));
-  for (const key of ['4,64,0', '5,66,0', '3,67,0', '4,67,0', '6,65,0']) assert.ok(banned.has(key), `门框/门内 ${key} 禁止垫脚`);
+  assert.equal(adapter.blocks.filter((b) => b.name === 'obsidian').length, 10);
+  assert.equal(adapter.inv.get('obsidian'), 0);
+  assert.ok(calls.length > 0 && calls.every((c) => c.opts.allowPlace === undefined && c.opts.allowTower === undefined && c.opts.noPlaceAt === undefined), '放置站位不再委托寻路改造地形');
+  assert.ok(towerStances.length >= 1, '够不到时执行显式垫高');
+  const banned = new Set(['3,63,0', '4,63,0', '5,63,0', '6,63,0', '3,64,0', '4,64,0', '5,64,0', '6,64,0', '3,65,0', '4,65,0', '5,65,0', '6,65,0', '3,66,0', '4,66,0', '5,66,0', '6,66,0', '3,67,0', '4,67,0', '5,67,0', '6,67,0']);
+  for (const stance of towerStances) {
+    assert.ok(!banned.has(`${Math.floor(stance.pos.x)},${Math.floor(stance.pos.y)},${Math.floor(stance.pos.z)}`), `垫高站位 ${JSON.stringify(stance.pos)} 不能落在门框/门内`);
+    assert.ok(stance.names.every((name) => ['dirt', 'cobblestone', 'netherrack', 'cobbled_deepslate'].includes(name)), `只使用原有施工材料：${stance.names.join(',')}`);
+  }
+  assert.ok(adapter.pos.y > 63, '垫高确实把身体升到需要的站立高度');
+});
+
+test('build_portal allowTower 缺脚手架时停下，保留已放置数量与目标事实', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1); // 没有脚手架：门框上段够不到时如实停下
+  adapter.blocks.push({ name: 'obsidian', pos: { x: 4, y: 63, z: 0 } }, { name: 'obsidian', pos: { x: 5, y: 63, z: 0 } });
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'reach_block') return;
+    if (target.kind === 'place_block') {
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
+    return moveTo(target, opts);
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'failed');
+  assert.match(outcome.result.summary, /缺脚手架方块/);
+  assert.ok((outcome.result.data?.placed as number) > 0, '保留已经实际放下的方块数');
+  assert.ok(outcome.result.data?.target, '回报够不到的目标格');
+});
+
+test('build_portal allowTower 垫高被挡时停下并带回净空事实，不自行挖开', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 4);
+  const moveTo = adapter.moveTo.bind(adapter);
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'reach_block') return;
+    if (target.kind === 'place_block') {
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
+    return moveTo(target, opts);
+  });
+  t.mock.method(adapter, 'pillarUp', async () => ({
+    ok: false, reason: 'NOT_PLACED:头顶跳跃空间受阻',
+    clearanceDetail: '头顶跳跃空间受阻；要跳起来得先把这几格都挖空（方块名未确认）：(0,66,0)',
+    clearance: { at: [0, 2, 0] as [number, number, number], facing: 'N' },
+  }));
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'failed');
+  assert.match(outcome.result.summary, /头顶跳跃空间受阻/);
+  assert.match(outcome.result.summary, /\(0,66,0\)/, 'net clearance detail reaches the caller');
+  assert.equal(outcome.result.data?.pillarFailure, 'NOT_PLACED:头顶跳跃空间受阻');
+  assert.match(String(outcome.result.data?.clearanceDetail), /\(0,66,0\)/);
+  assert.ok((outcome.result.data?.placed as number) > 0);
+  assert.ok(!adapter.actions.some((a) => a.startsWith('dig:') && a.includes('stone')), '垫高受阻不额外挖方块');
+});
+
+test('build_portal allowTower 不会因为目标高就垫高：水平超出交互距离时直接回报缺口', async (t) => {
+  const { adapter, run } = setup();
+  adapter.pos = { x: 20.5, y: 64, z: 0.5 };
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 5);
+  const moveTo = adapter.moveTo.bind(adapter);
+  let pillars = 0;
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'reach_block') return;
+    if (target.kind === 'place_block') {
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
+    return moveTo(target, opts);
+  });
+  t.mock.method(adapter, 'pillarUp', async () => { pillars++; return { ok: true }; });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(pillars, 0, '水平距离超出交互范围时不能仅因目标高就垫高');
+  assert.equal(adapter.inv.get('cobblestone'), 5, '没有消耗脚手架');
+  assert.equal(outcome.result.data?.reason, 'OUT_OF_REACH');
+  assert.ok((outcome.result.data?.horizontalDistance as number) > 4.5);
+});
+
+test('build_portal 不把悬空时的瞬时高度算成垫高', async (t) => {
+  const { adapter, run } = setup();
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 5);
+  const moveTo = adapter.moveTo.bind(adapter);
+  let pillars = 0;
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'reach_block') return;
+    if (target.kind === 'place_block') {
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
+    return moveTo(target, opts);
+  });
+  t.mock.method(adapter, 'pillarUp', async (names: string[]) => {
+    pillars++;
+    const item = names.find((name) => (adapter.inv.get(name) ?? 0) > 0);
+    if (item) adapter.inv.set(item, (adapter.inv.get(item) ?? 1) - 1);
+    adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 };
+    adapter.onGround = false; // 只有空中瞬时高度，没有站稳支撑
+    return { ok: true, y: adapter.pos.y };
+  });
+  const outcome = await run('build_portal', { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  assert.equal(outcome.result.status, 'failed');
+  assert.equal(pillars, 1, '只尝试一次垫高');
+  assert.equal(outcome.result.data?.confirmedRises, 0, '悬空高度不计入确认垫高');
+  assert.match(outcome.result.summary, /仍悬空|没有站在实地/);
+  assert.ok((outcome.result.data?.placed as number) > 0, '已放置方块数保留');
+});
+
+test('build_portal 在确认垫高后取消时保留部分实际事实', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.speed = 1000;
+  adapter.inv.set('obsidian', 10);
+  adapter.inv.set('flint_and_steel', 1);
+  adapter.inv.set('cobblestone', 5);
+  const memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  const controller = new AbortController();
+  const moveTo = adapter.moveTo.bind(adapter);
+  let pillars = 0;
+  t.mock.method(adapter, 'moveTo', async (target: Parameters<FakeAdapter['moveTo']>[0], opts: Parameters<FakeAdapter['moveTo']>[1]) => {
+    if (target.kind === 'reach_block') return;
+    if (target.kind === 'place_block') {
+      if (target.pos.y > Math.floor(adapter.pos.y) + 1) throw new Error('PLACEMENT_NOT_REACHABLE');
+      return;
+    }
+    return moveTo(target, opts);
+  });
+  t.mock.method(adapter, 'pillarUp', async (names: string[]) => {
+    pillars++;
+    const item = names.find((name) => (adapter.inv.get(name) ?? 0) > 0);
+    if (item) adapter.inv.set(item, (adapter.inv.get(item) ?? 1) - 1);
+    adapter.pos = { ...adapter.pos, y: adapter.pos.y + 1 };
+    adapter.onGround = true;
+    controller.abort('task cancelled');
+    return { ok: true, y: adapter.pos.y };
+  });
+  const ctx = {
+    adapter, memory, signal: controller.signal, deadline: Date.now() + 60000, taskId: 'portal-abort', progress() {}, senses: {},
+  } as unknown as SkillCtx;
+  let caught: (Error & { partial?: Record<string, unknown> }) | undefined;
+  try {
+    await buildPortal.run(ctx, { origin: { x: 3, y: 63, z: 0 }, axis: 'x', allowTower: true });
+  } catch (error) {
+    caught = error as typeof caught;
+  } finally {
+    memory.close();
+  }
+  assert.ok(caught, '取消仍抛 AbortedError');
+  assert.equal(caught.name, 'AbortedError');
+  assert.equal(pillars, 1);
+  assert.ok((caught.partial?.placed as number) > 0, '保留取消前已确认放置数');
+  assert.equal(caught.partial?.confirmedRises, 1);
+  assert.ok(((caught.partial?.position as { y: number }).y) > 64);
+  assert.ok(caught.partial?.target, '保留最后放置目标');
+  assert.deepEqual(caught.partial?.portal, { origin: { x: 3, y: 63, z: 0 }, axis: 'x' });
 });
 
 test('build_portal 未授权垫脚时不替 Agent 搭柱，够不到就报出那一格离脚多高', async (t) => {

@@ -43,13 +43,14 @@ test('unstuck reports pillar construction spend by stage instead of hiding it in
   for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) w.setBlock({ x: dx, y: 64, z: dz }, 'stone');
   w.setBlock({ x: 0, y: 66, z: 0 }, 'glass');
   w.inv.set('cobblestone', 2);
-  t.mock.method(w, 'moveTo', async (target: any) => {
+  t.mock.method(w, 'pillarUp', async (names: string[]) => {
     // climb_up 的原地向上一步：模拟真实垫柱消耗一块可垫方块，然后站上新高度。
-    if (target.kind === 'xyz') {
-      w.inv.set('cobblestone', (w.inv.get('cobblestone') ?? 1) - 1);
-      w.setBlock({ x: 0, y: 64, z: 0 }, 'cobblestone');
-      w.pos = { x: 0.5, y: target.y, z: 0.5 };
-    }
+    const item = names.find((name) => (w.inv.get(name) ?? 0) > 0);
+    if (!item) return { ok: false, reason: 'NO_ITEM' };
+    w.inv.set(item, (w.inv.get(item) ?? 1) - 1);
+    w.setBlock({ x: 0, y: 64, z: 0 }, item);
+    w.pos = { x: 0.5, y: 65, z: 0.5 };
+    return { ok: true, y: 65 };
   });
   const ctx = makeCtx(w);
   try {

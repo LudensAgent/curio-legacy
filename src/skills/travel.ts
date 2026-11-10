@@ -1,10 +1,15 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { supportCell } from '../perception/local.ts';
 import { portalAgeText, travelStore, type PortalEndpoint } from '../travel/store.ts';
-import { dist3, sleep, throwIfAborted } from '../util.ts';
+import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const TERRAIN = new Set(['dirt', 'grass_block', 'stone', 'cobblestone', 'deepslate', 'netherrack', 'sand', 'gravel']);
+/** 建门时允许消耗的施工支撑块（与 Agent 原有允许范围一致，不临时选别的材料） */
+const SCAFFOLD = ['dirt', 'cobblestone', 'netherrack', 'cobbled_deepslate'];
+/** 方块交互距离：原地垫高只改变竖直高度，水平距离超过它时垫高不可能让目标进入交互范围。 */
+const PLACE_REACH = 4.5;
 /** 传送门记进常规记忆（地标）时用的中文名 */
 const PORTAL_LABEL: Record<PortalEndpoint['kind'], string> = { nether_portal: '下界门', end_portal: '末地门', end_gateway: '末地折跃门' };
 
@@ -68,22 +73,114 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
     if (occupied.length) return fail('BAD_ARGS', `${frameNote}；以下格子挡住了门：${occupied.join('、')}${framesNote}`, { occupied, otherFrames });
     // 这次要开始立框（新开工），也记下：中途失败/被中断都能回同一处补全
     ctx.memory.addLandmark('discovery', partialLabel, state.dim, args.origin, 1);
-    let placed = 0;
+    let placed = 0, confirmedRises = 0;
+    let lastPlacementTarget: Vec3Like | undefined;
     // 门框格与门内空间：垫脚时不能往这里放方块，否则门框错位或门内被堵。
     const keepClear = [0, 1, 2, 3, 4].flatMap((y) => [0, 1, 2, 3].map((u) => at(u, y)));
+    const keepClearKeys = new Set(keepClear.map((p) => `${p.x},${p.y},${p.z}`));
+    const scaffoldNames = () => SCAFFOLD.filter((n) => (adapter.state().inventory.find((i) => i.name === n)?.count ?? 0) > 0);
+    // 显式垫高与落地等待受剩余绝对期限约束；只传信号，不替新的动作所有者 stopAll。
+    const operationSignal = () => Number.isFinite(ctx.deadline)
+      ? AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, ctx.deadline - Date.now()))])
+      : signal;
+    // 只做普通近距离移动；垫高与否由下面的显式 pillarUp 决定，不再交给寻路隐式搭柱/放块。
+    const moveIntoPlaceReach = (pos: Vec3Like) => adapter.moveTo({ kind: 'place_block', pos },
+      { signal, timeoutMs: Math.max(1, Math.min(20000, ctx.deadline - Date.now())) });
     const place = async (pos: Vec3Like, name: string) => {
       throwIfAborted(signal);
+      lastPlacementTarget = pos;
       try {
-        await adapter.moveTo({ kind: 'place_block', pos }, args.allowTower
-          ? { signal, timeoutMs: 20000, allowPlace: true, allowTower: true, noPlaceAt: keepClear }
-          : { signal, timeoutMs: 20000 });
+        await moveIntoPlaceReach(pos);
       } catch (error) {
-        if (isAbort(error) || args.allowTower) throw error;
-        const feet = Math.floor(adapter.state().pos.y);
-        throw new Error(`${(error as Error).message}：(${pos.x},${pos.y},${pos.z}) 比脚高 ${pos.y - feet} 格，本次未授权垫脚（allowTower 未开），寻路没有找到能看到它贴附面的站位`);
+        if (isAbort(error)) throw error;
+        const stance = adapter.state(), stancePos = stance.pos;
+        const feet = Math.floor(stancePos.y);
+        const horizontal = Math.hypot(stancePos.x - (pos.x + 0.5), stancePos.z - (pos.z + 0.5));
+        const target = `(${pos.x},${pos.y},${pos.z})`;
+        const failGap = (message: string, reason: string, facts: Record<string, unknown> = {}) =>
+          Object.assign(new Error(message), { details: {
+            target: pos, targetFeetY: pos.y, startFeetY: feet, reason, horizontalDistance: horizontal, reach: PLACE_REACH,
+            position: { ...stancePos }, placed, confirmedRises, ...facts,
+          } });
+        const failTower = (message: string, facts: Record<string, unknown>) =>
+          Object.assign(new Error(message), { details: {
+            target: pos, targetFeetY: pos.y, startFeetY: feet, horizontalDistance: horizontal, reach: PLACE_REACH,
+            position: { ...adapter.state().pos }, placed, confirmedRises, ...facts,
+          } });
+        if (!args.allowTower) {
+          throw failGap(`${(error as Error).message}：${target} 比脚高 ${pos.y - feet} 格，本次未授权垫脚（allowTower 未开），没有找到能放下它的站位`, 'NO_TOWER');
+        }
+        if (typeof adapter.pillarUp !== 'function') {
+          throw failTower(`${(error as Error).message}：当前适配器没有原地垫高能力，allowTower 无法执行，${target} 未放置`, { allowTower: true, reason: 'CAPABILITY_MISSING' });
+        }
+        // 正常接近失败不等于“高一点就够得到”：身体必须站在实地上，且水平距离必须已在交互范围内。
+        if (!stance.onGround) throw failGap(`${(error as Error).message}：身体没有站在实地上，垫高不会把 ${target} 变成可放置`, 'UNSUPPORTED_STANCE');
+        if (horizontal > PLACE_REACH) {
+          throw failGap(`${(error as Error).message}：${target} 水平方向离身体 ${horizontal.toFixed(1)} 格（交互距离约 ${PLACE_REACH} 格），原地垫高不会缩短这段距离`, 'OUT_OF_REACH');
+        }
+        // 垫高只对“目标高于当前站位”有意义，且最多垫到目标脚高；每次垫完都先重试原有放置方式。
+        const maxRises = Math.floor(pos.y) - feet;
+        if (maxRises <= 0) throw failGap(`${(error as Error).message}：${target} 不在当前站立高度之上`, 'NOT_ABOVE');
+        let rises = 0, lastError: Error | null = error as Error;
+        for (; rises < maxRises; rises++) {
+          throwIfAborted(signal);
+          if (Date.now() >= ctx.deadline - 250) throw failTower(`建门垫高到期限：${lastError?.message ?? '原地移动未完成'}`, { rises });
+          const current = adapter.state(), stancePosNow = current.pos;
+          // pillarUp 会放进“脚下支撑格上面一格”；用实际放置格判断是否落在门框/门内。
+          const stanceCell = { x: Math.floor(stancePosNow.x), y: supportCell(stancePosNow).y + 1, z: Math.floor(stancePosNow.z) };
+          if (keepClearKeys.has(`${stanceCell.x},${stanceCell.y},${stanceCell.z}`)) {
+            throw failTower(`够不到 ${target}，且垫高会填入门框/门内 (${stanceCell.x},${stanceCell.y},${stanceCell.z})，已停止`, { stance: stanceCell, rises });
+          }
+          const names = scaffoldNames();
+          if (names.length === 0) {
+            throw failTower(`够不到 ${target}，缺脚手架方块（${SCAFFOLD.join('/')}）`, { stance: stanceCell, rises });
+          }
+          const beforeY = stancePosNow.y;
+          const pillar = await adapter.pillarUp(names, operationSignal());
+          const supportedRise = () => {
+            const now = adapter.state();
+            return now.onGround && now.pos.y > beforeY + 0.45 && Math.floor(now.pos.y + 0.05) > Math.floor(beforeY + 0.05);
+          };
+          let supported = supportedRise();
+          // 适配器可能在上跳途中返回：有界等待真正站稳，不把空中瞬时高度算成垫高。
+          if (pillar.ok && !supported) {
+            const until = Math.min(Date.now() + 1500, ctx.deadline);
+            while (!supported && Date.now() < until) {
+              await sleep(Math.max(1, Math.min(50, until - Date.now())), operationSignal());
+              supported = supportedRise();
+            }
+          }
+          if (supported) confirmedRises++;
+          if (!pillar.ok || !supported) {
+            const asked = pillar.ok ? '实测没有站在实地上（仍悬空或高度未上升）' : pillar.reason ?? '原地垫高未成功';
+            const detail = pillar.clearanceDetail ? `；${pillar.clearanceDetail}` : '';
+            throw failTower(`够不到 ${target}，原地垫高没成：${asked}${detail}`, {
+              stance: stanceCell, rises,
+              ...(pillar.ok ? {} : { pillarFailure: pillar.reason }),
+              ...(pillar.clearanceDetail ? { clearanceDetail: pillar.clearanceDetail } : {}),
+              ...(pillar.clearance ? { pillarClearance: pillar.clearance } : {}),
+            });
+          }
+          try {
+            throwIfAborted(operationSignal());
+            if (Date.now() >= ctx.deadline) throw new AbortedError('DEADLINE');
+            await moveIntoPlaceReach(pos);
+            lastError = null;
+            break;
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            lastError = e as Error;
+          }
+        }
+        if (lastError) throw failTower(`${lastError.message}：原地垫高 ${rises} 格后仍够不到 ${target}`, { rises });
       }
+      throwIfAborted(operationSignal());
+      if (Date.now() >= ctx.deadline) throw new AbortedError('DEADLINE');
       const result = await adapter.placeBlockAt(pos, [name], signal);
-      if (!result.ok || adapter.blockAt(pos) !== name) throw new Error(result.reason ?? `PLACEMENT_MISMATCH:${name}`);
+      if (!result.ok || adapter.blockAt(pos) !== name) {
+        throw Object.assign(new Error(result.reason ?? `PLACEMENT_MISMATCH:${name}`),
+          { details: { target: pos, material: name, placed, confirmedRises, ...(result.ok ? {} : { reason: result.reason }) } });
+      }
     };
     try {
       for (const u of [1, 2]) {
@@ -97,7 +194,7 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
           if (!result.ok) return fail('ERROR', `无法准备门底：${result.reason}`);
         }
       }
-      const scaffold = () => adapter.state().inventory.find((i) => ['dirt', 'cobblestone', 'netherrack', 'cobbled_deepslate'].includes(i.name) && i.count > 0)?.name;
+      const scaffold = () => adapter.state().inventory.find((i) => SCAFFOLD.includes(i.name) && i.count > 0)?.name;
       // 斜坡/坑地上底座悬空：给底座 4 列从实心地往上垫到 y=-1，让底座方块有处可贴
       for (let u = 0; u <= 3; u++) {
         let solid: number | null = null;
@@ -145,7 +242,19 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
         await sleep(200, signal);
       }
       return fail('ERROR', '门框存在但没有观察到激活后的传送门', { placed });
-    } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `建门中断：${(error as Error).message}`, { placed }); }
+    } catch (error) {
+      if (isAbort(error)) {
+        // 取消/超时也保留已经确认的放置与垫高，以及实测位置和原门址，不能只剩一个取消码。
+        (error as Error & { partial?: Record<string, unknown> }).partial = {
+          placed, confirmedRises, position: { ...adapter.state().pos },
+          ...(lastPlacementTarget ? { target: lastPlacementTarget } : {}),
+          portal: { origin: args.origin, axis: args.axis },
+        };
+        throw error;
+      }
+      const details = (error as Error & { details?: Record<string, unknown> }).details;
+      return fail(codeFromError(error), `建门中断：${(error as Error).message}`, { placed, confirmedRises, ...(details ?? {}) });
+    }
   },
 };
 

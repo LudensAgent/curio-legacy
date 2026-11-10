@@ -1,4 +1,5 @@
 import { isSoftBlock, LIQUID_BLOCKS, surroundings } from '../perception/surroundings.ts';
+import { feetCell, toWorld } from '../perception/local.ts';
 import { clampInt, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
 import { ensureToolFor } from './work.ts';
@@ -81,6 +82,10 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     // 自动续跑沿用原动作期限；args.deadlineMs 只能缩短，不能延长父任务预算。
     const deadline = Math.min(ctx.deadline, args.deadlineMs ?? Number.POSITIVE_INFINITY);
     throwIfAborted(signal);
+    // 显式垫高/沿梯移动/落地等待都必须受剩余绝对期限约束；只传信号，不替新的动作所有者 stopAll。
+    const operationSignal = () => Number.isFinite(deadline)
+      ? AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, deadline - Date.now()))])
+      : signal;
     const onLadder = () => adapter.blockAt(floor(adapter.state().pos)) === 'ladder';
     const start = adapter.state().pos.y;
     // 同一逻辑动作的共享额度账本：跨顶层/重试/恢复共享，确认爬升才入账，取消/失败也保留。
@@ -102,43 +107,24 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
     const confirmedAscent = (fromY: number) => landed() && Math.floor(adapter.state().pos.y + 0.05) > Math.floor(fromY) && adapter.state().pos.y > fromY + 0.05;
     // moveTo 可能在上跳过程中返回（甚至报 no path）；此时身体还在空中，不能立即判失败。
     // 有界等待真实落地，再按“是否站高”结算；超时仍未落地则如实失败。
-    const waitForLanding = async (fromY: number, timeoutMs = 1500) => {
+    const waitForLanding = async (fromY: number, timeoutMs = 1500, waitSignal: AbortSignal = signal) => {
       const until = Date.now() + timeoutMs;
       while (Date.now() < until) {
-        throwIfAborted(signal);
+        throwIfAborted(waitSignal);
         if (confirmedAscent(fromY)) return true;
         if (adapter.state().onGround) return false;
-        await sleep(50, signal);
+        await sleep(50, waitSignal);
       }
       return confirmedAscent(fromY);
     };
-    // Pathfinder only towers with a placeable block in hand. A preceding dig may
-    // leave a tool selected, so switch back before each ascent attempt.
-    const ensureScaffoldHeld = async () => {
-      if (onLadder()) return true;
-      const held = adapter.state().held;
-      if (held !== null && PLACEABLE.includes(held)) return true;
-      const block = adapter.state().inventory.find((item) => item.count > 0 && PLACEABLE.includes(item.name));
-      if (block === undefined) return false;
-      // Adapters without an explicit equip surface let Pathfinder select the
-      // scaffold item itself; do not turn that capability gap into a hard stop.
-      if (typeof adapter.equipItem !== 'function') return true;
-      const equipped = await adapter.equipItem(block.name, 'hand', signal);
-      return equipped.ok;
-    };
-    // Pathfinder 报错或只是返回却没真正站高时，改用适配器显式的跳起垫块一次；
-    // 它报告真实的净空与放置事实，避免把“寻路结束”当成已经爬上去。
-    const tryPillarUp = async (fromY: number) => {
-      const names = adapter.state().inventory.filter((item) => item.count > 0 && PLACEABLE.includes(item.name)).map((item) => item.name);
-      if (names.length === 0 || typeof adapter.pillarUp !== 'function') return false;
-      const fallback = await adapter.pillarUp(names, signal);
-      return fallback.ok === true && await waitForLanding(fromY);
-    };
+    // 只能用 Agent 背包里真实存在、且本身体允许垫脚的方块名；不临时制造/替换材料。
+    const placeableNames = () => adapter.state().inventory
+      .filter((item) => item.count > 0 && PLACEABLE.includes(item.name)).map((item) => item.name);
     let climbedThisRun = 0;
     const total = () => (budget ? budget.spent : climbedThisRun);
     const reached = (around: ReturnType<typeof surroundings>) => (!args.untilSky || around.sky) && (!args.untilExit || around.exits.length > 0);
     // 结构化效果回执：区分本次/净进展（climbed）、累计消耗（spent）与目标是否达成（goalReached），成功/失败/取消共用。
-    const currentFacts = (failureCause?: 'PILLAR_CLEARANCE') => {
+    const currentFacts = (failureCause?: 'PILLAR_CLEARANCE', detail?: { clearanceDetail?: string; pillarClearance?: unknown }) => {
       const state = adapter.state(), around = surroundings(adapter);
       // 父动作续跑时按净高度报进展；但取消/超时可能停在半空，未站稳时不能把瞬时高度
       // 算成已确认爬升——以累计确认额度为上界，避免伪造未发生的效果。
@@ -146,10 +132,12 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         : landed() ? netFromStart() : Math.min(netFromStart(), budget!.spent);
       const goalReached = args.untilSky || args.untilExit ? reached(around) : isParentContinuation ? landed() && netFromStart() >= budget!.height : climbedThisRun >= args.height;
       return { climbed, spent: total(), height: budget?.height ?? args.height, sky: around.sky, exits: around.exits, goalReached, position: { ...state.pos }, ...(failureCause ? { failureCause } : {}),
+        ...(detail?.clearanceDetail ? { clearanceDetail: detail.clearanceDetail } : {}),
+        ...(detail?.pillarClearance ? { pillarClearance: detail.pillarClearance } : {}),
         effectEvidence: { verified: true, changed: climbedThisRun > 0, reasons: [`实际高度 ${start} → ${state.pos.y}`] } };
     };
-    const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE') => {
-      const facts = currentFacts(failureCause);
+    const finish = (stopped?: string, failureCause?: 'PILLAR_CLEARANCE', detail?: { clearanceDetail?: string; pillarClearance?: unknown }) => {
+      const facts = currentFacts(failureCause, detail);
       if (facts.goalReached) return ok(`往上爬了 ${facts.climbed} 格${args.untilExit ? '，四周有路了' : args.untilSky ? '，看得见天空了' : ''}`, facts);
       if (!facts.climbed) return fail('STUCK', `未实际爬升${stopped ? `：${stopped}` : '，没有完成垫高'}`, facts);
       return fail('STUCK', `往上爬了 ${facts.climbed} 格后停下：${stopped ?? '已到本次高度或时间上限，仍未满足停止条件'}`, facts);
@@ -179,9 +167,8 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
         throwIfAborted(signal);
         const here = surroundings(adapter);
         if ((args.untilSky || args.untilExit) && reached(here)) break;
-        const before = adapter.state().pos, me = floor(before);
+        const before = adapter.state().pos, me = floor(before), climbedBefore = climbedThisRun;
         lastBeforeY = before.y;
-        const moveUp = () => adapter.moveTo({ kind: 'xyz', x: me.x, y: me.y + 1, z: me.z }, { signal, timeoutMs: Math.max(1, Math.min(8000, deadline - Date.now())), allowTerrainChanges: true });
         // 头顶的方块先挖开（不挖液体旁边的）
         try {
           await breakCell(ctx, { x: me.x, y: me.y + 2, z: me.z });
@@ -189,57 +176,76 @@ export const climbUp: Skill<{ height: number; untilSky: boolean; untilExit?: boo
           if (isAbort(e)) throw e;
           return finish(why(e));
         }
-        if (!(await ensureScaffoldHeld())) {
-          return finish('背包里没有可垫脚方块，或无法切换到手持方块');
+        // 清障可能已经吃掉期限：到期后不再发起新的梯子移动/垫高。
+        if (Date.now() >= deadline) {
+          settlePending();
+          return finish('本次时间预算已用完');
         }
-        try {
-          await moveUp();
-        } catch (e) {
-          if (isAbort(e)) throw e;
-          const name = e instanceof Error ? e.name : undefined;
-          if (name !== 'PillarClearanceError') {
-            // The pathfinder can return while the jump/placement is still settling.
-            const climbedBefore = climbedThisRun;
-            await waitForLanding(before.y);
-            settlePending();
-            if (climbedThisRun > climbedBefore) return finish(why(e));
-            // 寻路确实报错、身体也没有升高：先用显式垫高尝试一次，再决定失败。
-            if (!(await tryPillarUp(before.y))) return finish(why(e));
-            settlePending();
-            ctx.senses.refresh();
-            continue;
-          }
-          // 搭柱被头顶/侧上方挡住：适配器报告具体那一格，把它挖开再垫一次；挖不动（基岩、近液体）由 breakCell 抛错如实停下
-          const blocked = (e as { block?: { pos: Vec3Like } }).block?.pos;
-          if (!blocked) return finish(why(e), 'PILLAR_CLEARANCE');
+        const opSignal = operationSignal();
+        if (onLadder()) {
+          // 脚下是梯子：只沿已复验的梯子格列升一格，不挖、不放、不绕行。
           try {
-            await breakCell(ctx, blocked);
-          } catch (e2) {
-            if (isAbort(e2)) throw e2;
-            return finish(why(e2), 'PILLAR_CLEARANCE');
-          }
-          if (!(await ensureScaffoldHeld())) {
-            return finish('背包里没有可垫脚方块，或无法切换到手持方块', 'PILLAR_CLEARANCE');
-          }
-          try {
-            await moveUp();
-          } catch (e2) {
-            if (isAbort(e2)) throw e2;
-            await waitForLanding(before.y);
+            await adapter.moveTo({ kind: 'ladder', x: me.x, y: me.y + 1, z: me.z },
+              { signal: opSignal, timeoutMs: Math.max(1, Math.min(8000, deadline - Date.now())) });
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            await waitForLanding(before.y, 1500, opSignal);
             settlePending();
-            return finish(why(e2), e2 instanceof Error && e2.name === 'PillarClearanceError' ? 'PILLAR_CLEARANCE' : undefined);
+            return finish(why(e));
+          }
+        } else {
+          // 没有梯子：显式原地垫一块。适配器报告真实的净空、放置与站立事实，不把“动作返回”当成已经爬上去。
+          if (typeof adapter.pillarUp !== 'function') return finish('当前适配器没有原地垫高能力');
+          let names = placeableNames();
+          if (names.length === 0) return finish('背包里没有可垫脚方块');
+          let pillar = await adapter.pillarUp(names, opSignal);
+          throwIfAborted(signal);
+          // 跳跃净空被挡：用 climb_up 明确授权的清障挖开报告的那一格，再垫一次；仍挡住就如实带回完整净空事实。
+          const fallingBack = pillar.ok ? undefined : pillar.clearance;
+          const facing = fallingBack?.facing, rel = fallingBack?.at;
+          if (rel && (facing === 'N' || facing === 'E' || facing === 'S' || facing === 'W')) {
+            const blocked = toWorld(feetCell(adapter.state().pos), facing, rel);
+            if (adapter.blockAt(blocked) !== null) {
+              // 期限已到：不再挖新格、不再发起第二次垫高。
+              if (Date.now() >= deadline || opSignal.aborted) {
+                settlePending();
+                const detail = pillar.clearanceDetail ? `；${pillar.clearanceDetail}` : '';
+                return finish(`${pillar.reason ?? '原地垫高未成功'}${detail}`, pillar.clearance ? 'PILLAR_CLEARANCE' : undefined,
+                  { clearanceDetail: pillar.clearanceDetail, pillarClearance: pillar.clearance });
+              }
+              try {
+                await breakCell(ctx, blocked);
+              } catch (e) {
+                if (isAbort(e)) throw e;
+                return finish(why(e), 'PILLAR_CLEARANCE', { clearanceDetail: pillar.clearanceDetail, pillarClearance: pillar.clearance });
+              }
+              names = placeableNames();
+              if (names.length > 0) {
+                throwIfAborted(signal);
+                if (Date.now() < deadline) {
+                  pillar = await adapter.pillarUp(names, operationSignal());
+                  throwIfAborted(signal);
+                }
+              }
+            }
+          }
+          if (!pillar.ok) {
+            settlePending();
+            const detail = pillar.clearanceDetail ? `；${pillar.clearanceDetail}` : '';
+            return finish(`${pillar.reason ?? '原地垫高未成功'}${detail}`, pillar.clearance ? 'PILLAR_CLEARANCE' : undefined,
+              { clearanceDetail: pillar.clearanceDetail, pillarClearance: pillar.clearance });
           }
         }
-        throwIfAborted(signal);
-        // Pathfinder can resolve mid-jump without placing a block. Fall back to
-        // the adapter's explicit jump-and-place once; it reports real clearance
-        // and placement facts instead of assuming a path result is a climb.
-        if (!(await waitForLanding(before.y)) && !(await tryPillarUp(before.y))) {
-          return finish('移动已结束，但脚下没有实际站高');
+        // 适配器可能在期限后才返回；到期时不再等待落地或发起下一步，但已确认的爬升仍入账。
+        if (Date.now() >= deadline) {
+          settlePending();
+          return finish('本次时间预算已用完');
         }
-        climbedThisRun++;
-        if (budget) budget.spent++;
-        lastBeforeY = undefined;
+        throwIfAborted(operationSignal());
+        // 只有实测站在有效支撑上且高度确实上升，才算完成这一级。
+        await waitForLanding(before.y, 1500, operationSignal());
+        settlePending();
+        if (climbedThisRun === climbedBefore) return finish('移动已结束，但脚下没有实际站高');
         ctx.senses.refresh();
         if (!onLadder() && !hasPlaceable(adapter.state().inventory)) break;
       }
