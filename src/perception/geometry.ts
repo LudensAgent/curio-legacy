@@ -236,6 +236,17 @@ export function bodyCells(footY: number, cx: number, cz: number): Vec3Like[] {
   return cells;
 }
 
+/** 连续脚位的站立身体（0.6×1.8）及直接支撑格；只贴边的邻格不计入。 */
+export function standingContactCells(feet: Vec3Like): Vec3Like[] {
+  const epsilon = 1e-9;
+  const minX = Math.floor(feet.x - 0.3 + epsilon), maxX = Math.floor(feet.x + 0.3 - epsilon);
+  const minZ = Math.floor(feet.z - 0.3 + epsilon), maxZ = Math.floor(feet.z + 0.3 - epsilon);
+  const minY = Math.floor(feet.y - epsilon), maxY = Math.floor(feet.y + 1.8 - epsilon);
+  return Array.from({ length: maxX - minX + 1 }, (_, dx) => minX + dx).flatMap((x) =>
+    Array.from({ length: maxZ - minZ + 1 }, (_, dz) => minZ + dz).flatMap((z) =>
+      Array.from({ length: maxY - minY + 1 }, (_, dy) => ({ x, y: minY + dy, z }))));
+}
+
 /** 方块 (name, properties) 位于 cell，其碰撞盒是否与身体 AABB 相交。状态形状未确认时保守视为可能相交。 */
 export function blockCollidesBody(name: string, properties: BlockProps, cell: { x: number; y: number; z: number }, body: BodyBox): boolean {
   if (isPassableDoor(name, properties)) return false;

@@ -18,6 +18,7 @@ import { isResourceBlock, oreKind } from '../memory/ore-spots.ts';
 import { EffectWatch } from '../brain/effects.ts';
 import { efficiencyInsights, type EfficiencyInsight } from '../brain/efficiency.ts';
 import { learnCandidates, reflectionDue } from '../brain/habits.ts';
+import { standingContactCells } from './geometry.ts';
 
 export const DIRS: Record<string, [number, number]> = {
   N: [0, -1], NE: [0.707, -0.707], E: [1, 0], SE: [0.707, 0.707],
@@ -251,21 +252,21 @@ export class Perception {
   }
 
   /**
-   * 身体正接触的脚/头/支撑格是实时事实：它们不依赖视锥，也不会因为 camera/遮挡
+   * 身体实际覆盖的格及直接支撑格是实时事实：它们不依赖视锥，也不会因为 camera/遮挡
    * 而看不见。把它们作为 local_rescan 证据刷新，避免 plan_route 因为“自己脚下”
-   * 超过新鲜度窗口而卡在 STALE。只写这三格，不挖、不选路。
+   * 超过新鲜度窗口而卡在 STALE。只读实测身体接触范围的 blockstate，不推断前方空气。
    */
-  private observeStance(s: ReturnType<GameAdapter['state']>, contact: ReturnType<typeof surroundings>) {
+  private observeStance(s: ReturnType<GameAdapter['state']>) {
     const spatial = this.spatial;
     if (!spatial || spatial.closing || !s.onGround || !s.connected || !s.observationReady) return;
     const now = Date.now();
-    const key = `${s.dim}|${Math.floor(s.pos.x)}|${Math.floor(s.pos.y)}|${Math.floor(s.pos.z)}`;
+    const contacts = standingContactCells(s.pos);
+    const key = `${s.worldId}|${s.sessionId}|${s.dim}|${contacts.map((cell) => `${cell.x},${cell.y},${cell.z}`).join(';')}`;
     if (key === this.lastStanceKey && now - this.lastStanceAt < 5000) return;
-    // 半砖/台阶上脚格和支撑格可能是同一格；按坐标去重后再写。
-    const cells = [...new Map([contact.feet, contact.head, contact.support].flatMap((cell) => {
-      const state = this.adapter.blockStateAt?.(cell.pos);
-      return state ? [[`${cell.pos.x},${cell.pos.y},${cell.pos.z}`, { pos: cell.pos, name: state.name, properties: state.properties ?? {}, stateComplete: true }] as const] : [];
-    })).values()];
+    const cells = contacts.flatMap((pos) => {
+      const state = this.adapter.blockStateAt?.(pos);
+      return state ? [{ pos, name: state.name, properties: state.properties ?? {}, stateComplete: true }] : [];
+    });
     if (!cells.length) return;
     this.lastStanceKey = key;
     this.lastStanceAt = now;
@@ -735,7 +736,7 @@ export class Perception {
     try {
       // 当前站位的脚/头/支撑是身体直接接触到的实时事实；先刷新它们，
       // 避免空间 3D 搜索从脚下第一步就被旧证据判成 STALE。
-      if (contact) this.observeStance(s, contact);
+      if (contact) this.observeStance(s);
       // 效率账本不依赖环境判断：寻路挖穿、辅助开挖也是真实发生的挖掘
       const effDug = this.adapter.recentDug?.(this.lastDugAt) ?? [];
       if (effDug.length) this.lastDugAt = effDug[effDug.length - 1].ts;

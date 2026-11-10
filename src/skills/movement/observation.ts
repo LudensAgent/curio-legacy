@@ -1,6 +1,6 @@
 import type { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../../adapter/types.ts';
-import { supportTop } from '../../perception/geometry.ts';
+import { standingContactCells, supportTop } from '../../perception/geometry.ts';
 import type { LandSearchBoundary } from '../../spatial/land-search.ts';
 import { assessLanding } from '../landing.ts';
 import type { LandingOption, SkillCtx } from '../types.ts';
@@ -77,19 +77,17 @@ export function boundaryProbeCells(
   const step = directionStep[boundary.direction];
   const cells: Vec3Like[] = [];
   const seen = new Set<string>();
-  const add = (cell: Vec3Like) => {
+  const add = (cell: Vec3Like, stance = { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }) => {
     const key = keyOf(cell);
-    if (seen.has(key) || !withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, corridor)) return;
+    if (seen.has(key) || !withinCorridor(stance, corridor)) return;
     seen.add(key);
     cells.push(cell);
   };
-  add(to);
-  add({ x: to.x, y: to.y - 1, z: to.z });
-  add({ x: to.x, y: to.y + 1, z: to.z });
+  // 先补齐真实起/终脚位的身体与支撑；侧向探测不能挤掉非整数头部或跨列接触格。
+  // corridor 限制脚位；合法脚位的身体可能压到边界外的相邻格，不能按格心丢掉这些接触格。
+  for (const feet of [boundary.to, boundary.from]) standingContactCells(feet).forEach((cell) => add(cell, feet));
   add({ x: to.x + step.x, y: to.y, z: to.z + step.z });
   add({ x: to.x + step.x, y: to.y - 1, z: to.z + step.z });
-  add(from);
-  add({ x: from.x, y: from.y + 1, z: from.z });
 
   const horizontal = boundary.direction === 'N' || boundary.direction === 'S' || boundary.direction === 'E' || boundary.direction === 'W';
   if (horizontal) {

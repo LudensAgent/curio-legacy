@@ -15,6 +15,38 @@ const boundary = {
 };
 const key = (pos: Vec3Like) => `${pos.x},${pos.y},${pos.z}`;
 
+test('boundary probes cover fractional headroom and every column touched by the standing body', () => {
+  const from = { x: 0.2, y: 63.9375, z: 0.2 };
+  const to = { ...from, x: 1.2 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'walk', direction: 'E' }).cells;
+  const keys = new Set(cells.map(key));
+  for (const x of [-1, 0, 1]) for (const z of [-1, 0]) for (const y of [63, 64, 65]) {
+    assert.ok(keys.has(`${x},${y},${z}`), `missing actual body/support cell ${x},${y},${z}`);
+  }
+  assert.ok(cells.length <= 32, 'physical coverage remains inside the observation budget');
+});
+
+test('a zero-width corridor still observes the physical body of an authorized off-center stance', () => {
+  const from = { x: 0.2, y: 63.5, z: 0.5 }, to = { ...from, z: -0.5 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'walk' }, 32, {
+    origin: from, bearing: { x: 0, z: -1 }, maxLateral: 0,
+  }).cells;
+  const keys = new Set(cells.map(key));
+  for (const x of [-1, 0]) for (const z of [-1, 0]) for (const y of [63, 64, 65]) {
+    assert.ok(keys.has(`${x},${y},${z}`), `authorized body cell ${x},${y},${z} must remain observable`);
+  }
+  assert.ok(cells.every((cell) => cell.x === -1 || cell.x === 0), 'does not authorize terrain outside the body footprint');
+});
+
+test('exact body contact at a column boundary does not include the untouched neighbor', () => {
+  const from = { x: 0.3, y: 64, z: 0.5 }, to = { ...from, z: -0.5 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'walk' }, 32, {
+    origin: from, bearing: { x: 0, z: -1 }, maxLateral: 0,
+  }).cells;
+  assert.ok(cells.every((cell) => cell.x === 0 && cell.y >= 63 && cell.y <= 65));
+  assert.ok(cells.some((cell) => key(cell) === '0,63,0'), 'the original integer stance support is included');
+});
+
 function setup() {
   const adapter = new FakeAdapter();
   adapter.pos = { ...boundary.from };
