@@ -53,6 +53,14 @@ import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './worki
 /** 正常操作的持久化时限；supervisor 20s 窗口内约可容纳一次保存 + 最终 checkpoint + close。 */
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/**
+ * 显式 eager 读取旧历史时的单 fragment links 容量。库默认 4096，旧库中已有
+ * 4097+ 条的合法片段（线上曾出现 4107 条）；eager 是兼容诊断入口，恢复足够容量
+ * 才能读回旧数据。生产默认 historyLoading:'none' 不加载旧域，也不经过这里。
+ * 这不是路线写入器：只放宽读取/恢复容量，不恢复普通写入链。
+ */
+const LEGACY_FRAGMENT_MAX_LINKS = 16_384;
+
 /** 运行时默认的快照字节上限（与 config 的 SPATIAL_SNAPSHOT_MAX_MB 默认值一致）；离线迁移工具不读 config，按它打开。 */
 export const DEFAULT_SNAPSHOT_MAX_MB = 192;
 
@@ -544,6 +552,8 @@ export class SharedSpatialSession {
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     // 同一个时钟供体素中断边界与查询信封使用；测试可注入固定时钟。
     const now = options.now ?? Date.now;
+    // 显式 eager 会恢复旧 fragment/topology；只有这个兼容读取边界需要放宽旧片段容量。
+    const restoresLegacyHistory = (options.historyLoading ?? 'eager') === 'eager';
     const session = await openSpatialSession({
       worldId: options.worldId,
       databasePath: options.databasePath,
@@ -552,6 +562,7 @@ export class SharedSpatialSession {
       ...(options.historyLoading === undefined ? {} : { historyLoading: options.historyLoading }),
       ...(options.residencyLimits === undefined ? {} : { residencyLimits: options.residencyLimits }),
       ...(options.voxelBatchMaxBytes === undefined ? {} : { voxelBatchMaxBytes: options.voxelBatchMaxBytes }),
+      ...(restoresLegacyHistory ? { fragmentOptions: { maxLinks: LEGACY_FRAGMENT_MAX_LINKS } } : {}),
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
     });

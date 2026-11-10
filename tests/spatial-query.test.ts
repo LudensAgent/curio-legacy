@@ -167,8 +167,7 @@ test('spatial_query：validate 只做对象边界，支持的 kind 由库校验�
     const requests: Record<string, unknown>[] = [
       { kind: 'cells', dim: DIM, positions: [point(0)] },
       { kind: 'nodes', dim: DIM, tag: 'base', label: 'home', source: 'agent', after: 'n1', limit: 2 },
-      { kind: 'anchor', dim: DIM, here: point(0), order: 'surface', near: 3 },
-      { kind: 'portals', after: 'p1', limit: 2 },
+      { kind: 'nodes', dim: DIM, tag: 'portal', after: 'p1', limit: 2 },
       { kind: 'resourceAnchors', dim: DIM, tag: 'resource', label: 'iron', after: 'n1', limit: 2 },
       { kind: 'containerAnchors', dim: DIM, after: 'n1', limit: 2 },
       { kind: 'containerContents', dim: DIM },
@@ -189,6 +188,8 @@ test('spatial_query：validate 只做对象边界，支持的 kind 由库校验�
       { kind: 'historyRoute', dim: DIM, from: point(0), to: point(5), near: 5 },
       { kind: 'components', dim: DIM },
       { kind: 'segments', fragmentId: 'f1' },
+      { kind: 'anchor', dim: DIM, here: point(0), order: 'surface', near: 3 },
+      { kind: 'portals', after: 'p1', limit: 2 },
     ];
     for (const request of retired) {
       const result = await spatialQuery.run(ctxFor(svc), request);
@@ -363,7 +364,11 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
   let shutdown: ShutdownResult | null = null;
   try {
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    svc.session.topology.saveNode({ id: 'n-chest', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(3, 64) }, metadata: { curio: { v: 2, type: 'container' } } });
+    svc.session.facts.upsertContainer({
+      id: 'n-chest', worldId: WORLD, dim: DIM, pos: point(3, 64),
+      externalRef: 'chest-1', observedAt: OBSERVED_AT, source: { source: 'vision' },
+      gone: false, ledgerRef: `${WORLD}:${DIM}:3,64,0`,
+    });
 
     const contents = await spatialQuery.run(ctxFor(svc), { kind: 'containerContents', dim: DIM });
     assert.equal(contents.status, 'succeeded');
@@ -391,7 +396,8 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     assert.equal(report.contract, 'memory-host-contract/1');
     const queryCaps = rec(report.query);
     assert.equal(queryCaps.cells, true);
-    assert.equal(queryCaps.components, true);
+    assert.equal(queryCaps.nodes, true);
+    assert.equal(queryCaps.resourceAnchors, true);
     assert.equal(queryCaps.containerAnchors, true);
     assert.equal(queryCaps.containerContents, false);
 
@@ -440,7 +446,8 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
     const snapshot = await spatialQuery.run(ctxFor(svc), { kind: 'snapshot' });
     const snapshotData = rec(innerOf(snapshot).snapshot);
     assert.equal(snapshotData.worldId, WORLD);
-    assert.equal(rec(snapshotData.topology).nodes, 1);
+    assert.equal(rec(snapshotData.fragments).total, 0, 'facts 数据不写入旧片段域');
+    assert.equal(rec(snapshotData.topology).nodes, 0, 'facts 数据不写入旧拓扑域');
   } finally {
     shutdown = await svc.shutdown();
     assertCleanClose(shutdown);
@@ -448,38 +455,40 @@ test('spatial_query：容器边界 host_ledger / unsupported 与能力报告', a
   }
 });
 
-test('spatial_query：nodes/portals/anchors 原样返回库事实；路线/拓扑 kind 已退役', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'spatial-query-topology-'));
+test('spatial_query：nodes/resourceAnchors 读 facts；传送门用 nodes tag:portal；路线/锚点 kind 已退役', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spatial-query-facts-'));
   const svc = await openSession(dir);
   let shutdown: ShutdownResult | null = null;
   try {
     svc.beginSession({ worldId: WORLD, dim: DIM, sessionId: S1 });
-    const history = svc.session.history;
-    const topology = svc.session.topology;
-    history.saveFragment({
-      id: 'f-main', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
-      polyline: [point(0, 64), point(5, 64)], entrances: [], deepestY: 64,
-      createdAt: 1000, lastUsedAt: 2000, uses: 1,
+    svc.session.facts.upsertPlace({
+      id: 'n-a', kind: 'base', label: 'home', worldId: WORLD, dim: DIM,
+      location: { kind: 'exact', pos: point(0, 64) }, observedAt: 1000,
+      source: { source: 'agent' }, gone: false,
     });
-    history.addTraversal({
-      id: 't-ok', fragmentId: 'f-main', from: point(0, 64), to: point(5, 64),
-      worldId: WORLD, dim: DIM, sessionId: S1, observedAt: 5000, source: 'confirmed_walk',
+    svc.session.facts.upsertResource({
+      id: 'n-b', worldId: WORLD, dim: DIM, label: 'iron', sourceCell: point(5, 64),
+      observedAt: 2000, source: { source: 'program' }, revoked: false,
     });
-    topology.saveNode({ id: 'n-a', kind: 'place', source: 'agent', tag: 'base', label: 'home', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(0, 64) } });
-    topology.saveNode({ id: 'n-b', kind: 'place', source: 'program', tag: 'resource', label: 'iron', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: point(5, 64) } });
-    topology.saveEdge({ id: 'e-ab', from: 'n-a', to: 'n-b', type: 'HORIZONTAL', basis: 'traversed', fragmentId: 'f-main', evidenceIds: ['t-ok'] });
+    svc.session.facts.upsertPlace({
+      id: 'p-main', kind: 'portal', label: 'nether_portal', worldId: WORLD, dim: DIM,
+      location: { kind: 'exact', pos: point(7, 64) }, observedAt: 3000,
+      source: { source: 'vision' }, gone: false,
+    });
 
     const nodes = await spatialQuery.run(ctxFor(svc), { kind: 'nodes', dim: DIM, tag: 'base' });
     const nodeItems = list(innerOf(nodes).items).map(rec);
     assert.deepEqual(nodeItems.map((node) => node.id), ['n-a']);
     assert.equal(nodeItems[0]!.source, 'agent');
     assert.equal(nodeItems[0]!.label, 'home');
+    assert.equal(nodeItems[0]!.observedAt, 1000, '事实保留原始观察时间');
 
     const resource = await spatialQuery.run(ctxFor(svc), { kind: 'resourceAnchors', dim: DIM, tag: 'resource' });
     assert.deepEqual(list(innerOf(resource).items).map((node) => rec(node).id), ['n-b']);
 
-    const portals = await spatialQuery.run(ctxFor(svc), { kind: 'portals' });
-    assert.deepEqual(list(innerOf(portals).items), []);
+    // 传送门端点作为语义事实读取，不推断连接；旧 portals 路线查询已退役。
+    const portals = await spatialQuery.run(ctxFor(svc), { kind: 'nodes', dim: DIM, tag: 'portal' });
+    assert.deepEqual(list(innerOf(portals).items).map((node) => rec(node).id), ['p-main']);
 
     // 作用域按 store 绑定的 worldId + 请求 dim 过滤；M2 不产生 scope_mismatch（无世界寻址）。
     const otherDim = await spatialQuery.run(ctxFor(svc), { kind: 'nodes', dim: 'nether' });
@@ -488,18 +497,21 @@ test('spatial_query：nodes/portals/anchors 原样返回库事实；路线/拓�
     assert.equal(envelopeOf(otherDim).dim, 'nether');
     assert.deepEqual(list(innerOf(otherDim).items), []);
 
-    const anchor = await spatialQuery.run(ctxFor(svc), { kind: 'anchor', dim: DIM, here: point(0, 64), order: 'surface' });
-    assert.equal(rec(innerOf(anchor)).kind, 'anchor');
-
-    // 旧拓扑/片段读面不再把库数据透传给 Agent：统一结构化 unsupported。
-    for (const kind of ['edges', 'historyRoute', 'segments', 'fragments'] as const) {
-      const retired = await spatialQuery.run(ctxFor(svc), kind === 'segments' || kind === 'fragments'
-        ? { kind, fragmentId: 'f-main', dim: DIM }
-        : kind === 'historyRoute' ? { kind, dim: DIM, from: point(0, 64), to: point(5, 64) } : { kind, dim: DIM });
-      assert.equal(retired.status, 'succeeded', `${kind}：${retired.summary}`);
-      assert.equal(rec(envelopeOf(retired)).status, 'unsupported');
-      assert.equal(rec(envelopeOf(retired)).reason, 'route_retired');
-      assert.equal(envelopeOf(retired).items, undefined, '不返回空列表冒充无记录');
+    // 旧拓扑/片段/锚点读面不再把库数据透传给 Agent：统一结构化 unsupported。
+    const retired = [
+      spatialQuery.run(ctxFor(svc), { kind: 'edges', dim: DIM }),
+      spatialQuery.run(ctxFor(svc), { kind: 'historyRoute', dim: DIM, from: point(0, 64), to: point(5, 64) }),
+      spatialQuery.run(ctxFor(svc), { kind: 'segments', fragmentId: 'f-main' }),
+      spatialQuery.run(ctxFor(svc), { kind: 'fragments', dim: DIM }),
+      spatialQuery.run(ctxFor(svc), { kind: 'anchor', dim: DIM, here: point(0, 64), order: 'surface' }),
+      spatialQuery.run(ctxFor(svc), { kind: 'portals' }),
+    ];
+    for (const pending of retired) {
+      const result = await pending;
+      assert.equal(result.status, 'succeeded', result.summary);
+      assert.equal(rec(envelopeOf(result)).status, 'unsupported');
+      assert.equal(rec(envelopeOf(result)).reason, 'route_retired');
+      assert.equal(envelopeOf(result).items, undefined, '不返回空列表冒充无记录');
     }
   } finally {
     shutdown = await svc.shutdown();

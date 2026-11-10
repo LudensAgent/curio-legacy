@@ -88,32 +88,22 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       block({ x: 0, y: 64, z: 0 }, 'minecraft:stone', now, 1),
       block({ x: 1, y: 64, z: 0 }, 'minecraft:dirt', now, 2),
     ]);
-    const history = spatial.session.history;
-    const topology = spatial.session.topology;
-    history.saveFragment({
-      id: 'f-integration', worldId: WORLD, dim: DIM, kind: 'walked', geometrySource: 'traversal',
-      polyline: [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }],
-      entrances: [{ x: 0, y: 64, z: 0 }],
-      deepestY: 64, createdAt: 1000, lastUsedAt: 2000, uses: 3,
+    const facts = spatial.session.facts;
+    facts.upsertPlace({
+      id: 'n-a', kind: 'base', label: 'home', worldId: WORLD, dim: DIM,
+      location: { kind: 'exact', pos: { x: 0, y: 64, z: 0 } }, observedAt: 12_345,
+      source: { source: 'agent', sessionId: SESSION, observationIds: ['obs-a'] }, gone: false,
     });
-    history.addTraversal({
-      id: 't-integration', fragmentId: 'f-integration',
-      from: { x: 0, y: 64, z: 0 }, to: { x: 1, y: 64, z: 0 },
-      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: 12_345,
-      source: 'confirmed_walk', executionId: 'exec-real', actionId: 'act-real', mode: 'walk',
+    facts.upsertResource({
+      id: 'n-b', worldId: WORLD, dim: DIM, label: 'iron', sourceCell: { x: 1, y: 64, z: 0 },
+      observedAt: 23_456, source: { source: 'vision', sessionId: SESSION }, revoked: false,
     });
-    topology.saveNode({ id: 'n-a', kind: 'place', source: 'agent', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: { x: 0, y: 64, z: 0 } } });
-    topology.saveNode({ id: 'n-b', kind: 'place', source: 'program', worldId: WORLD, dim: DIM, location: { kind: 'exact', pos: { x: 1, y: 64, z: 0 } } });
-    topology.saveEdge({ id: 'e-ab', from: 'n-a', to: 'n-b', type: 'HORIZONTAL', basis: 'traversed', fragmentId: 'f-integration', evidenceIds: ['t-integration'] });
 
     const evidenceBefore = {
       voxelRevision: spatial.session.voxel.saveRevision,
-      historyRevision: history.revision,
-      topologyRevision: topology.revision,
+      factsRevision: facts.revision,
       cell: clone(spatial.session.voxel.cellAt(DIM, 0, 64, 0)),
-      fragment: clone(history.getFragment('f-integration')),
-      traversal: clone(history.getTraversal('t-integration')),
-      historySnapshot: clone(history.checkpointSnapshot()),
+      factsSnapshot: clone(facts.checkpointSnapshot()),
     };
 
     arbiter = new Arbiter(adapter, memory, bus, new Vision(adapter), spatial);
@@ -293,17 +283,17 @@ test('spatial_query：真实注册、只读分发、查询数据保留且不产�
       assert.deepEqual(adapter.actions.filter((a) => a === 'useBucket:water_bucket'), ['useBucket:water_bucket', 'useBucket:water_bucket']);
     });
 
-    // ---- 所有分发都没有刷新共享证据或改写历史时间/会话 ----
+    // ---- 所有分发都没有刷新共享证据或改写事实时间/会话 ----
     assert.equal(spatial.session.voxel.saveRevision, evidenceBefore.voxelRevision);
-    assert.equal(history.revision, evidenceBefore.historyRevision);
-    assert.equal(topology.revision, evidenceBefore.topologyRevision);
+    assert.equal(facts.revision, evidenceBefore.factsRevision);
     assert.deepEqual(spatial.session.voxel.cellAt(DIM, 0, 64, 0), evidenceBefore.cell);
-    assert.deepEqual(history.getFragment('f-integration'), evidenceBefore.fragment);
-    assert.deepEqual(history.getTraversal('t-integration'), evidenceBefore.traversal);
-    assert.deepEqual(history.checkpointSnapshot(), evidenceBefore.historySnapshot);
-    assert.deepEqual(history.getFragment('f-integration')?.polyline, [{ x: 0, y: 64, z: 0 }, { x: 1, y: 64, z: 0 }, { x: 2, y: 64, z: 0 }]);
-    assert.equal(history.getTraversal('t-integration')?.sessionId, SESSION);
-    assert.equal(history.getTraversal('t-integration')?.observedAt, 12_345);
+    assert.deepEqual(facts.checkpointSnapshot(), evidenceBefore.factsSnapshot);
+    const base = facts.places({ worldId: WORLD, includeGone: true }).items.find((fact) => fact.id === 'n-a');
+    assert.equal(base?.source.sessionId, SESSION);
+    assert.equal(base?.observedAt, 12_345);
+    const ore = facts.resources({ worldId: WORLD, includeGone: true }).items.find((fact) => fact.id === 'n-b');
+    assert.equal(ore?.observedAt, 23_456);
+    assert.equal(ore?.source.source, 'vision');
 
     await t.test('真实 BehaviorEngine：实际 use_skill 结果按 noop/输入/物理语义记账', async () => {
       const statsDir = mkdtempSync(join(tmpdir(), 'spatial-query-stats-'));
