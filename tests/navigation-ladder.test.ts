@@ -94,6 +94,8 @@ test('navigate_to climbs an explicitly allowed ladder column with measured feet'
     ['ladder', 65, 66],
   ]);
   assert.ok(adapter.actions.some((action) => action === 'moveTo:ladder'), 'ladder body control must use the strict ladder target');
+  assert.equal(adapter.actions.filter((action) => action.startsWith('moveTo:')).length, 2,
+    'each ladder transition is dispatched exactly once; no second feet move after climbing');
 });
 
 test('navigate_to completes on a ladder while the body is not onGround', async (t) => {
@@ -113,6 +115,14 @@ test('navigate_to completes on a ladder while the body is not onGround', async (
   adapter.sessionId = SESSION;
   adapter.dim = DIM;
   adapter.speed = 100_000;
+  // The live adapter must also report the ladder source; goal completion prefers
+  // current loaded contact over remembered geometry.
+  adapter.blocks.push(
+    { name: 'stone', pos: { x: 0, y: 63, z: 0 } },
+    { name: 'ladder', pos: { x: 0, y: 64, z: 0 } },
+    { name: 'ladder', pos: { x: 0, y: 65, z: 0 } },
+    { name: 'ladder', pos: { x: 0, y: 66, z: 0 } },
+  );
   const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
   t.after(() => ctx.memory.close());
 
@@ -124,6 +134,36 @@ test('navigate_to completes on a ladder while the body is not onGround', async (
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(adapter.pos.y, 64);
   assert.equal(adapter.state().onGround, false);
+});
+
+test('stale ladder memory cannot excuse an airborne arrival', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const old = Date.now() - 120_000;
+  map.observe({
+    worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: old, sequence: 1,
+    source: 'vision', evidence: 'seen', stateComplete: true,
+    state: { name: 'minecraft:ladder', properties: { facing: 'north' } },
+    pos: { x: 0, y: 64, z: 0 },
+  });
+
+  class AirborneAdapter extends FakeAdapter {
+    override state() { return { ...super.state(), onGround: false }; }
+  }
+  const adapter = new AirborneAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.worldId = WORLD;
+  adapter.sessionId = SESSION;
+  adapter.dim = DIM;
+  adapter.speed = 100_000;
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+
+  const validated = navigateTo.validate({
+    to: { x: 0, y: 64, z: 0 }, allowed: ['ladder'], historical: false, maxSteps: 8,
+  }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await navigateTo.run(ctx, validated.args);
+  assert.notEqual(result.status, 'succeeded', result.summary);
 });
 
 test('navigate_to enters a hanging ladder from ground and exits onto an adjacent platform', async (t) => {

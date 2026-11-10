@@ -26,10 +26,20 @@ function airborneLadderGoal(ctx: SkillCtx, intent: MovementIntent): boolean {
   const foot = goal.kind === 'cell'
     ? { x: goal.cell.x, y: Math.floor(goal.footY), z: goal.cell.z }
     : { x: Math.floor(goal.feet.x), y: Math.floor(goal.feet.y), z: Math.floor(goal.feet.z) };
-  const dim = ctx.adapter.state().dim;
+  const state = ctx.adapter.state();
+  const dim = state.dim;
+  const now = Date.now();
   const climbable = (y: number): boolean => {
-    const view = voxel.cellAt(dim, foot.x, y, foot.z);
-    return view.observed && view.evidence.observation.stateComplete
+    const pos = { x: foot.x, y, z: foot.z };
+    // Prefer the live loaded block: that is current contact, not memory.
+    const live = ctx.adapter.blockAt(pos);
+    if (live !== null) return isClimbableBlockName(live);
+    const view = voxel.cellAt(dim, pos.x, y, pos.z);
+    return view.observed
+      && view.evidence.freshness === 'FRESH'
+      && view.evidence.validUntil >= now
+      && view.evidence.observation.sessionId === state.sessionId
+      && view.evidence.observation.stateComplete
       && isClimbableBlockName(view.evidence.observation.state.name);
   };
   return climbable(foot.y) || climbable(foot.y - 1);

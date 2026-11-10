@@ -504,23 +504,30 @@ async function runNavigationSegmentInner(
     // 历史几何搜索的预算耗尽是真实终态，不能被 strict 的“证据不足”覆盖成普通未知边界。
     const historicalBudget = blockerAhead === undefined && chosen === null && historical?.status === 'BUDGET_EXHAUSTED'
       ? historical : null;
+    const residencyFailure = residencyState.failure;
+    // A failed cold-page load is a capability/residency fact, not "no path" and
+    // not an evidence gap. It must win over the search status derived from the
+    // pages that happened to be available.
     // 直接阻挡/不支持与“整个授权走廊内没有路”、“已存几何无路”、“证据不足”分开，不互相顶替。
-    const outcome: SegmentOutcome = blockerAhead?.status === 'BLOCKED' ? 'blocked'
-      : blockerAhead?.status === 'UNSUPPORTED' ? 'unsupported'
-        : strict.corridorLimited === true ? 'corridor_exhausted'
-          : historicalBudget !== null ? 'search_budget'
-            : outcomeOfStatus(strict.status);
+    const outcome: SegmentOutcome = residencyFailure !== null ? 'residency_not_ready'
+      : blockerAhead?.status === 'BLOCKED' ? 'blocked'
+        : blockerAhead?.status === 'UNSUPPORTED' ? 'unsupported'
+          : strict.corridorLimited === true ? 'corridor_exhausted'
+            : historicalBudget !== null ? 'search_budget'
+              : outcomeOfStatus(strict.status);
     const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
-    const unavailable = historicalBudget !== null && historicalBudget.unavailableSections.length > 0
-      ? historicalBudget.unavailableSections
-      : strict.unavailableSections.length > 0
-        ? strict.unavailableSections
-        : residencyState.failure?.sections ?? [];
-    const residencyNote = residencyState.failure === null
+    const unavailable = residencyFailure !== null && residencyFailure.sections.length > 0
+      ? residencyFailure.sections
+      : historicalBudget !== null && historicalBudget.unavailableSections.length > 0
+        ? historicalBudget.unavailableSections
+        : strict.unavailableSections.length > 0
+          ? strict.unavailableSections
+          : [];
+    const residencyNote = residencyFailure === null
       ? ''
-      : `；驻留加载失败（${residencyState.failure.reason}）：${residencyState.failure.message}`;
+      : `；驻留加载失败（${residencyFailure.reason}）：${residencyFailure.message}`;
     return {
-      waypoint, outcome, stopCode: blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
+      waypoint, outcome, stopCode: residencyFailure !== null ? 'residency_gap' : blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
       chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
       evidenceMode: 'current', searches,
       planned: reachable?.transitions ?? [], confirmed: [], remaining: reachable?.transitions ?? [],
@@ -531,13 +538,15 @@ async function runNavigationSegmentInner(
       ...(strict.policy === undefined ? {} : { policy: strict.policy }),
       ...(blockerAhead === undefined ? {} : { blockerAhead }),
       ...(outcome === 'unknown_boundary' && blockedBoundary !== undefined ? { boundary: blockedBoundary } : {}),
-      detail: `${blockerAhead !== undefined
-        ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
-        : strict.corridorLimited === true
-          ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
-          : historicalBudget !== null
-            ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
-            : statusDetail(strict)}${residencyNote}`,
+      detail: residencyFailure !== null
+        ? `导航所需的 ${residencyFailure.sections.length} 个 Section 未能加载/驻留（${residencyFailure.reason}）：${residencyFailure.message}；没有把冷页失败当成无路或未知，未执行未复验的动作`
+        : `${blockerAhead !== undefined
+          ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
+          : strict.corridorLimited === true
+            ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
+            : historicalBudget !== null
+              ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
+              : statusDetail(strict)}${residencyNote}`,
     };
   }
 
@@ -785,8 +794,7 @@ async function runNavigationSegmentInner(
         detail: `第 ${index + 1} 段是 ${transition.drop.toFixed(2)} 格下落，现有 descend_to 只按目标格心落地，不能保证精确连续 endpoint；没有执行这段`,
         failureCode: 'BAD_ARGS', stepIndex: index, transition,
       });
-    }
-    if (transition.kind === 'drop' && transition.drop > 1) {
+    } else if (transition.kind === 'drop' && transition.drop > 1) {
       // descend_to 只按目标格心落地；只有计划 endpoint 就是该格心时，单步复验才证明了
       // 实际将要发生的下落。非格心起点不能靠格心落点冒充连续 endpoint。
       const centered = Math.abs(transition.to.x - (Math.floor(transition.to.x) + 0.5)) <= 1e-9

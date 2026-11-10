@@ -63,4 +63,6 @@ test('navigate_to crosses an observed one-cell gap with an explicit horizontal j
     ['jump', -0.5, 1.5],
   ]);
   assert.ok(adapter.actions.includes('moveTo:feet'), 'horizontal jump must use measured feet body control');
+  assert.equal(adapter.actions.filter((action) => action.startsWith('moveTo:')).length, 1,
+    'a jump transition is dispatched exactly once, not repeated by a generic feet move');
 });
