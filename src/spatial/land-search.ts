@@ -359,8 +359,12 @@ function libraryRequest(request: LandSearchRequest): LibraryRequest {
     sessionId: request.sessionId,
     body: request.body,
     to: stanceFor(request.goal, request.body.feet),
-    arrival: { kind: 'exact' },
-    ...(request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
+    // travel 的范围参与规划，不能先强求进入箱子/床所在的不可站立坐标，
+    // 再在执行层检查范围；与实测验收使用同一个原目标、格距和维度。
+    arrival: request.goal.arrival === undefined ? { kind: 'exact' }
+      : { kind: 'near', radius: request.goal.arrival.radius, coordinates: 'cell' },
+    ...(request.goal.arrival !== undefined ? { goalMetric: request.goal.arrival.metric }
+      : request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
     rules: request.rules,
     edgePolicy: hostLandEdgePolicy,
     ...(request.evidenceMode === undefined ? {} : { evidenceMode: request.evidenceMode }),

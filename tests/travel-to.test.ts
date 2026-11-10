@@ -142,6 +142,28 @@ test('目标格受阻但当前已证实前缀可进入 range 时，走到范围�
   assert.equal(adapter.actions.filter(action => action.startsWith('moveTo:feet')).length, 4);
   assert.deepEqual(result.data?.requestedTarget, target);
   assert.deepEqual((result.data?.navigation as Record<string, unknown>)?.requestedTarget, target);
+  assert.equal(result.data?.searchStatus, 'FOUND', '原 range 参与搜索，不必搜索到受阻的目标格');
+  const search = result.data?.lastSearch as { arrival: unknown; goalMetric: string };
+  assert.deepEqual(search.arrival, { kind: 'near', radius: 2, coordinates: 'cell' });
+  assert.equal(search.goalMetric, '3d');
+});
+
+test('无 y 的范围搜索可在不同脚高的目标列旁按水平格距完成', async (t) => {
+  const { adapter, map, ctx } = voxelNavigationFixture(8);
+  t.after(() => ctx.memory.close());
+  [63, 64, 65, 66, 67, 68, 69, 70, 71, 72].forEach((y) => map.observe({
+    worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+    observedAt: Date.now(), sequence: 10000 + y, source: 'vision', evidence: 'seen', stateComplete: true,
+    state: { name: y === 69 ? 'minecraft:stone' : 'minecraft:air', properties: {} }, pos: { x: 6, y, z: 0 },
+  }));
+  const target = { x: 6, z: 0 };
+  const result = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.targetFootY, 70);
+  assert.deepEqual(adapter.pos, { x: 4.5, y: 64, z: 0.5 });
+  assert.deepEqual(result.data?.requestedTarget, target);
+  assert.equal(result.data?.searchStatus, 'FOUND');
+  assert.equal((result.data?.lastSearch as { goalMetric: string }).goalMetric, 'horizontal');
 });
 
 test('无 y 的移动范围保持水平格距，不被推导脚高改成三维距离', async (t) => {
