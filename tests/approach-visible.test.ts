@@ -734,7 +734,7 @@ test('approach_visible 用历史体素候选路线，但过期当前证据在动
   assert.equal(r.status, 'failed', r.summary);
   assert.equal(r.data?.outcome, 'UNKNOWN');
   assert.equal(r.data?.searchEvidenceMode, 'historical', '候选来源仍是历史体素');
-  assert.equal((r.data?.navigation as { evidenceMode: string }).evidenceMode, 'historical');
+  assert.equal((r.data?.navigation as { evidenceMode: string }).evidenceMode, 'current', '执行器先报告当前位置的过期证据');
   assert.deepEqual(adapter.pos, before, 'STALE 当前证据不启动身体');
   const candidates = (r.data?.candidates ?? []) as {
     mode: string;

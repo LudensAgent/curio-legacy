@@ -1,8 +1,8 @@
 /**
  * B5 长程场景探针：512 格跨 TTL。
  *
- * 地图证据在测试开始时已全部过期；navigate_to 只能先用 remembered 几何拿候选，
- * 在执行前按当前证据停下，并通过 Coordinator 的有界边界观察刷新相关格后继续。
+ * 地图证据在测试开始时已全部过期；局部观察刷新当前位置附近后，
+ * navigate_to 沿已确认的前缀行走，继续按当前证据复验。
  * 这不是实机验收，也不证明连续 8 小时负载；它检查宿主能否在原目标/原期限下
  * 跨多个 TTL 窗口滚动推进到 512 格。
  */
@@ -162,6 +162,10 @@ test('历史搜索预算耗尽时报告 search_budget，不冒充未知边界', 
   const ctx: SkillCtx = { ...makeCtx(adapter, { deadlineMs: 10_000 }), spatial: fakeSpatial(map) };
   t.after(() => ctx.memory.close());
 
+  // 起点和第一个落点可通，未过期的第一条边使严格搜索实际触碰节点上限。
+  // 没有可执行前缀时再查历史，才能检验历史查询自己的预算回执。
+  observingSenses(adapter, map).observeBlocks!([0, 1].flatMap((x) => [63, 64, 65].map((y) => ({ x, y, z: 0 }))));
+
   const validated = navigateTo.validate({
     to: { x: 16, y: 64, z: 0 }, allowed: ['walk'], historical: true,
     maxNodes: 1, maxSegments: 1, maxSteps: 16,
@@ -171,4 +175,5 @@ test('历史搜索预算耗尽时报告 search_budget，不冒充未知边界', 
   assert.equal(result.status, 'failed');
   assert.equal((result.data?.stop as { reason?: string } | undefined)?.reason, 'BUDGET_EXHAUSTED');
   assert.equal(result.data?.budget, 'nodes', '预算原因来自历史搜索，而不是被 strict 的证据不足覆盖');
+  assert.equal((result.data?.lastSearch as { evidenceMode: string }).evidenceMode, 'historical');
 });

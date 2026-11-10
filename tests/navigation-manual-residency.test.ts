@@ -15,6 +15,9 @@ import type { BlockObservation } from '../src/adapter/types.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { acquireRouteResidency, releaseRouteResidency } from '../src/spatial/skill-residency.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
+import { searchLandRouteAsync } from '../src/spatial/land-search.ts';
+import { cellGoal } from '../src/skills/movement/goal.ts';
+import { walkLandRules } from '../src/adapter/land-rules.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -106,15 +109,24 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
       };
     };
 
-    // 所有页面都已换出。导航必须先 prepare 再搜索，才能从保存的历史几何拿到
-    // 候选；未驻留不能被当成“已存几何里没有路”。保存的证据按库契约是历史
-    // 几何（重新加载后为 STALE），到达仍需 Perception 的当前观察。
+    // 起点页已换出。导航按需加载，重新加载的页是 STALE；到达仍需当前观察。
+    // 再独立查询同一批已加载页面，以确认保存的几何仍能提供历史候选。
     const first = await run();
     assert.notEqual(first.stop, 'NO_PATH', `未驻留页面被当成无路：${first.result.summary}`);
-    assert.ok(first.planned > 0, `导航应从已保存页面找到历史候选；实际 planned=${first.planned}`);
-    assert.equal(first.evidenceMode, 'historical');
+    assert.equal(first.stop, 'UNKNOWN_BOUNDARY');
+    assert.equal(first.planned, 0, '旧起点先补当前证据，不能先移动');
+    assert.equal(first.evidenceMode, 'current');
+    assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', '导航应已加载所需页面');
     assert.equal(shared.workingSetStats().pinnedLeases, 0, '本段结束后不得遗留 pin lease');
+    const remembered = await searchLandRouteAsync(shared.session.voxel, {
+      worldId: WORLD, dim: DIM, sessionId: SESSION,
+      body: { feet: adapter.pos, width: 0.6, height: 1.8, pose: 'standing' },
+      goal: cellGoal(base.to, base.to.y, base.to), allowed: ['walk'], rules: walkLandRules,
+      evidenceMode: 'remembered', maxDrop: 4,
+    });
+    assert.equal(remembered.status, 'FOUND', '已加载页面仍提供历史候选');
+    assert.equal(remembered.transitions.length, 32);
     assert.equal(first.continuation?.canContinue, true, `导航应可续接：${first.result.summary}`);
     assert.ok(first.continuation?.sessionId !== undefined);
 
@@ -124,7 +136,9 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
     const second = await run(first.continuation.sessionId);
     assert.notEqual(second.stop, 'NO_PATH', `换出后再次把未驻留当成无路：${second.result.summary}`);
-    assert.ok(second.planned > 0, `换出后应重新加载并找到历史候选；实际 planned=${second.planned}`);
+    assert.equal(second.stop, 'UNKNOWN_BOUNDARY');
+    assert.equal(second.planned, 0);
+    assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', '第二次委托应重新加载所需页面');
     assert.equal(shared.workingSetStats().pinnedLeases, 0);
   });
