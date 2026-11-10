@@ -70,7 +70,7 @@ export interface LandSearchPrefix {
   endpoint: Vec3Like;
   points: Vec3Like[];
   transitions: LandSearchTransition[];
-  /** endpoint 到原始目标的 3D 欧氏距离；near 目标已扣除半径。 */
+  /** endpoint 到原始目标的距离，按请求的 goalMetric 计算。 */
   distanceToTarget: number;
   /** 原始 exact/near 完成谓词在 endpoint 上成立；仍不代表身体已到达。 */
   atTarget: boolean;
@@ -93,6 +93,8 @@ export interface LandSearchRequest {
   body: BodyContext;
   /** 共享目标语义：格目标不会退化成格心精确点，连续目标不会被格心替代。 */
   goal: NavigationGoal;
+  /** 方向推进只约束目标列；精确目的地默认保留 3D 脚高。 */
+  goalMetric?: '3d' | 'horizontal';
   rules: LandRules;
   /** current 只认当前证据；remembered 用过期几何做候选，绝不冒充当前 OPEN。 */
   evidenceMode?: 'current' | 'remembered';
@@ -124,6 +126,7 @@ export interface LandSearchResult {
   /** 实际交给库搜索的精确目标点（格目标落在起点同一格内偏移上）。 */
   target: Vec3Like;
   arrival: LandSearchArrival;
+  goalMetric?: '3d' | 'horizontal';
   points: Vec3Like[];
   transitions: LandSearchTransition[];
   cost: number;
@@ -357,6 +360,7 @@ function libraryRequest(request: LandSearchRequest): LibraryRequest {
     body: request.body,
     to: stanceFor(request.goal, request.body.feet),
     arrival: { kind: 'exact' },
+    ...(request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
     rules: request.rules,
     edgePolicy: hostLandEdgePolicy,
     ...(request.evidenceMode === undefined ? {} : { evidenceMode: request.evidenceMode }),
@@ -394,6 +398,7 @@ function normalize(result: LibraryResult): LandSearchResult {
     from: { ...result.from },
     target: { ...result.target },
     arrival: { ...result.arrival },
+    goalMetric: result.goalMetric,
     points: result.points.map((point) => ({ ...point })),
     transitions: result.transitions.map(hostTransition),
     cost: result.cost,

@@ -22,7 +22,7 @@ function airborneLadderGoal(ctx: SkillCtx, intent: MovementIntent): boolean {
   if (intent.kind !== 'navigate') return false;
   const voxel = ctx.spatial?.session?.voxel;
   if (!voxel) return false;
-  const goal = goalFromIntent(intent.to, intent.targetKind);
+  const goal = goalFromIntent(intent.to, intent.targetKind, intent.arrival);
   const foot = goal.kind === 'cell'
     ? { x: goal.cell.x, y: Math.floor(goal.footY), z: goal.cell.z }
     : { x: Math.floor(goal.feet.x), y: Math.floor(goal.feet.y), z: Math.floor(goal.feet.z) };
@@ -149,7 +149,9 @@ function stateFacts(session: MovementSession) {
 
 function continuationOf(session: MovementSession) {
   const reason = session.stop?.reason;
-  const canContinue = reason !== undefined && canResume(reason) && Date.now() <= session.expiresAt;
+  const budgetExhausted = session.counters.confirmedTransitions >= session.budget.maxTransitions
+    || session.counters.searches >= session.budget.maxSearches;
+  const canContinue = reason !== undefined && canResume(reason) && !budgetExhausted && Date.now() <= session.expiresAt;
   return {
     canContinue,
     ...(canContinue ? { sessionId: session.id } : {}),
@@ -159,7 +161,9 @@ function continuationOf(session: MovementSession) {
           : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
             : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
               : ['用同一 sessionId 续接；累计预算不会重置']
-      : [],
+      : budgetExhausted && reason !== undefined && canResume(reason)
+        ? ['累计 transition 或搜索预算已用尽；同一 session 不能增加预算，若仍要推进需明确新建移动委托']
+        : [],
     expiresAt: session.expiresAt,
   };
 }
@@ -363,7 +367,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       // advance 的路点是候选格列（x/z 可能是半格），navigate 使用冻结的 targetKind。
       let goal: NavigationGoal = session.intent.kind === 'advance'
         ? cellGoal({ x: waypoint.x, z: waypoint.z }, waypoint.y, waypoint)
-        : goalFromIntent(session.intent.to, session.intent.targetKind);
+        : goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
       // 格目标的格内偏移取实测起点，可能让中继路点落在当前站位同一投影上（例如漂移后
       // 分数偏移变化）；此时把中继格沿冻结方向推进一格，保证推进请求仍能前进。
       const bearing = session.bearing;
@@ -382,6 +386,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
         goal,
+        ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const } : {}),
         allowed: session.intent.allowed,
         historical: session.intent.historical,
         ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),

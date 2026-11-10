@@ -149,12 +149,70 @@ test('A2 开阔地 50 格：两次调用同一 session 完成，累计预算不�
   assert.ok(Math.floor(adapter.pos.x) >= 50);
 });
 
+test('方向推进在已观测长上下坡完成 50 格，临时目标高度不截短前缀', async (t) => {
+  for (const slope of [-1, 1]) {
+    const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+    for (let x = -1; x <= 55; x++) for (let z = -1; z <= 1; z++) {
+      const height = 64 + slope * Math.max(0, x);
+      const cells = Array.from({ length: 15 }, (_, index) => ({ x, y: height - 6 + index, z }));
+      fill(map, 'minecraft:stone', cells.filter((pos) => pos.y < height));
+      fill(map, 'minecraft:air', cells.filter((pos) => pos.y >= height));
+    }
+    const { adapter, ctx } = setup(map);
+    t.after(() => ctx.memory.close());
+    const result = await advance.run(ctx, args({ direction: 'E', distance: 50, maxStepsPerSegment: 32 }));
+    assert.equal(result.status, 'succeeded', `${slope}: ${result.summary}`);
+    assert.deepEqual(adapter.pos, { x: 50.5, y: 64 + slope * 50, z: 0.5 });
+    assert.deepEqual(result.data?.frozenOrigin, { x: 0.5, y: 64, z: 0.5 });
+    assert.equal((result.data?.lastSearch as { goalMetric: string }).goalMetric, 'horizontal');
+    assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 50);
+    assert.equal((result.data?.progress as { along: number }).along, 50);
+  }
+});
+
+test('方向推进走到已知坡道的真实前沿，不在坡道中途声称未知边界', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  for (let x = -1; x <= 12; x++) for (let z = -1; z <= 1; z++) {
+    const height = 64 - Math.max(0, x);
+    const cells = Array.from({ length: 12 }, (_, index) => ({ x, y: height - 6 + index, z }));
+    fill(map, 'minecraft:stone', cells.filter((pos) => pos.y < height));
+    fill(map, 'minecraft:air', cells.filter((pos) => pos.y >= height));
+  }
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const result = await advance.run(ctx, args({ direction: 'E', distance: 20, maxSegments: 1, maxStepsPerSegment: 16 }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal((result.data?.stop as { reason: string }).reason, 'UNKNOWN_BOUNDARY');
+  assert.deepEqual(adapter.pos, { x: 12.5, y: 52, z: 0.5 });
+  assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 12);
+  assert.equal((result.data?.progress as { along: number }).along, 12);
+});
+
+test('累计 transition 或搜索预算耗尽后不再承诺同一 session 可继续', async (t) => {
+  for (const budget of [{ maxTransitions: 8 }, { maxSearches: 1 }]) {
+    const { adapter, ctx } = setup(corridor(40));
+    t.after(() => ctx.memory.close());
+    const request = { direction: 'E', distance: 20, maxSegments: 1, maxStepsPerSegment: 8, ...budget };
+    const first = await advance.run(ctx, args(request));
+    assert.equal(first.status, 'failed', first.summary);
+    const continuation = first.data?.continuation as { canContinue: boolean; sessionId?: string; requires: string[] };
+    assert.equal(continuation.canContinue, false);
+    assert.equal(continuation.sessionId, undefined);
+    assert.match(continuation.requires.join(' '), /累计.*预算.*新建/);
+    const moved = adapter.actions.length;
+    const repeated = await advance.run(ctx, args({ ...request, sessionId: first.data?.sessionId }));
+    assert.equal(repeated.status, 'failed');
+    assert.equal(adapter.actions.length, moved, '硬预算不能通过续接重置');
+    assert.equal((repeated.data?.continuation as { canContinue: boolean }).canContinue, false);
+  }
+});
+
 test('A2b sessionId 只续接同一冻结意图；方向/距离改变返回 INTENT_MISMATCH', async (t) => {
   const map = corridor(40);
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
   const first = await advance.run(ctx, args({ direction: 'E', distance: 20, maxSegments: 1, maxStepsPerSegment: 8, maxTransitions: 8 }));
-  const sessionId = (first.data?.continuation as { sessionId: string }).sessionId;
+  const sessionId = first.data?.sessionId;
   const changed = await advance.run(ctx, args({ direction: 'E', distance: 24, sessionId }));
   assert.equal(changed.status, 'failed');
   assert.equal(changed.failureCode, 'BAD_ARGS');
