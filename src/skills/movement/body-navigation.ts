@@ -7,7 +7,6 @@ import type { CollisionShape } from 'curio-minecraft-3d-memory';
 import { AbortedError } from '../../util.ts';
 import { runSkill, type SkillCtx, type SkillResult } from '../types.ts';
 import { cellGoal, type NavigationGoal } from './goal.ts';
-import { navigateTo } from './navigate.ts';
 
 /**
  * 通用 MoveTarget → 宿主已观测 VoxelMap 有界导航的翻译层。
@@ -345,6 +344,10 @@ async function chooseRoute(
 async function runNavigateTo(
   ctx: SkillCtx, to: Vec3Like, deadline: number, signal: AbortSignal, maxSteps: number,
 ): Promise<SkillResult> {
+  // Load the route executor lazily at the actual navigation call: navigate.ts reaches back into
+  // skills/types.ts through coordinator/segment/descend, so a static import closes an ESM cycle
+  // that evaluates descend.ts before its skill object is initialized.
+  const { navigateTo } = await import('./navigate.ts');
   return runSkill({ ...ctx, signal, deadline }, navigateTo, {
     to: { ...to },
     allowed: [...ALLOWED],

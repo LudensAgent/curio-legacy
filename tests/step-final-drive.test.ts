@@ -131,7 +131,7 @@ test('moveTo 在寻路按节点提前结算后，闭环前推真正落到目标�
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
   // 寻路按整数节点立刻结算（节点 64→64 未变），身体仍由原支撑托住。
-  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
   assert.ok(bot.entity.position.z > -1, `越过目标格 z=${bot.entity.position.z}`);
@@ -143,7 +143,7 @@ test('moveTo 从底半砖上一步到整块（脚高 64）也能闭环完成', a
   const { bot, timer } = physicsBot(world, 63.5);
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
-  await a.moveTo({ kind: 'xyz', x: 0, y: 64, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 64, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   assert.ok(Math.abs(bot.entity.position.y - 64) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
@@ -155,7 +155,7 @@ test('身体已贴近目标但仍由原支撑托住时，仍会前推并落到�
   // 寻路停在距目标中心 0.3 格（<0.35）但仍由原支撑托住：这正是「提前制动」复现的旧支撑边缘卡住位置。
   bot.entity.position = new Vec3(0.5, 64, -0.2);
   const a = adapter(bot);
-  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
@@ -168,7 +168,7 @@ test('单列半砖：身体停在目标边缘仍能受控减速落到半砖上',
   bot.entity.position = new Vec3(0.5, 64, -0.2);
   bot.entity.velocity = new Vec3(0, 0, 0);
   const a = adapter(bot);
-  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
@@ -178,7 +178,7 @@ test('单列半砖：从整块格中心出发也能受控减速落到半砖', as
   const { bot, timer } = physicsBot(world, 64); // 从格中心 (0.5, 64, 0.5) 出发
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
-  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
   assert.equal(Math.floor(bot.entity.position.z), -1);
 });
@@ -190,7 +190,7 @@ for (const x of [0.4, 0.5, 0.55]) {
     t.after(() => clearInterval(timer));
     bot.entity.position = new Vec3(x, 64, 0.5);
     const a = adapter(bot);
-    await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+    await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
     assert.ok(Math.abs(bot.entity.position.y - 63.5) <= 0.01, `脚高 ${bot.entity.position.y}`);
     assert.equal(Math.floor(bot.entity.position.z), -1);
   });
@@ -254,7 +254,7 @@ test('相邻一步前，身体偏心时先潜行归位到格心，再迈步', as
   };
   await a.moveTo(
     { kind: 'xyz', x: 0, y: 63.9375, z: -1 },
-    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false, adjacentStep: true },
+    { signal: new AbortController().signal, timeoutMs: 4000, adjacentStep: true },
   );
   assert.deepEqual(steadied, [{ x: 0, z: 0 }], '偏心 x=0.8 先归位到当前格心');
   assert.equal(Math.floor(bot.entity.position.x), 0);
@@ -278,7 +278,7 @@ test('相邻一步向上整块高度差会起跳，而不只是平走', async (t
   const a = adapter(bot);
   await a.moveTo(
     { kind: 'xyz', x: 0, y: 65, z: -1 },
-    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false, adjacentStep: true },
+    { signal: new AbortController().signal, timeoutMs: 4000, adjacentStep: true },
   );
   assert.equal(Math.floor(bot.entity.position.z), -1);
   assert.ok(Math.abs(bot.entity.position.y - 65) <= 0.02, `脚高 ${bot.entity.position.y}`);
@@ -313,7 +313,7 @@ test('连续脚位控制：非格心起点走到非格心 endpoint，不先归�
   const a = adapter(bot);
   await a.moveTo(
     { kind: 'feet', x: 0.2, y: 64, z: -0.8 },
-    { signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false },
+    { signal: new AbortController().signal, timeoutMs: 4000 },
   );
   assert.equal(bot.entity.onGround, true, '完成时实测触地');
   assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003, `完成时水平速度 ${bot.entity.velocity}`);
@@ -339,7 +339,7 @@ test('单列半砖后方恢复整块：越段即停，不无限前推', async (t
   bot.entity.position = new Vec3(0.5, 64, 0.0);
   bot.entity.velocity = new Vec3(0, 0, -0.3);
   const a = adapter(bot);
-  try { await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 1500, allowTerrainChanges: false }); } catch { /* 越段或超时均属预期，关键是不得无限前推 */ }
+  try { await a.moveTo({ kind: 'xyz', x: 0, y: 63.5, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 1500 }); } catch { /* 越段或超时均属预期，关键是不得无限前推 */ }
   assert.ok(Math.abs(bot.entity.position.z) < 3, `越段后不该继续前推，z=${bot.entity.position.z}`);
   assert.equal(bot.control.forward, false, '越段后应松开前进键');
 });
@@ -355,7 +355,7 @@ test('到达后继续推进物理，身体仍稳定停在目标列', async (t) =
   const { bot, timer } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
   const a = adapter(bot);
-  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000, allowTerrainChanges: false });
+  await a.moveTo({ kind: 'xyz', x: 0, y: 63.9375, z: -1 }, { signal: new AbortController().signal, adjacentStep: true, timeoutMs: 4000 });
   // moveTo 返回后再推进若干物理 tick：身体已稳定停住，不因惯性滑出目标列。
   await new Promise((r) => setTimeout(r, 300));
   assert.equal(Math.floor(bot.entity.position.z), -1, `停稳后仍在目标列 z=${bot.entity.position.z}`);
@@ -473,7 +473,7 @@ test('连续脚位走廊：实测横向移动越过 maxLateral 时立即停止�
   const error = await a.moveTo(
     { kind: 'feet', x: 0.9, y: 64, z: -0.5 },
     {
-      signal: new AbortController().signal, timeoutMs: 4000, allowTerrainChanges: false,
+      signal: new AbortController().signal, timeoutMs: 4000,
       corridor: { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 0, z: -1 }, maxLateral: 0 },
     },
   ).then(() => null, (e: Error) => e);

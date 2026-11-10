@@ -203,12 +203,6 @@ export interface MoveOpts {
   corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
   signal: AbortSignal;
   timeoutMs: number;
-  constructionSafe?: boolean;
-  /**
-   * 允许（不是要求）本次动作改变地形。普通 VoxelMap 路线不会因为这份授权就自动挖/放；
-   * 路线确实需要施工时会返回结构化缺口，由 Agent 显式调用 mine_cell / place_cell / place_support / pillar_one。
-   */
-  allowTerrainChanges?: boolean;
   /**
    * 允许（不是要求）入水。陆地路线不会因这份授权静默改成游泳模式；
    * 受控下落入水、swim_path/dive_to 仍按各自原语执行。

@@ -367,7 +367,7 @@ export const hitEntity: Skill<{ entity: string | number; hits: number }> = {
     try {
       throwIfAborted(signal);
       if (!withinReach(target)) {
-        await adapter.moveTo({ kind: 'follow_entity', entityId: targetId, range: 1.8 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now() - 6000)), constructionSafe: true, allowSwimming: false });
+        await adapter.moveTo({ kind: 'follow_entity', entityId: targetId, range: 1.8 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now() - 6000)), allowSwimming: false });
         await sleep(180, signal);
       }
       const before = new Map(adapter.state().inventory.map((item) => [item.name, item.count]));

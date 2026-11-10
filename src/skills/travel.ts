@@ -520,7 +520,7 @@ export const useEndGateway: Skill<{ portalId?: string }> = {
       for (const stand of stands) {
         throwIfAborted(signal);
         if (Date.now() >= ctx.deadline - 50) break;
-        try { await adapter.moveTo({ kind: 'near', pos: stand, range: 0.3 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
+        try { await adapter.moveTo({ kind: 'near', pos: stand, range: 0.3 }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())) }); }
         catch (error) { if (isAbort(error)) throw error; continue; }
         const reached = adapter.state();
         if (!sameSession(reached)) return fail('ERROR', '投掷站位移动中观察会话中断');

@@ -43,7 +43,6 @@ class ExcavationWorld extends FakeAdapter {
     throwIfAborted(options.signal);
     assert.equal(target.kind, 'feet', 'the checked adjacent cell is dispatched as an exact feet target');
     if (target.kind !== 'feet') throw new Error('Unexpected movement');
-    assert.equal(options.constructionSafe, true, 'the body control must never dig or place outside the approved work column');
     assert.ok(Math.hypot(target.x - this.pos.x, target.z - this.pos.z) <= 1.01);
     const feet = { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z) };
     if (target.y > this.pos.y) assert.ok(AIR.has(this.blockAt({ x: Math.floor(this.pos.x), y: Math.floor(this.pos.y) + 2, z: Math.floor(this.pos.z) })), 'jumping first requires actual clearance above the current head');
@@ -428,7 +427,7 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
     override state() { return { ...super.state(), onGround: this.player?.entity.onGround ?? true }; }
     override async moveTo(target: MoveTarget, options: MoveOpts) {
       throwIfAborted(options.signal);
-      assert.equal(target.kind, 'feet'); assert.equal(options.constructionSafe, true);
+      assert.equal(target.kind, 'feet');
       if (target.kind !== 'feet') throw new Error('Unexpected movement');
       const controls = { forward: true, back: false, left: false, right: false, jump: true, sprint: false, sneak: false };
       const environment = { getBlock: (position: any) => {

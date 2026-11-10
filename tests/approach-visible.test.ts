@@ -180,6 +180,13 @@ test('approach_visible 已注册，且校验 target 三选一与方块整数坐�
   assert.equal(approachVisible.validate({ target: { pos: { x: 0, y: 64, z: 0 }, block: { x: 1, y: 64, z: 0 } } }, w).ok, false);
   assert.equal(approachVisible.validate({ target: { pos: { x: 0, y: 64, z: 0 } }, maxSteps: 0 }, w).ok, false);
   assert.equal(approachVisible.validate({ target: { pos: { x: 0, y: 64, z: 0 } }, radius: 65 }, w).ok, false, '局部范围上限是 64，视觉范围只能再调低');
+  for (const request of [
+    { target: { pos: { x: 0, y: 64, z: 0 } }, allowDig: false },
+    { target: { pos: { x: 0, y: 64, z: 0 } }, avoid: [] },
+    { target: { pos: { x: 0, y: 64, z: 0 } }, extra: undefined },
+    { target: { pos: { x: 0, y: 64, z: 0 } }, backend: 'pathfinder' },
+  ]) assert.equal(approachVisible.validate(request, w).ok, false, JSON.stringify(request));
+  assert.equal(approachVisible.validate({ target: { pos: { x: 0, y: 64, z: 0 } }, make: false }, w).ok, true, '通用 make 不应被当作未知参数');
 });
 
 test('approach_visible 的校验对自己的规范化输出幂等（Arbiter 执行前会再校验一次）', () => {

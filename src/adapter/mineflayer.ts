@@ -1034,14 +1034,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     // 非本地移动只走 runSkill 绑定的 VoxelMap 导航委托。
-    // allowTerrainChanges 是“允许改变地形”的授权，不是要求本趟必须挖/放；普通 voxel
-    // 路线照常执行且不消耗这份权限。若路线确实需要施工/下水，委托会以结构化缺口交回，
+    // 若路线确实需要施工/下水，委托会以结构化缺口交回，
     // 由 Agent 显式调用 mine_cell / place_cell / place_support / pillar_one / swim_path。
     // allowSwimming:true 同理只是允许，不会让陆地路线静默改成游泳模式。
     const delegate = this.navigationDelegate.getStore();
     if (!delegate) {
       throw Object.assign(
-        new Error('NAVIGATION_UNAVAILABLE: 非本地移动需要 runSkill 在任务生命周期内绑定 withNavigation；没有回退到旧 pathfinder'),
+        new Error('NAVIGATION_UNAVAILABLE: 非本地移动需要 runSkill 在任务生命周期内绑定 withNavigation；没有回退到其他导航后端'),
         { name: 'NavigationUnavailable', position: { ...b.entity.position }, target },
       );
     }
@@ -2194,7 +2193,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       for (const sign of [1, -1]) {
         const landing = this.vec({ x: pos.x + direction.x * 2 * sign, y: pos.y, z: pos.z + direction.z * 2 * sign });
         if (b.blockAt(landing.offset(0, -1, 0))?.boundingBox !== 'block' || !empty(b.blockAt(landing)) || !empty(b.blockAt(landing.offset(0, 1, 0)))) continue;
-        await this.afterAction(() => this.moveTo({ kind: 'near', pos: { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 }, range: 0.4 }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
+        await this.afterAction(() => this.moveTo({ kind: 'near', pos: { x: landing.x + 0.5, y: landing.y, z: landing.z + 0.5 }, range: 0.4 }, { signal, timeoutMs: 8000 }), check);
         reference = selectReference();
         if (reference) break;
       }
@@ -2347,7 +2346,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           return window;
         };
       } else {
-        if (entity.position.distanceTo(b.entity.position) > 4.5) await this.afterAction(() => this.moveTo({ kind: 'follow_entity', entityId: target.entityId, range: 3 }, { signal, timeoutMs: 20000, constructionSafe: true }), check);
+        if (entity.position.distanceTo(b.entity.position) > 4.5) await this.afterAction(() => this.moveTo({ kind: 'follow_entity', entityId: target.entityId, range: 3 }, { signal, timeoutMs: 20000 }), check);
         if (b.entities?.[target.entityId] !== entity || entity.position.distanceTo(b.entity.position) > 4.5) return { ok: false, reason: 'ENTITY_OUT_OF_REACH', done };
         open = () => b.openEntity(entity);
       }
@@ -2355,7 +2354,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const block = b.blockAt(this.vec(target));
       if (!block) return { ok: false, reason: 'UNLOADED', done };
       if (isLocalStorage(block.name)) storageBlock = block.name;
-      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: target }, { signal, timeoutMs: 20000, constructionSafe: true, allowSwimming: false }), check);
+      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: target }, { signal, timeoutMs: 20000, allowSwimming: false }), check);
       open = block.name === 'enchanting_table' && typeof b.openEnchantmentTable === 'function' ? () => b.openEnchantmentTable(block) : () => b.openBlock(block);
     }
     let w: any;
@@ -2487,7 +2486,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const check = this.actionCheckpoint(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
     const b = this.bot;
-    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: true }), check);
+    await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000 }), check);
     const block = b.blockAt(this.vec(pos));
     if (!block || !/_sign$/.test(block.name)) return { ok: false, reason: 'NOT_SIGN' };
     const read = (): string[] | undefined => {
@@ -2808,7 +2807,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const hit = distance <= 4.4 && distance > 0 && b.world?.raycast?.(eye, direction.normalize(), distance + 0.05, (candidate: any, ray: any) =>
       candidate.position.equals(block.position) || !!ray.intersect(candidate.shapes, candidate.position));
     if (!hit?.position?.equals(block.position)) {
-      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, constructionSafe: item === '', ...(item === '' ? { allowSwimming: false } : {}) }), check);
+      await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000, ...(item === '' ? { allowSwimming: false } : {}) }), check);
     }
     const current = b.blockAt(this.vec(pos));
     if (!current || current.name !== block.name) return { ok: false, reason: 'TARGET_CHANGED' };
@@ -3596,7 +3595,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       try {
         let placed = await this.afterAction(() => this.placeBlockAt(position, [item], signal), check);
         if (!placed.ok || b.blockAt(position)?.name !== item) {
-          await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
+          await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000 }), check);
           placed = await this.afterAction(() => this.placeBlockAt(position, [item], signal), check);
         }
         const observed = b.blockAt(position);
@@ -3928,7 +3927,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const nearby = b.findBlock({ matching: tableId, maxDistance: 5 });
     if (nearby && (!table || reachable(nearby))) table = nearby;
     if (table && !reachable(table)) {
-      try { await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000, constructionSafe: true }), check); }
+      try { await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 30000 }), check); }
       catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); table = null; }
       if (table && !reachable(table)) table = null;
     }
@@ -3945,7 +3944,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           // 已能伸手放下就直接放，避免寻路器在一格宽空间里强行找另一个站位。
           let placed = await this.afterAction(() => this.placeBlockAt(position, ['crafting_table'], signal), check);
           if (!placed.ok) {
-            await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000, constructionSafe: true }), check);
+            await this.afterAction(() => this.moveTo({ kind: 'place_block', pos: position }, { signal, timeoutMs: 8000 }), check);
             placed = await this.afterAction(() => this.placeBlockAt(position, ['crafting_table'], signal), check);
           }
           const observed = b.blockAt(position);
@@ -3953,7 +3952,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         } catch (error: any) { if (error?.name === 'AbortedError') throw error; check(); }
       }
     }
-    if (table && !reachable(table)) await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 15000, constructionSafe: true }), check);
+    if (table && !reachable(table)) await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos: table.position }, { signal, timeoutMs: 15000 }), check);
     if (table && !reachable(table)) return null;
     return table;
   }

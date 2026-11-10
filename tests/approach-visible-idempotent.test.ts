@@ -19,6 +19,9 @@ test('approach_visible 的校验对规范化参数幂等', () => {
     const second = approachVisible.validate(first.args, adapter);
     assert.ok(second.ok, `规范化参数再校验失败：${second.ok ? '' : second.error}`);
   }
+  const withMake = approachVisible.validate({ target: { pos: { x: 1, y: 64, z: 0 } }, make: false }, adapter);
+  assert.ok(withMake.ok, withMake.ok ? '' : withMake.error);
+  assert.ok(approachVisible.validate(withMake.args, adapter).ok, '带通用 make 的规范化参数也须再次通过');
 });
 
 test('kind 与唯一目标键一致时接受，不一致或缺少目标时仍然拒绝', () => {

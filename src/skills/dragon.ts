@@ -63,8 +63,8 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
           // outside the current FOV. Use the last observed hazard, then fall
           // back to the observed entry position if no threat was ever seen.
           try {
-            if (dist3(state.pos, lastHazard) > 0.1 || attacker || dragon || breath) await adapter.moveTo({ kind: 'away_from', pos: lastHazard, distance: 20 }, { sprint: true, signal, timeoutMs: Math.max(1, Math.min(6000, end - Date.now())), constructionSafe: true });
-            else await adapter.moveTo({ kind: 'near', pos: start.pos, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(4000, end - Date.now())), constructionSafe: true });
+            if (dist3(state.pos, lastHazard) > 0.1 || attacker || dragon || breath) await adapter.moveTo({ kind: 'away_from', pos: lastHazard, distance: 20 }, { sprint: true, signal, timeoutMs: Math.max(1, Math.min(6000, end - Date.now())) });
+            else await adapter.moveTo({ kind: 'near', pos: start.pos, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(4000, end - Date.now())) });
           } catch (error) { if (isAbort(error)) throw error; }
           if (adapter.hasFood() && state.food < 20) await adapter.eat(signal);
           if (state.hp <= 6) return fail('LOW_HP', '战斗中低血撤离，未宣称击败末影龙', { shots, bodyMeleeAttempts, stages });
@@ -100,7 +100,7 @@ export const dragonFight: Skill<{ seconds: number; endermanMask?: boolean }> = {
             // Try bounded ground-level angles; never repeatedly fire at bars.
             const angle = Math.atan2(state.pos.z - crystal.pos.z, state.pos.x - crystal.pos.x) + Math.PI / 4;
             if (++crystalApproaches > 8) return fail('PATH_NOT_FOUND', '水晶周围没有确认可用的射击通道，需要另选开笼或登高方法', { shots, bodyMeleeAttempts, stages });
-            await adapter.moveTo({ kind: 'xz', x: crystal.pos.x + Math.cos(angle) * 16, z: crystal.pos.z + Math.sin(angle) * 16, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(8000, end - Date.now())), constructionSafe: true });
+            await adapter.moveTo({ kind: 'xz', x: crystal.pos.x + Math.cos(angle) * 16, z: crystal.pos.z + Math.sin(angle) * 16, range: 1 }, { signal, timeoutMs: Math.max(1, Math.min(8000, end - Date.now())) });
             await sleep(150, signal);
             continue;
           }

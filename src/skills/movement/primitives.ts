@@ -229,7 +229,7 @@ const moveStepSkill: Skill<MoveArgs> = {
         });
       }
       try {
-        await adapter.moveTo({ kind: 'ladder', x: target.x, y: ladderFoot, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false });
+        await adapter.moveTo({ kind: 'ladder', x: target.x, y: ladderFoot, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())) });
       } catch (e) {
         if (isAbort(e)) {
           (e as Error & { partial?: Record<string, unknown> }).partial = partial({ targetFoot: ladderFoot });
@@ -421,7 +421,7 @@ const moveStepSkill: Skill<MoveArgs> = {
       }
     }
     try {
-      await adapter.moveTo({ kind: 'xyz', x: target.x, y: targetY, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), allowTerrainChanges: false, adjacentStep: true });
+      await adapter.moveTo({ kind: 'xyz', x: target.x, y: targetY, z: target.z }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(6000, ctx.deadline - Date.now())), adjacentStep: true });
     } catch (e) {
       if (isAbort(e)) {
         (e as Error & { partial?: Record<string, unknown> }).partial = partial({ targetFoot: targetY });
@@ -1123,7 +1123,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       movementAttempted = true;
       try {
         // y 用连续实测脚高，不用离散脚格：半砖/雪层上换站位时不能被要求走到格底。
-        await adapter.moveTo({ kind: 'near', pos: { x: stance.pos.x + 0.5, y: origin.pos.y, z: stance.pos.z + 0.5 }, range: 0.3 }, { signal: ctx.signal, timeoutMs: Math.min(2500, ctx.deadline - Date.now()), constructionSafe: true, allowSwimming: false });
+        await adapter.moveTo({ kind: 'near', pos: { x: stance.pos.x + 0.5, y: origin.pos.y, z: stance.pos.z + 0.5 }, range: 0.3 }, { signal: ctx.signal, timeoutMs: Math.min(2500, ctx.deadline - Date.now()), allowSwimming: false });
       } catch (e) {
         if (isAbort(e)) throw e;
         const afterMove = { ...adapter.state().pos };

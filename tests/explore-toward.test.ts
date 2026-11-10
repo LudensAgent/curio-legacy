@@ -11,12 +11,19 @@ const argsOf = (raw: unknown, adapter: FakeAdapter) => {
   return result.args;
 };
 
-test('方向探索保留距离，明确拒绝不支持的对角/施工能力', () => {
+test('方向探索保留距离，明确拒绝不支持的对角/施工能力与未知参数', () => {
   const adapter = new FakeAdapter();
   const args = argsOf({ direction: 'E', distance: 512 }, adapter);
   assert.equal(args.distance, 512);
   assert.deepEqual(exploreToward.validate(args, adapter), { ok: true, args });
-  for (const request of [{ direction: 'NE', distance: 40 }, { direction: 'E', distance: 600 }, { direction: 'E', distance: 40, allowDig: true }, { direction: 'E', distance: 40, tool: 'stone_pickaxe' }]) assert.equal(exploreToward.validate(request, adapter).ok, false);
+  for (const request of [
+    { direction: 'NE', distance: 40 }, { direction: 'E', distance: 600 },
+    { direction: 'E', distance: 40, allowDig: true }, { direction: 'E', distance: 40, allowDig: false },
+    { direction: 'E', distance: 40, allowSwim: false }, { direction: 'E', distance: 40, tool: 'stone_pickaxe' },
+    { direction: 'E', distance: 40, via: 'auto' }, { direction: 'E', distance: 40, avoid: [] },
+    { direction: 'E', distance: 40, extra: undefined },
+  ]) assert.equal(exploreToward.validate(request, adapter).ok, false, JSON.stringify(request));
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
 
 test('方向探索以同一体素 session 分段推进并扫视，预算累计', async (t) => {

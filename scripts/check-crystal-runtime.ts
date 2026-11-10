@@ -36,7 +36,7 @@ const aimAndObserve = async (at: Vec3Like) => {
     && Math.hypot(e.pos.x - at.x, e.pos.y - at.y, e.pos.z - at.z) < 2);
 };
 const move = async (x: number, z: number) => {
-  await adapter.moveTo({ kind: 'xz', x, z, range: 0.7 }, { signal: controller.signal, timeoutMs: 18000, constructionSafe: true });
+  await adapter.moveTo({ kind: 'xz', x, z, range: 0.7 }, { signal: controller.signal, timeoutMs: 18000 });
   await sleep(250, controller.signal);
 };
 const shotCase = async (name: string, at: Vec3Like, shots: number) => {

@@ -121,7 +121,6 @@ test('construction resolves actual placement faces even nearby and never request
   class StrictAccessWorld extends BuildingWorld {
     placementsWithFace = 0;
     override async moveTo(target: any, opts: any) {
-      assert.equal(opts.constructionSafe, true);
       if (target.kind === 'reach_block') assert.notEqual(this.blockAt(target.pos), 'air', 'GoalLookAtBlock cannot hit an air target');
       if (target.kind === 'place_block') this.placementsWithFace++;
       await super.moveTo(target, opts);
@@ -142,7 +141,6 @@ test('upper-cell path failures retry through an actually observed owned scaffold
     summitVisits = 0;
     override async moveTo(target: any, opts: any) {
       if (target.kind === 'near' && target.pos.x === summit.x + 0.5 && target.pos.y === summit.y + 1 && target.pos.z === summit.z + 0.5) {
-        assert.equal(opts.constructionSafe, true);
         assert.equal(this.blockAt(summit), 'cobblestone');
         assert.ok(archive.get(project.id)!.temporaryBlocks.some((block) => block.pos.x === -1 && block.pos.y === blueprint.spec.height && block.pos.z === 0));
         this.summitVisits++;

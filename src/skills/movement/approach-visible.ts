@@ -413,6 +413,9 @@ export const approachVisible: Skill<Args> = {
   outcomeBoundary: true,
   validate(raw) {
     const a = obj(raw);
+    const allowedKeys = new Set(['target', 'radius', 'backend', 'allowed', 'historical', 'maxSteps', 'allowUnknownCorridor', 'make']);
+    const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
+    if (unknown.length) return { ok: false, error: `approach_visible 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
     const target = targetOf(a.target);
     if (typeof target === 'string') return { ok: false, error: target };
     const radius = a.radius === undefined ? DEFAULT_RADIUS : Number(a.radius);
@@ -426,7 +429,7 @@ export const approachVisible: Skill<Args> = {
       return { ok: false, error: `maxSteps 需要 1–${HARD_MAX_STEPS} 的整数` };
     }
     if (a.allowUnknownCorridor !== undefined && typeof a.allowUnknownCorridor !== 'boolean') return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
-    if (a.backend !== undefined && a.backend !== 'spatial') return { ok: false, error: 'pathfinder 后端已退役；approach_visible 只使用 VoxelMap，不会静默换后端' };
+    if (a.backend !== undefined && a.backend !== 'spatial') return { ok: false, error: 'backend 只支持 "spatial"（共享 VoxelMap 后端）' };
     return {
       ok: true,
       args: {

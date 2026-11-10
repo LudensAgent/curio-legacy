@@ -96,8 +96,8 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
     const end = Math.min(ctx.deadline, Date.now() + 12_000);
     if (end <= Date.now()) return refused('本次下行时间预算已用尽');
     try {
-      await adapter.moveTo({ kind: 'xyz', ...target }, { signal, timeoutMs: end - Date.now(), constructionSafe: true,
-        allowTerrainChanges: false, allowSwimming: option.surface === 'water', maxDropDown: Math.ceil(drop) + 1 });
+      await adapter.moveTo({ kind: 'xyz', ...target }, { signal, timeoutMs: end - Date.now(),
+        allowSwimming: option.surface === 'water', maxDropDown: Math.ceil(drop) + 1 });
       // Pathfinder can resolve within a block of its node; wait briefly for actual contact.
       const settle = Math.min(end, Date.now() + 800);
       let actual = check();

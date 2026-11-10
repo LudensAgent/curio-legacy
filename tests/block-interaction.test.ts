@@ -57,7 +57,7 @@ test('interact_block refuses occluded or distant targets, nominal success withou
     if (mode === 'occluded') w.visible(false);
     if (mode === 'glass') w.world.setBlock({ x: 1, y: 65, z: 0 }, 'glass');
     if (mode === 'far' || mode === 'lost_after_move') w.world.moveTo = async (_target, opts) => {
-      assert.equal(opts.constructionSafe, true); assert.equal(opts.allowSwimming, false);
+      assert.equal(opts.allowSwimming, false);
       if (mode === 'lost_after_move') { w.world.pos.x = 10.5; w.visible(false); }
     };
     let readsAtAbort = -1;

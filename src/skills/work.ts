@@ -109,7 +109,7 @@ export async function ensureToolFor(ctx: SkillCtx, pos: { x: number; y: number; 
 }
 
 /** 走向目标方块；8 秒内几乎没挪动就放弃这个目标（换下一个），而不是原地耗到被判卡死；走着走着进了水也立刻停（ENTERED_WATER） */
-async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }, dig = false) {
+async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: number }) {
   const stop = new AbortController();
   const dryStart = !ctx.adapter.state().inWater;
   let anchor = ctx.adapter.state().pos, since = Date.now();
@@ -120,7 +120,7 @@ async function moveWithWatchdog(ctx: SkillCtx, pos: { x: number; y: number; z: n
     else if (Date.now() - since >= 8000) stop.abort('no_progress');
   }, 500);
   try {
-    await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: AbortSignal.any([ctx.signal, stop.signal]), timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())), ...(dig ? { allowTerrainChanges: true } : {}) });
+    await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: AbortSignal.any([ctx.signal, stop.signal]), timeoutMs: Math.min(90000, Math.max(3000, ctx.deadline - Date.now())) });
   } catch (e) {
     if (stop.signal.aborted && !ctx.signal.aborted) throw new Error(stop.signal.reason === 'entered_water' ? 'ENTERED_WATER' : 'PATH_NO_PROGRESS');
     throw e;
@@ -363,7 +363,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       if (classifyBlock(ctx.memory, s, pick.pos, pick.name) === 'man-made') manMade++;
       try {
         progressNow(`前往 ${pick.name}（${Math.round(pick.dist)} 格）`);
-        await moveWithWatchdog(ctx, pick.pos, args.dig === true);
+        await moveWithWatchdog(ctx, pick.pos);
         // 路上可能已经捡到目标物品（走过掉落物）：先核对目标，再决定还要不要挖这一块。
         if (held() >= target) { progressNow(`路上已经拿到足够 ${itemsLabel(targetItems)}，不再挖 ${pick.name}`); continue; }
         before = held();

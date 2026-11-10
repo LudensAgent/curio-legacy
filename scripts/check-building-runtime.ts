@@ -45,7 +45,7 @@ try {
     const outcomes: unknown[] = [];
     for (const [i, facing] of ['north', 'east', 'south', 'west'].entries()) {
       const pos = { ...origin, x: origin.x + i * 3 };
-      await adapter.moveTo({ kind: 'place_block', pos }, { signal: controller.signal, timeoutMs: 30000, constructionSafe: true });
+      await adapter.moveTo({ kind: 'place_block', pos }, { signal: controller.signal, timeoutMs: 30000 });
       const requested = { facing, half: 'lower', hinge: 'left', open: false };
       const result = await adapter.placeBlockStateAt(pos, 'oak_door', requested, controller.signal);
       const actualLower = adapter.blockStateAt(pos), actualUpper = adapter.blockStateAt({ ...pos, y: pos.y + 1 });

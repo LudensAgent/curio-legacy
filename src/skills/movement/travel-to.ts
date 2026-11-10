@@ -2,7 +2,6 @@ import type { Vec3Like } from '../../adapter/types.ts';
 import { observedFootY } from '../../spatial/land-search.ts';
 import { travelStore } from '../../travel/store.ts';
 import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSkill, type NavOutcome, type Skill, type SkillResult } from '../types.ts';
-import { HEADING_TARGET } from '../overland.ts';
 import { navigateTo } from './navigate.ts';
 
 type TravelTarget =
@@ -19,7 +18,7 @@ type TravelToArgs = {
   sessionId?: string;
 };
 
-/** 目标只给 x/z 时，在共享 VoxelMap 的同列观测里解析脚高；解析不到就报缺口，不用 pathfinder 猜。 */
+/** 目标只给 x/z 时，在共享 VoxelMap 的同列观测里解析脚高；解析不到就报缺口，不猜落脚高度。 */
 const TARGET_FOOT_SCAN = 16;
 /** 累计位移预算：最短路线超过直线距离的这个倍数加余量就不再扩大。 */
 const MAX_DETOUR_FACTOR = 3;
@@ -27,29 +26,16 @@ const DETOUR_SLACK = 8;
 /** navigate_to 单次调用的 transition 硬上限。 */
 const HARD_MAX_STEPS = 64;
 const MAX_SEGMENTS = 4;
-const BLOCK_NAME = /^[a-z0-9_]+$/;
+const TARGET_ERROR = 'to 需要坐标 {x,z}/{x,y,z}/"x,z"/"x,y,z"、记得的地标名/base、"death" 或 "portal:<id>"';
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const round1 = (v: number) => Math.round(v * 10) / 10;
 const at = (p: Vec3Like) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
 
-const HEADING_RETIRED = '方向+距离（heading/corridor）不再由 travel_to 规划：VoxelMap A* 需要具体目标脚位。按方向探索用 explore_toward（它按冻结方向委托 advance 同一协调器），或把方向换算成 {x,y,z} 脚位后用 navigate_to/advance；不会把方向走廊悄悄改成射线终点。';
-
-/** 旧 pathfinder 执行选项在 VoxelMap A* 里没有等价物，传 true 会明确拒绝，不静默丢弃授权。 */
-const LEGACY_OPTIONS: Record<string, string> = {
-  allowDig: '需要挖方块请显式用 mine_cell/excavate_run，再重新导航',
-  allowPlace: '需要放方块请显式用 place_cell/place_support/pillar_one，再重新导航',
-  allowTower: '需要原地搭柱请显式用 pillar_one，再重新导航',
-  allowSwim: '需要下水请显式用 swim_path；乘船用 boat_path',
-  allowHazard: 'VoxelMap A* 只按自身危险格规则搜索，没有额外避让开关；危险判断由你决定',
-  sprint: 'VoxelMap A* 的 walk/step/drop 不提供 sprint 开关',
-};
-
 function parseTarget(raw: unknown): TravelTarget | string {
   if (typeof raw === 'string') {
     const s = raw.trim();
     if (!s) return 'to 不能为空';
-    if (HEADING_TARGET.test(s.toUpperCase())) return HEADING_RETIRED;
     if (/^death$/i.test(s)) return { death: true };
     const portal = s.match(/^portal\s*[:：]\s*(\S+)$/i);
     if (portal) return { portal: portal[1] };
@@ -59,57 +45,54 @@ function parseTarget(raw: unknown): TravelTarget | string {
       if (nums.length === 2) return { x: +nums[0], z: +nums[1] };
       return 'to 坐标需要 "x,z" 或 "x,y,z"';
     }
-    return s ? { landmark: s } : 'to 不能为空';
+    return { landmark: s };
   }
   const t = obj(raw);
-  if ('heading' in t || 'corridor' in t) return HEADING_RETIRED;
-  if (finite(t.x) && finite(t.z)) {
+  const keys = Object.keys(t);
+  const unexpected = keys.filter((key) => !['x', 'y', 'z', 'landmark', 'portal', 'death'].includes(key));
+  if (unexpected.length) return `to 不认识字段 ${unexpected.join('、')}；${TARGET_ERROR}`;
+  if (keys.some((key) => key === 'x' || key === 'y' || key === 'z')) {
+    if (!keys.every((key) => key === 'x' || key === 'y' || key === 'z') || !finite(t.x) || !finite(t.z)) {
+      return 'to 坐标需要有限的 x、z（y 可选）';
+    }
     if (t.y !== undefined && !finite(t.y)) return 'to.y 需要有限数字';
-    return { x: t.x, ...(finite(t.y) ? { y: t.y } : {}), z: t.z };
+    return { x: t.x, ...(t.y === undefined ? {} : { y: t.y }), z: t.z };
   }
-  if (typeof t.landmark === 'string' && t.landmark.trim()) return { landmark: t.landmark.trim() };
-  if (typeof t.portal === 'string' && t.portal.trim()) return { portal: t.portal.trim() };
-  if (t.death === true) return { death: true };
-  return 'to 需要坐标 {x,z}/{x,y,z}/"x,z"/"x,y,z"、记得的地标名/base、"death" 或 "portal:<id>"；方向+距离已退役';
+  if (keys.length === 1 && 'landmark' in t) {
+    if (typeof t.landmark !== 'string' || !t.landmark.trim()) return 'landmark 需要非空字符串';
+    return { landmark: t.landmark.trim() };
+  }
+  if (keys.length === 1 && 'portal' in t) {
+    if (typeof t.portal !== 'string' || !t.portal.trim()) return 'portal 需要非空字符串';
+    return { portal: t.portal.trim() };
+  }
+  if (keys.length === 1 && 'death' in t) {
+    if (t.death !== true) return 'death 需要 true';
+    return { death: true };
+  }
+  return TARGET_ERROR;
 }
 
 /**
- * travel_to 的 VoxelMap A* 兼容入口：只把精确目标（坐标、记得的地标/base/死亡点/传送门）转交给
- * navigate_to 执行 walk/step/drop。旧 pathfinder 的分跳、偏转、施工、游泳、冲刺和方向走廊都不在这里；
- * 缺少共享 VoxelMap 时如实报缺口，不会隐式回退到另外一套寻路。
+ * travel_to 的 VoxelMap A* 入口：只把精确目标（坐标、记得的地标/base/死亡点/传送门）转交给
+ * navigate_to 执行 walk/step/drop。缺少共享 VoxelMap 时如实报缺口，不会隐式回退。
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端只有共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或目标列缺证据时如实报缺口，不回退到直接 pathfinder。无 y 的坐标会先用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），但路线目标仍是原坐标；不会把范围目标改成更近的点。allowDig/allowPlace/allowTower/allowSwim/allowHazard/sprint/tool、方向+距离与 corridor 都是旧 pathfinder 选项，传入会明确拒绝（施工用 excavate_run/mine_cell/place_support/pillar_one，水路用 swim_path/boat_path，按方向探索用 explore_toward）。',
-  argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号"}；不要写 allowDig/allowPlace/allowTower/allowSwim/allowHazard/sprint/tool/via，也不要写方向+距离或 corridor（会返回具体的能力缺口说明）。',
+  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或目标列缺证据时如实报缺口。无 y 的坐标会先用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），但路线目标仍是原坐标；不会把范围目标改成更近的点。只接受 to/range/timeoutMs/sessionId（以及通用 make），其他参数一律拒绝。',
+  argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号"}；只接受 to/range/timeoutMs/sessionId/make，未知参数会被拒绝。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    if (a.corridor !== undefined || a.heading !== undefined) return { ok: false, error: HEADING_RETIRED };
-    const to = parseTarget(a.to ?? a.target);
+    const allowedKeys = new Set(['to', 'range', 'timeoutMs', 'sessionId', 'make']);
+    const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
+    if (unknown.length) return { ok: false, error: `travel_to 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
+    const to = parseTarget(a.to);
     if (typeof to === 'string') return { ok: false, error: to };
     if (a.range !== undefined && (!Number.isInteger(a.range) || a.range < 1 || a.range > 16)) return { ok: false, error: 'range 需要 1–16 的整数' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 10000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 10000–600000 的整数' };
-    for (const [flag, alternative] of Object.entries(LEGACY_OPTIONS)) {
-      if (a[flag] === undefined) continue;
-      if (typeof a[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
-      if (a[flag] === true) {
-        return { ok: false, error: `${flag}:true 是旧 pathfinder 执行选项，VoxelMap A* 的 navigate_to 没有等价能力；travel_to 不会静默忽略授权。${alternative}` };
-      }
-    }
-    if (a.tool !== undefined) {
-      if (typeof a.tool !== 'string' || !BLOCK_NAME.test(a.tool)) return { ok: false, error: 'tool 为物品注册名（如 stone_pickaxe）' };
-      return { ok: false, error: 'tool 只在旧 pathfinder 寻路挖掘里使用；VoxelMap A* 不挖方块，travel_to 不会静默忽略它。需要挖掘用 mine_cell/excavate_run，再重新导航' };
-    }
-    if (a.avoid !== undefined) {
-      if (!Array.isArray(a.avoid) || a.avoid.some((n) => typeof n !== 'string' || !BLOCK_NAME.test(n))) return { ok: false, error: 'avoid 需要方块名数组（小写 snake_case）' };
-      if (a.avoid.length) return { ok: false, error: 'avoid 是旧 pathfinder 的额外绕行清单；VoxelMap A* 没有这个开关，travel_to 不会静默丢弃。需要绕开特定方块时改目的地或显式改变地形' };
-    }
-    if (a.via !== undefined) {
-      return { ok: false, error: 'via 已退役：travel_to 只把精确目标转交 VoxelMap A* navigate_to；不再接受 "auto"、"direct"、"history" 或 {"fragment":…}' };
-    }
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
     return { ok: true, args: { to, range: a.range ?? 2, timeoutMs: a.timeoutMs ?? 180000, ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }) } };
   },
@@ -129,7 +112,7 @@ export const travelTo: Skill<TravelToArgs> = {
     }
     const voxel = ctx.spatial?.session?.voxel;
     if (!voxel) {
-      return fail('NOT_CONNECTED', 'travel_to 需要宿主共享空间 VoxelMap；当前没有体素证据，不会回退到直接 pathfinder，没有移动', { originalRequest: request, backend });
+      return fail('NOT_CONNECTED', 'travel_to 需要宿主共享空间 VoxelMap；当前没有体素证据，没有移动', { originalRequest: request, backend });
     }
 
     // 目标解析：坐标原样；记忆目标按当前维度解析成位置。解析失败不移动。
@@ -166,7 +149,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const goalY = point.y ?? observedFootY(voxel, s0.dim, Math.floor(point.x), Math.floor(point.z), Math.floor(start.y), TARGET_FOOT_SCAN, TARGET_FOOT_SCAN);
     const resolvedTarget = { x: point.x, ...(requestedY ? { y: point.y } : {}), z: point.z };
     if (goalY === null) {
-      return fail('BAD_ARGS', `目标 (${point.x},${point.z}) 没有给 y，且共享 VoxelMap 在该列 ±${TARGET_FOOT_SCAN} 格内没有可站立面的新鲜证据；travel_to 不用另一套寻路猜落脚高度。请写 {x,y,z}（y 是脚高）或先观察该列；没有移动`, {
+      return fail('BAD_ARGS', `目标 (${point.x},${point.z}) 没有给 y，且共享 VoxelMap 在该列 ±${TARGET_FOOT_SCAN} 格内没有可站立面的新鲜证据；travel_to 不猜落脚高度。请写 {x,y,z}（y 是脚高）或先观察该列；没有移动`, {
         originalRequest: request, backend, resolvedTarget, outcome: 'UNSUPPORTED',
         capabilityGap: 'target_foot_y_unobserved', target: resolvedTarget,
       });

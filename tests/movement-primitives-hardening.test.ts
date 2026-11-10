@@ -433,7 +433,6 @@ test('move_step 把相邻一步的扫掠/跳跃/落地交给适配器 adjacentSt
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(w.targets[0]?.kind, 'xyz');
   assert.equal(w.opts[0]?.adjacentStep, true, '单步由适配器的身体控制完成，不另起整段寻路');
-  assert.equal(w.opts[0]?.allowTerrainChanges, false);
   assert.equal(w.opts[0]?.maxDropDown, undefined);
 });
 

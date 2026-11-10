@@ -30,7 +30,6 @@ test('descend requires fresh local geometry, sufficient health or observed water
   assert.equal(ground.calls.length, 1);
   assert.deepEqual(ground.calls[0].target, { kind: 'xyz', ...ground.option.target });
   assert.equal(ground.calls[0].opts.maxDropDown, 7, 'native solid landings count the support block too');
-  assert.equal(ground.calls[0].opts.allowTerrainChanges, false); assert.equal(ground.calls[0].opts.constructionSafe, true);
   assert.equal(ground.calls[0].opts.allowSwimming, false);
 
   const stale = fixture(); stale.option.receipt.at -= 2000;

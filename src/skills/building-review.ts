@@ -43,7 +43,7 @@ export const buildingReview: Skill<{ projectId: string; cameras: ('front' | 'rig
         throwIfAborted(ctx.signal);
         if (Date.now() >= ctx.deadline - 1000) break;
         const requested = rotatePosition(positions[camera], project.origin, project.rotation);
-        await ctx.adapter.moveTo({ kind: 'near', pos: requested, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(25000, ctx.deadline - Date.now())), constructionSafe: true });
+        await ctx.adapter.moveTo({ kind: 'near', pos: requested, range: 1 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(25000, ctx.deadline - Date.now())) });
         throwIfAborted(ctx.signal);
         const state = ctx.adapter.state(), eye = ctx.adapter.eye();
         if (state.sessionId !== start.sessionId || state.worldId !== project.worldId || state.dim !== project.dimension || !state.observationReady) throw new AbortedError('观察会话已经改变');

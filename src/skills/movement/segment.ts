@@ -749,7 +749,6 @@ async function runNavigationSegmentInner(
           {
             signal: ctx.signal,
             timeoutMs: Math.min(6000, Math.floor(remaining)),
-            allowTerrainChanges: false,
             horizontalJump: true,
             ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
           },
@@ -779,7 +778,6 @@ async function runNavigationSegmentInner(
           {
             signal: ctx.signal,
             timeoutMs: Math.min(6000, Math.floor(remaining)),
-            allowTerrainChanges: false,
             ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
           },
         );
@@ -834,7 +832,6 @@ async function runNavigationSegmentInner(
             signal: ctx.signal,
             // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。
             timeoutMs: Math.min(6000, Math.floor(remaining)),
-            allowTerrainChanges: false,
             ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
           },
         );

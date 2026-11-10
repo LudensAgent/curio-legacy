@@ -260,7 +260,7 @@ async function prepareSite(ctx: SkillCtx, project: BuildingProject, blueprint: B
       const filler = [...FILLERS, spec.palette.foundation].find((n) => (avail.get(n) ?? 0) - (stillNeeded[n] ?? 0) > 0);
       if (!filler) break;
       if (PLANTS.has(adapter.blockAt(p) ?? '')) await adapter.dig(p, ctx.signal);
-      try { await adapter.moveTo({ kind: 'place_block', pos: p }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())), constructionSafe: true }); }
+      try { await adapter.moveTo({ kind: 'place_block', pos: p }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now())) }); }
       catch (e) { if (isAbort(e)) throw e; break; }
       const r = await adapter.placeBlockAt(p, [filler], ctx.signal);
       check();
@@ -287,7 +287,7 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
   // Local surveying is an explicit construction action, not a global resource search.
   if (Math.hypot(adapter.state().pos.x - project.origin.x, adapter.state().pos.y - project.origin.y, adapter.state().pos.z - project.origin.z) > 20) {
     if (mode === 'inspect') return { projectId: project.id, placed: 0, cleared: 0, inspection: { at: Date.now(), complete: false, checked: 0, defects: [{ cellId: 'site', pos: project.origin, kind: 'unknown', expected: '在现场检查建筑', actual: 'out_of_survey_range' }], functions: {} }, missingMaterials: {}, failures: [] };
-    await adapter.moveTo({ kind: 'near', pos: project.origin, range: 4 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(30000, ctx.deadline - Date.now())), constructionSafe: true });
+    await adapter.moveTo({ kind: 'near', pos: project.origin, range: 4 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(30000, ctx.deadline - Date.now())) });
     checkSession();
   }
   if (project.pendingPlacement) {
@@ -384,7 +384,7 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
         const me = adapter.state().pos;
         if (Math.floor(me.x) === d.pos.x && Math.floor(me.z) === d.pos.z && Math.floor(me.y) - 1 === d.pos.y) continue; // 脚下不挖
         if (Math.hypot(d.pos.x + 0.5 - me.x, d.pos.y + 0.5 - me.y, d.pos.z + 0.5 - me.z) > 4) {
-          await adapter.moveTo({ kind: 'reach_block', pos: d.pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+          await adapter.moveTo({ kind: 'reach_block', pos: d.pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())) });
           checkSession();
         }
         const r = await adapter.dig(d.pos, ctx.signal);
@@ -449,7 +449,7 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     checkSession();
     const s = adapter.state();
     if (placement || Math.hypot(pos.x + 0.5 - s.pos.x, pos.y - s.pos.y, pos.z + 0.5 - s.pos.z) > 3) {
-      const moveOptions = () => ({ signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())), constructionSafe: true });
+      const moveOptions = () => ({ signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())) });
       try { await adapter.moveTo({ kind: placement ? 'place_block' : 'reach_block', pos }, moveOptions()); }
       catch (error) {
         if (isAbort(error) || !placement || blueprint.spec.layout !== 'house' || pos.y < project.origin.y + 2) throw error;
@@ -475,10 +475,10 @@ export async function constructBuilding(ctx: SkillCtx, archive: BuildingArchive,
     if (name === null || HAZARDS.has(name)) return false;
     if (AIR.has(name)) return true;
     if (!PLANTS.has(name) && !(foundation && NATURAL_GROUND.has(name)) && !siteClearable(name) && !owned.has(id)) return false;
-    // Never excavate under the bot; choose a safe standing position through the pathfinder first.
+    // Never excavate under the bot; choose a safe standing position through voxel navigation first.
     let s = adapter.state();
     if (Math.floor(s.pos.x) === pos.x && Math.floor(s.pos.z) === pos.z && Math.floor(s.pos.y) - 1 === pos.y) {
-      await adapter.moveTo({ kind: 'near', pos: { x: pos.x + 2, y: s.pos.y, z: pos.z }, range: 0.5 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+      await adapter.moveTo({ kind: 'near', pos: { x: pos.x + 2, y: s.pos.y, z: pos.z }, range: 0.5 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())) });
       s = adapter.state();
       if (Math.floor(s.pos.x) === pos.x && Math.floor(s.pos.z) === pos.z) return false;
     }

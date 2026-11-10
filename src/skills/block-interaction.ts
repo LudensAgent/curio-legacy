@@ -53,7 +53,7 @@ export const interactBlock: Skill<{ target: string | Vec3Like; item?: string }> 
       const pos = before.pos, expected = before.name;
       if (/^(air|cave_air|void_air)$/.test(expected)) return refused('BAD_ARGS', '目标是空气，不能当作可右键方块');
       if (distance(pos) > 4.4) {
-        await adapter.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now() - 4000)), constructionSafe: true, allowSwimming: false });
+        await adapter.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: Math.max(1, Math.min(12000, ctx.deadline - Date.now() - 4000)), allowSwimming: false });
         await sleep(180, signal);
       }
       check();

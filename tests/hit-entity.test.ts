@@ -48,7 +48,7 @@ test('hit_entity rejects heard, obstructed and still-out-of-reach targets and ca
     if (mode === 'glass') for (const y of [64, 65]) w.setBlock({ x: 1, y, z: 0 }, 'glass');
     if (mode === 'far') {
       w.entities = [{ ...target(), pos: { x: 10.5, y: 64, z: 0.5 }, dist: 10 }];
-      w.moveTo = async (_target, opts: MoveOpts) => { assert.equal(opts.constructionSafe, true); assert.equal(opts.allowSwimming, false); }; // nominal arrival without actual proximity
+      w.moveTo = async (_target, opts: MoveOpts) => { assert.equal(opts.allowSwimming, false); }; // nominal arrival without actual proximity
     }
     const pending = hitEntity.run(ctx, { entity: 41, hits: 8 });
     if (mode === 'cancelled') {

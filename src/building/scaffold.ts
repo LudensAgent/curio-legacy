@@ -39,7 +39,7 @@ export async function erectScaffolding(ctx: SkillCtx, archive: BuildingArchive, 
     if (ctx.adapter.blockAt(pos) !== 'air') throw new Error('SCAFFOLD_OBSTRUCTED');
     // A nearby target can still have its clickable face occluded by the previous
     // stair column. Distance alone is not a legal placement-standing proof.
-    await ctx.adapter.moveTo({ kind: 'place_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())), constructionSafe: true });
+    await ctx.adapter.moveTo({ kind: 'place_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())) });
     check();
     archive.pending(project.id, { kind: 'temporary', pos: cell.pos, name: cell.name });
     const action = await ctx.adapter.placeBlockAt(pos, [cell.name], ctx.signal);
@@ -63,14 +63,14 @@ export async function removeScaffolding(ctx: SkillCtx, archive: BuildingArchive,
     if (name === 'air') { archive.temporary(project.id, block, true); continue; }
     if (name !== block.name) continue;
     const state = ctx.adapter.state();
-    if (Math.hypot(pos.x - state.pos.x, pos.y - state.pos.y, pos.z - state.pos.z) > 4) await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())), constructionSafe: true });
+    if (Math.hypot(pos.x - state.pos.x, pos.y - state.pos.y, pos.z - state.pos.z) > 4) await ctx.adapter.moveTo({ kind: 'reach_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())) });
     check();
     let now = ctx.adapter.state();
     if (Math.floor(now.pos.x) === pos.x && Math.floor(now.pos.z) === pos.z && Math.floor(now.pos.y) - 1 === pos.y) {
       const support = (archive.get(project.id)?.temporaryBlocks ?? []).find((b) => b.pos.y === block.pos.y - 1 && Math.abs(b.pos.x - block.pos.x) + Math.abs(b.pos.z - block.pos.z) === 1 && ctx.adapter.blockAt(rotatePosition(b.pos, project.origin, project.rotation)) === b.name);
       const supportWorld = support ? rotatePosition(support.pos, project.origin, project.rotation) : null;
       const stand = supportWorld ? { x: supportWorld.x + 0.5, y: supportWorld.y + 1, z: supportWorld.z + 0.5 } : rotatePosition({ x: -3, y: 0, z: -project.versions.at(-1)!.spec.height - 2 }, project.origin, project.rotation);
-      await ctx.adapter.moveTo({ kind: 'near', pos: stand, range: 0.5 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())), constructionSafe: true });
+      await ctx.adapter.moveTo({ kind: 'near', pos: stand, range: 0.5 }, { signal: ctx.signal, timeoutMs: Math.max(1, Math.min(15000, ctx.deadline - Date.now())) });
       check(); now = ctx.adapter.state();
       if (Math.floor(now.pos.x) === pos.x && Math.floor(now.pos.z) === pos.z) continue;
     }

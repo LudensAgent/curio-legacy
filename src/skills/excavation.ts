@@ -561,7 +561,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       assertSession(ctx, origin);
       // 下一落点已在挖掘前逐格复核（同一相邻格、身体空间已挖开、支撑已确认）；
       // 用精确连续脚位交给本地身体控制，不把已确认的单步再交给路线搜索。
-      await adapter.moveTo({ kind: 'feet', x: next.x + 0.5, y: next.y, z: next.z + 0.5 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+      await adapter.moveTo({ kind: 'feet', x: next.x + 0.5, y: next.y, z: next.z + 0.5 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())) });
       const landedBy = Math.min(ctx.deadline, Date.now() + 2500);
       let landed: AgentState;
       while (true) {

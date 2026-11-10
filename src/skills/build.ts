@@ -212,7 +212,7 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
       const below = ctx.adapter.blockAt({ ...pos, y: pos.y - 1 });
       if (ctx.adapter.blockAt(pos) !== 'air' || !below || ['air', 'cave_air', 'water', 'lava'].includes(below)) continue;
       try {
-        await ctx.adapter.moveTo({ kind: 'place_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(10000, ctx.deadline - Date.now())), constructionSafe: true });
+        await ctx.adapter.moveTo({ kind: 'place_block', pos }, { signal: ctx.signal, timeoutMs: Math.max(1000, Math.min(10000, ctx.deadline - Date.now())) });
         const r = await ctx.adapter.placeBlockAt(pos, [kind], ctx.signal);
         if (r.ok && ctx.adapter.blockAt(pos) === kind) { rememberStation(ctx, kind, pos); placed.push(kind); break; }
       } catch (e) { if (isAbort(e)) throw e; }
@@ -516,7 +516,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
             await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, Math.min(60000, ctx.deadline - Date.now() - 30000)) });
           } catch (e) {
             if (isAbort(e)) throw e;
-            await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000), allowTerrainChanges: true });
+            await ctx.adapter.moveTo({ kind: 'near', pos: args.at, range: 2 }, { signal: ctx.signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 30000) });
           }
         }
       }

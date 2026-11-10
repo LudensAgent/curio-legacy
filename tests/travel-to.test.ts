@@ -11,16 +11,26 @@ const argsOf = (raw: unknown, adapter = new FakeAdapter()) => {
   return result.args;
 };
 
-test('travel_to 明确拒绝旧施工、方向走廊和后端选项，不静默改委托', () => {
+test('travel_to 只接受公开参数，未知键无论值都拒绝，目标字段也须符合当前形状', () => {
   const adapter = new FakeAdapter();
   for (const option of ['allowDig', 'allowPlace', 'allowTower', 'allowSwim', 'allowHazard', 'sprint']) {
-    assert.equal(travelTo.validate({ to: '10,64,0', [option]: true }, adapter).ok, false, option);
+    for (const value of [true, false]) assert.equal(travelTo.validate({ to: '10,64,0', [option]: value }, adapter).ok, false, `${option}:${value}`);
   }
-  for (const request of [{ to: 'E 150' }, { to: { heading: 'E', distance: 30, corridor: 8 } }, { to: '10,64,0', corridor: 8 }, { to: { x: 10, y: 64, z: 0, corridor: 8 } }, { to: '10,64,0', via: 'direct' }, { to: '10,64,0', tool: 'stone_pickaxe' }]) {
-    assert.equal(travelTo.validate(request, adapter).ok, false);
+  for (const request of [
+    { to: '10,64,0', avoid: [] }, { to: '10,64,0', extra: undefined }, { to: '10,64,0', corridor: 8 },
+    { to: '10,64,0', via: 'direct' }, { to: '10,64,0', tool: 'stone_pickaxe' }, { target: '10,64,0' },
+    { to: { heading: 'E', distance: 30, corridor: 8 } }, { to: { x: 10, y: 64, z: 0, corridor: 8 } },
+    { to: { x: 10, z: 0, landmark: 'base' } }, { to: { landmark: 'base', name: 'x' } }, { to: { death: false } },
+  ]) {
+    assert.equal(travelTo.validate(request, adapter).ok, false, JSON.stringify(request));
   }
   const args = argsOf({ to: '10,64,0', range: 3, sessionId: 'original-session' });
   assert.deepEqual(travelTo.validate(args, adapter), { ok: true, args });
+  for (const raw of [{ to: { landmark: 'base' } }, { to: { portal: 'p1' } }, { to: { death: true } }]) {
+    const once = argsOf(raw);
+    assert.deepEqual(travelTo.validate(once, adapter), { ok: true, args: once }, JSON.stringify(raw));
+  }
+  assert.equal(travelTo.validate({ to: '10,64,0', make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
 
 test('travel_to 只有体素规划：到达已知目标，不发 broad pathfinder 目标', async (t) => {

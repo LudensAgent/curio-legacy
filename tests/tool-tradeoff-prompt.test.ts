@@ -60,14 +60,13 @@ class ToolWorld extends FakeAdapter {
   }
   override async moveTo(target: MoveTarget, options: MoveOpts) {
     throwIfAborted(options.signal);
-    assert.equal(target.kind, 'near');
-    if (target.kind !== 'near') throw new Error('Unexpected movement');
-    assert.equal(options.constructionSafe, true);
-    const feet = { x: Math.floor(target.pos.x), y: target.pos.y, z: Math.floor(target.pos.z) };
+    assert.equal(target.kind, 'feet');
+    if (target.kind !== 'feet') throw new Error('Unexpected movement');
+    const feet = { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z) };
     for (const level of [0, 1]) assert.ok(AIR.has(this.blockAt({ ...feet, y: feet.y + level })), 'both actual body cells must be cleared before movement');
     assert.ok(!AIR.has(this.blockAt({ ...feet, y: feet.y - 1 })), 'a resolved move cannot fabricate a floor');
-    this.moves.push({ ...target.pos });
-    this.pos = { ...target.pos };
+    this.moves.push({ x: target.x, y: target.y, z: target.z });
+    this.pos = { x: target.x, y: target.y, z: target.z };
   }
 }
 

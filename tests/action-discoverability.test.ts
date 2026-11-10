@@ -55,13 +55,14 @@ test('公开目录只说明直接寻路与体素导航，不再宣传旧路优�
   assert.match(moveDetails(['excavate_run']), /travel_to\/explore_toward 只做直接寻路/);
   assert.match(moveDetails(['excavate_run']), /不查询、不优先复用历史路线或路径片段/);
   const travel = moveDetails(['travel_to']);
-  assert.match(travel, /不查询、不优先复用历史路线或路径片段/);
-  assert.match(travel, /需要按已记录体素证据 3D 移动/);
-  assert.doesNotMatch(travel, /via:/);
+  assert.match(travel, /共享 VoxelMap A\*/);
+  assert.match(travel, /委托 navigate_to/);
+  assert.match(travel, /只接受 to\/range\/timeoutMs\/sessionId/);
+  assert.doesNotMatch(travel, /allowDig|allowPlace|allowTower|allowSwim|allowHazard|sprint|\btool\b|\bvia\b/);
   const explore = moveDetails(['explore_toward']);
-  assert.match(explore, /每段始终沿同一条冻结射线推进/);
-  assert.match(explore, /不查询、不优先复用历史路线或路径片段/);
-  assert.match(explore, /明确 NoPath 且原请求授权施工时/);
+  assert.match(explore, /沿你指定的 N\/E\/S\/W 方向按共享 VoxelMap 三维路线推进/);
+  assert.match(explore, /原方向、距离与横向范围冻结/);
+  assert.match(explore, /只接受声明的参数/);
 });
 
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {

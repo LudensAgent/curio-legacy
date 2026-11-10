@@ -164,7 +164,6 @@ test('enclosed door hinges relocate to an actually supported frontal landing and
   let approaches = 0;
   adapter.moveTo = async (goal: any, options) => {
     assert.equal(goal.kind, 'near');
-    assert.equal(options.constructionSafe, true);
     assert.equal(goal.pos.y, target.y);
     bot.entity.position = new Vec3(goal.pos.x, goal.pos.y, goal.pos.z);
     approaches++;

@@ -20,13 +20,16 @@ export const MAX_EXPLORE_DISTANCE = 512;
 /** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；每段后朝该方向扫视，until 在本轮视野看见时停止。距离 16–512 格，不缩短原目标。只执行已确认的 walk/step/drop；未知前沿先做一次有界合法观察，相关证据变化才继续，否则返回边界。不挖放、不下水。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。对角方向、施工/游泳/冲刺选项尚无等价执行能力，明确拒绝。',
-  argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（单次身体窗口最多32步）,"maxLateralDrift"?:16（4-64）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z}}；只用体素证据，不接受 allowDig/allowPlace/allowSwim/allowHazard/sprint:true 或 tool；until 只认当前扫视。',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；每段后朝该方向扫视，until 在本轮视野看见时停止。距离 16–512 格，不缩短原目标。只执行已确认的 walk/step/drop；未知前沿先做一次有界合法观察，相关证据变化才继续，否则返回边界。不挖放、不下水。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
+  argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（单次身体窗口最多32步）,"maxLateralDrift"?:16（4-64）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z}}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/make，未知参数会被拒绝；until 只认当前扫视。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
+    const allowedKeys = new Set(['direction', 'distance', 'until', 'segment', 'maxLateralDrift', 'timeoutMs', 'sessionId', 'origin', 'make']);
+    const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
+    if (unknown.length) return { ok: false, error: `explore_toward 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
     const direction = String(a.direction ?? '').toUpperCase();
     if (!CARDINAL_DIRECTIONS.includes(direction as CardinalDirection)) return { ok: false, error: '当前体素方向推进只支持 N/E/S/W；对角方向需要额外角落净空支持，不会替换成其他方向' };
     if (!Number.isInteger(a.distance) || a.distance < 16 || a.distance > MAX_EXPLORE_DISTANCE) return { ok: false, error: `distance 需要 16–${MAX_EXPLORE_DISTANCE} 的整数；原目标不会被缩短` };
@@ -34,11 +37,6 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (a.segment !== undefined && (!Number.isInteger(a.segment) || a.segment < 16 || a.segment > 48)) return { ok: false, error: 'segment 需要 16–48 的整数' };
     if (a.maxLateralDrift !== undefined && (!Number.isInteger(a.maxLateralDrift) || a.maxLateralDrift < 4 || a.maxLateralDrift > 64)) return { ok: false, error: 'maxLateralDrift 需要 4–64 的整数' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
-    for (const flag of ['allowDig', 'allowPlace', 'allowTower', 'allowSwim', 'allowHazard', 'sprint']) {
-      if (a[flag] !== undefined && typeof a[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
-      if (a[flag] === true) return { ok: false, error: `${flag}:true 在体素方向推进中没有等价能力；施工请显式 mine_cell/place_support/pillar_one，水路用 swim_path，不会静默忽略授权` };
-    }
-    if (a.tool !== undefined || a.via !== undefined) return { ok: false, error: 'tool/via 属于已退役的寻路选项；explore_toward 只使用 VoxelMap，不自动施工' };
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
     const origin = a.origin === undefined ? { ...adapter.state().pos } : obj(a.origin);
     if (![origin.x, origin.y, origin.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'origin 需要 {x,y,z} 有限数字' };
