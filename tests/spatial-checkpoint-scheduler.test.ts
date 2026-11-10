@@ -45,6 +45,10 @@ function persistenceState(overrides: Partial<SpatialPersistenceState> = {}): Spa
     ledgerRevision: 0,
     confirmedLedgerRevision: 0,
     ledgerBaselineCheckpointId: null,
+    factsRevision: 0,
+    confirmedFactsRevision: 0,
+    factsBaselineCheckpointId: null,
+    factsMigration: { version: 1, target: 'semantic-facts-v1', committed: false },
     pendingJournalRecords: 0,
     pendingJournalBytes: 0,
     committedJournalRecords: 0,
@@ -66,6 +70,7 @@ function checkpoint(id: string, revisions = { voxel: 5, fragment: 4, topology: 3
     topologyRevision: revisions.topology,
     journalRevision: 0,
     ledgerRevision: 0,
+    factsRevision: 0,
   };
 }
 
