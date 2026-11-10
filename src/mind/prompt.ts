@@ -12,11 +12,12 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { portalAgeText, travelStore } from '../travel/store.ts';
-import { describeActivity } from './activity.ts';
+import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
+import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
@@ -50,7 +51,7 @@ export interface MindContext {
   runningStep?: { skill: string; args: unknown; source: string; startedAt: number } | null;
   suspended: Activity[];
   /** 提前想好、手上的活做完就接上的下一段（模型自己写的 next，如实回显，不加引导） */
-  next?: { what: string; why?: string } | null;
+  next?: { what: string; why?: string; requires?: Condition } | null;
   lastRecord: ActivityRecord | null;
   noticed: Noticing[];
   changes: string[];
@@ -218,12 +219,13 @@ const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）"},
- "next":{同 activity，可提前写下一段；手上的活成功结束后无条件接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next}}
-手上还有活要接着做就只写 decision:"continue"，不要写 activity；要做新的一段或换做法，写 decision:"new"/"adjust"/"switch"（不要写 continue）。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
+ "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
+activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
+核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
-const DECISIONS = `continue 照常做｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
+const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
@@ -253,7 +255,7 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resol
 
 const ROUTINE_OF_THINKING = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
-2. 看【专注】：在推进清单就 continue。
+2. 看【手上的活】里的 continue_effect：只有当你核对后决定原样执行剩余计划时才 continue（continue 不改变动作）；要改变当下动作，用 adjust/detour/switch 并写出 steps，独白、what、expect、注意到的事不会改变执行。
 3. 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
@@ -311,7 +313,7 @@ ${movesCatalog(28)}`;
 
 /** 瞥一眼的专属说明；放在共用前缀之后，避免改动它时打碎前面的缓存 */
 const GLANCE_GUIDE = `这次只是抬头看一眼，不必把每个细节重新铺开：
-- 先看【此刻】：没什么要紧的、手上的活还顺，就 continue（独白可以很短）。
+- 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust/detour/switch 写出 steps——独白、what、expect、noticed 不会改变执行。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
@@ -810,11 +812,17 @@ function worldKnowledge(ctx: MindContext) {
   };
 }
 
+/** 历史采集回执的提示词写法：数量是当时的实际物品差量，不代表当前背包。 */
+function collectionSnapshot(c: NonNullable<ActivityRecord['collection']>) {
+  return `采集 ${c.items.join('/')} ${c.initial}→${c.final}（目标 ${c.target}${c.targetMet ? '，已达成' : '，未达成'}；实得 +${c.gained}，挖了 ${c.dug} 块${c.lost ? `，${c.lost} 块掉落物没捡到` : ''}）；动作 ${c.skill} ${argsLabel({ skill: c.skill, args: c.args ?? {} })} @ ${new Date(c.at).toISOString()}；历史采集回执，不代表当前背包`;
+}
+
 function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
   return { what: recallText(r.what, memory, dimension, r.at), outcome: r.completion === 'condition' ? 'condition_met' : r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
     ...(r.facing ? { facing: r.facing } : {}),
+    ...(r.collection ? { collection: collectionSnapshot(r.collection) } : {}),
     ...(r.expect ? { i_expected: recallText(r.expect, memory, dimension, r.at) } : {}), ...(r.hypothesis ? { hypothesis: recallText(r.hypothesis, memory, dimension, 0) } : {}) };
 }
 
@@ -864,6 +872,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(ctx.activity?.why ? { activity_reason_source: '当前活动的 why 是先前选择的理由，不等于观测事实；动作反馈和当前观察可用于核对' } : {}),
       ...(ctx.suspended.length ? { will_resume_after: ctx.suspended.map((a) => a.what) } : {}),
       ...(ctx.next ? { queued_next: `已经想好接下来做「${ctx.next.what}」${ctx.next.why ? `（${ctx.next.why}）` : ''}` } : {}),
+      ...(ctx.next?.requires ? { queued_next_requires: `「${ctx.next.what}」开始前会按当时状态验收这个前置条件（未满足或无法确认就不会启动，交回你重新决定）：${JSON.stringify(ctx.next.requires)}` } : {}),
       ...(ctx.designing ? { architect_drawing: ctx.designing.brief.slice(0, 60) } : {}),
       ...(ctx.repeatedFailures?.length ? { repeated_failures: ctx.repeatedFailures } : {}),
       ...(ctx.notes.length ? { last_decision_corrections: ctx.notes } : {}),
@@ -967,6 +976,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
         ...(r.failure.worldId ? { world_id: r.failure.worldId } : {}), ...(r.failure.dim ? { dim: r.failure.dim } : {}),
         ...(r.failure.pos ? { pos: r.failure.pos } : {}) } } : {}),
       ...(Object.keys(r.gained).length ? { gained: r.gained } : {}), ...(Object.keys(r.lost).length ? { used: r.lost } : {}),
+      ...(r.collection ? { collection: collectionSnapshot(r.collection) } : {}),
       summary: historical(r.summary, r.at),
     })),
     experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),

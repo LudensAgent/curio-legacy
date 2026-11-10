@@ -401,6 +401,14 @@ test('gather：蹚过一格深的小水洼不算“下了水”', async () => {
   w.setBlock({ x: 1, y: 64, z: -20 }, 'water'); // 一格深的水洼：脚泡水、头在外面
   const move = w.moveTo.bind(w);
   w.moveTo = async (t: any, o: any) => { if (t.kind === 'reach_block') { w.inWater = true; w.pos = { x: 1.5, y: 64, z: -19.5 }; await move(t, o); w.inWater = false; return; } return move(t, o); };
+  // FakeAdapter 挖矿默认掉方块本身；这里按真实掉落（coal_ore → coal）记，采集回执核对的是实际物品。
+  const dig = w.dig.bind(w);
+  w.dig = async (pos, signal) => {
+    const name = w.blockAt(pos);
+    const r = await dig(pos, signal);
+    if (r.ok && name === 'coal_ore') { w.inv.delete('coal_ore'); w.inv.set('coal', (w.inv.get('coal') ?? 0) + 1); }
+    return r;
+  };
   const ctx = makeCtx(w);
   try {
     const r = await gather.run(ctx, { block: 'coal_ore', count: 1 });

@@ -111,6 +111,97 @@ test('失败回执保留动作发生时的世界/维度与实测时间，不用�
   assert.equal(record.failure?.summary, '按当前授权没找到路线');
 });
 
+test('continue_effect 按正在执行的步骤和剩余 index/repeat 说明继续会做什么', () => {
+  const steps = [
+    { skill: 'gather', args: { block: 'oak_log', count: 4 } },
+    { skill: 'craft', args: { item: 'oak_planks', count: 1 } },
+  ];
+  const running = (skill: string, args: unknown) => ({ skill, args, source: 'llm', startedAt: Date.now() });
+
+  const finalStep = make('砍木头再做木板', steps, { repeat: 2 });
+  finalStep.iteration = 0;
+  finalStep.index = 2; // 两步都已派发，第一步仍在执行
+  const finalEffect = describeActivity(finalStep, state(), undefined, running('craft', { item: 'oak_planks', count: 1 })).continue_effect as Record<string, unknown>;
+  assert.equal(finalEffect.position, 'in_flight_final_step');
+  assert.equal(finalEffect.remaining_steps_after_running, 2, '不含正在执行的终步，但还有一整轮');
+  assert.equal(finalEffect.remaining_rounds, 1);
+  assert.match(String(finalEffect.executes_if_continue), /本轮已无已排后续步骤.*若没有失败\/取消.*还有 1 轮/);
+  assert.equal(finalEffect.done_when_can_stop_early, false);
+
+  const withFollowing = make('砍木头再做木板', steps, { repeat: 2 });
+  withFollowing.index = 1;
+  const followingEffect = describeActivity(withFollowing, state(), undefined, running('gather', { block: 'oak_log', count: 4 })).continue_effect as Record<string, unknown>;
+  assert.equal(followingEffect.position, 'in_flight_with_following_steps');
+  assert.equal(followingEffect.remaining_steps_after_running, 3);
+  assert.match(String(followingEffect.executes_if_continue), /若没有失败\/取消.*本轮剩余 1 步.*还有 1 轮/);
+
+  const between = make('砍木头再做木板', steps, { repeat: 3 });
+  between.index = 1;
+  const betweenEffect = describeActivity(between, state()).continue_effect as Record<string, unknown>;
+  assert.equal(betweenEffect.position, 'between_steps');
+  assert.match(String(betweenEffect.executes_if_continue), /下一步「craft/);
+  assert.equal(betweenEffect.remaining_steps, 5, '本轮剩 1 步 + 后面 2 轮各 2 步');
+  assert.equal(betweenEffect.remaining_rounds, 2);
+
+  const roundEnd = make('砍木头再做木板', steps, { repeat: 2 });
+  roundEnd.iteration = 0;
+  roundEnd.index = 2;
+  const roundEndEffect = describeActivity(roundEnd, state()).continue_effect as Record<string, unknown>;
+  assert.match(String(roundEndEffect.executes_if_continue), /本轮结束，进入下一轮第 1 步/);
+});
+
+test('continue_effect 的后续步骤以 done_when/失败/取消可能提前停止为前提', () => {
+  const a = make('挖到装满', [
+    { skill: 'gather', args: { block: 'stone', count: 8 } },
+    { skill: 'gather', args: { block: 'stone', count: 8 } },
+  ], { repeat: 2, doneWhen: { type: 'inventory_full', free_slots: 0 } });
+  a.index = 1;
+  const effect = describeActivity(a, state()).continue_effect as Record<string, unknown>;
+  assert.equal(effect.done_when_can_stop_early, true);
+  assert.match(String(effect.executes_if_continue), /若收工条件未触发且没有失败\/取消/);
+});
+
+test('采集回执 data.collection 会保留到最近一步的事实里，而不是只留一句模糊成功', () => {
+  const a = make('挖铁', [{ skill: 'gather', args: { block: 'iron_ore', count: 3 } }]);
+  const step = nextStep(a)!;
+  afterStep(a, step, {
+    status: 'succeeded',
+    summary: 'raw_iron 2→3（目标 3，已达成；实得 +1，挖了 1 块 iron_ore）',
+    data: { dug: 1, collection: { block: 'iron_ore', items: ['raw_iron'], initial: 2, target: 3, final: 3, gained: 1, dug: 1, targetMet: true } },
+  }, 10, state());
+  const receipt = a.results.at(-1)?.data?.collection as Record<string, unknown>;
+  assert.equal(receipt.final, 3);
+  assert.equal(receipt.gained, 1);
+  assert.equal(describeActivity(a, state()).last_collection, receipt);
+});
+
+test('活动结束时保留最近一次采集回执快照（含动作与时间），历史值不冒充当前背包', () => {
+  const a = make('挖铁', [{ skill: 'gather', args: { block: 'iron_ore', count: 3 } }]);
+  a.startInventory = {};
+  const at = Date.now() - 1000;
+  a.results.push({ skill: 'gather', args: { block: 'iron_ore', count: 3 }, status: 'succeeded',
+    summary: 'raw_iron 2→3（目标 3，已达成）', at, durationMs: 5, pos: { ...pos },
+    data: { dug: 1, collection: { block: 'iron_ore', items: ['raw_iron'], initial: 2, target: 3, final: 3, gained: 1, dug: 1, targetMet: true } } });
+  const record = recordOf(a, 'done', '采集完成', state([{ name: 'raw_iron', count: 3 }]));
+  assert.deepEqual(record.collection, {
+    block: 'iron_ore', items: ['raw_iron'], initial: 2, target: 3, final: 3, gained: 1, dug: 1, targetMet: true,
+    skill: 'gather', args: { block: 'iron_ore', count: 3 }, at,
+  });
+});
+
+test('collection.dug>0 但顶层 dug=0/gained=0 时，不因历史方块数被记成已取得', () => {
+  const a = make('挖铁', [{ skill: 'gather', args: { block: 'iron_ore', count: 3 } }]);
+  a.startInventory = {};
+  a.results.push({ skill: 'gather', args: { block: 'iron_ore', count: 3 }, status: 'failed', failureCode: 'ERROR',
+    summary: '挖掉了 3 块 iron_ore 但目标物品都没进背包', at: Date.now(), durationMs: 5, pos: { ...pos },
+    data: { dug: 0, lost: 3, collection: { block: 'iron_ore', items: ['raw_iron'], initial: 0, target: 3, final: 0, gained: 0, dug: 3, targetMet: false, lost: 3 } } });
+  const record = recordOf(a, 'stuck', '掉落物都没捡到', state());
+  assert.equal(record.resource?.intent, true);
+  assert.equal(record.resource?.acquired, false, '顶层 dug 沿用产出块数语义，不能拿 collection.dug 当已取得');
+  assert.equal(record.resource?.goalIncomplete, true);
+  assert.equal(record.collection?.dug, 3);
+});
+
 test('实测位置决定探索覆盖：同格观察不能算远处已搜索', () => {
   const local = make('找树砍原木', [{ skill: 'look_around', args: { for: 'log' } }]);
   local.results.push({ skill: 'look_around', args: {}, status: 'failed', failureCode: 'NOT_FOUND', summary: '视野内未见', at: Date.now(), durationMs: 2, pos: { x: 0.8, y: 64, z: 0.5 } });

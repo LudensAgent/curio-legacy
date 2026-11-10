@@ -174,27 +174,50 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
   {
     const { adapter, senses, signal } = ctx;
     let names = adapter.resolveBlockNames(args.block);
+    let drops = new Set(names.flatMap((n) => dropItemsOf(n)));
+    // 采到背包里的目标物：count 模式是这些方块的实际掉落物；for 模式是配方真正缺的原材料。
+    let targetItems = [...drops];
+    let target = args.count;
+    let initial = 0;
+    const held = () => adapter.state().inventory.filter((i) => targetItems.includes(i.name)).reduce((a, i) => a + i.count, 0);
+    const receipt = (dug: number, lost = 0) => {
+      const final = held();
+      return { block: args.block, items: targetItems, initial, target, final, gained: final - initial, dug, targetMet: final >= target,
+        ...(lost ? { lost } : {}) };
+    };
+    const itemsLabel = (items: string[]) => items.length <= 3 ? items.join('/') : `${items.slice(0, 3).join('/')} 等 ${items.length} 种`;
+    const briefly = (r: ReturnType<typeof receipt>) =>
+      `${itemsLabel(r.items)} ${r.initial}→${r.final}（目标 ${r.target}${r.targetMet ? '，已达成' : '，未达成'}；实得 +${r.gained}，挖了 ${r.dug} 块 ${r.block}${r.lost ? `，${r.lost} 块掉落物没捡到` : ''}）`;
     // 先算账：要做的东西还差多少原材料，其中多少要从这种方块里来
     if (args.for) {
       const plan = materialPlan(args.for.item, args.for.count, adapter.state().inventory);
       const mine = plan.raw.filter((r) => names.includes(r.item) || r.from.some((b) => names.includes(b)) || (r.anyWood && names.some((n) => n.endsWith('_log'))));
       const need = mine.reduce((a, r) => a + r.count, 0);
+      initial = held();
       if (!need) {
-        return plan.enough ? ok(`不用采了：${describePlan(plan)}`, { needed: 0, plan })
-          : fail('BAD_ARGS', `做 ${args.for.item}×${args.for.count} 不缺 ${args.block}；${describePlan(plan)}`, { plan });
+        target = initial;
+        const r = receipt(0);
+        return plan.enough ? ok(`不用采了：${describePlan(plan)}；${briefly(r)}`, { needed: 0, plan, collection: r })
+          : fail('BAD_ARGS', `做 ${args.for.item}×${args.for.count} 不缺 ${args.block}；${describePlan(plan)}；${briefly(r)}`, { plan, collection: r });
       }
       args = { ...args, count: Math.min(64, need) };
       // 只采真正缺的那种（做桦木门就砍桦木，别砍橡木）
       const wanted = names.filter((n) => mine.some((r) => r.item === n || r.from.includes(n) || (r.anyWood && n.endsWith('_log'))));
       if (wanted.length) names = wanted;
+      drops = new Set(names.flatMap((n) => dropItemsOf(n)));
+      // 目标物按配方的原材料名计；哪种原木都行时把各种原木合计。
+      targetItems = [...new Set(mine.flatMap((r) => r.anyWood ? [...drops].filter((i) => i.endsWith('_log')) : [r.item]))];
+      if (!targetItems.length) targetItems = [...drops];
+      initial = held();
+      target = initial + args.count;
       ctx.progress(0, `${describePlan(plan)}：先采 ${args.block}×${args.count}`);
     } else {
-      // 不写 for：count 是"要采到多少"，不是"再采多少"——先按方块掉落的物品扣掉背包里已经有的
-      const dropItems = new Set<string>();
-      for (const n of names) for (const item of dropItemsOf(n)) dropItems.add(item);
-      const have = [...dropItems].reduce((sum, item) => sum + adapter.state().inventory.filter((i) => i.name === item).reduce((a, i) => a + i.count, 0), 0);
-      if (have >= args.count) return ok(`背包里已经有 ${have} 个 ${args.block}，不用再采`);
-      args = { ...args, count: args.count - have };
+      // 不写 for：count 是"要采到多少"（背包里这类掉落物的总数），不是"再采多少"
+      initial = held();
+      if (initial >= target) {
+        const r = receipt(0);
+        return ok(`不用再采：${briefly(r)}`, { collection: r });
+      }
     }
     const canDigDown = names.some((n) => UNDERFOOT.has(n));
     const skip = new Set<string>();
@@ -202,6 +225,8 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     if (!unreachable) { unreachable = new Map(); unreachableTargets.set(adapter, unreachable); }
     for (const [k, failed] of unreachable) if (Date.now() - failed.at > UNREACHABLE_TTL_MS) unreachable.delete(k);
     const skippedUnreachable = new Set<string>();
+    // dug 是实际挖掉的方块数；返回的顶层 data.dug 沿用旧语义 = dug - lost（确实计入目标物品的采集块数，
+    // recordOf 用它判断是否 acquired），collection.dug 才是实际挖掉块数。
     let dug = 0;
     let manMade = 0;
     let failsInRow = 0;
@@ -214,14 +239,23 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const parts = [risky.hazard ? `${risky.hazard} 处在出过事的危险区域` : '', risky.wet ? `${risky.wet} 处挨着水/岩浆或要泡在水里挖` : '', risky.deep ? `${risky.deep} 处在脚下很深、旁边有水的地方` : ''].filter(Boolean);
       return parts.length ? `；为安全跳过了 ${parts.join('、')} 的 ${args.block}（换个干燥、露天的地方采）` : '';
     };
+    const progressNow = (note: string) => ctx.progress(Math.min(1, Math.max(0, (held() - initial) / Math.max(1, target - initial))), note);
+    // 移动/挖掘/拾取被取消或报错时保留当前采集回执。productiveDug 沿用顶层 data.dug 的旧语义，
+    // collection.dug 仍是实际挖掉的块数；不把没进背包的当前方块算成已取得。
+    const attachPartial = (error: unknown, productiveDug: number) => {
+      if (!error || typeof error !== 'object') return;
+      const target = error as Error & { partial?: Record<string, unknown> };
+      const previous = target.partial && typeof target.partial === 'object' ? target.partial : {};
+      target.partial = { ...previous, dug: productiveDug, ...(lost ? { lost } : {}), collection: receipt(dug, lost) };
+    };
     ctx.progress(0, `采集 ${args.block} x${args.count}`);
     const ownSkipped = new Set<string>();
-    const drops = new Set(names.flatMap((n) => dropItemsOf(n)));
-    while (dug < args.count) {
+    while (held() < target) {
       const s = adapter.state();
-      if (!s.connected) return fail('NOT_CONNECTED', '连接断开');
+      if (!s.connected) return fail('NOT_CONNECTED', `连接断开；${briefly(receipt(dug, lost))}`, { collection: receipt(dug, lost) });
       if (![...drops].some((item) => canAcceptItem(s.inventory, s.emptySlots, item))) {
-        return dug > 0 ? ok(`背包已满，采集了 ${dug}/${args.count} 个 ${args.block}`) : fail('INVENTORY_FULL', '背包已满');
+        const r = receipt(dug, lost);
+        return held() > initial ? ok(`背包已满，${briefly(r)}`, { dug: dug - lost, collection: r }) : fail('INVENTORY_FULL', `背包已满；${briefly(r)}`, { collection: r });
       }
       senses.refresh();
       const feetY = Math.floor(s.pos.y);
@@ -261,9 +295,12 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       const hits = safeHits;
 
       if (!hits.length) {
-        if (skippedUnreachable.size && !candidates.length) return dug > 0
-          ? ok(`采集了 ${dug}/${args.count}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug, skippedUnreachable: skippedUnreachable.size })
-          : fail('PATH_NOT_FOUND', `${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size });
+        if (skippedUnreachable.size && !candidates.length) {
+          const r = receipt(dug, lost);
+          return held() > initial
+            ? ok(`${briefly(r)}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug: dug - lost, skippedUnreachable: skippedUnreachable.size, collection: r })
+            : fail('PATH_NOT_FOUND', `${briefly(r)}；${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size, collection: r });
+        }
         // 看不见目标：不替它决定往下挖（直上直下挖是最危险的挖法），只说脚下踩着的是什么，挖不挖、往哪挖由它定
         if (canDigDown && !underNote) {
           const under = adapter.blockAt({ x: Math.floor(s.pos.x), y: Math.floor(s.pos.y) - 1, z: Math.floor(s.pos.z) });
@@ -272,7 +309,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         // 眼前没有了就转头找找（砍完一棵树，人会四下看看下一棵在哪），每次采集只找一次
         if (!searched && !s.inWater) {
           searched = true;
-          ctx.progress(dug / args.count, `四下找找还有没有 ${args.block}`);
+          progressNow(`四下找找还有没有 ${args.block}`);
           const r = await lookAround.run(ctx, { seconds: 3, for: args.block });
           if (r.status === 'succeeded') continue;
           fruitlessHere = Number(r.data?.searchedHere ?? 1);
@@ -297,72 +334,93 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           : !unconfirmed.length && isResourceBlock(args.block)
             ? `；附近 256 格内也没记过哪里有 ${args.block}（更远处未查询，不代表其他地点没有）`
             : '';
-        return dug > 0
-          ? ok(`看不到更多 ${args.block}${looked}，采集了 ${dug}/${args.count}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, ...(skipped ? { skippedUnsafe: { ...risky } } : {}) }, manMadeCaveat)
-          : fail('NOT_FOUND', skipped
+        const r = receipt(dug, lost);
+        return held() > initial
+          ? ok(`看不到更多 ${args.block}${looked}，${briefly(r)}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, dug: dug - lost, ...(skipped ? { skippedUnsafe: { ...risky } } : {}), collection: r }, manMadeCaveat)
+          : fail('NOT_FOUND', `未达成：${briefly(r)}；${skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
-            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}${remembered ? '' : repeatSearchNote(args.block, times)}`, {
+            : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}${remembered ? '' : repeatSearchNote(args.block, times)}`}`, {
               searched, searchedHere: times, coverage: { mode: 'seen_or_remembered', knownRadius: 256, unknownBeyond: true },
-              ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}),
+              ...(spots.length ? { remembered: spots.map((o) => o.pos) } : {}), ...(skipped ? { skippedUnsafe: { ...risky } } : {}), collection: r,
             });
       }
       // 记忆里的方块可能已经被砍掉/不在加载范围：这种目标跳过，不能误报成“缺工具”
       const present = hits.filter((h) => adapter.blockAt(h.pos) === h.name);
       for (const h of hits) if (!present.includes(h)) skip.add(key(h.pos));
       if (!present.length) continue;
-      let target = present.find((h) => adapter.canHarvest(h.pos));
-      if (!target) {
+      let pick = present.find((h) => adapter.canHarvest(h.pos));
+      if (!pick) {
         const tool = await ensureToolFor(ctx, present[0].pos);
-        if (!tool.ok) return fail('TOOL_MISSING', tool.message, { block: present[0].name });
-        target = present[0];
+        if (!tool.ok) {
+          const r = receipt(dug, lost);
+          return fail('TOOL_MISSING', `${tool.message}；${briefly(r)}`, { block: present[0].name, collection: r });
+        }
+        pick = present[0];
       }
 
-      const invTotal = () => adapter.state().inventory.reduce((a, i) => a + i.count, 0);
-      const before = invTotal();
-      if (classifyBlock(ctx.memory, s, target.pos, target.name) === 'man-made') manMade++;
+      let before = 0;
+      if (classifyBlock(ctx.memory, s, pick.pos, pick.name) === 'man-made') manMade++;
       try {
-        ctx.progress(dug / args.count, `前往 ${target.name}（${Math.round(target.dist)} 格）`);
-        await moveWithWatchdog(ctx, target.pos, args.dig === true);
-        const r = await adapter.dig(target.pos, signal);
+        progressNow(`前往 ${pick.name}（${Math.round(pick.dist)} 格）`);
+        await moveWithWatchdog(ctx, pick.pos, args.dig === true);
+        // 路上可能已经捡到目标物品（走过掉落物）：先核对目标，再决定还要不要挖这一块。
+        if (held() >= target) { progressNow(`路上已经拿到足够 ${itemsLabel(targetItems)}，不再挖 ${pick.name}`); continue; }
+        before = held();
+        const r = await adapter.dig(pick.pos, signal);
         if (!r.ok) throw new Error(r.reason ?? 'DIG_FAILED');
       } catch (e) {
-        if (isAbort(e)) throw e;
-        skip.add(key(target.pos));
+        if (isAbort(e)) { attachPartial(e, Math.max(0, dug - lost)); throw e; }
+        skip.add(key(pick.pos));
         if (String((e as Error).message).includes('OUT_OF_REACH') || codeFromError(e) === 'PATH_NOT_FOUND' || String((e as Error).message) === 'PATH_NO_PROGRESS') {
           const failedAt = adapter.state();
-          unreachable.set(`${failedAt.worldId}:${failedAt.dim}:${key(target.pos)}`, { at: Date.now(), from: { ...failedAt.pos }, block: target.name });
+          unreachable.set(`${failedAt.worldId}:${failedAt.dim}:${key(pick.pos)}`, { at: Date.now(), from: { ...failedAt.pos }, block: pick.name });
         }
         if ((e as Error).message === 'ENTERED_WATER') {
-          rememberWet(ctx, target.pos);
+          rememberWet(ctx, pick.pos);
           risky.wet++;
           adapter.stopAll();
           const current = adapter.state();
-          return fail('PATH_NOT_FOUND', `前往 ${target.name} 时进入水中，已停止采集；已采 ${dug}/${args.count}，氧气 ${current.oxygen}/20`,
-            { dug, target: target.pos, pos: current.pos, inWater: current.inWater, oxygen: current.oxygen });
+          const r = receipt(dug, lost);
+          return fail('PATH_NOT_FOUND', `前往 ${pick.name} 时进入水中，已停止采集；${briefly(r)}，氧气 ${current.oxygen}/20`,
+            { dug: dug - lost, target: pick.pos, pos: current.pos, inWater: current.inWater, oxygen: current.oxygen, collection: r });
         }
         if (++failsInRow >= 4) {
-          return dug > 0 ? ok(`多次失败后停止，采集了 ${dug}/${args.count}`, { dug }) : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}`);
+          const r = receipt(dug, lost);
+          return held() > initial
+            ? ok(`多次失败后停止，${briefly(r)}`, { dug: dug - lost, collection: r })
+            : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}；${briefly(r)}`, { collection: r });
         }
         continue;
       }
       failsInRow = 0;
       dug++;
-      ctx.progress(dug / args.count, `采集 ${args.block} ${dug}/${args.count}`);
-      await adapter.collectNearbyDrops(signal, 6, 3000);
-      // 捡完再核对：挖掉了但掉落物没进背包（掉进水里、卡在角落）就不算数
-      if (invTotal() <= before) await adapter.collectNearbyDrops(signal, 8, 2500);
-      if (invTotal() <= before) {
-        dug--;
-        ctx.progress(dug / args.count, `${args.block} 的掉落物没捡到`);
-        if (++lost >= 3) return dug > 0
-          ? ok(`采集了 ${dug}/${args.count}；另外挖掉了 ${lost} 块但掉落物没捡到（可能掉进水里或够不着）`, { dug, lost })
-          : fail('ERROR', `挖掉了 ${lost} 块 ${args.block} 但掉落物都没捡到（可能掉进水里或够不着），换个干燥、好走的地方再挖`, { dug, lost });
+      progressNow(`采集 ${args.block}：${briefly(receipt(dug, lost))}`);
+      try {
+        await adapter.collectNearbyDrops(signal, 6, 3000);
+        // 捡完再核对：挖掉了但目标物品没进背包（掉进水里、卡在角落、掉落的是别的物品）就不算数
+        if (held() <= before) await adapter.collectNearbyDrops(signal, 8, 2500);
+      } catch (e) {
+        // 拾取超时/取消不吞掉：保留原错误语义并挂上当前回执。当前块若没把目标物品装进背包，
+        // legacy dug 不把它算成产出；collection 仍如实报告实际挖掉了几块。
+        attachPartial(e, Math.max(0, dug - lost - (held() > before ? 0 : 1)));
+        throw e;
+      }
+      if (held() <= before) {
+        lost++;
+        progressNow(`${args.block} 的目标掉落物没捡到`);
+        if (lost >= 3) {
+          const r = receipt(dug, lost);
+          return held() > initial
+            ? ok(`${briefly(r)}；另有 ${lost} 块挖掉后目标物品没进背包（可能掉进水里或够不着）`, { dug: dug - lost, lost, collection: r })
+            : fail('ERROR', `挖掉了 ${lost} 块 ${args.block} 但目标物品都没进背包（可能掉进水里或够不着），换个干燥、好走的地方再挖；${briefly(r)}`, { dug: dug - lost, lost, collection: r });
+        }
         continue;
       }
     }
     const after = args.for ? materialPlan(args.for.item, args.for.count, adapter.state().inventory) : null;
-    return ok(`采集了 ${dug} 个 ${args.block}${lost ? `（另有 ${lost} 块的掉落物没捡到）` : ''}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}) });
+    const r = receipt(dug, lost);
+    return ok(`${briefly(r)}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug: dug - lost, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}), collection: r });
   }
 }
 

@@ -9,7 +9,7 @@ import { KNOW_HOW_LESSON_KEY_PREFIX, type Hazard, type WorldMemory } from '../me
 import { materialPlan } from '../methods/shortfall.ts';
 import { durationText, realSecondsToTicks, type Perception, type Percept } from '../perception/perception.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
-import { evaluateCondition, observationReady } from '../projects/conditions.ts';
+import { evaluateCondition, observationReady, observeCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
 import { worldPoint } from '../skills/recovery.ts';
 import { causeName } from '../brain/habits.ts';
@@ -31,7 +31,7 @@ import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
-import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, Noticing } from './types.ts';
+import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, NextDraft, Noticing } from './types.ts';
 
 export interface MindDeps {
   adapter: GameAdapter; arbiter: Arbiter; perception: Perception; memory: WorldMemory; bus: EventBus;
@@ -126,7 +126,7 @@ export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
   /** 预排的下一段活；scope/epoch 记录它是按哪个世界、维度、会话和决定批次想的。 */
-  queuedNext: { draft: ActivityDraft; monologue: string; at: number; scope?: { worldId: string; dim: string; sessionId: string }; epoch?: number } | null = null;
+  queuedNext: { draft: NextDraft; monologue: string; at: number; scope?: { worldId: string; dim: string; sessionId: string }; epoch?: number } | null = null;
   paused = false;
   staleDropped = 0;
   readonly attention = new Attention();
@@ -705,6 +705,21 @@ export class Mind {
       if (problem) {
         this.requestThink(`提前想好的「${q.draft.what}」需要重新想：${problem}`, 'deliberate');
         return;
+      }
+      // 显式前置条件：用与上面 stale 检查同一个当前世界/会话状态快照验收；未满足或无法确认就不启动，
+      // 也不自动等待或代拿材料，只把条件与实际值交回模型重新决定。
+      const requires = q.draft.requires;
+      if (requires !== undefined) {
+        const percept = this.safe(() => this.d.perception.snapshot(), undefined);
+        // 当前可见的方块条件用只读的 observeCondition 取实测观测；取不到就如实 unknown，不拿记忆或坐标冒充。
+        const observations = this.safe(() => observeCondition(requires, this.d.perception), []);
+        const evidence = evaluateCondition(requires, current, current.worldId, observations, percept);
+        if (evidence.status !== 'satisfied') {
+          const detail = `前置条件 ${JSON.stringify(requires)}；状态 ${evidence.status}，实际 ${JSON.stringify(evidence.actual)}${evidence.reason ? `；原因：${evidence.reason}` : ''}`;
+          this.d.bus.publish('decision_stale', 'P2', `提前想好的「${q.draft.what}」没有启动：${detail}`, { was: q.draft.what, requires, status: evidence.status, actual: evidence.actual });
+          this.requestThink(`提前想好的「${q.draft.what}」没有启动：${detail}。请按现在的事实重新决定（继续等、先准备条件或改做别的都由你定）`, 'deliberate');
+          return;
+        }
       }
       this.beginActivity(q.draft, q.monologue || `接着做：${q.draft.what}`, 'llm', 'next');
     }
