@@ -90,6 +90,45 @@ test('较大下落只标记落地帧，不标记空中位置；瞬移/游泳/骑
   });
 });
 
+test('下落初期的短下降帧不把空中位置写成到访', async () => {
+  const clock = new FixtureClock(0);
+  await withSharedSession(clock.now, async (session) => {
+    session.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
+    const recorder = new TraversalVisitRecorder(session, clock.now);
+    const step = (x: number, y: number, z: number, extra: Partial<{ onGround: boolean }> = {}) => {
+      clock.set(clock.now() + 1);
+      recorder.observe({ worldId: WORLD, dim: DIM, sessionId: SESSION_1, pos: at(x, y, z), onGround: true, ...extra });
+    };
+    // 第一帧只下降 0.5 格，不能因此把 y=67 当成走到过。
+    step(0.5, 68, 0.5);
+    step(0.5, 67.5, 0.5, { onGround: false });
+    step(0.5, 64, 0.5, { onGround: true });
+    assert.equal(session.session.voxel.historyAt(DIM, 0, 67, 0).traversed, false, '离地短帧不是到访');
+    assert.equal(session.session.voxel.historyAt(DIM, 0, 64, 0).traversed, true, '落地帧才标记');
+  });
+});
+
+test('下落期间瞬移/远距横移落地不标记目的地', async () => {
+  const clock = new FixtureClock(0);
+  await withSharedSession(clock.now, async (session) => {
+    session.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION_1 });
+    const recorder = new TraversalVisitRecorder(session, clock.now);
+    const step = (x: number, y: number, z: number, extra: Partial<{ onGround: boolean }> = {}) => {
+      clock.set(clock.now() + 1);
+      recorder.observe({ worldId: WORLD, dim: DIM, sessionId: SESSION_1, pos: at(x, y, z), onGround: true, ...extra });
+    };
+    step(0.5, 68, 0.5);
+    step(0.5, 66, 0.5, { onGround: false });
+    step(100.5, 64, 0.5, { onGround: true });
+    assert.equal(session.session.voxel.historyAt(DIM, 100, 64, 0).traversed, false, '下落中的远距瞬移不是落点');
+
+    step(100.5, 68, 0.5);
+    step(100.5, 66, 0.5, { onGround: false });
+    step(106.5, 64, 0.5, { onGround: true });
+    assert.equal(session.session.voxel.historyAt(DIM, 106, 64, 0).traversed, false, '下落中的远距横移不是落点');
+  });
+});
+
 test('Perception 的普通移动只写访问位，不新增历史几何', async () => {
   // Perception 内部使用真实 Date.now；共享会话也用同一时钟，避免未来观测时间。
   await withSharedSession(Date.now, async (session) => {

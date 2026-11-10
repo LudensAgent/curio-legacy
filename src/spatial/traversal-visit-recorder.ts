@@ -67,8 +67,11 @@ const cellKey = (dim: string, cell: Vec3Like) => `${dim}:${cell.x},${cell.y},${c
 
 export class TraversalVisitRecorder {
   private last: { worldId: string; dim: string; sessionId: string; pos: Vec3Like } | null = null;
-  /** 正在经历一次较大下落；离地期间不标记，落地帧才标记。 */
-  private falling = false;
+  /**
+   * 离开地面时最后一个已落地观测位置。离地期间不标记；落地帧必须先从
+   * 这个位置检查连续位移，瞬移不能借“落地”绕过。
+   */
+  private airborneFrom: Vec3Like | null = null;
   /** 上一个已标记的格；连续观测停在同一格时不重复写/发回执。 */
   private lastMarkedCell: string | null = null;
   private readonly receiptsLog: TraversalVisitReceipt[] = [];
@@ -88,36 +91,45 @@ export class TraversalVisitRecorder {
     if (previous === null) {
       // 起始站位本身不算一次“走到”；等下一次确认位移再标记落点。
       this.last = { worldId, dim, sessionId, pos: { ...pos } };
+      if (observation.onGround === false) this.airborneFrom = { ...pos };
       return;
     }
     const sameScope = previous.worldId === worldId && previous.dim === dim && previous.sessionId === sessionId;
     // 游泳、岩浆、骑乘或换作用域都不是普通步行；结束当前段，不携带旧段位置。
     if (!sameScope || observation.inWater || observation.inLava || observation.riding) {
-      this.falling = false;
+      this.airborneFrom = null;
       this.lastMarkedCell = null;
       this.last = { worldId, dim, sessionId, pos: { ...pos } };
       return;
     }
-    if (observation.onGround === undefined) this.falling = false;
-    const moved = d3(previous.pos, pos);
-    if (moved === 0) return;
-    const horizontal = Math.hypot(pos.x - previous.pos.x, pos.z - previous.pos.z);
-    const dropping = observation.onGround !== undefined
-      && previous.pos.y - pos.y > 2 && horizontal <= FALL_HORIZONTAL && moved <= TELEPORT;
-    if (this.falling || dropping) {
-      // 空中位置不是到访；只有落地帧才标记落点。
-      if (observation.onGround === true) {
-        this.falling = false;
-        this.mark(dim, pos);
-      } else {
-        this.falling = true;
-      }
+    if (observation.onGround === undefined) {
+      // 不知道是否着地时不能推断下落；按普通步行口径处理，并结束此前离地状态。
+      this.airborneFrom = null;
+    } else if (observation.onGround === false) {
+      // 离地期间的位置不是到访；记住最后一个已落地位置，落地帧再检查连续性。
+      this.airborneFrom ??= { ...previous.pos };
       this.last = { worldId, dim, sessionId, pos: { ...pos } };
       return;
+    } else if (this.airborneFrom !== null) {
+      // 落地帧：先从最后一个已落地位置检查位移是否连续，再决定是否标记。
+      const from = this.airborneFrom;
+      this.airborneFrom = null;
+      this.last = { worldId, dim, sessionId, pos: { ...pos } };
+      const moved = d3(from, pos);
+      const horizontal = Math.hypot(pos.x - from.x, pos.z - from.z);
+      if (moved > TELEPORT || horizontal > FALL_HORIZONTAL) {
+        // 下落期间发生瞬移/远距横移：不能把目的地当作这次下落的落点。
+        this.lastMarkedCell = null;
+        return;
+      }
+      const fell = from.y - pos.y > 2 && horizontal <= FALL_HORIZONTAL;
+      if (fell || observedStep(from, pos)) this.mark(dim, pos);
+      return;
     }
+    const moved = d3(previous.pos, pos);
+    if (moved === 0) return;
     if (moved > TELEPORT || !observedStep(previous.pos, pos)) {
       // 瞬移或相邻观测之间的位移超出步行口径；不插值、不标记中间格。
-      this.falling = false;
       this.lastMarkedCell = null;
       this.last = { worldId, dim, sessionId, pos: { ...pos } };
       return;
