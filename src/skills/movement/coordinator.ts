@@ -1003,7 +1003,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     })();
     const start = { x: Math.floor(here.x), y: Math.floor(here.y + 0.05), z: Math.floor(here.z) };
     const steps = await planMakeWay(voxel, scope.dim, start, target, makeWay, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }));
-    if (steps === null) break;
+    if (steps === null) {
+      // 说清试过开路、用了哪些授权、缺哪种手段：是否补授权由调用方决定。
+      const granted = [makeWay.dig === undefined ? null : 'dig', makeWay.place === undefined ? null : `place(${makeWay.place.item})`].filter((x): x is string => x !== null);
+      const missing = [makeWay.dig === undefined ? 'dig（挖开挡路格）' : null, makeWay.place === undefined ? 'place（补脚下支撑/原地垫高）' : null].filter((x): x is string => x !== null);
+      stop = stopOf(stop.reason, `${stop.detail}；试过开路：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}`);
+      break;
+    }
     const leg = await runMakeWay(ctx, steps, makeWay, makeWayEdits, deadline, (cell) => {
       const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
       return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';

@@ -618,6 +618,13 @@ test('开路：普通路线被已知的墙堵死时，授权 dig 才挖开挡路
       assert.ok(Math.floor(adapter.pos.x) < 6, '没授权就不挖、不穿墙');
       assert.ok(!adapter.actions.some((a) => a.startsWith('dig:')));
       assert.match(result.summary, /本次没有授权 dig\/place，没有挖也没有放/);
+      // 只授权 place（这面墙要挖）：回执写明试过开路、缺 dig。
+      clearMovementSessions();
+      const placeOnly = travelTo.validate({ to: { x: 12, y: 64, z: 0 }, range: 1, place: 'cobblestone' }, adapter);
+      assert.ok(placeOnly.ok);
+      const second = await travelTo.run(ctx, placeOnly.args);
+      assert.equal(second.status, 'failed');
+      assert.match(second.summary, /试过开路：已授权 place\(cobblestone\)，未授权 dig/);
     } else {
       assert.equal(result.status, 'succeeded', result.summary);
       assert.ok(adapter.pos.x >= 11, `挖穿墙走进目标范围（实测 x=${adapter.pos.x}）`);

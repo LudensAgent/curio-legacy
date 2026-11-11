@@ -99,3 +99,19 @@ test('坑底长着树苗：同时授权 dig 时先打掉树苗再垫高；只授
   const placeOnly = await planMakeWay(w.map, D, { x: 0, y: 62, z: 0 }, { x: 3.5, y: 64, z: 0.5 }, { place: { item: 'cobblestone' }, maxEdits: 16 }, any);
   assert.ok(placeOnly === null || placeOnly.every((s) => !(s.kind === 'pillar' && s.to.y === 63 && s.to.x === 0 && s.to.z === 0)), '树苗占着的格放不进方块');
 });
+
+test('桥头：前方是缺口、缺口上方一格有方块（高出两格）——授权 place 时原地垫高一格再迈上去；只授权 dig 时没有路线', async () => {
+  const w = world();
+  // 桥：z=0 的 x=0..3，桥面 y=68（脚在 69）；x=4 一列 y=68、69 空，y=70 是下界岩（站上去脚在 71）；四周下方是空的。
+  for (let x = -1; x <= 6; x++) for (let z = -1; z <= 1; z++) for (let y = 60; y <= 74; y++) {
+    const bridge = z === 0 && x >= 0 && x <= 3 && y === 68;
+    const ledge = x >= 4 && y === 70;
+    w.put(x, y, z, bridge || ledge ? 'netherrack' : 'air');
+  }
+  const target = { x: 6.5, y: 71, z: 0.5 };
+  const placed = await planMakeWay(w.map, D, { x: 3, y: 69, z: 0 }, target, { place: { item: 'netherrack' }, maxEdits: 16 }, any);
+  assert.ok(placed !== null);
+  assert.equal(placed[0]!.kind, 'pillar', JSON.stringify(placed));
+  assert.deepEqual(placed[1]!.to, { x: 4, y: 71, z: 0 }, '垫高后迈上缺口上方那块');
+  assert.equal(await planMakeWay(w.map, D, { x: 3, y: 69, z: 0 }, target, { dig: {}, maxEdits: 16 }, any), null, '只能挖时上不去');
+});
