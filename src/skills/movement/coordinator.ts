@@ -1,6 +1,6 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../../adapter/types.ts';
-import { shortId } from '../../util.ts';
+import { shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
@@ -98,8 +98,10 @@ export type MakeWayEdit = { kind: 'dig' | 'place'; pos: Vec3Like; name: string }
 export type MakeWayLegReceipt = { from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string };
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
-/** 一次调用最多开路几段；每段仍受改动次数与期限约束。 */
-const MAX_MAKE_WAY_LEGS = 16;
+/** 一次调用最多开路几段（每段只做到第一处改动）；总改动数另受 maxEdits 约束。 */
+const MAX_MAKE_WAY_LEGS = 64;
+/** 所需区段暂时加载不了（存档正在写盘等）时，等这么久再重试，最多这么多次。 */
+const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
 
 /**
  * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell，只用授权工具或当前手持），再补支撑（place_support）
@@ -124,7 +126,7 @@ async function runMakeWay(
     for (const cell of step.dig) {
       if (edits.length >= opts.maxEdits) { failure = `开路改动已达上限 ${opts.maxEdits} 次`; break outer; }
       const name = nameAt(cell);
-      // 规划时已用体素确认六个邻格都有记录且不是液体，邻格未在当前视野里看清不再拦。
+      // 规划时已排除已记录的液体邻格；墙后看不见的邻格是授权 dig 承担的风险，不再按“当前视野没看清”拦。
       failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig?.tool === undefined ? {} : { tool: opts.dig.tool }) }) ?? undefined;
       if (failure !== undefined) break outer;
       edits.push({ kind: 'dig', pos: { ...cell }, name });
@@ -145,6 +147,8 @@ async function runMakeWay(
       if (failure !== undefined) break;
     }
     executed++;
+    // 做完第一处改动就交回：挖开后视觉会看到新露出的格（可能是液体或空腔），后面按新证据重新规划。
+    if (step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') break;
   }
   return { from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed, ...(failure === undefined ? {} : { failure }) };
 }
@@ -407,6 +411,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     const deviations = new Map<string, number>();
     const refusedEdges = new Map<string, number>();
     const triedFrontiers = new Set<string>();
+    let residencyRetries = 0;
     let swimPending = false;
     // 委托推进量：方向委托按冻结轴线的前进，到点委托按到目标的水平距离缩短；横向授权仍是硬限制。
     const gainFrom = (from: Vec3Like) => (p: Vec3Like) => {
@@ -717,8 +722,17 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'residency_not_ready') {
-        // 所需页面没有加载/驻留，不是“已观测阻挡”或“已存几何无路”；
-        // 原样保留 unavailableSections，后续由 Agent 决定重试/换目标/先观察。
+        // 所需页面暂时没加载/驻留（常见是存档正在写盘、加载排队）：这是存储侧的短暂忙，不是地形结论，
+        // 等一会儿从实测位置重试；重试用完仍不行才停下，原样保留 unavailableSections。
+        if (residencyRetries < MAX_RESIDENCY_RETRIES && Date.now() + RESIDENCY_RETRY_MS < deadline) {
+          residencyRetries++;
+          // 存储忙不是“没走出一步”的身体事实：不计入无进展段与无位移搜索。
+          session.progress.stagnationSegments = Math.max(0, session.progress.stagnationSegments - 1);
+          session.counters.idleSearches = Math.max(0, session.counters.idleSearches - segment.searches);
+          await sleep(RESIDENCY_RETRY_MS, ctx.signal);
+          session.phase = 'replanning';
+          continue;
+        }
         stop = stopOf('RESIDENCY_NOT_READY', segment.detail ?? '导航所需的 Section 未能加载/驻留；没有执行未复验的动作');
         break;
       }
