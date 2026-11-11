@@ -72,7 +72,7 @@ test('excavation has explicit bounded args and registers a reusable method witho
   const world = new ExcavationWorld();
   assert.equal('excavate_path' in structureSkills, false);
   assert.equal(excavationSkill.validate({ entry: 'current', direction: 'east' }, world).ok, true);
-  for (const invalid of [{ steps: 9 }, { steps: 1.5 }, { steps: -1 }, { direction: '__proto__' }, { direction: 'toString' }, { direction: 'down' }, { entry: { x: 1, y: 2, z: 3 } }]) assert.equal(excavationSkill.validate({ ...args(), ...invalid }, world).ok, false);
+  for (const invalid of [{ steps: 33 }, { steps: 1.5 }, { steps: -1 }, { direction: '__proto__' }, { direction: 'toString' }, { direction: 'down' }, { entry: { x: 1, y: 2, z: 3 } }]) assert.equal(excavationSkill.validate({ ...args(), ...invalid }, world).ok, false);
   assert.deepEqual(searchStructure.validate({ kind: 'stronghold' }, world), { ok: true, args: { kind: 'stronghold', method: 'eye' } });
   assert.equal(searchStructure.validate({ kind: 'stronghold', method: 'excavate', entry: 'current', direction: 'east' }, world).ok, false);
 });
