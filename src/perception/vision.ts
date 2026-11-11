@@ -291,11 +291,16 @@ export class Vision {
   openness = { left: 0, center: 0, right: 0 };
   lastSweepAt = 0;
   private known = new Map<string, Known>();
-  private perName = new Map<string, number>();
+  /**
+   * 同名方块按最近看见排序（Map 插入序：再看见就挪到队尾），队首就是最久没看见的。
+   * 名额满时淘汰队首、过期时从队首清，都不必扫一遍全部记忆（下界满眼 netherrack 时每个新格都要淘汰一次）。
+   */
+  private byName = new Map<string, Map<string, Known>>();
+  private lastExpiryAt = 0;
   private lastScanAt = 0;
   private scope = '';
   private session = '';
-  private scopes = new Map<string, { known: Map<string, Known>; perName: Map<string, number> }>();
+  private scopes = new Map<string, { known: Map<string, Known>; byName: Map<string, Map<string, Known>> }>();
 
   /** 上一份已可信开始的作用域（world/dim/session）；未就绪时清空，避免用旧边界接纳新证据。 */
   private spatialScope: string | null = null;
@@ -323,16 +328,25 @@ export class Vision {
       this.lastSweepAt = 0;
       this.fed.clear();
       if (scope !== this.scope) {
-        this.scopes.set(this.scope, { known: this.known, perName: this.perName });
+        this.scopes.set(this.scope, { known: this.known, byName: this.byName });
         const saved = this.scopes.get(scope);
         this.known = saved?.known ?? new Map();
-        this.perName = saved?.perName ?? new Map();
+        this.byName = saved?.byName ?? new Map();
         this.scope = scope;
       }
       this.session = state.sessionId;
     }
+    // 过期清理每秒最多一次，且只从各名字队首清到第一条未过期的为止（队列按最近看见排序）。
     const now = Date.now();
-    for (const [key, block] of this.known) if (now - block.lastSeen > RESOURCE_MEMORY_TTL_MS) this.forget(key);
+    if (now - this.lastExpiryAt >= 1000) {
+      this.lastExpiryAt = now;
+      for (const lru of this.byName.values()) {
+        for (const [key, block] of lru) {
+          if (now - block.lastSeen <= RESOURCE_MEMORY_TTL_MS) break;
+          this.forget(key);
+        }
+      }
+    }
     return state;
   }
 
@@ -630,32 +644,34 @@ export class Vision {
   }
 
   private remember(k: string, name: string, pos: Vec3Like, now: number) {
+    let lru = this.byName.get(name);
+    if (lru === undefined) { lru = new Map(); this.byName.set(name, lru); }
     const old = this.known.get(k);
     if (old) {
-      if (old.name !== name) {
-        this.perName.set(old.name, (this.perName.get(old.name) ?? 1) - 1);
-        this.perName.set(name, (this.perName.get(name) ?? 0) + 1);
-      }
+      // 再看见：挪到这个名字队尾（名字变了就换一条队列）
+      this.byName.get(old.name)?.delete(k);
       old.name = name;
       old.lastSeen = now;
+      lru.set(k, old);
       return;
     }
     const cap = GROUND.has(name) ? 300 : 600;
-    const n = this.perName.get(name) ?? 0;
-    if (n >= cap) {
-      // 淘汰同名里最久没看到的
-      let oldestK = '', oldestT = Infinity;
-      for (const [kk, v] of this.known) if (v.name === name && v.lastSeen < oldestT) { oldestT = v.lastSeen; oldestK = kk; }
-      if (oldestK) this.known.delete(oldestK);
-    } else this.perName.set(name, n + 1);
-    this.known.set(k, { name, pos, lastSeen: now });
+    if (lru.size >= cap) {
+      // 淘汰同名里最久没看到的：队首
+      const oldest = lru.keys().next().value!;
+      lru.delete(oldest);
+      this.known.delete(oldest);
+    }
+    const entry = { name, pos, lastSeen: now };
+    this.known.set(k, entry);
+    lru.set(k, entry);
   }
 
   private forget(k: string) {
     const v = this.known.get(k);
     if (!v) return;
     this.known.delete(k);
-    this.perName.set(v.name, Math.max(0, (this.perName.get(v.name) ?? 1) - 1));
+    this.byName.get(v.name)?.delete(k);
   }
 
   // ------------------------------------------------------------ 查询（给技能、反射层、感知摘要用）
