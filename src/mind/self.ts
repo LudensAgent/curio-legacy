@@ -567,6 +567,31 @@ export class SelfModel {
   }
   diary(n = 5) { return this.data.diary.slice(-n); }
 
+  // ---------------------------------------------------------------- 控制台人工清理
+  /** 控制台列出全部窍门与日记（不截断），供操作者挑出要删的条目。 */
+  notesForReview() {
+    return {
+      knowHow: this.data.knowHow.map((k) => ({ id: k.id, text: k.text, kind: k.kind ?? null, source: k.source, wins: k.wins, losses: k.losses, unverified: k.unverified === true, createdAt: k.createdAt, updatedAt: k.updatedAt })),
+      diary: this.data.diary.map((d) => ({ at: d.at, text: d.text, dim: d.dim })),
+    };
+  }
+
+  /** 控制台人工删除窍门（按 id）；不改其余记忆。返回被删掉的条目。 */
+  forgetKnowHow(ids: readonly string[]) {
+    const drop = new Set(ids);
+    const removed = this.data.knowHow.filter((k) => drop.has(k.id));
+    if (removed.length) { this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); this.touch(); }
+    return removed.map((k) => ({ id: k.id, text: k.text }));
+  }
+
+  /** 控制台人工删除日记（按写下时间 at）；不改其余记忆。返回被删掉的条目。 */
+  forgetDiary(ats: readonly number[]) {
+    const drop = new Set(ats);
+    const removed = this.data.diary.filter((d) => drop.has(d.at));
+    if (removed.length) { this.data.diary = this.data.diary.filter((d) => !drop.has(d.at)); this.touch(); }
+    return removed.map((d) => ({ at: d.at, text: d.text }));
+  }
+
   // ---------------------------------------------------------------- 喜好
   like(text: string) {
     const t = text.trim().slice(0, 60);

@@ -545,6 +545,20 @@
         <div class="card"><h2>情绪</h2><div class="body"><div id="mindMood"></div><div class="row" style="margin-top:8px"><span>擅长</span><span class="mono" id="mindGoodAt">-</span></div><div class="row"><span>苦手</span><span class="mono" id="mindStruggle">-</span></div></div></div>
         <div class="card"><h2>窍门</h2><ul class="list body" id="mindKnowHow"></ul></div>
         <div class="card"><h2>日记 · 实验</h2><div class="body"><ul class="list" id="mindDiary"></ul><div class="sub">实验</div><ul class="list" id="mindExperiments"></ul></div></div>
+        <div class="card"><div class="body">
+          <details id="notesAdmin">
+            <summary>清理窍门 / 日记（直接改运行中的心智，约 5 秒内写回 mind.json；删除不可恢复）</summary>
+            <div class="row" style="gap:6px;margin:6px 0">
+              <input id="notesAdminSearch" placeholder="按内容或 id 筛选，例如 explore_toward / k_34q6qi" style="flex:1">
+              <button id="notesAdminRefresh" type="button">刷新</button>
+            </div>
+            <div id="notesAdminResult" class="skill-curate-result dim" role="status" hidden></div>
+            <div class="sub">窍门 <button id="knowHowDeleteSelected" type="button">删除勾选的窍门</button></div>
+            <table><thead><tr><th><input type="checkbox" id="knowHowSelectAll" title="全选当前筛选结果"></th><th>id</th><th>内容</th><th>来源 · 成/败</th><th>操作</th></tr></thead><tbody id="knowHowAdminRows"></tbody></table>
+            <div class="sub">日记 <button id="diaryDeleteSelected" type="button">删除勾选的日记</button></div>
+            <table><thead><tr><th><input type="checkbox" id="diarySelectAll" title="全选当前筛选结果"></th><th>时间</th><th>内容</th><th>操作</th></tr></thead><tbody id="diaryAdminRows"></tbody></table>
+          </details>
+        </div></div>
         <div class="card"><h2>权衡 <span class="r dim">精确库存 · 贪心/奢侈</span></h2><div class="body"><div id="mindStock"></div><div class="sub">贪心 / 抠门（时间 ↔ 稀缺材料）</div><div id="mindTrade"></div></div></div>
         <div class="card"><h2>消耗品预算 <span class="r dim">存量 · 覆盖 · 缺口</span></h2><div class="body"><ul class="list" id="mindSupply"></ul></div></div>
       </div>
@@ -1225,6 +1239,59 @@ async function clearAllSkills() {
     result.className = 'skill-curate-result error';
   }
 }
+// ---------------------------------------------------------------- 清理窍门 / 日记
+let notesAdmin = { knowHow: [], diary: [] };
+const notesMatch = (text) => { const q = $('notesAdminSearch').value.trim().toLowerCase(); return !q || text.toLowerCase().includes(q); };
+function renderNotesAdmin() {
+  const kh = notesAdmin.knowHow.filter((k) => notesMatch(`${k.id} ${k.text}`));
+  $('knowHowAdminRows').innerHTML = kh.length ? kh.map((k) => `<tr><td><input type="checkbox" data-kh="${esc(k.id)}"></td><td class="mono">${esc(k.id)}</td><td>${esc(k.text)}</td>`
+    + `<td class="dim">${esc(k.source)}${k.unverified ? ' · 未验证' : ''} · ${k.wins}/${k.losses}</td><td><button data-forget-kh="${esc(k.id)}">删除</button></td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">没有匹配的窍门</td></tr>';
+  const dy = notesAdmin.diary.filter((d) => notesMatch(d.text)).slice().reverse();
+  $('diaryAdminRows').innerHTML = dy.length ? dy.map((d) => `<tr><td><input type="checkbox" data-dy="${d.at}"></td><td class="dim">${esc(new Date(d.at).toLocaleString())}</td><td>${esc(d.text)}</td>`
+    + `<td><button data-forget-dy="${d.at}">删除</button></td></tr>`).join('')
+    : '<tr><td colspan="4" class="empty">没有匹配的日记</td></tr>';
+  $('knowHowSelectAll').checked = false; $('diarySelectAll').checked = false;
+}
+function notesResult(text, error = false) {
+  const result = $('notesAdminResult');
+  result.hidden = false;
+  result.className = 'skill-curate-result' + (error ? ' error' : '');
+  result.textContent = text;
+}
+async function loadNotesAdmin() {
+  try {
+    const response = await fetch('/api/mind/notes');
+    const r = await response.json();
+    if (!response.ok) return notesResult(r.error || '读取失败', true);
+    notesAdmin = r;
+    renderNotesAdmin();
+    $('notesAdminResult').hidden = true;
+  } catch (error) { notesResult(`读取窍门与日记失败：${error.message}`, true); }
+}
+async function forgetNotes(kind, ids) {
+  if (!ids.length) return notesResult('没有勾选任何条目', true);
+  const zh = kind === 'knowHow' ? '窍门' : '日记';
+  if (!confirm(`要删除 ${ids.length} 条${zh}吗？删除不可恢复。`)) return;
+  notesResult(`正在删除 ${ids.length} 条${zh}…`);
+  try {
+    const response = await fetch('/api/mind/notes/forget', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind, ids }) });
+    const r = await response.json();
+    if (!r.ok) return notesResult(r.error || '删除失败', true);
+    notesResult(`已删除 ${r.removed.length} 条${zh}`);
+    await loadNotesAdmin();
+    notesResult(`已删除 ${r.removed.length} 条${zh}`);
+  } catch (error) { notesResult(`删除失败：${error.message}`, true); }
+}
+$('notesAdmin').addEventListener('toggle', () => { if ($('notesAdmin').open) loadNotesAdmin(); });
+$('notesAdminRefresh').addEventListener('click', loadNotesAdmin);
+$('notesAdminSearch').addEventListener('input', renderNotesAdmin);
+$('knowHowSelectAll').addEventListener('change', (e) => { for (const box of $('knowHowAdminRows').querySelectorAll('input[data-kh]')) box.checked = e.target.checked; });
+$('diarySelectAll').addEventListener('change', (e) => { for (const box of $('diaryAdminRows').querySelectorAll('input[data-dy]')) box.checked = e.target.checked; });
+$('knowHowDeleteSelected').addEventListener('click', () => forgetNotes('knowHow', [...$('knowHowAdminRows').querySelectorAll('input[data-kh]:checked')].map((box) => box.dataset.kh)));
+$('diaryDeleteSelected').addEventListener('click', () => forgetNotes('diary', [...$('diaryAdminRows').querySelectorAll('input[data-dy]:checked')].map((box) => Number(box.dataset.dy))));
+$('knowHowAdminRows').addEventListener('click', (e) => { const btn = e.target.closest('button[data-forget-kh]'); if (btn) forgetNotes('knowHow', [btn.dataset.forgetKh]); });
+$('diaryAdminRows').addEventListener('click', (e) => { const btn = e.target.closest('button[data-forget-dy]'); if (btn) forgetNotes('diary', [Number(btn.dataset.forgetDy)]); });
 $('skillAdminClear').addEventListener('click', clearAllSkills);
 $('skillAdminRefresh').addEventListener('click', loadSkillAdmin);
 $('skillAdminSearch').addEventListener('input', renderSkillAdmin);

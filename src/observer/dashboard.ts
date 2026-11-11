@@ -53,6 +53,10 @@ export interface DashboardHandlers {
   clearSkills?(): Promise<{ ok: boolean; error?: string; cleared?: number }>;
   /** 从记忆里移除一个地点（含基地）；只动记忆，不改世界里的方块 */
   forgetPlace?(id: string): { ok: boolean; error?: string; place?: { id: string; kind: string; label: string; dim: string; pos: { x: number; y: number; z: number } } };
+  /** 列出全部窍门与日记，供控制台人工清理 */
+  listMindNotes?(): { knowHow: { id: string; text: string; kind: string | null; source: string; wins: number; losses: number; unverified: boolean; createdAt: number; updatedAt: number }[]; diary: { at: number; text: string; dim: string }[] };
+  /** 人工删除窍门（按 id）或日记（按写下时间 at）；作用到运行中的心智并随定时保存写回 mind.json */
+  forgetMindNotes?(kind: 'knowHow' | 'diary', ids: string[] | number[]): { ok: boolean; error?: string; removed?: { id?: string; at?: number; text: string }[] };
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
   /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
@@ -223,6 +227,10 @@ export function startDashboard(
       if (!h.listSkills) return send(res, 404, '{"error":"not supported"}');
       return send(res, 200, JSON.stringify(h.listSkills()));
     }
+    if (req.method === 'GET' && p === '/api/mind/notes') {
+      if (!h.listMindNotes) return send(res, 404, '{"ok":false,"error":"当前运行不支持清理窍门与日记"}');
+      return send(res, 200, JSON.stringify(h.listMindNotes()));
+    }
     if (req.method === 'GET' && p === '/api/items') {
       if (!h.listItems) return send(res, 404, '{"error":"not supported"}');
       return send(res, 200, JSON.stringify({ items: h.listItems() }));
@@ -265,6 +273,25 @@ export function startDashboard(
         if (!id) return send(res, 400, '{"ok":false,"error":"id 不能为空"}');
         const r = h.forgetPlace(id);
         return send(res, r.ok ? 200 : 400, JSON.stringify(r));
+      }
+      if (p === '/api/mind/notes/forget') {
+        if (!h.forgetMindNotes) return send(res, 404, '{"ok":false,"error":"当前运行不支持清理窍门与日记"}');
+        const body = await readBody(req);
+        const kind = body?.kind;
+        const ids: unknown[] = Array.isArray(body?.ids) ? body.ids : [];
+        if (kind === 'knowHow') {
+          const names = ids.filter((id): id is string => typeof id === 'string' && id.trim() !== '');
+          if (!names.length) return send(res, 400, '{"ok":false,"error":"ids 需要非空的窍门 id 列表"}');
+          const r = h.forgetMindNotes('knowHow', names);
+          return send(res, r.ok ? 200 : 400, JSON.stringify(r));
+        }
+        if (kind === 'diary') {
+          const ats = ids.filter((id): id is number => Number.isSafeInteger(id));
+          if (!ats.length) return send(res, 400, '{"ok":false,"error":"ids 需要非空的日记写下时间（at）列表"}');
+          const r = h.forgetMindNotes('diary', ats);
+          return send(res, r.ok ? 200 : 400, JSON.stringify(r));
+        }
+        return send(res, 400, '{"ok":false,"error":"kind 只能是 knowHow 或 diary"}');
       }
       if (p === '/api/skills/clear') {
         if (!h.clearSkills) return send(res, 404, '{"ok":false,"error":"当前运行不支持清除所有技能"}');

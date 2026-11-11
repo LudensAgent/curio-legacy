@@ -812,6 +812,13 @@ const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, b
     catch (e) { return { ok: false, error: `删除文件失败：${(e as Error).message}` }; }
     return { ok: true };
   },
+  listMindNotes: () => selfModel.notesForReview(),
+  forgetMindNotes: (kind, ids) => {
+    const removed = kind === 'knowHow' ? selfModel.forgetKnowHow(ids as string[]) : selfModel.forgetDiary(ids as number[]);
+    if (!removed.length) return { ok: false, error: '没有匹配的条目（可能已经删了）' };
+    bus.publish('operator_edit', 'P3', `控制台删除了 ${removed.length} 条${kind === 'knowHow' ? '窍门' : '日记'}：${removed.map((r) => r.text.slice(0, 30)).join('；')}`, { kind, removed });
+    return { ok: true, removed };
+  },
   forgetPlace: (id) => {
     const removed = memory.forgetLandmark(id);
     if (!removed) return { ok: false, error: '记忆里没有这个地点（可能已经删了）' };
