@@ -138,8 +138,14 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
       // 脚高接近整数：支撑是下面那格；分数脚高（半砖、雪层）：支撑就在脚所在那格。
       const supportY = Math.abs(edge.to.y - Math.round(edge.to.y)) <= 0.05 ? Math.round(edge.to.y) - 1 : Math.floor(edge.to.y);
       const cell = read.cell(x, supportY, z);
-      if (cell.kind !== 'recorded' || supportTop(cell.state.name.replace(/^minecraft:/, ''), cell.state.properties) === null) {
-        return { allow: false, reason: `host policy rejects a stance supported only by a neighbouring column's edge: no recorded support under the feet centre at (${x},${supportY},${z})` };
+      if (cell.kind === 'unknown') {
+        // 未记录 ≠ 没有支撑：只靠邻列擦边时，这一格可能只是还没看过。把它作为
+        // 观察边界交回，让协调器看清脚底中心后再决定；不是永久策略拒绝。
+        return { allow: false, observe: true, reason: `stance is supported only by a neighbouring column's edge; support under the feet centre at (${x},${supportY},${z}) is not recorded yet`,
+          supportColumn: { minY: supportY, maxY: supportY } };
+      }
+      if (cell.kind === 'unavailable' || supportTop(cell.state.name.replace(/^minecraft:/, ''), cell.state.properties) === null) {
+        return { allow: false, reason: `host policy rejects a stance supported only by a neighbouring column's edge: no observed support under the feet centre at (${x},${supportY},${z})` };
       }
     }
     // 旁边的岩浆会流动、也可能被碰到：脚部、头部与脚下一层的岩浆邻格都加价，规划更愿意离远一点。
@@ -152,5 +158,5 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
   },
 });
 
-export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support.gap-jump-2.fall-only.dry.lava-neighbor-3.v5', new Set(['fall']), false);
-export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support.gap-jump-2.fall-wade.lava-neighbor-3.v5', new Set(['fall', 'water_contact']), true);
+export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-only.dry.lava-neighbor-3.v6', new Set(['fall']), false);
+export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-wade.lava-neighbor-3.v6', new Set(['fall', 'water_contact']), true);

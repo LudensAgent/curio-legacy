@@ -227,16 +227,24 @@ test('permitted edge stays within the per-edge read bound (swept body, support a
   assert.ok(expected.every((cell) => read.has(cell)), '落点脚/头/支撑与岩浆邻格都被读取');
 });
 
-test('桥头擦边：落点只靠邻列擦边支撑时拒绝；脚底中心那列有支撑才允许', () => {
+test('桥头擦边：脚底中心未记录时交回观察边界；已有中心支撑才允许，不可用/非支撑仍拒绝', () => {
   // 复现：桥面圆石到 x=94 为止，路线保留起点偏移走到 x=95.29，身体只压住 x=94 那列 0.01 格。
   const to = at(95.29, 70, -39.55);
   const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
   const edgeOnly = fakeReader([[94, 69, -40, recorded('cobblestone')]], 64, []);
-  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, edgeOnly.read)), /feet centre at \(95,69,-40\)/);
+  const deferred = hostLandEdgePolicy.evaluate(edge, edgeOnly.read);
+  assert.equal(deferred.allow, false);
+  assert.equal(deferred.observe, true);
+  assert.deepEqual(deferred.supportColumn, { minY: 69, maxY: 69 });
+  assert.match(deferred.reason, /feet centre at \(95,69,-40\)/);
   const centred = fakeReader([[95, 69, -40, recorded('cobblestone')]], 64, []);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centred.read)), 0);
   const unknownBelow = fakeReader([], 64, []);
-  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, unknownBelow.read)), /no recorded support/);
+  const stillDeferred = hostLandEdgePolicy.evaluate(edge, unknownBelow.read);
+  assert.equal(stillDeferred.allow, false);
+  assert.equal(stillDeferred.observe, true);
+  const unavailableBelow = fakeReader([[95, 69, -40, unavailableCell]], 64, []);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, unavailableBelow.read)), /no observed support/);
   // 分数脚高（站在下半砖上）：支撑就是脚所在那一格。
   const slab = fakeReader([[95, 69, -40, { kind: 'recorded', state: { name: 'stone_slab', properties: { type: 'bottom' } }, stateComplete: true }]], 64, []);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(95.5, 69.5, -39.5), { from: at(94.5, 69.5, -39.5) }), slab.read)), 0);
