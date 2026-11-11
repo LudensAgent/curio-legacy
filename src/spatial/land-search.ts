@@ -64,6 +64,8 @@ export interface LandSearchBoundary {
   reason: string;
   /** 从 from 指向 to 的方向；水平优先，纯垂直时为 UP/DOWN。 */
   direction: LandBoundaryDirection;
+  /** 搜索尚未找到支撑面时实际读取的方块 y 范围（闭区间）。 */
+  supportColumn?: { minY: number; maxY: number };
 }
 
 export interface LandSearchPrefix {
@@ -337,6 +339,7 @@ function hostBoundary(boundary: LibraryBoundary): LandSearchBoundary {
     status: boundary.status,
     reason: boundary.reason,
     direction: directionOf(boundary.from, boundary.to),
+    ...(boundary.supportColumn === undefined ? {} : { supportColumn: { ...boundary.supportColumn } }),
   };
 }
 

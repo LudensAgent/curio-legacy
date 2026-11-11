@@ -87,6 +87,14 @@ export function boundaryProbeCells(
   // 先补齐真实起/终脚位的身体与支撑；侧向探测不能挤掉非整数头部或跨列接触格。
   // corridor 限制脚位；合法脚位的身体可能压到边界外的相邻格，不能按格心丢掉这些接触格。
   for (const feet of [boundary.to, boundary.from]) standingContactCells(feet).forEach((cell) => add(cell, feet));
+  // 无落脚面的列没有已知的 to.y。优先看从身体下面往下第一个仍缺证据的格，
+  // 范围来自搜索本身；只向视觉得见的格请求新证据。
+  if (boundary.supportColumn !== undefined) {
+    const footprint = standingContactCells(boundary.to).filter(cell => cell.y === Math.floor(boundary.to.y - 1e-9));
+    for (let y = boundary.supportColumn.maxY; y >= boundary.supportColumn.minY; y--) {
+      for (const { x, z } of footprint) add({ x, y, z }, boundary.to);
+    }
+  }
   if (boundary.kind === 'step' || boundary.kind === 'drop') {
     // step 先在起点上升再横移；drop 先在原高度横移再沿终点列下降。
     // 两端站位之间的身体扫掠也需要可见证据，不能只补终点脚/头两格。
@@ -173,7 +181,7 @@ function yawTo(dx: number, dz: number): number {
 
 export async function observeBoundary(
   ctx: SkillCtx,
-  opts: { boundary: LandSearchBoundary; maxCells: number; corridor?: Corridor },
+  opts: { boundary: LandSearchBoundary; maxCells: number; corridor?: Corridor; allowDrop?: boolean },
 ): Promise<ObservationReceipt> {
   const spatial = ctx.spatial;
   const state = ctx.adapter.state();
@@ -189,7 +197,12 @@ export async function observeBoundary(
     return !view?.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < now
       || view.evidence.observation.sessionId !== state.sessionId || !view.evidence.observation.stateComplete;
   };
-  const { cells, landingCells } = boundaryProbeCells(opts.boundary, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings, needsObservation);
+  // walk/step 委托只需要当前高度附近的支撑；给 drop 的深层探测留在允许下落的委托内。
+  const column = opts.boundary.supportColumn;
+  const probe = opts.allowDrop === false && column !== undefined
+    ? { ...opts.boundary, supportColumn: { ...column, minY: Math.max(column.minY, Math.floor(opts.boundary.from.y) - 1) } }
+    : opts.boundary;
+  const { cells, landingCells } = boundaryProbeCells(probe, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings, needsObservation);
   const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell, now)]));
   const base = {
     boundary: opts.boundary, cells, attempted: false, observed: 0, newObservedCells: 0,

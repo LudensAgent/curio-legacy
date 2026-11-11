@@ -17,6 +17,16 @@ const boundary = {
 };
 const key = (pos: Vec3Like) => `${pos.x},${pos.y},${pos.z}`;
 
+test('探测搜索实际缺支撑的深度，优先请求近期前方漏看的地面', () => {
+  const from = { x: -464.4197, y: 93, z: -306.4966 }, to = { ...from, x: from.x + 1 };
+  const target = { x: -464, z: -307 };
+  const cells = boundaryProbeCells({ ...boundary, from, to, kind: 'walk', direction: 'E',
+    supportColumn: { minY: 88, maxY: 94 } }, 3, undefined, [],
+    (p) => p.x === target.x && p.z === target.z && p.y <= 90).cells;
+  assert.deepEqual(cells.map(p => p.y), [90, 89, 88]);
+  assert.ok(cells.every(p => p.x === target.x && p.z === target.z));
+});
+
 test('boundary probes cover fractional headroom and every column touched by the standing body', () => {
   const from = { x: 0.2, y: 63.9375, z: 0.2 };
   const to = { ...from, x: 1.2 };
