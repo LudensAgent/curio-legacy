@@ -363,7 +363,7 @@ class PartialMoveWorld extends FakeAdapter {
   }
 }
 
-test('A19 move_step 部分位移：保留实测位置，续接从新位置开始', async (t) => {
+test('A19 move_step 部分位移：身体仍站在地上时从实测位置重新规划，一次失败不结束整趟委托', async (t) => {
   const map = corridor(30);
   const adapter = new PartialMoveWorld();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -371,16 +371,8 @@ test('A19 move_step 部分位移：保留实测位置，续接从新位置开始
   t.after(() => ctx.memory.close());
   const first = await advance.run(ctx, args({ direction: 'E', distance: 20 }));
 
-  assert.equal(first.status, 'failed', first.summary);
-  assert.equal((first.data?.stop as { reason: string }).reason, 'PHYSICAL_FAILURE');
-  assert.deepEqual(first.data?.position, { x: 1, y: 64, z: 0.5 });
-  const partial = first.data?.partialDisplacement as { horizontal: number; vertical: number; atTarget: boolean } | undefined;
-  assert.ok(partial && partial.horizontal > 0.4, JSON.stringify(partial));
-  const sessionId = (first.data?.continuation as { sessionId?: string }).sessionId;
-  assert.ok(sessionId, '部分位移后仍可续接');
-
-  const second = await advance.run(ctx, args({ direction: 'E', distance: 20, sessionId }));
-  assert.equal(second.status, 'succeeded', second.summary);
+  assert.ok(adapter.failed, '确实发生过一次部分位移失败');
+  assert.equal(first.status, 'succeeded', first.summary);
   assert.ok(Math.floor(adapter.pos.x) >= 20);
 });
 

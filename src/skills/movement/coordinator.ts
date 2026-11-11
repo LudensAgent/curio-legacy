@@ -96,6 +96,7 @@ export type SwimLegReceipt = {
 
 /** 一次调用最多绕向前沿点的次数；绕不了就按真实原因交回。 */
 const MAX_DETOURS = 8;
+const MAX_CELL_RETRIES = 3;
 /** 一次调用最多代为游泳的段数；每段仍受原期限约束。 */
 const MAX_SWIM_LEGS = 8;
 
@@ -338,8 +339,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
 
     session.phase = 'executing';
     let executedSegments = 0;
-    const deviations = new Set<string>();
-    const refusedEdges = new Set<string>();
+    // 同一脚格/同一条边的执行层重来次数；用完先试绕行，再如实停下。
+    const deviations = new Map<string, number>();
+    const refusedEdges = new Map<string, number>();
     const triedFrontiers = new Set<string>();
     let swimPending = false;
     // 委托推进量：方向委托按冻结轴线的前进，到点委托按到目标的水平距离缩短；横向授权仍是硬限制。
@@ -513,7 +515,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
         break;
       }
-      if (segment.stopCode === 'settlement_failed') {
+      // 身体稳稳站在地面上（活着、不在岩浆里）时，执行层的失败只是这一段的结束，后面从实测位置重新规划。
+      const steady = after.alive && after.onGround && !after.inLava;
+      if (segment.stopCode === 'settlement_failed' && !(steady && segment.outcome === 'physical_failure')) {
         stop = stopOf(segment.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'PHYSICAL_FAILURE',
           segment.detail ?? '已松开运动键，但未确认身体停稳；保留实测位置');
         break;
@@ -590,24 +594,27 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.phase = 'replanning';
         return 'moved';
       };
-      if (segment.outcome === 'replan') {
-        // 计划过时：同一条边被当前证据再次拒绝，说明重搜仍会走到这里，如实按阻挡停下。
-        if (segment.stopCode === 'stale_plan' && segment.transition !== undefined) {
-          const edge = `${cellText(segment.transition.from)}→${cellText(segment.transition.to)}`;
-          if (refusedEdges.has(edge)) {
-            stop = stopOf('BLOCKED', `${segment.detail ?? '当前证据阻挡'}；已用最新证据重搜过一次，路线仍经过这条边`);
-            break;
-          }
-          refusedEdges.add(edge);
-        }
-        // 执行偏差只在每个脚格重试一次；同一处再偏差说明身体做不到这段计划，如实停下。
-        if (segment.stopCode === 'execution_deviation') {
-          const cell = `${Math.floor(after.pos.x)},${Math.floor(after.pos.y)},${Math.floor(after.pos.z)}`;
-          if (deviations.has(cell)) {
-            stop = stopOf('PHYSICAL_FAILURE', `${segment.detail ?? '执行偏差'}；同一站位已重新规划过一次，仍未按计划落位`);
-            break;
-          }
-          deviations.add(cell);
+      // 动作没按计划落位、搜索期间地图变了：身体稳稳站着就从实测位置重来，与执行偏差同一口径。
+      // 低血量门槛不是执行失败，仍按原因停下。
+      const retryable = segment.outcome === 'replan' && segment.stopCode === 'execution_deviation'
+        || steady && segment.outcome === 'physical_failure' && segment.failureCode !== 'LOW_HP'
+        || segment.outcome === 'invalidated';
+      const refusedEdge = segment.outcome === 'replan' && segment.stopCode === 'stale_plan' && segment.transition !== undefined
+        ? `${cellText(segment.transition.from)}→${cellText(segment.transition.to)}` : undefined;
+      if (retryable || segment.outcome === 'replan') {
+        // 同一脚格（或被当前证据拒绝的同一条边）最多重来 MAX_CELL_RETRIES 次：再重搜大概率走回原处，先试绕行。
+        const key = retryable ? `${Math.floor(after.pos.x)},${Math.floor(after.pos.y)},${Math.floor(after.pos.z)}` : refusedEdge;
+        const seen = retryable ? deviations : refusedEdges;
+        const tries = key === undefined ? 0 : (seen.get(key) ?? 0) + 1;
+        if (key !== undefined) seen.set(key, tries);
+        if (tries > MAX_CELL_RETRIES) {
+          const detoured = await tryDetour();
+          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'moved') continue;
+          stop = retryable
+            ? stopOf('PHYSICAL_FAILURE', `${segment.detail ?? '执行偏差'}；同一站位已从实测位置重新规划 ${MAX_CELL_RETRIES} 次，仍未按计划落位，也没有可绕的前沿`)
+            : stopOf('BLOCKED', `${segment.detail ?? '当前证据阻挡'}；已用最新证据重搜 ${MAX_CELL_RETRIES} 次，路线仍经过这条边，也没有可绕的前沿`);
+          break;
         }
         // 不把实测起点覆盖成计划点；保留冻结目标，从实测位置重新搜索。
         // 搜索次数与 deadline 由 session/本次调用预算继续约束，不重置、不延长。

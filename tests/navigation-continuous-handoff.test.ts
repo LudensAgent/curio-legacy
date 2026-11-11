@@ -95,6 +95,6 @@ test('同一站位再次执行偏差时如实停下，不无限重试', async (t
   };
   const r = await navigateTo.run(ctx, { to: { x: 6, y: 64, z: 0 }, allowed: ['walk'], historical: false, maxSteps: 16, maxSegments: 8, allowUnknownCorridor: false });
   assert.equal(r.status, 'failed', r.summary);
-  assert.equal(attempts, 2, '偏差后只重新规划一次');
-  assert.match(r.summary, /同一站位已重新规划过一次/);
+  assert.ok(attempts >= 4 && attempts <= 8, `同一站位重来有上限（${attempts} 次）`);
+  assert.match(r.summary, /同一站位已从实测位置重新规划 3 次/);
 });
