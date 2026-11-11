@@ -337,6 +337,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     session.phase = 'executing';
     let executedSegments = 0;
     const deviations = new Set<string>();
+    const refusedEdges = new Set<string>();
     let swimPending = false;
     // 委托推进量：方向委托按冻结轴线的前进，到点委托按到目标的水平距离缩短；横向授权仍是硬限制。
     const gainFrom = (from: Vec3Like) => (p: Vec3Like) => {
@@ -528,6 +529,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'replan') {
+        // 计划过时：同一条边被当前证据再次拒绝，说明重搜仍会走到这里，如实按阻挡停下。
+        if (segment.stopCode === 'stale_plan' && segment.transition !== undefined) {
+          const edge = `${cellText(segment.transition.from)}→${cellText(segment.transition.to)}`;
+          if (refusedEdges.has(edge)) {
+            stop = stopOf('BLOCKED', `${segment.detail ?? '当前证据阻挡'}；已用最新证据重搜过一次，路线仍经过这条边`);
+            break;
+          }
+          refusedEdges.add(edge);
+        }
         // 执行偏差只在每个脚格重试一次；同一处再偏差说明身体做不到这段计划，如实停下。
         if (segment.stopCode === 'execution_deviation') {
           const cell = `${Math.floor(after.pos.x)},${Math.floor(after.pos.y)},${Math.floor(after.pos.z)}`;

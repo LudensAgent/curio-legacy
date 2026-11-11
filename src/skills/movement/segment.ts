@@ -790,8 +790,12 @@ async function runNavigationSegmentInner(
     };
     if (check.status === 'BLOCKED') {
       const problem = blockingProblemOf(check, Math.floor(transition.to.y + 0.05));
-      return receipt('blocked', {
-        stopCode: check.risk === true ? 'risk_boundary' : 'blocker',
+      // 计划时这条边可通、执行前当前证据却是阻挡：计划已过时（历史候选或期间新观测）。
+      // 交回协调器用最新证据重搜；同一条边再次被拒时由协调器如实停下。精确连续脚位目标
+      // 只能从原起点格点到达，从偏移站位重搜不了，仍按阻挡停下。
+      const exactFeet = request.goal.kind === 'feet' && request.goal.arrival === undefined;
+      return receipt(exactFeet ? 'blocked' : 'replan', {
+        stopCode: exactFeet ? (check.risk === true ? 'risk_boundary' : 'blocker') : 'stale_plan',
         detail: `第 ${index + 1} 段当前证据 ${check.status}${check.reason === undefined ? '' : `（${check.reason}）`}；没有执行`,
         failureCode: 'PATH_NOT_FOUND', stepIndex: index, transition, currentCheck, boundary,
         ...(problem === undefined ? {} : { problemKind: problem }),

@@ -175,8 +175,10 @@ test('基准4：路线中阻挡 upcoming 段：立即停、保留实测进度、
     await originalMoveTo(moveTarget, opts);
     executedMoves += 1;
     if (executedMoves === 3) {
-      adapter.blocks.push({ name: 'stone', pos: { x: 4, y: 64, z: 0 } }, { name: 'stone', pos: { x: 4, y: 65, z: 0 } });
-      observe(map, 'minecraft:stone', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }]);
+      // 墙封满整个已观察走廊：用最新证据重搜也没有旁路，第一次调用如实停下。
+      const wall = [-1, 0, 1].flatMap((z) => [{ x: 4, y: 64, z }, { x: 4, y: 65, z }]);
+      adapter.blocks.push(...wall.map((pos) => ({ name: 'stone', pos })));
+      observe(map, 'minecraft:stone', wall);
     }
   };
   const firstStep = nextStep(activity)!;
