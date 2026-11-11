@@ -204,8 +204,9 @@ export class Mind {
   /** 回想时觉得主目标可以放下了：留到下一次阶段回顾时告诉它 */
   private keptHint: string | null = null;
   /**
-   * 主目标级无进展闸门：连续若干段活没有物品、清单或新区块进展时，强制换一个
-   * 能带来新信息的做法。它只阻止重复已试过的动作签名，不替 Agent 选去哪/做什么。
+   * 主目标级无进展闸门：连续若干段活没有物品、清单、新区块或出行最远点的变化时，
+   * 要求认真想一次；同一做法（签名+区域+证据版本）退回重新确认，确认后放行。
+   * 它不判断该换方向还是继续，也不替 Agent 选去哪/做什么。
    */
   private progressGate: { at: number; agendaId: string | null; signatures: string[]; activities: { what: string; outcome: string; summary: string }[] } | null = null;
   private progressGateRejects = 0;
@@ -988,8 +989,10 @@ export class Mind {
     this.d.self.record(record);
     // 物品、清单或新区块都没动：记一笔无进展。整条链只在这里观察，不替 Agent 判断原因。
     const planAfter = this.d.self.plan()?.progressAt;
+    // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。
     this.noteProgressOutcome(a, record, Object.keys(record.gained).length > 0
-      || this.d.memory.visitedChunkCount > chunksBefore || planAfter !== planBefore);
+      || this.d.memory.visitedChunkCount > chunksBefore || planAfter !== planBefore
+      || !!this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt));
     this.lastRecord = record;
     this.finishedSinceReflect++;
     this.d.self.creditAgenda(a.agendaId);
@@ -1069,8 +1072,8 @@ export class Mind {
   }
 
   /**
-   * 一段活结束时记无进展。只有物品、清单和新区块都没动才累计；达到阈值后要求
-   * 认真想一次，并把"继续同一条路不会产生新信息"作为必须回应的事实。
+   * 一段活结束时记无进展。物品、清单、新区块和出行最远点都没动才累计；达到阈值后要求
+   * 认真想一次，只陈述这些量没变，不断言“同一条路没用”——沿已走过的路回到前沿本来就不进新区块。
    */
   private noteProgressOutcome(a: Activity, record: ActivityRecord, progressed: boolean) {
     const plan = this.d.self.plan();
@@ -1113,10 +1116,10 @@ export class Mind {
     };
     this.lastProgressGateAt = now;
     const repeated = [...new Set(activities.map((entry) => entry.what))].slice(0, 4).join('；');
-    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块进展：${repeated}。需要换一个能带来新信息的做法`, {
+    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点的变化：${repeated}`, {
       agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
     });
-    this.requestThink(`最近 ${activities.length} 段活没有物品/清单/新区块进展（反复：${repeated}）；继续同一条路不会产生新信息。先看已知地点、已见物资和可用的长距离搜索方式，再决定换地点、换方法或调整主目标`, 'deliberate');
+    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块或出行最远点的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
   }
 
   /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */
@@ -1128,8 +1131,9 @@ export class Mind {
       no_progress_activities: gate.activities.length,
       recent: gate.activities.map((entry) => `${entry.what} → ${entry.outcome}：${entry.summary}`),
       repeated_signatures: gate.signatures.map((signature) => signature.length > 160 ? `${signature.slice(0, 159)}…` : signature),
-      available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点见【记得的地方】。',
-      rule: '同一条路线不会产生新信息：继续原目标必须换成不同签名的一步（换地点/换方法）；也可以写 plan 换清单或主目标并说明理由。上面列出的签名会被拒绝一次。',
+      measured: '进展只按物品、清单勾项、新区块和出行离入口最远点计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
+      available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；explore_toward 朝选定方向边走边看；travel_to 去记得的坐标；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点和出行记录见【记得的地方】。',
+      rule: `上面列出的签名（同一做法+同一区域+同一证据版本）会被退回重新确认；连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次仍写同一做法就放行。也可以写 plan 改清单或主目标。`,
     };
   }
 
@@ -1227,17 +1231,18 @@ export class Mind {
       this.d.bus.publish('progress_gate_cleared', 'P3', `换了一个没在无进展列表里的做法：${decision.activity?.what ?? decision.next?.what ?? '新计划'}`);
       return true;
     }
-    this.progressGateRejects += 1;
-    const note = `最近无进展的动作签名包含「${(signature ?? decision.kind).slice(0, 100)}」，这一步会被拒绝：请换成不同地点/不同方法，或写 plan 说明换清单/主目标`;
-    decision.notes.push(note);
-    this.d.bus.publish('progress_gate_repeat', 'P2', note, { signature });
-    if (this.progressGateRejects <= Mind.PROGRESS_GATE_REJECT_LIMIT) {
-      this.requestThink(`${note}。近期无进展的是：${gate.activities.map((entry) => entry.what).slice(-4).join('；')}；可用搜索：look_around 当前视野、gather 已见/记得、expedition {find} 长距离沿路扫`, 'deliberate');
-    } else {
-      this.d.bus.publish('progress_gate_unresolved', 'P2', '连续两次仍选择无进展的同一做法；闸门解除，但这段循环已记录', { signature });
+    // 退回 PROGRESS_GATE_REJECT_LIMIT 次后仍写同一做法：视为 Agent 已确认，原样放行并解除闸门。
+    if (this.progressGateRejects >= Mind.PROGRESS_GATE_REJECT_LIMIT) {
+      this.d.bus.publish('progress_gate_unresolved', 'P2', `退回 ${this.progressGateRejects} 次后仍选择同一做法：按确认放行，闸门解除，这段循环已记录`, { signature });
       this.progressGate = null;
       this.progressGateRejects = 0;
+      return true;
     }
+    this.progressGateRejects += 1;
+    const note = `最近无进展的动作签名包含「${(signature ?? decision.kind).slice(0, 100)}」，这一步先退回重新确认：仍要这样做就再写一次（连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次放行），也可以改做法或写 plan`;
+    decision.notes.push(note);
+    this.d.bus.publish('progress_gate_repeat', 'P2', note, { signature });
+    this.requestThink(`${note}。近期无进展的是：${gate.activities.map((entry) => entry.what).slice(-4).join('；')}；可用搜索：look_around 当前视野、gather 已见/记得、explore_toward 朝方向探、travel_to 去记得的坐标、expedition {find} 长距离沿路扫`, 'deliberate');
     decision.activity = undefined;
     decision.next = undefined;
     decision.kind = 'continue';

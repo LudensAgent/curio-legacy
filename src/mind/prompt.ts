@@ -98,7 +98,7 @@ export interface MindContext {
   plan?: FocusPlan | null;
   /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
   stageReview?: Record<string, unknown>;
-  /** 主目标级无进展闸门：最近几段活没有物品/清单/新区块进展，重复的动作签名会被拒绝一次 */
+  /** 主目标级无进展闸门：最近几段活没有物品/清单/新区块/出行最远点的变化，重复的动作签名会被退回重新确认 */
   progressGate?: Record<string, unknown> | null;
   /** 自己写的可执行技能一览（带成败） */
   learnedSkills?: string[];

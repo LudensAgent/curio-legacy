@@ -35,7 +35,9 @@ test('连续无进展达到阈值：记录闸门并要求认真想，不替它�
   assert.ok(mind.progressGate, '达到阈值后应有闸门');
   assert.ok(events.some((event) => event.type === 'progress_gate'));
   assert.equal(thinks[0]?.tier, 'deliberate');
-  assert.match(thinks[0]?.reason ?? '', /没有物品\/清单\/新区块进展/);
+  assert.match(thinks[0]?.reason ?? '', /没有物品、清单、新区块或出行最远点的变化/);
+  // 只陈述量没变，不断言“同一条路没用”，也不要求必须换做法
+  assert.doesNotMatch(thinks[0]?.reason ?? '', /不会产生新信息|必须换/);
 });
 
 test('闸门拒绝已出现过的动作签名，换成不同做法则放行并清除', () => {
@@ -47,7 +49,7 @@ test('闸门拒绝已出现过的动作签名，换成不同做法则放行并�
     kind: 'new', notes: [], activity: { what: '再查一次', steps: [{ skill: 'find_item', args: { item: 'oak_log' } }] },
   };
   assert.equal(mind.enforceProgressGate(repeat, {}), false);
-  assert.ok(repeat.notes.some((note: string) => /不同地点\/不同方法/.test(note)));
+  assert.ok(repeat.notes.some((note: string) => /先退回重新确认/.test(note)));
 
   const different = {
     kind: 'new', notes: [], activity: {
@@ -91,5 +93,18 @@ test('有物品、清单或新区块进展就清空无进展记录', () => {
   assert.equal(mind.noProgressRuns.length, 3);
   mind.noteProgressOutcome(activity, { outcome: 'done', gained: { oak_log: 2 }, summary: '拿到 2 根' }, true);
   assert.equal(mind.noProgressRuns.length, 0);
+  assert.equal(mind.progressGate, null);
+});
+
+test('退回到上限后仍写同一做法：按确认原样放行并解除闸门', () => {
+  const { mind, activity } = harness();
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) {
+    mind.noteProgressOutcome(activity, { outcome: 'done', gained: {}, summary: '没找到' }, false);
+  }
+  const repeat = () => ({ kind: 'new', notes: [] as string[], activity: { what: '接着查', steps: [{ skill: 'find_item', args: { item: 'oak_log' } }] } });
+  for (let i = 0; i < Mind.PROGRESS_GATE_REJECT_LIMIT; i++) assert.equal(mind.enforceProgressGate(repeat(), {}), false);
+  const confirmed = repeat();
+  assert.equal(mind.enforceProgressGate(confirmed, {}), true);
+  assert.ok(confirmed.activity, '确认后的活动不能被丢掉');
   assert.equal(mind.progressGate, null);
 });
