@@ -26,7 +26,7 @@ export const MAX_EXPLORE_DISTANCE = 512;
 /** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已确认的 walk/step/drop 与跨越 1 格缺口的 jump（原地起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已确认的 walk/step/drop 与跨越 1 格缺口的 jump（走到起点边缘起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
   catalog: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","maxLateralDrift"?:16,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:16,"sessionId"?}：没有具体目的地时，朝一个方向去没去过的地方、边走边看，until 本轮看见就停；dig/place 同 travel_to',
   argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多32步）,"maxLateralDrift"?:16（0-64，0 只直行）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,' + MAKE_WAY_ARGS_DOC + '}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/swim/dig/place/maxEdits/make，未知参数会被拒绝；until 只认本次实际看见的目标。',
   timeoutMs: 600000,

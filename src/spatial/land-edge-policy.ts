@@ -67,7 +67,7 @@ const recordedName = (read: LandSearchPolicyRead, x: number, y: number, z: numbe
  * 其余危险格、岩浆加价规则与默认策略完全相同。
  */
 /**
- * 水平跳跃的执行能力：身体控制原地起跳、不助跑不疾跑，只能稳定跨过 1 格宽的缺口（水平 2 格）。
+ * 水平跳跃的执行能力：身体控制走到起点边缘起跳、不疾跑，只能稳定跨过 1 格宽的缺口（水平 2 格）。
  * 更宽的缺口执行必然落空掉进缺口，属于程序能力限制，不规划。
  */
 export const MAX_GAP_JUMP_HORIZONTAL = 2;
@@ -80,7 +80,7 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
     if (edge.kind === 'jump') {
       const horizontal = Math.hypot(edge.to.x - edge.from.x, edge.to.z - edge.from.z);
       if (horizontal > MAX_GAP_JUMP_HORIZONTAL + 0.01) {
-        return { allow: false, reason: `host body control jumps from standing without a run-up and cannot clear a ${horizontal.toFixed(1)}-block horizontal gap jump (limit ${MAX_GAP_JUMP_HORIZONTAL})` };
+        return { allow: false, reason: `host body control jumps from the start edge without sprinting and cannot clear a ${horizontal.toFixed(1)}-block horizontal gap jump (limit ${MAX_GAP_JUMP_HORIZONTAL})` };
       }
       // 缺口下方：起点列与落点列之间被跨过的列，从脚下一层往下找第一个非空格；是危险格就拒绝。
       const fromCol = { x: Math.floor(edge.from.x), z: Math.floor(edge.from.z) }, toCol = { x: Math.floor(edge.to.x), z: Math.floor(edge.to.z) };

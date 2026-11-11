@@ -242,11 +242,11 @@ test('桥头擦边：落点只靠邻列擦边支撑时拒绝；脚底中心那�
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(95.5, 69.5, -39.5), { from: at(94.5, 69.5, -39.5) }), slab.read)), 0);
 });
 
-test('跨缺口跳跃：超出原地起跳能力的宽缺口不规划；落空会掉进火/岩浆的缺口不规划', () => {
+test('跨缺口跳跃：超出不疾跑起跳能力的宽缺口不规划；落空会掉进火/岩浆的缺口不规划', () => {
   // 复现：从 (-73.39,69) 水平跳 3 格到 (-70.39,69)，缺口下方 3 格是火。
   const wide = edgeAt(at(-70.39, 69, -18.55), { kind: 'jump', from: at(-73.39, 69, -18.55) });
   const supports = [at(-70.39, 69, -18.55), at(-71.5, 69, -18.5)];
-  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(wide, fakeReader([], 64, supports).read)), /without a run-up/);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(wide, fakeReader([], 64, supports).read)), /without sprinting/);
   const gap = edgeAt(at(-71.5, 69, -18.5), { kind: 'jump', from: at(-73.5, 69, -18.5) });
   const overFire = fakeReader([
     [-73, 68, -19, recorded('minecraft:air')], [-73, 67, -19, recorded('minecraft:air')], [-73, 66, -19, recorded('fire')],

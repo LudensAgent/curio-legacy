@@ -192,7 +192,7 @@ export interface MoveOpts {
   adjacentStep?: boolean | { centerRadius: number };
   /**
    * feet 目标：允许一次同脚高的水平起跳跨越已证实的空腔。目标必须与实测
-   * 脚高相同；身体控制只在原地起跳可覆盖的有限距离内尝试，不改变目标或
+   * 脚高相同；身体控制走到起点格列边缘起跳、只在不疾跑可覆盖的有限距离内尝试，不改变目标或
    * 自动搭桥。
    */
   horizontalJump?: boolean;
