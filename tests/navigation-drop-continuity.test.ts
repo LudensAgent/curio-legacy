@@ -54,8 +54,7 @@ test('travel_to traverses a non-centred two-block dirt_path drop and continues o
   const result = await travelTo.run(ctx, validated.args);
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(calls.length, 3);
-  assert.equal(calls[1]!.opts.maxDropDown, 2);
-  assert.equal(calls[0]!.opts.maxDropDown, undefined);
+  assert.ok(calls.every(call => call.opts.maxDropDown === 4), '允许 drop 时每段的实测落差上限与搜索一致（4 格），滑下边缘不在半空判失败');
   assert.ok(calls.every(call => call.opts.settleAtTarget === undefined), '大落差及其前一段仍使用完整停稳');
   assert.deepEqual(calls[1]!.target, { x: to.x - 1, y: 97.9375, z: to.z });
   assert.deepEqual(calls.at(-1)!.target, to, '落点不改成格心，不让实测残差累计到后续计划');

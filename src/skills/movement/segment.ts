@@ -1064,7 +1064,10 @@ async function runNavigationSegmentInner(
             timeoutMs: Math.min(transition.kind === 'drop' && drop > 1 + FEET_ARRIVAL_TOLERANCE.vertical ? 6000 : 3000, Math.floor(remaining)),
             ...(continuous ? { settleAtTarget: false } : {}),
             ...(passColumn ? { passColumn: true } : {}),
-            ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
+            // 允许 drop 时，身体滑下边缘的实测落差按搜索同一上限（maxDrop 4）放行：落地后由执行偏差从实测位置重搜，
+            // 不在半空判失败；未允许 drop 时仍只容一格。
+            ...(request.allowed.includes('drop') ? { maxDropDown: Math.max(4, Math.ceil(drop)) }
+              : transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: directionalFinish ? { ...request.corridor, minimumAlong: request.minimumAlong } : request.corridor }),
           },
         );
