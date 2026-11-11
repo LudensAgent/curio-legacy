@@ -473,3 +473,39 @@ test('梯子攀爬被取消后不再写按键', async () => {
   assert.equal(writes.length, after, `取消后不得再写控制：${writes.slice(after).join(',')}`);
   assert.equal(controls.jump, false, '取消后必须释放本次持有的 jump');
 });
+
+test('水平跳跨 1 格缺口：起点偏在格内靠后 0.2 也先走到边缘再起跳，落到对岸（复现 11-11 下界坠岩浆）', async (t) => {
+  const require = createRequire(import.meta.url);
+  const data = require('minecraft-data')('1.20.1');
+  const Block = require('prismarine-block')(data);
+  const { Physics, PlayerState } = require('prismarine-physics');
+  // 脚下 y=68：x≤35 与 x≥37 是下界岩，x=36 是缺口，下面一直到 y=20 都是空气
+  const world = {
+    getBlock(position: Vec3) {
+      const p = position.floored();
+      const solid = p.y === 68 && (p.x <= 35 || p.x >= 37);
+      const block = Block.fromStateId(data.blocksByName[solid ? 'netherrack' : 'air'].defaultState, 0);
+      block.position = p;
+      return block;
+    },
+  };
+  const from = { x: 35.3, y: 69, z: -39.3 }, to = { x: 37.3, y: 69, z: -39.3 };
+  const { bot, controls, writes } = botAt(from.x, from.y, from.z);
+  Object.assign(bot.entity, { effects: {}, attributes: {}, isInWeb: false, isCollidedHorizontally: false, isCollidedVertically: false });
+  Object.assign(bot, { version: '1.20.1', jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0, inventory: { slots: [] }, blockAt: world.getBlock });
+  bot.look = async (yaw: number, pitch: number) => { bot.entity.yaw = yaw; bot.entity.pitch = pitch; };
+  const physics = Physics(data, world);
+  let jumpX: number | null = null;
+  const timer = setInterval(() => {
+    if (controls.jump && jumpX === null) jumpX = bot.entity.position.x;
+    physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
+    bot.emit('physicsTick');
+  }, 50);
+  timer.unref();
+  t.after(() => clearInterval(timer));
+  await adapterWith(bot).moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000, horizontalJump: true });
+  assert.ok(writes.includes('jump:true'));
+  assert.ok(jumpX !== null && jumpX >= 36, `应在跨出起点格列后才起跳，实际起跳时 x=${jumpX}`);
+  assert.ok(bot.entity.position.y >= 68.99, `应落在对岸，实测 ${bot.entity.position}`);
+  assert.ok(bot.entity.position.x >= 37, `实测 ${bot.entity.position}`);
+});

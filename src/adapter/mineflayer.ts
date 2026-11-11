@@ -1455,13 +1455,24 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return Math.hypot(Math.max(fx - p.x, 0, p.x - (fx + 1)), Math.max(fz - p.z, 0, p.z - (fz + 1))) <= Math.max(0.65, lead);
     };
     const holdJump = () => stepUp && b.entity.position.y < target.y - 0.05 && (nearRise() || b.entity.isCollidedHorizontally === true);
-    if (horizontalJump && needsJump) b.setControlState('jump', true);
+    // 水平跳：先向前走到起点格列边缘再起跳，不在原地起跳。原地起跳没有助跑，起点离边缘越远越跳不过去：
+    // 实测从格内偏后 0.2 处原地起跳只飞出 1.40 格、落进 1 格宽的缺口；走到跨出起点格列时再跳，同样的缺口落点多出约 1 格。
+    const startColumn = { x: Math.floor(p0.x), z: Math.floor(p0.z) };
+    let jumpPressedAt: number | null = null;
+    const driveHorizontalJump = () => {
+      if (!horizontalJump || !needsJump) return;
+      const p = b.entity.position;
+      if (jumpPressedAt === null) {
+        const leftStartColumn = Math.floor(p.x) !== startColumn.x || Math.floor(p.z) !== startColumn.z;
+        if (b.entity.onGround && leftStartColumn) { b.setControlState('jump', true); jumpPressedAt = Date.now(); }
+      } else if (Date.now() >= jumpPressedAt + 180) b.setControlState('jump', false);
+    };
+    driveHorizontalJump();
     if (stepUp) b.setControlState('jump', holdJump());
     // sprint 只来自本次委托的执行请求；只在平走、无需跳跃/跨空时按住，
     // 逐段 feet 控制能看到外层非本地 moveTo 通过异步作用域传下来的同一请求。
     const sprinting = mode === 'feet' && sprint && !needsJump && !horizontalJump && Math.abs(target.y - p0y) <= 0.05;
     if (sprinting) b.setControlState('sprint', true);
-    const jumpReleaseAt = Date.now() + 180;
     // 地面摩擦使水平速度每 tick 衰减到约 0.546 倍（停稳系数 ≈ 1/(1-0.546) ≈ 2.2），
     // 空中摩擦约 0.91 倍（停稳系数 ≈ 1/(1-0.91) ≈ 11.1，见 prismarine-physics）。
     const GROUND_DRAG = 0.546;
@@ -1482,6 +1493,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const onPhysicsTick = () => {
       if (crossedCheckpoint || signal.aborted || !ownsControls()) return;
       if (stepUp) b.setControlState('jump', holdJump());
+      driveHorizontalJump();
+      // 水平跳在空中、离落点还剩约 1 格时松开前进：空中惯性正好滑进目标格；一直按着会越过落点一格多（可能是下一个缺口）。
+      // 落地后若还差一点，下面的落地恢复会接着往前。
+      if (horizontalJump && jumpPressedAt !== null && !b.entity.onGround && !airCoast) {
+        const p = b.entity.position;
+        const remaining = (p.x - tx) * Math.sin(heading) + (p.z - tz) * Math.cos(heading);
+        if (remaining <= 1) {
+          b.setControlState('forward', false);
+          airCoast = true;
+          return;
+        }
+      }
       // 已升过台阶、身体在目标格上方：松开前进在空中减速，落在这一格里，不被起跳惯性带到下一格。
       if (stepUp && !b.entity.onGround && b.entity.position.y >= target.y - 0.05
         && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz) {
@@ -1531,7 +1554,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       while (!crossedCheckpoint && !atEndpoint() && !(overshotInColumn() && passedPoint()) && Date.now() < deadline) {
         check();
         checkPosition();
-        if (horizontalJump && needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
+        driveHorizontalJump();
         if (stepUp) b.setControlState('jump', holdJump());
         const d = dist();
         const v = b.entity.velocity;
