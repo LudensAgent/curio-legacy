@@ -290,9 +290,11 @@ setInterval(() => library.prune(), 60_000).unref();
     const task = arbiter.info();
     bus.publish('event_loop_stall', 'P1', `主线程卡住了 ${(stall / 1000).toFixed(1)} 秒（超过 15~30 秒服务器会以超时踢掉）；当时手上：${task ? `${task.source} ${task.skill}` : '空闲'}`, { stallMs: stall, task: task?.skill ?? null });
   }, 1000).unref();
+  // 默认按需采样（出现阻塞后才开 CPU 采样）；STALL_PROFILER=always 一直采，=0 关闭。
   if (process.env.STALL_PROFILER !== '0') startStallProfiler(path.join(config.dataDir, 'logs'), (r) => {
     bus.publish('event_loop_profile', 'P1', `卡顿那段时间 CPU 花在：${r.top.join('；')}${r.file ? `（完整采样：${path.basename(r.file)}）` : ''}`, { stallMs: r.stallMs, top: r.top, file: r.file });
   }, {
+    always: process.env.STALL_PROFILER === 'always',
     // 100ms 级的阻塞不会被踢，但会让身体物理顿一下：每分钟最多记一次，只写汇总不存采样文件。
     onJank: (r) => {
       const task = arbiter.info();
