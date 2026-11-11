@@ -3253,6 +3253,23 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           } catch (error) {
             if (signal.aborted || error instanceof AbortedError) throw error;
           }
+          // 导航没把身体送到门前站位（门厅杂物、证据不足等）：直接驱动身体朝站位格心走，被挡或低一级就跳。
+          const stanceCenter = { x: approach.cell.x + 0.5, y: approach.cell.y, z: approach.cell.z + 0.5 };
+          const atStance = () => {
+            const p = this.bot?.entity?.position;
+            return !!p && Math.hypot(p.x - stanceCenter.x, p.z - stanceCenter.z) <= 0.45 && p.y >= stanceCenter.y - 0.05;
+          };
+          const walkDeadline = Date.now() + 8000;
+          while (!atStance() && !this.bodyInPortal(name) && Date.now() < walkDeadline) {
+            throwIfAborted(signal);
+            const cur = this.transitionProbe();
+            if (!cur.connected || !cur.alive || cur.dim !== from.dim) break;
+            const body = this.bot?.entity;
+            if (!body?.position || Math.hypot(body.position.x - stanceCenter.x, body.position.z - stanceCenter.z) > 6) break;
+            const lower = !!body.onGround && body.position.y < stanceCenter.y - 0.4;
+            const blocked = body.isCollidedHorizontally === true;
+            await this.drive({ forward: true, ...(lower || blocked ? { jump: true } : {}) }, 250, signal, { facePoint: { x: stanceCenter.x, y: stanceCenter.y + 1.6, z: stanceCenter.z } });
+          }
           const stepDeadline = Date.now() + 12000;
           while (Date.now() < stepDeadline) {
             throwIfAborted(signal);

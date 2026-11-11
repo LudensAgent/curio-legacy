@@ -27,11 +27,11 @@ function blockAt(p: Vec3) {
   return block;
 }
 
-test('真实物理：门前站位高一级时，进门的直推会跳上台阶并压进门方块', { timeout: 30_000 }, async () => {
+async function enterFrom(feet: Vec3) {
   const world = { getBlock: (position: Vec3) => blockAt(position.floored()) };
   const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const entity = {
-    position: new Vec3(-497.5, 78, -253.3), velocity: new Vec3(0, 0, 0), yaw: 0, pitch: 0, height: 1.8, eyeHeight: 1.62,
+    position: feet.clone(), velocity: new Vec3(0, 0, 0), yaw: 0, pitch: 0, height: 1.8, eyeHeight: 1.62,
     onGround: true, isInWater: false, isInLava: false, isInWeb: false,
     isCollidedHorizontally: false, isCollidedVertically: false, effects: {}, attributes: {},
   };
@@ -65,6 +65,16 @@ test('真实物理：门前站位高一级时，进门的直推会跳上台阶�
     clearInterval(timer);
     clearInterval(watcher);
   }
-  assert.equal(abort.signal.aborted, true, `身体没有压进门方块，停在 (${entity.position.x.toFixed(2)},${entity.position.y.toFixed(2)},${entity.position.z.toFixed(2)})`);
-  assert.ok(entity.position.y >= 79 - 0.05, '跳上了门前台阶');
+  return { entered: abort.signal.aborted, at: entity.position.clone() };
+}
+
+test('真实物理：门前站位高一级时，进门的直推会跳上台阶并压进门方块', { timeout: 30_000 }, async () => {
+  const result = await enterFrom(new Vec3(-497.5, 78, -253.3));
+  assert.equal(result.entered, true, `身体没有压进门方块，停在 ${result.at}`);
+  assert.ok(result.at.y >= 79 - 0.05, '跳上了门前台阶');
+});
+
+test('真实物理：导航没送到站位时，从斜前方几格外直接走到站位再进门', { timeout: 30_000 }, async () => {
+  const result = await enterFrom(new Vec3(-494.5, 78, -251.5));
+  assert.equal(result.entered, true, `身体没有压进门方块，停在 ${result.at}`);
 });

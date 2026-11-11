@@ -162,6 +162,13 @@ export const navigateTo: Skill<NavigateArgs> = {
     const state = ctx.adapter.state();
     if (!state.alive || !state.connected || !state.observationReady) return { status: 'failed', failureCode: 'NOT_CONNECTED', summary: 'navigate_to 需要有效的存活观测' };
     if (state.worldId !== spatial.worldId) return { status: 'failed', failureCode: 'WRONG_DIMENSION', summary: '当前世界与空间会话不一致' };
+    // 门方块不是可站格：普通步行不会走进传送门。直接说明，而不是报一串碰撞/阻挡。
+    const goalCell = { x: Math.floor(args.to.x), y: Math.floor(args.to.y), z: Math.floor(args.to.z) };
+    const goalBlock = [goalCell, { ...goalCell, y: goalCell.y + 1 }].map((cell) => ctx.adapter.blockAt(cell)).find((name) => name === 'nether_portal' || name === 'end_portal');
+    if (args.arrival === undefined && goalBlock !== undefined) {
+      return { status: 'failed', failureCode: 'BAD_ARGS', summary: `目标 (${goalCell.x},${goalCell.y},${goalCell.z}) 是 ${goalBlock} 方块，步行导航不进传送门；进门用 travel_portal {"at":[${goalCell.x},${goalCell.y},${goalCell.z}]}，没有移动`,
+        data: { requestedTarget: { ...args.to }, portal: goalBlock } };
+    }
     const invocationStart = { ...state.pos };
     const startChunks = ctx.memory.visitedChunkCount;
     const voxel = spatial.session.voxel;
@@ -224,7 +231,9 @@ export const navigateTo: Skill<NavigateArgs> = {
           ? { remaining: [{ to: { ...args.to } }], prefixRemaining: [] }
           : { remaining: last?.remaining.length ? last.remaining : [{ to: { ...args.to } }], prefixRemaining: last?.remaining ?? [] }),
       ...(last?.blockerAhead === undefined ? {} : { blockerAhead: last.blockerAhead }),
-      ...(last?.blocker === undefined ? {} : { blocker: last.blocker }),
+      // 计划过时后的重搜段没有执行级阻挡：回报本次调用最近一次实测到的阻挡，不让 Agent 丢掉阻挡格。
+      ...(outcome.status !== 'succeeded' && [...outcome.segments].reverse().find((entry) => entry.blocker !== undefined)?.blocker !== undefined
+        ? { blocker: [...outcome.segments].reverse().find((entry) => entry.blocker !== undefined)!.blocker } : {}),
       ...(last?.disallowed === undefined ? {} : { disallowed: last.disallowed }),
       ...(last?.directDrop === true ? { directDrop: true } : {}),
       ...(last?.nested === undefined ? {} : { nested: last.nested }),

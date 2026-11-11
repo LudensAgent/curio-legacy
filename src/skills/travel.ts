@@ -282,7 +282,10 @@ export const observePortal: Skill<{}> = {
       ...travelStore(ctx.memory).snapshot(state.worldId).endpoints
         .filter((e) => e.dim === state.dim && e.portalObserved && dist3(e.pos, here) <= 8).map((e) => e.pos),
     ];
-    let portal: { pos: Vec3Like; name: string } | undefined = visiblePortal(ctx, around, kinds) ?? visiblePortal(ctx, remembered, kinds) ?? touching[0];
+    // 本帧视线刚命中的门方块（如 4 格外的门洞）也是候选；仍由 visiblePortal 用本次视野核对。
+    const inFrame = ctx.senses.currentBlockCandidates?.(kinds).map((block) => block.pos) ?? [];
+    let portal: { pos: Vec3Like; name: string } | undefined = visiblePortal(ctx, around, kinds) ?? visiblePortal(ctx, inFrame, kinds)
+      ?? visiblePortal(ctx, remembered, kinds) ?? touching[0];
     // 记得附近有门、但它不在当前视锥里：朝记得的门方块转头再看（最多 3 处），仍由本次视野核对，不透视。
     let turned = 0;
     for (const pos of remembered.slice(0, 3)) {
@@ -405,10 +408,31 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `传送失败：${(error as Error).message}（门离你约 ${Math.round(dist3(state.pos, endpoint.pos))} 格，在 ${endpoint.pos.x},${endpoint.pos.y},${endpoint.pos.z}）`); } finally { ctx.setStationaryWait?.(false); }
 }
 
-export const travelPortal: Skill<{ portalId: string }> = {
-  name: 'travel_portal', description: '进入一个已观察的传送门，等待实际维度切换和新出生观察后记录真实出口；到达下界另一侧后会尝试把身体挪出目的地门方块（最多约 4 秒，leftPortal 如实报告）。', argsDoc: '{"portalId":"portal_id"}', timeoutMs: 100000, movement: true,
-  validate(raw) { const portalId = String(obj(raw).portalId ?? '').trim(); return portalId ? { ok: true, args: { portalId } } : { ok: false, error: '缺少 portalId' }; },
+export const travelPortal: Skill<{ portalId: string; at?: Vec3Like }> = {
+  name: 'travel_portal', description: '进入一个传送门，等待实际维度切换和新出生观察后记录真实出口。门用 portalId（observe_portal 记录的）或门方块坐标 at 指定；at 时该格此刻必须是 16 格内的下界门/末地门方块，会当场登记。身体先走到门前站位（导航不到就直接朝站位走，低一级会跳），再正面走进门洞并停留等传送；到达下界另一侧后会尝试把身体挪出目的地门方块（最多约 4 秒，leftPortal 如实报告）。', argsDoc: '{"portalId":"portal_id"} | {"at":[x,y,z]}（门方块坐标）', timeoutMs: 100000, movement: true,
+  validate(raw) {
+    const a = obj(raw);
+    if (a.at !== undefined) {
+      const at = a.at;
+      if (!Array.isArray(at) || at.length !== 3 || !at.every((n) => Number.isInteger(n))) return { ok: false, error: 'at 需要门方块的整数坐标 [x,y,z]' };
+      return { ok: true, args: { portalId: '', at: { x: at[0] as number, y: at[1] as number, z: at[2] as number } } };
+    }
+    const portalId = String(a.portalId ?? '').trim();
+    return portalId ? { ok: true, args: { portalId } } : { ok: false, error: '缺少 portalId 或 at' };
+  },
   async run(ctx, args) {
+    if (args.at !== undefined) {
+      const state = ctx.adapter.state();
+      const name = ctx.adapter.blockAt(args.at);
+      if (name !== 'nether_portal' && name !== 'end_portal') {
+        return fail('NOT_FOUND', `(${args.at.x},${args.at.y},${args.at.z}) 现在是 ${name ?? '未加载'}，不是下界门或末地门方块；没有移动`, { at: { ...args.at }, actual: name });
+      }
+      if (dist3(state.pos, args.at) > 16) {
+        return fail('BAD_ARGS', `门方块离身体 ${dist3(state.pos, args.at).toFixed(1)} 格，超过 16 格；先走近再进门`, { at: { ...args.at } });
+      }
+      const endpoint = travelStore(ctx.memory).observe(state, args.at, name);
+      return traverse(ctx, endpoint);
+    }
     const store = travelStore(ctx.memory);
     const state = ctx.adapter.state();
     const worldId = state.worldId;

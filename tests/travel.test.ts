@@ -394,6 +394,29 @@ test('travel_portal 接受 nearest/auto：只在当前维度已观察的门里�
   assert.equal((outcome.result.data as any)?.resolvedPortalId, a.id);
 });
 
+test('travel_portal 接受门方块坐标 at：当场登记并进门，不要求先 observe_portal', async () => {
+  const { adapter, memory, run } = setup();
+  const portal = { x: 3, y: 64, z: 0 };
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'nether_portal', pos: portal });
+  adapter.portalDestinations.set('fake-world:overworld:3,64,0', { dim: 'the_nether', pos: { x: 71, y: 55, z: -33 } });
+  const outcome = await run('travel_portal', { at: [3, 64, 0] });
+  assert.equal(outcome.result.status, 'succeeded', outcome.result.summary);
+  assert.equal(adapter.dim, 'the_nether');
+  assert.ok(travelStore(memory).snapshot(adapter.worldId).endpoints.some((e) => e.dim === 'overworld' && e.pos.x === 3), '入口门被登记');
+});
+
+test('travel_portal at 指向的不是门方块或太远时不移动', async () => {
+  const { adapter, run } = setup();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'nether_portal', pos: { x: 40, y: 64, z: 0 } });
+  const notPortal = await run('travel_portal', { at: [3, 64, 0] });
+  assert.equal(notPortal.result.failureCode, 'NOT_FOUND');
+  const far = await run('travel_portal', { at: [40, 64, 0] });
+  assert.equal(far.result.failureCode, 'BAD_ARGS');
+  assert.equal(adapter.dim, 'overworld');
+});
+
 test('travel_portal auto 在当前维度没有已观察门时明确失败，不跨维猜门', async () => {
   const { adapter, memory, run } = setup();
   const overworldPortal = { x: 3, y: 64, z: 0 };
