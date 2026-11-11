@@ -1,6 +1,6 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import type { VoxelMap } from 'curio-minecraft-3d-memory';
-import { observedFootY } from '../../spatial/land-search.ts';
+import { observedFootYSlices } from '../../spatial/land-search.ts';
 
 /** 向前最多查这么远的已记录体素找探索前沿；不受周边扫描半径限制。 */
 export const FRONTIER_MAX_AHEAD = 256;
@@ -29,15 +29,28 @@ export async function farthestFrontier(
     .sort((a, b) => Math.abs(a - lateral0) - Math.abs(b - lateral0));
   const unknown = (x: number, y: number, z: number) => !voxel.cellAt(dim, x, y, z).observed || !voxel.cellAt(dim, x, y + 1, z).observed;
   let sliceEnd = performance.now() + FRONTIER_SLICE_MS;
+  const yieldIfNeeded = async () => {
+    if (performance.now() < sliceEnd) return;
+    await new Promise((resolve) => setImmediate(resolve));
+    sliceEnd = performance.now() + FRONTIER_SLICE_MS;
+  };
   for (let along = Math.floor(Math.min(maxAlong, along0 + FRONTIER_MAX_AHEAD)); along > along0 + 1; along--) {
     if (performance.now() >= sliceEnd) {
       await new Promise((resolve) => setImmediate(resolve));
       sliceEnd = performance.now() + FRONTIER_SLICE_MS;
     }
     for (const lateral of lateralOrder) {
+      await yieldIfNeeded();
       const x = Math.floor(origin.x + bearing.x * along + side.x * lateral);
       const z = Math.floor(origin.z + bearing.z * along + side.z * lateral);
-      const footY = observedFootY(voxel, dim, x, z, anchorY, FRONTIER_FOOT_RANGE, FRONTIER_FOOT_RANGE);
+      // 高度探测也分片：一列要读大约 33 层，长走廊下不能只在整列之间检查预算。
+      const heights = observedFootYSlices(voxel, dim, x, z, anchorY, FRONTIER_FOOT_RANGE, FRONTIER_FOOT_RANGE);
+      let footY: number | null;
+      for (;;) {
+        const step = heights.next();
+        if (step.done) { footY = step.value; break; }
+        await yieldIfNeeded();
+      }
       if (footY === null) continue;
       const feet = { x: x + 0.5, y: footY, z: z + 0.5 };
       if (skip(feet)) continue;

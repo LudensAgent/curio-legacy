@@ -295,47 +295,46 @@ function sweptDangerAt(map: VoxelMap, dim: string, from: Vec3Like, to: Vec3Like)
 }
 
 /**
- * 一列里真实可站立面的脚高。不是按整数层猜，而是读已观察方块的碰撞顶面，
- * 包括 0.5 半砖、0.875 雪层、箱子/台阶顶面；0 < drop < 1 也保留。
- * 严格模式跳过待重新确认/状态不完整的证据；历史模式允许待确认证据但用它推导。体素不按时间或会话过期。
+ * (x,z) 这一列已观测的、离 aroundY 最近的站立脚高：支撑格完整观测、脚部格已观测且不是支撑面。
+ * 脚高按实际碰撞顶面算（0.5 半砖、0.875 雪层、箱子/台阶顶面），不是按整数层猜。
+ * 只读当前 VoxelMap，没观测过的列返回 null，不外推。用于给分段路点一个脚高提示。
+ *
+ * 分片版本让前沿扫描在高度探测循环中途也能检查时间预算；返回值与同步版本一致。
  */
-function standableSurfaces(
-  map: VoxelMap, dim: string,
-  x: number, z: number, centerY: number, down: number, up: number,
-): { y: number; top: number }[] {
-  const min = Math.floor(centerY - down) - 1;
-  const max = Math.ceil(centerY + up) + 1;
-  const out: { y: number; top: number }[] = [];
-  const seen = new Set<string>();
+export function* observedFootYSlices(map: VoxelMap, dim: string, x: number, z: number, aroundY: number, down: number, up: number): Generator<void, number | null, void> {
+  const min = Math.floor(aroundY - down) - 1;
+  const max = Math.ceil(aroundY + up) + 1;
+  let best: number | null = null;
+  let work = 0;
   for (let y = min; y <= max; y++) {
     const view = map.cellAt(dim, x, y, z);
-    if (!view.observed) continue;
-    const evidence = view.evidence;
-    if (!evidence.observation.stateComplete) continue;
-    const top = supportTop(evidence.observation.state.name.replace(/^minecraft:/, ''), evidence.observation.state.properties);
-    if (top === null) continue;
-    const foot = y + top;
-    if (foot < centerY - down - 0.01 || foot > centerY + up + 0.01) continue;
-    const key = foot.toFixed(3);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ y: foot, top });
+    if (view.observed) {
+      const evidence = view.evidence;
+      if (evidence.observation.stateComplete) {
+        const state = evidence.observation.state;
+        const top = supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
+        if (top !== null) {
+          const foot = y + top;
+          if (foot >= aroundY - down - 0.01 && foot <= aroundY + up + 0.01) {
+            const footCell = map.cellAt(dim, x, Math.floor(foot) + (top >= 1 ? 0 : 1), z);
+            if (footCell.observed
+              && supportTop(footCell.evidence.observation.state.name.replace(/^minecraft:/, ''), footCell.evidence.observation.state.properties) === null
+              && (best === null || Math.abs(foot - aroundY) < Math.abs(best - aroundY))) best = foot;
+          }
+        }
+      }
+    }
+    if (++work >= 8) { work = 0; yield; }
   }
-  return out;
+  return best;
 }
 
-/**
- * (x,z) 这一列已观测的、离 aroundY 最近的站立脚高：支撑格完整观测、脚部格已观测且不是支撑面。
- * 只读当前 VoxelMap，没观测过的列返回 null，不外推。用于给分段路点一个脚高提示。
- */
 export function observedFootY(map: VoxelMap, dim: string, x: number, z: number, aroundY: number, down: number, up: number): number | null {
-  const open = (y: number) => {
-    const view = map.cellAt(dim, x, y, z);
-    return view.observed && supportTop(view.evidence.observation.state.name.replace(/^minecraft:/, ''), view.evidence.observation.state.properties) === null;
-  };
-  return standableSurfaces(map, dim, x, z, aroundY, down, up)
-    .filter((surface) => open(Math.floor(surface.y) + (surface.top >= 1 ? 0 : 1)))
-    .reduce<number | null>((best, surface) => best === null || Math.abs(surface.y - aroundY) < Math.abs(best - aroundY) ? surface.y : best, null);
+  const slices = observedFootYSlices(map, dim, x, z, aroundY, down, up);
+  for (;;) {
+    const step = slices.next();
+    if (step.done) return step.value;
+  }
 }
 
 function hostTransition(transition: LibraryTransition): LandSearchTransition {

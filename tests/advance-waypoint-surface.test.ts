@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
-import { observedFootY } from '../src/spatial/land-search.ts';
+import { observedFootY, observedFootYSlices } from '../src/spatial/land-search.ts';
 import { waypointOf } from '../src/skills/movement/intent.ts';
 import type { MovementSession } from '../src/skills/movement/session.ts';
 import type { Vec3Like } from '../src/adapter/types.ts';
@@ -24,6 +24,25 @@ test('observedFootY 取该列已观测、离参考高度最近的站立面；没
   assert.equal(observedFootY(map, DIM, 10, 0, 64, 24, 8), 56);
   assert.equal(observedFootY(map, DIM, 11, 0, 64, 24, 8), null, '脚部被石头占住；石头上方没观测，也不算站立面');
   assert.equal(observedFootY(map, DIM, 12, 0, 64, 24, 8), null);
+});
+
+test('observedFootYSlices 与同步版本给出同一脚高，并在高度循环中分片', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fill(map, 'minecraft:grass_block', [{ x: 10, y: 55, z: 0 }, { x: 12, y: 70, z: 0 }]);
+  fill(map, 'minecraft:air', [{ x: 10, y: 56, z: 0 }, { x: 10, y: 57, z: 0 }, { x: 12, y: 71, z: 0 }, { x: 12, y: 72, z: 0 }]);
+  fill(map, 'minecraft:stone', [{ x: 11, y: 56, z: 0 }]);
+  for (const [x, aroundY] of [[10, 64], [11, 64], [12, 72], [20, 64]] as const) {
+    const slices = observedFootYSlices(map, DIM, x, 0, aroundY, 24, 8);
+    let sliced: number | null | undefined;
+    let yields = 0;
+    for (;;) {
+      const step = slices.next();
+      if (step.done) { sliced = step.value; break; }
+      yields += 1;
+    }
+    assert.equal(sliced, observedFootY(map, DIM, x, 0, aroundY, 24, 8), `x=${x} 的分片结果应与同步版本一致`);
+    assert.ok(yields > 0, '长高度扫描应在循环中让出');
+  }
 });
 
 test('advance 路点脚高用该列观测到的站立面，没观测时才沿用当前脚高', () => {

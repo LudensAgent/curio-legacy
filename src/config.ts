@@ -289,8 +289,12 @@ export const config = {
   serverDir: res(str('SERVER_DIR') || 'world'),
   /** 角色档案目录。 */
   agentsDir: res(str('AGENTS_DIR') || path.join('agents', mode)),
-  /** 堆用到这么多 MB 时写一份堆快照到 DATA_DIR/logs（每个进程一次），查内存是谁占的；0 = 不写。平时堆只有一两百 MB */
-  heapSnapshotMb: num('HEAP_SNAPSHOT_MB', 1024),
+  /**
+   * 堆用到这么多 MB 时写一份堆快照到 DATA_DIR/logs（每个进程一次），查内存是谁占的。
+   * 默认 0 = 不自动写：V8 堆快照会同步冻结主线程数秒（local-test-01 实测 5.7s），
+   * 正常运行不为此暂停身体。需要诊断时显式设 HEAP_SNAPSHOT_MB。
+   */
+  heapSnapshotMb: num('HEAP_SNAPSHOT_MB', 0),
   /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
   llmArchiveDir: res(str('LLM_ARCHIVE_DIR', `./archives/${mode}/llm-calls`)),
   /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
