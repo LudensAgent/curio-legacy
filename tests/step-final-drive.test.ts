@@ -239,11 +239,11 @@ test('显式相邻一步由本地身体控制完成', async (t) => {
   assert.ok(Math.abs(bot.entity.position.y - 63.9375) < 0.02);
 });
 
-test('相邻一步前，身体偏心时先潜行归位到格心，再迈步', async (t) => {
-  const world = stepWorld({ name: 'stone', props: {} }, { name: 'farmland', props: {} });
-  const { bot, timer } = physicsBot(world, 64);
+for (const startX of [0.85, 0.05]) test(`普通支撑偏心 x=${startX} 时直接迈进相邻列，实测不先归位或倒退`, async (t) => {
+  const world = stepWorld({ name: 'stone', props: {} }, { name: 'stone', props: {} });
+  const { bot, timer, trajectory } = physicsBot(world, 64);
   t.after(() => clearInterval(timer));
-  bot.entity.position = new Vec3(0.8, 64, 0.5);
+  bot.entity.position = new Vec3(startX, 64, 0.5);
   bot.blockAt = (pos: any) => world.getBlock(pos);
   const a = adapter(bot);
   const steadied: { x: number; z: number }[] = [];
@@ -253,13 +253,37 @@ test('相邻一步前，身体偏心时先潜行归位到格心，再迈步', as
     await steady(cell, signal, check);
   };
   await a.moveTo(
-    { kind: 'xyz', x: 0, y: 63.9375, z: -1 },
+    { kind: 'xyz', x: 1, y: 64, z: 0 },
     { signal: new AbortController().signal, timeoutMs: 4000, adjacentStep: true },
   );
-  assert.deepEqual(steadied, [{ x: 0, z: 0 }], '偏心 x=0.8 先归位到当前格心');
+  assert.deepEqual(steadied, [], `实际最远退到 x=${Math.min(...trajectory.map(p => p.x))}`);
+  assert.ok(trajectory.every(p => p.x >= startX - 0.001));
+  assert.equal(Math.floor(bot.entity.position.x), 1);
+  assert.equal(Math.floor(bot.entity.position.z), 0);
+  assert.equal(bot.entity.position.y, 64);
+});
+
+test('只有身体中心悬空、脚边仍在承重面时才潜行回到实际支撑列', async (t) => {
+  const { bot, timer } = physicsBot(dropWorld(), 64);
+  t.after(() => clearInterval(timer));
+  bot.entity.position = new Vec3(1.1, 64, 0.5);
+  const a = adapter(bot);
+  const steady = t.mock.method(a as unknown as { steady: (cell: { x: number; z: number }, signal: AbortSignal, check: () => void) => Promise<void> }, 'steady');
+  await a.moveTo({ kind: 'xyz', x: 0, y: 64, z: 0 }, { signal: new AbortController().signal, timeoutMs: 4000, adjacentStep: true });
+  assert.equal(steady.mock.callCount(), 1);
+  assert.deepEqual(steady.mock.calls[0]!.arguments[0], { x: 0, z: 0 });
   assert.equal(Math.floor(bot.entity.position.x), 0);
-  assert.equal(Math.floor(bot.entity.position.z), -1);
-  assert.ok(Math.abs(bot.entity.position.y - 63.9375) <= 0.02);
+  assert.equal(bot.entity.onGround, true);
+});
+
+test('真实支撑列与目标隔着一格时，拒绝该单步且不先向后归位', async (t) => {
+  const { bot, timer } = physicsBot(dropWorld(), 64);
+  t.after(() => clearInterval(timer));
+  bot.entity.position = new Vec3(1.1, 64, 0.5);
+  const keys = t.mock.method(bot, 'setControlState');
+  await assert.rejects(adapter(bot).moveTo({ kind: 'xyz', x: 2, y: 64, z: 0 }, { signal: new AbortController().signal, timeoutMs: 4000, adjacentStep: true }), /NOT_CONFIRMED/);
+  assert.equal(keys.mock.callCount(), 0);
+  assert.equal(bot.entity.position.x, 1.1);
 });
 
 test('相邻一步向上整块高度差会起跳，而不只是平走', async (t) => {

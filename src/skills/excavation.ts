@@ -30,6 +30,7 @@ export type ExcavationStopKind = 'impossible' | 'risk' | 'capability' | 'missing
 
 const registry = minecraftData(config.mc.version);
 const AIR = new Set(['air', 'cave_air', 'void_air']);
+const LANDING_CENTER_RADIUS = 0.45;
 const HAZARDS = new Set(['water', 'lava', 'bubble_column', 'powder_snow', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'cobweb', 'pointed_dripstone']);
 const PROTECTED = new Set(['end_portal_frame', 'end_portal', 'nether_portal', 'end_gateway', 'chest', 'trapped_chest', 'barrel', 'spawner', 'crafting_table', 'furnace', 'blast_furnace', 'smoker']);
 /** 传送门方块：软块（薄片、可穿过），不是「半砖/台阶」这类能站但不稳的方块，也不是液体/坑 */
@@ -559,14 +560,15 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       workCheck();
       standingCell(ctx, next, ledger, args);
       assertSession(ctx, origin);
-      // 下一落点已在挖掘前逐格复核（同一相邻格、身体空间已挖开、支撑已确认）；
-      // 用精确连续脚位交给本地身体控制，不把已确认的单步再交给路线搜索。
-      await adapter.moveTo({ kind: 'feet', x: next.x + 0.5, y: next.y, z: next.z + 0.5 }, { signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())) });
+      // 已逐格复核身体空间和支撑；直接迈进这一个落点，停稳条件与下方实测验收一致。
+      await adapter.moveTo({ kind: 'xyz', ...next }, {
+        signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), adjacentStep: { centerRadius: LANDING_CENTER_RADIUS },
+      });
       const landedBy = Math.min(ctx.deadline, Date.now() + 2500);
       let landed: AgentState;
       while (true) {
         landed = assertSession(ctx, origin);
-        if (landed.onGround && Math.abs(landed.pos.y - next.y) <= 0.1 && Math.hypot(landed.pos.x - next.x - 0.5, landed.pos.z - next.z - 0.5) <= 0.45) break;
+        if (landed.onGround && Math.abs(landed.pos.y - next.y) <= 0.1 && Math.hypot(landed.pos.x - next.x - 0.5, landed.pos.z - next.z - 0.5) <= LANDING_CENTER_RADIUS) break;
         if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
         await sleep(50, signal);
       }

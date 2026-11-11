@@ -41,15 +41,17 @@ class ExcavationWorld extends FakeAdapter {
   }
   override async moveTo(target: MoveTarget, options: MoveOpts) {
     throwIfAborted(options.signal);
-    assert.equal(target.kind, 'feet', 'the checked adjacent cell is dispatched as an exact feet target');
-    if (target.kind !== 'feet') throw new Error('Unexpected movement');
-    assert.ok(Math.hypot(target.x - this.pos.x, target.z - this.pos.z) <= 1.01);
+    assert.deepEqual(options.adjacentStep, { centerRadius: 0.45 });
+    assert.equal(target.kind, 'xyz', 'the checked adjacent cell uses the same acceptance radius as the excavation receipt');
+    if (target.kind !== 'xyz') throw new Error('Unexpected movement');
+    assert.equal(Math.abs(target.x - Math.floor(this.pos.x)) + Math.abs(target.z - Math.floor(this.pos.z)), 1);
     const feet = { x: Math.floor(target.x), y: target.y, z: Math.floor(target.z) };
     if (target.y > this.pos.y) assert.ok(AIR.has(this.blockAt({ x: Math.floor(this.pos.x), y: Math.floor(this.pos.y) + 2, z: Math.floor(this.pos.z) })), 'jumping first requires actual clearance above the current head');
     for (const level of [0, 1]) assert.ok(AIR.has(this.blockAt({ ...feet, y: feet.y + level })), 'both actual body cells must be cleared before movement');
     assert.ok(!AIR.has(this.blockAt({ ...feet, y: feet.y - 1 })), 'a resolved move cannot fabricate a floor');
-    this.moves.push({ x: target.x, y: target.y, z: target.z }); this.moveOptions.push(options);
-    if (!this.acknowledgeMoveOnly) this.pos = { x: target.x, y: target.y, z: target.z };
+    const center = { x: target.x + 0.5, y: target.y, z: target.z + 0.5 };
+    this.moves.push(center); this.moveOptions.push(options);
+    if (!this.acknowledgeMoveOnly) this.pos = center;
     this.afterMove?.();
   }
 }
@@ -427,8 +429,8 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
     override state() { return { ...super.state(), onGround: this.player?.entity.onGround ?? true }; }
     override async moveTo(target: MoveTarget, options: MoveOpts) {
       throwIfAborted(options.signal);
-      assert.equal(target.kind, 'feet');
-      if (target.kind !== 'feet') throw new Error('Unexpected movement');
+      assert.equal(target.kind, 'xyz');
+      if (target.kind !== 'xyz') throw new Error('Unexpected movement');
       const controls = { forward: true, back: false, left: false, right: false, jump: true, sprint: false, sneak: false };
       const environment = { getBlock: (position: any) => {
         const p = position.floored(), block = Block.fromStateId(data.blocksByName[this.blockAt(p)].defaultState, 0);
@@ -440,7 +442,7 @@ test('installed Minecraft physics can jump onto an excavated upper step under th
       const physics = Physics(data, environment);
       for (let tick = 0; tick < 100; tick++) {
         throwIfAborted(options.signal);
-        if (this.player.entity.position.x >= target.x - 0.2) { controls.forward = false; controls.jump = false; }
+        if (this.player.entity.position.x >= target.x + 0.5 - 0.2) { controls.forward = false; controls.jump = false; }
         physics.simulatePlayer(new PlayerState(this.player, controls), environment).apply(this.player);
         this.pos = { ...this.player.entity.position };
         if (tick > 20 && this.player.entity.onGround && Math.abs(this.pos.y - target.y) < 0.1) break;

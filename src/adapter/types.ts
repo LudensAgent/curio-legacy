@@ -188,8 +188,8 @@ export type MoveTarget =
   | { kind: 'away_from'; pos: Vec3Like; distance: number };
 
 export interface MoveOpts {
-  /** 只执行一个相邻格：绕过整段路线委托，直接用身体控制走/跳/下；仅 move_step 使用。 */
-  adjacentStep?: boolean;
+  /** 只走/跳/下到已检查的相邻 xyz 格列。调用方可指定距目标格心的最大水平距离。 */
+  adjacentStep?: boolean | { centerRadius: number };
   /**
    * feet 目标：允许一次同脚高的水平起跳跨越已证实的空腔。目标必须与实测
    * 脚高相同；身体控制只在原地起跳可覆盖的有限距离内尝试，不改变目标或

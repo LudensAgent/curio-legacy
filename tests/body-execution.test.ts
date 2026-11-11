@@ -7,6 +7,9 @@ import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import type { MoveOpts, NavigationDelegate } from '../src/adapter/types.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
+import { excavateRun } from '../src/skills/movement/excavate.ts';
+import { FakeAdapter } from './fake-adapter.ts';
+import { makeCtx } from './survival-helpers.ts';
 
 function botAt(x: number, y: number, z: number) {
   const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
@@ -37,7 +40,7 @@ function opts(signal = new AbortController().signal): MoveOpts {
   return { signal, timeoutMs: 3000 };
 }
 
-function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }, repeated = false) {
+function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }, repeated = false, workFace?: Set<string>) {
   const require = createRequire(import.meta.url);
   const data = require('minecraft-data')('1.20.1');
   const Block = require('prismarine-block')(data);
@@ -49,7 +52,8 @@ function continuousBody(drop: number, surface = { name: 'dirt_path', props: {} }
     getBlock(position: Vec3) {
       const p = position.floored();
       const surfaceY = p.x <= -495 ? 99 : 99 - drop * (repeated ? p.x + 495 : 1);
-      const stateId = p.y === surfaceY ? surfaceBlock.stateId : data.blocksByName[p.y < surfaceY ? 'stone' : 'air'].defaultState;
+      const stateId = workFace?.has(p.toString()) ? data.blocksByName.stone.defaultState
+        : p.y === surfaceY ? surfaceBlock.stateId : data.blocksByName[p.y < surfaceY ? 'stone' : 'air'].defaultState;
       const block = Block.fromStateId(stateId, 0);
       block.position = p;
       return block;
@@ -120,7 +124,7 @@ test('连续多格下落取消后松开控制，保留空中实测位置', async
 
 for (const drop of [0, -1]) {
   test(`连续四步 dirt_path ${drop === 0 ? '步行' : '上台阶'}：微调实测越位时不转身，保持落稳`, async (t) => {
-    const { bot, timer, from, looks, writes, controls } = continuousBody(drop, undefined, true);
+    const { bot, timer, from, looks, writes, controls, frames } = continuousBody(drop, undefined, true);
     t.after(() => clearInterval(timer));
     const adapter = adapterWith(bot);
     for (let step = 1; step <= 4; step++) {
@@ -132,7 +136,11 @@ for (const drop of [0, -1]) {
     }
     assert.equal(looks.length, 4, '每段只定向一次，不为制动后的微调反复转向');
     assert.ok(looks.every((yaw) => Math.abs(yaw + Math.PI / 2) < 0.01), `朝向 ${looks}`);
-    if (drop === 0) assert.ok(writes.includes('back:true'), '真实越位仍经过后退短脉冲纠正');
+    if (drop === 0) {
+      const reversals = frames.slice(1).filter((frame, index) => frame.x < frames[index]!.x - 0.001);
+      assert.equal(writes.filter(write => write === 'back:true').length, 0, `平走中出现 ${reversals.length} 个实测后退帧`);
+      assert.equal(reversals.length, 0);
+    }
     assert.ok(Object.values(controls).every((pressed) => !pressed));
   });
 }
@@ -181,6 +189,38 @@ test('中间点终止时只松键等待实际制动，不回到旧检查点', as
   assert.ok(Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
   assert.ok(writes.slice(count).every(event => event.endsWith(':false')), '收尾不主动倒车或重新前进');
   assert.ok(Object.values(controls).every(held => !held));
+});
+
+test('excavate_run 清开四级下降阶梯后直接落在每个已验收格内', async (t) => {
+  const solids = new Set<string>();
+  const { bot, timer, from, writes, frames } = continuousBody(1, { name: 'stone', props: {} }, true, solids);
+  t.after(() => clearInterval(timer));
+  for (let index = 1; index <= 4; index++) solids.add(new Vec3(Math.floor(from.x) + index, from.y - index, Math.floor(from.z)).toString());
+  const body = adapterWith(bot);
+  const adapter = new FakeAdapter();
+  adapter.pos = { ...from };
+  const state = adapter.state.bind(adapter);
+  t.mock.method(adapter, 'state', () => ({ ...state(), pos: { ...bot.entity.position }, onGround: bot.entity.onGround }));
+  t.mock.method(adapter, 'blockAt', pos => bot.blockAt(new Vec3(pos.x, pos.y, pos.z)).name);
+  t.mock.method(adapter, 'dig', async pos => ({ ok: solids.delete(new Vec3(pos.x, pos.y, pos.z).toString()) }));
+  t.mock.method(adapter, 'moveTo', async (target, options) => {
+    assert.equal(target.kind, 'xyz');
+    assert.deepEqual(options.adjacentStep, { centerRadius: 0.45 });
+    await body.moveTo(target, options);
+    adapter.pos = { ...bot.entity.position };
+    assert.ok(bot.entity.onGround && Math.hypot(bot.entity.velocity.x, bot.entity.velocity.z) < 0.003);
+    assert.ok(Math.hypot(adapter.pos.x - target.x - 0.5, adapter.pos.z - target.z - 0.5) <= 0.45);
+    assert.equal(adapter.pos.y, target.y);
+  });
+  const ctx = makeCtx(adapter, { deadlineMs: 20_000 });
+  t.after(() => ctx.memory.close());
+  const result = await excavateRun.run(ctx, { mode: 'stairs', direction: 'east', steps: 4 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.completedSteps, 4);
+  assert.equal(result.data?.excavatedBlocks, 4);
+  assert.equal(solids.size, 0);
+  assert.ok(!writes.includes('back:true'));
+  assert.ok(frames.slice(1).every((frame, index) => frame.x >= frames[index]!.x - 0.001));
 });
 
 for (const bearing of [{ x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }]) {
@@ -251,14 +291,34 @@ test('松键后实际停在纠偏窗外，立即报告过冲', async () => {
 });
 
 test('经过检查点后又被移出容差时，不能用旧物理帧确认到达', async () => {
-  const { bot } = botAt(0.5, 64, 0.5);
+  const { bot, writes } = botAt(0.5, 64, 0.5);
   const moved = adapterWith(bot).moveTo({ kind: 'feet', x: 1.5, y: 64, z: 0.5 }, { ...opts(), settleAtTarget: false });
   bot.entity.position.x = 1.421;
   bot.emit('physicsTick');
   bot.entity.position.x = 2.109;
   bot.emit('physicsTick');
-  await assert.rejects(moved, /越过了连续脚位目标/);
+  await assert.rejects(moved, { code: 'CHECKPOINT_PASSED' });
+  assert.ok(!writes.includes('back:true'));
   assert.equal(bot.listenerCount('physicsTick'), 0);
+});
+
+test('中间点前只需惯性一帧即可入窗时，补跑两帧仍向前交接', async () => {
+  const { bot, controls, writes } = botAt(8.6755, 160, 0.5);
+  const target = { kind: 'feet' as const, x: 9.6638, y: 160, z: 0.5 };
+  const movement = adapterWith(bot).moveTo(target, { ...opts(), settleAtTarget: false });
+  for (const [x, vx] of [[9.11, 0.1], [9.30, 0.107], [9.507, 0.114]]) {
+    bot.entity.position.x = x; bot.entity.velocity.x = vx;
+    bot.emit('physicsTick');
+  }
+  assert.equal(controls.forward, false, '在真服出现过冲的前一帧松键');
+  for (let tick = 0; tick < 2; tick++) {
+    bot.entity.position.x += bot.entity.velocity.x;
+    bot.entity.velocity.x *= 0.546;
+    bot.emit('physicsTick');
+  }
+  await movement;
+  assert.ok(Math.abs(bot.entity.position.x - target.x) <= 0.12 && bot.entity.velocity.x > 0.003);
+  assert.ok(!writes.includes('back:true'));
 });
 
 for (const drop of [0, -1]) {
@@ -309,7 +369,7 @@ test('后退微调被取消时释放本次按键且不再转向', async () => {
 test('实测侧向惯性用侧移纠正，保持初始朝向与原目标', async (t) => {
   const { bot, timer, controls, writes, looks, to } = continuousBody(0);
   t.after(() => clearInterval(timer));
-  bot.entity.velocity = new Vec3(0, 0, 0.02);
+  bot.entity.velocity = new Vec3(0, 0, 0.06);
   await adapterWith(bot).moveTo({ kind: 'feet', ...to }, { ...opts(), timeoutMs: 6000 });
   assert.ok(writes.includes('left:true'), '面东时向南的惯性应由左移纠正');
   assert.ok(Math.hypot(bot.entity.position.x - to.x, bot.entity.position.z - to.z) <= 0.12);
