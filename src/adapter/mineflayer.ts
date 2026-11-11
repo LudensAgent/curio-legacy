@@ -3261,7 +3261,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             // 已经换维度就不再按身体位置猜：交给落地等待；身体压上门方块才停止前进
             if (cur.dim !== from.dim) break;
             if (this.bodyInPortal(name)) { markEntered(); break; }
-            await this.drive({ forward: true }, 350, signal, { facePoint: approach.center });
+            // 门前站位比身体高一级（草地接门框黑曜石等）时，像玩家一样跳上去；只推前进键会一直顶在台阶上。
+            const body = this.bot?.entity;
+            const below = !!body?.onGround && body.position.y < approach.cell.y - 0.4;
+            await this.drive({ forward: true, ...(below ? { jump: true } : {}) }, 350, signal, { facePoint: approach.center });
           }
         } else {
           // 没有可站立的接近格（门贴着崖/墙）：走到门附近再短促朝门洞中心冲，让身体落进门格
