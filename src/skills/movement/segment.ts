@@ -645,13 +645,21 @@ async function runNavigationSegmentInner(
     // not an evidence gap. It must win over the search status derived from the
     // pages that happened to be available.
     // 直接阻挡/不支持与“整个授权走廊内没有路”、“已存几何无路”、“证据不足”分开，不互相顶替。
+    const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
+    // 当前证据搜索因预算耗尽停下时，如果本地恰有可观察的 UNKNOWN/STALE 出边，先把它当
+    // 未知边界交给协调器观察；预算耗尽的事实仍保留在 searchStatus/search.budget。
+    // 只在身体确实站在该前缀端点（或没有可执行前缀）时这样做，避免把远处边界当成身边证据。
+    const localBudgetBoundary = historicalBudget === null && strict.status === 'BUDGET_EXHAUSTED'
+      && (reachable === undefined || reachable.atStart === true || sameCell(cell(reachable.endpoint), cell(start)))
+      ? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal))
+      : undefined;
     const outcome: SegmentOutcome = residencyFailure !== null ? 'residency_not_ready'
       : blockerAhead?.status === 'BLOCKED' ? 'blocked'
         : blockerAhead?.status === 'UNSUPPORTED' ? 'unsupported'
           : !straight && strict.corridorLimited === true ? 'corridor_exhausted'
             : historicalBudget !== null ? 'search_budget'
-              : outcomeOfStatus(strict.status);
-    const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
+              : localBudgetBoundary !== undefined ? 'unknown_boundary'
+                : outcomeOfStatus(strict.status);
     const unavailable = residencyFailure !== null && residencyFailure.sections.length > 0
       ? residencyFailure.sections
       : historicalBudget !== null && historicalBudget.unavailableSections.length > 0
@@ -663,7 +671,7 @@ async function runNavigationSegmentInner(
       ? ''
       : `；驻留加载失败（${residencyFailure.reason}）：${residencyFailure.message}`;
     return {
-      waypoint, outcome, stopCode: residencyFailure !== null ? 'residency_gap' : blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
+      waypoint, outcome, stopCode: residencyFailure !== null ? 'residency_gap' : localBudgetBoundary !== undefined ? 'budget_boundary' : blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
       chosen: null, search: historicalBudget ?? strict, ...historicalAttempt,
       searchStatus: (historicalBudget ?? strict).status, searchReason: (historicalBudget ?? strict).reason,
       evidenceMode: 'current', searches,
@@ -674,7 +682,8 @@ async function runNavigationSegmentInner(
       ...(unavailable.length === 0 ? {} : { unavailableSections: unavailable }),
       ...(strict.policy === undefined ? {} : { policy: strict.policy }),
       ...(blockerAhead === undefined ? {} : { blockerAhead }),
-      ...(outcome === 'unknown_boundary' && blockedBoundary !== undefined ? { boundary: blockedBoundary } : {}),
+      ...(outcome === 'unknown_boundary' && (localBudgetBoundary ?? blockedBoundary) !== undefined
+        ? { boundary: localBudgetBoundary ?? blockedBoundary! } : {}),
       detail: residencyFailure !== null
         ? `导航所需的 ${residencyFailure.sections.length} 个 Section 未能加载/驻留（${residencyFailure.reason}）：${residencyFailure.message}；没有把冷页失败当成无路或未知，未执行未复验的动作`
         : `${blockerAhead !== undefined
@@ -683,7 +692,9 @@ async function runNavigationSegmentInner(
             ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
             : historicalBudget !== null
               ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
-              : statusDetail(strict)}${residencyNote}`,
+              : localBudgetBoundary !== undefined
+                ? `${statusDetail(strict)}；本地边界仍有可观察缺口，先观察再重搜`
+                : statusDetail(strict)}${residencyNote}`,
     };
   }
 
@@ -1240,7 +1251,10 @@ async function runNavigationSegmentInner(
     }
     if (blocker?.status === 'BLOCKED') return receipt('blocked', { ...facts, blockerAhead: blocker, stopCode: 'blocker', detail: blocker.reason });
     const boundary = boundaryAfter(next.boundaries, last.pos, anchorOf(previewEnd.goal));
-    return receipt(outcomeOfStatus(next.status), { ...facts, stopCode: 'window_boundary', detail: statusDetail(next),
+    // 预算耗尽时若末端正好有可观察的本地未知边界，先走未知边界流程观察，再重搜；
+    // 仍保留 searchStatus/budget 事实，不把预算停止伪装成普通无路。
+    const outcome = next.status === 'BUDGET_EXHAUSTED' && boundary !== undefined ? 'unknown_boundary' : outcomeOfStatus(next.status);
+    return receipt(outcome, { ...facts, stopCode: 'window_boundary', detail: statusDetail(next),
       ...(boundary === undefined ? {} : { boundary }) });
   }
   if (truncated) {
