@@ -66,6 +66,7 @@ import { Perception } from './perception/perception.ts';
 import { NOTABLE, Vision } from './perception/vision.ts';
 import { Ledger } from './mind/ledger.ts';
 import { ExcursionLog } from './mind/excursions.ts';
+import { reachTraversed } from './skills/spatial-extrema.ts';
 import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './planner/llm.ts';
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
@@ -418,6 +419,7 @@ const mind = new Mind({
   behaviors,
   ledger,
   excursions: new ExcursionLog(path.join(config.dataDir, 'excursions.json')),
+  reach: (dim, origin, signal) => reachTraversed(spatial, dim, origin, 512, signal, Date.now() + 20_000),
   onWorthLearning: (note: string) => smith.noted(note),
   onGoalStuck: (goal, lines) => smith.goalStuck(goal, lines),
   ...(audience ? { audience } : {}),

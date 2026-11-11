@@ -91,6 +91,8 @@ export interface MindContext {
   trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
   /** 出行记录（认真想时给）：每段在某维度的在线经历、走到的最远脚格、怎么结束、吃了多少 */
   excursions?: readonly Leg[];
+  /** 本维度各方位身体站过的最远脚格（体素到访标记，后台读的缓存；认真想时给） */
+  reach?: { dim: string; origin: Vec3Like; at: number; sectors: Record<string, { pos: Vec3Like; distance: number }>; truncated: boolean };
   /** 打猎的账（给“肉快打光了”这种事实） */
   hunting?: HuntTally | null;
   /** 材料账：木料/矿石各跑过几段活、一共多少、走了多远（给重复跑腿的事实，不替 Agent 决定备多少） */
@@ -470,6 +472,12 @@ export function decisionReminders(ctx: MindContext): string[] {
       out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；粗矿块 ${rawBlocks} 个（背包+记得的箱子合计）按块计，未折算成粗铁` : ''}`);
     }
   }
+  // 站在这一趟的起点附近（通常刚到门边）时，把以前推到过的最远处贴在末尾：要不要从那里接着推由它定。
+  const reach = ctx.reach;
+  if (ctx.tier === 'deliberate' && reach && reach.dim === p.self.dim && Math.hypot(here.x - reach.origin.x, here.z - reach.origin.z) <= 24) {
+    const far = reachLines(ctx, here, 64);
+    if (far.length) out.push(`这个维度里身体站过的最远处（体素到访记录，从 (${reach.origin.x},${reach.origin.y},${reach.origin.z}) 起算）：${far.join('；')}——现在能否走通未确认，坐标可作为 travel_to 目标`);
+  }
   // 顺手采集与不可替代工具：把「看见什么矿 + 现在这类料有多少 + 能做什么」摆成事实，让它在路过矿石时能自己掂量要不要顺手采；
   // 只报事实，采不采、做不做备用工具都由它定（不替它写 gather 或 craft）
   if (ctx.tier === 'deliberate') {
@@ -822,6 +830,8 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
+    ...(reachLines(ctx, here, 32).length ? { walked_farthest: { from: `(${ctx.reach!.origin.x},${ctx.reach!.origin.y},${ctx.reach!.origin.z}) 起算`, by_direction: reachLines(ctx, here, 32),
+      note: `身体实际站过的脚格（体素到访记录，${Math.round((Date.now() - ctx.reach!.at) / 60_000)} 分钟前读取${ctx.reach!.truncated ? '，没读完全部区段' : ''}）；现在能否走通未确认，沿途也不等于看全了；坐标可以直接作为移动目标` } } : {}),
     ...(tripsBeyond.length ? { my_trips_beyond_nearby_portal: tripsBeyond } : {}),
     ...(tripsHere.length || tripsBeyond.length ? { trips_note: LEG_NOTE } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
@@ -829,6 +839,16 @@ function worldKnowledge(ctx: MindContext) {
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子
     ...(p.waiting_on?.length ? { waiting_on: p.waiting_on } : {}),
   };
+}
+
+/** 各方位最远到访点里离起点至少 min 格的，按远近排；附上相对现在位置的方位与距离。 */
+function reachLines(ctx: MindContext, here: Vec3Like, min: number): string[] {
+  const reach = ctx.reach;
+  if (!reach || reach.dim !== ctx.percept.self.dim) return [];
+  return Object.entries(reach.sectors).filter(([, s]) => s.distance >= min).sort((a, b) => b[1].distance - a[1].distance).slice(0, 4).map(([dir, s]) => {
+    const dx = s.pos.x + 0.5 - here.x, dz = s.pos.z + 0.5 - here.z, d = Math.round(Math.hypot(dx, dz));
+    return `${dir} ${s.distance} 格 (${s.pos.x},${s.pos.y},${s.pos.z})，在你 ${dirName(dx, dz)} ${d} 格`;
+  });
 }
 
 /** 历史采集回执的提示词写法：数量是当时的实际物品差量，不代表当前背包。 */

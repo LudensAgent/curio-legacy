@@ -103,3 +103,36 @@ test('prompt lists trips in this dimension and trips beyond a nearby portal, onl
   assert.equal(known('glance').my_trips_beyond_nearby_portal, undefined);
   memory.close();
 });
+
+test('最远到访点：认真想时列在【记得的地方】，站在起点附近时再贴到【此刻要留意】', async () => {
+  const { EventBus } = await import('../src/events.ts');
+  const { WorldMemory } = await import('../src/memory/store.ts');
+  const { buildMindMessages } = await import('../src/mind/prompt.ts');
+  const { SelfModel } = await import('../src/mind/self.ts');
+  const { Perception } = await import('../src/perception/perception.ts');
+  const { Vision } = await import('../src/perception/vision.ts');
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  const s = adapter.state();
+  const reach = { dim: s.dim, origin: { x: 0, y: 64, z: 0 }, at: Date.now(), truncated: false,
+    sectors: { E: { pos: { x: 236, y: 56, z: -10 }, distance: 236 }, N: { pos: { x: 0, y: 64, z: -20 }, distance: 20 } } };
+  const user = (tier: 'deliberate' | 'glance', pos = s.pos) => {
+    adapter.pos = pos;
+    const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+    return buildMindMessages({
+      tier, reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory,
+      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [],
+      persona: 'P', skills: [], ...(tier === 'deliberate' ? { reach } : {}),
+    })[1].content;
+  };
+  const near = user('deliberate', { x: 0.5, y: 64, z: 0.5 });
+  const known = JSON.parse(near.match(/【记得的地方】(.*)/)![1]);
+  assert.equal(known.walked_farthest.by_direction.length, 1, '20 格的不列');
+  assert.match(known.walked_farthest.by_direction[0], /^E 236 格 \(236,56,-10\)/);
+  assert.match(near.split('【此刻要留意】')[1] ?? '', /身体站过的最远处.*E 236 格/);
+  const away = user('deliberate', { x: 100.5, y: 64, z: 0.5 });
+  assert.doesNotMatch(away.split('【此刻要留意】')[1] ?? '', /身体站过的最远处/, '离起点远了不再贴到末尾');
+  assert.doesNotMatch(user('glance'), /walked_farthest/);
+  memory.close();
+});

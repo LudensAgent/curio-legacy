@@ -67,3 +67,19 @@ test('spatial_extrema：deepest 返回半径内身体实际站过的最低脚格
   assert.equal(none.data?.deepest, null);
   assert.match(none.summary, /没有身体站过的记录/);
 });
+
+test('spatial_extrema：reach 按八方位给身体站过的最远脚格', async () => {
+  const voxel = new VoxelMap('fake-world', { validityWindowMs: 1e12 });
+  voxel.beginSession('s');
+  for (let i = 1; i <= 200; i++) voxel.markTraversed(DIM, { x: i, y: 64, z: 0 });   // 往东的旧巷，到 x=200
+  for (let i = 1; i <= 40; i++) voxel.markTraversed(DIM, { x: 0, y: 64, z: -i });   // 往北 40 格
+  voxel.markTraversed('the_nether', { x: 300, y: 64, z: 0 });
+  const spatial = { closing: false, session: { lifecycle: 'open', voxel, voxelLoading: 'eager' } } as unknown as SharedSpatialSession;
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'reach' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  const sectors = r.data?.sectors as Record<string, { pos: { x: number; y: number; z: number }; distance: number }>;
+  assert.deepEqual(sectors.E!.pos, { x: 200, y: 64, z: 0 });
+  assert.equal(sectors.N!.distance, 40);
+  assert.equal(sectors.W, undefined);
+  assert.match(r.summary, /E 200 格 \(200,64,0\)/);
+});

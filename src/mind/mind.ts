@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { shortId } from '../util.ts';
-import type { AgentState, GameAdapter } from '../adapter/types.ts';
+import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
@@ -53,6 +53,8 @@ export interface MindDeps {
   ledger?: LedgerView | null;
   /** 出行记录：每次换维度/死亡/长时间未观测之间的身体经历与消耗（只记事实） */
   excursions?: ExcursionLog | null;
+  /** 读体素到访标记：各方位身体站过、离 origin 最远的脚格（异步，可能要从存盘加载区段） */
+  reach?: (dim: string, origin: Vec3Like, signal: AbortSignal) => Promise<{ sectors: Record<string, { pos: Vec3Like; distance: number }>; truncated: boolean }>;
   /** 心智觉得刚才的事值得练成技能：交给后台去写 */
   onWorthLearning?: (note: string) => void;
   timing?: Partial<typeof DEFAULT_TIMING>;
@@ -272,6 +274,28 @@ export class Mind {
   private learnFrom: { stuck: NonNullable<Mind['lastStuck']>; solved: { what: string; routine: string[] } } | null = null;
   /** 这一趟下地：从哪一刻起头顶没了天空、当时背包有什么。回到地面就清掉（给“下矿的账”算这趟花了多久、挖到了什么） */
   private trip: { since: number; inventory: Record<string, number> } | null = null;
+  /** 按维度缓存的“身体站过的最远处”（后台读体素到访标记）；思考时用上一次读到的，不等它。 */
+  private reachCache = new Map<string, { worldId: string; origin: Vec3Like; at: number; sectors: Record<string, { pos: Vec3Like; distance: number }>; truncated: boolean }>();
+  private reachPending = false;
+
+  /**
+   * 后台刷新本维度的最远到访点：起算点用这一趟的入口（通常是门边），没有就用当前位置。
+   * 缓存 5 分钟内、起算点没挪远就不重读；读失败只是这次没有，不影响思考。
+   */
+  private refreshReach(state: AgentState) {
+    if (!this.d.reach || this.reachPending) return;
+    const leg = this.d.excursions?.current(state.worldId);
+    const origin = leg && leg.dim === state.dim ? leg.entry.pos : { x: Math.floor(state.pos.x), y: Math.floor(state.pos.y), z: Math.floor(state.pos.z) };
+    const cached = this.reachCache.get(state.dim);
+    if (cached && cached.worldId === state.worldId && Date.now() - cached.at < 5 * 60_000
+      && Math.hypot(cached.origin.x - origin.x, cached.origin.z - origin.z) < 32) return;
+    this.reachPending = true;
+    const dim = state.dim, worldId = state.worldId;
+    this.d.reach(dim, origin, AbortSignal.timeout(20_000))
+      .then((r) => { this.reachCache.set(dim, { worldId, origin, at: Date.now(), sectors: r.sectors, truncated: r.truncated }); })
+      .catch((e) => { this.d.bus.publish('reach_unavailable', 'P3', `读最远到访点没成：${String((e as Error)?.message ?? e)}`); })
+      .finally(() => { this.reachPending = false; });
+  }
   private skillOpenedAt = new Map<string, number>();
   /** 上次展示的工具分级事实签名与时间：同状态不每念重复，状态变了或过了 10 分钟才再说 */
   private toolFactKey: string | null = null;
@@ -1682,6 +1706,11 @@ export class Mind {
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
       ...(tier === 'deliberate' && this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
+      ...(tier === 'deliberate' ? (() => {
+        this.safe(() => this.refreshReach(state), undefined);
+        const reach = this.reachCache.get(state.dim);
+        return reach && reach.worldId === state.worldId ? { reach: { dim: state.dim, ...reach } } : {};
+      })() : {}),
       materials: ledger ? this.safe(() => ({ wood: ledger.materialTally('wood'), ore: ledger.materialTally('ore') }), null) : null,
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
