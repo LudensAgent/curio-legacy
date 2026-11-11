@@ -650,6 +650,17 @@ export class SelfModel {
       const [keep, ...rest] = parts;
       // 回想可能添加了新的结论：旧做法的成败不能证明改写后的整句话。
       const unchanged = parts.every((k) => cleanLesson(k.text) === cleanLesson(m.text) && k.signature === keep.signature);
+      // 措辞变了：新说法从零计，旧说法（含被并入的几条）累计的成败记到 prior 里。
+      if (!unchanged) keep.prior = {
+        wins: parts.reduce((n, k) => n + k.wins + (k.prior?.wins ?? 0), 0),
+        losses: parts.reduce((n, k) => n + k.losses + (k.prior?.losses ?? 0), 0),
+        revisions: parts.reduce((n, k) => n + (k.prior?.revisions ?? 0), 0) + 1,
+        lastText: keep.text.slice(0, 160),
+      };
+      else if (parts.some((k) => k.prior)) keep.prior = {
+        wins: parts.reduce((n, k) => n + (k.prior?.wins ?? 0), 0), losses: parts.reduce((n, k) => n + (k.prior?.losses ?? 0), 0),
+        revisions: parts.reduce((n, k) => n + (k.prior?.revisions ?? 0), 0), lastText: parts.find((k) => k.prior)!.prior!.lastText,
+      };
       keep.text = m.text;
       keep.wins = unchanged ? parts.reduce((n, k) => n + k.wins, 0) : 0;
       keep.losses = unchanged ? parts.reduce((n, k) => n + k.losses, 0) : 0;
@@ -664,6 +675,7 @@ export class SelfModel {
     }
     for (const r of c.rewrite) { const k = byId.get(r.id); if (k) {
       if (cleanLesson(k.text) !== cleanLesson(r.text)) {
+        k.prior = { wins: k.wins + (k.prior?.wins ?? 0), losses: k.losses + (k.prior?.losses ?? 0), revisions: (k.prior?.revisions ?? 0) + 1, lastText: k.text.slice(0, 160) };
         k.wins = 0; k.losses = 0; k.unverified = true; k.signature = undefined; k.applications = undefined;
         // 新说法来自这次反思，不再是原来的亲历观察；createdAt 保留原观察时间，不改成现在。
         k.source = 'reflection';

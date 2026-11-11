@@ -229,6 +229,11 @@ export interface KnowHow {
   createdAt: number;
   updatedAt: number;
   source: 'reflection' | 'experiment' | 'observed';
+  /**
+   * 改写/合并之前的说法累计下来的成败：新说法的成败从零重新计，但旧说法的记录不丢，
+   * 否则一条一直失败的窍门换个措辞就把失败史洗掉了。只是历史事实，留不留由 Agent 决定。
+   */
+  prior?: { wins: number; losses: number; revisions: number; lastText: string };
 }
 
 export interface Experiment {

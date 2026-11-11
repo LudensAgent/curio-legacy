@@ -284,3 +284,22 @@ test('主提示词的窍门条目保留来源、未验证和应用证据计数',
   assert.match(system.content, /applying/);
   memory.close();
 });
+
+test('改写或合并换了措辞：新说法从零计，旧说法的成败累计到 prior，并送到提示词与回想', () => {
+  const self = new SelfModel(null);
+  const rule = self.learn('同一格连卡两次就换没试过的方向', { source: 'reflection' })!;
+  rule.wins = 0; rule.losses = 13;
+  self.consolidate({ merge: [], rewrite: [{ id: rule.id, text: '同一格连卡两次就换方向或横移几格' }], drop: [], add: [], agendaDrop: [] });
+  assert.equal(rule.losses, 0);
+  assert.deepEqual({ ...rule.prior, lastText: undefined }, { wins: 0, losses: 13, revisions: 1, lastText: undefined });
+  rule.losses = 2;
+  const other = self.learn('卡住就换方向', { source: 'reflection' })!;
+  other.wins = 1;
+  self.consolidate({ merge: [{ ids: [rule.id, other.id], text: '卡住就换方向，或横移几格再回主方向' }], rewrite: [], drop: [], add: [], agendaDrop: [] });
+  assert.equal(rule.wins, 0);
+  assert.equal(rule.prior?.losses, 15, '两次改写累计的失败都留着');
+  assert.equal(rule.prior?.wins, 1);
+  assert.equal(rule.prior?.revisions, 2);
+  const [, user] = buildReflectionMessages(self, 'P');
+  assert.match(user.content, /"before_rewrite":\{"wins":1,"losses":15,"revisions":2/);
+});
