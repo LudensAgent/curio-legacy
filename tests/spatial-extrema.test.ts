@@ -83,3 +83,19 @@ test('spatial_extrema：reach 按八方位给身体站过的最远脚格', async
   assert.equal(sectors.W, undefined);
   assert.match(r.summary, /E 200 格 \(200,64,0\)/);
 });
+
+test('spatial_extrema：manual 模式下按会话的 worker 分页列存盘目录，不调用 VoxelMap 自己的 directoryPage', async () => {
+  const voxel = new VoxelMap('fake-world', { validityWindowMs: 1e12 });
+  voxel.beginSession('s');
+  for (let i = 1; i <= 50; i++) voxel.markTraversed(DIM, { x: i, y: 64, z: 0 });
+  (voxel as unknown as { directoryPage: () => never }).directoryPage = () => { throw new Error('directory metadata is not resident; use the session worker-backed directoryPage'); };
+  let pages = 0;
+  const session = { lifecycle: 'open', voxel, voxelLoading: 'manual',
+    sectionResidency: () => ({ residency: 'no_record' }),
+    directoryPage: async () => { pages++; return { items: [], nextAfter: undefined }; } };
+  const spatial = { closing: false, session } as unknown as SharedSpatialSession;
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'reach' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(pages, 1);
+  assert.equal((r.data?.sectors as Record<string, { distance: number }>).E!.distance, 50);
+});

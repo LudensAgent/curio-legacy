@@ -25,8 +25,11 @@ interface ExtremaArgs {
 /** deepest 默认/最大水平半径；一次调用最多读这么多个区段，每批加载这么多个。 */
 const DEEPEST_DEFAULT_RADIUS = 128, DEEPEST_MAX_RADIUS = 512, DEEPEST_MAX_SECTIONS = 512, DEEPEST_BATCH = 64;
 
-/** 在 origin 水平 radius 内、记录过体素区段的键；manual 模式下连同存盘未驻留的一起列出。 */
-function traversedSectionKeys(spatial: SharedSpatialSession, dim: string, origin: Vec3Like, radius: number) {
+/**
+ * 在 origin 水平 radius 内、记录过体素区段的键；manual 模式下连同存盘未驻留的一起列出。
+ * 存盘目录走会话的 worker 分页（VoxelMap 自己的 directoryPage 在 manual 模式下没有目录元数据，会直接报错）。
+ */
+async function traversedSectionKeys(spatial: SharedSpatialSession, dim: string, origin: Vec3Like, radius: number) {
   const voxel = spatial.session.voxel;
   const near = (k: SectionKey) => Math.hypot(k.cx * 16 + 8 - origin.x, k.cz * 16 + 8 - origin.z) <= radius + 12;
   const keys = new Map<string, SectionKey>();
@@ -35,7 +38,7 @@ function traversedSectionKeys(spatial: SharedSpatialSession, dim: string, origin
   if (spatial.session.voxelLoading === 'manual') {
     let after: number | undefined;
     do {
-      const page = voxel.directoryPage({ ...(after === undefined ? {} : { after }), limit: 512 });
+      const page = await spatial.session.directoryPage({ ...(after === undefined ? {} : { after }), limit: 512 });
       page.items.forEach((item) => add(item.key));
       after = page.nextAfter;
     } while (after !== undefined);
@@ -75,7 +78,7 @@ async function walkTraversed(
 async function deepestTraversed(
   spatial: SharedSpatialSession, dim: string, origin: Vec3Like, radius: number, signal: AbortSignal, deadline: number,
 ) {
-  const keys = traversedSectionKeys(spatial, dim, origin, radius);
+  const keys = await traversedSectionKeys(spatial, dim, origin, radius);
   const levels = [...new Set(keys.map((k) => k.sy))].sort((a, b) => a - b);
   let best: Vec3Like | null = null;
   let scanned = 0, unreadable = 0, truncated = false;
@@ -105,7 +108,7 @@ const sectorOf = (dx: number, dz: number) => SECTORS[((Math.round(Math.atan2(dz,
 export async function reachTraversed(
   spatial: SharedSpatialSession, dim: string, origin: Vec3Like, radius: number, signal: AbortSignal, deadline: number,
 ) {
-  const keys = traversedSectionKeys(spatial, dim, origin, radius)
+  const keys = (await traversedSectionKeys(spatial, dim, origin, radius))
     .sort((a, b) => Math.hypot(b.cx * 16 + 8 - origin.x, b.cz * 16 + 8 - origin.z) - Math.hypot(a.cx * 16 + 8 - origin.x, a.cz * 16 + 8 - origin.z));
   const sectors = new Map<string, { pos: Vec3Like; distance: number }>();
   const r = await walkTraversed(spatial, dim, keys, signal, deadline, (cell) => {
