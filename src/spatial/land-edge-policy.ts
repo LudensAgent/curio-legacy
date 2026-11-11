@@ -30,15 +30,20 @@ const WATER = new Set(['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass
 export const isWaterBlock = (name: string): boolean => WATER.has(name.replace(/^minecraft:/, ''));
 
 /**
- * 身体从 from 到 to 扫过的格子（0.6×1.8 身体在两端的并集包围盒，覆盖斜向拐角与台阶/下落的两段）。
- * 火、岩浆等危险格只要与身体重叠就会伤人，不只落点那三格。
+ * 身体从 from 到 to 将要新进入的格子（0.6×1.8 身体在两端的并集包围盒，覆盖斜向拐角与台阶/下落的两段），
+ * 不含身体此刻已占据的格：站在火里时必须还能走出去。火、岩浆等危险格只要与身体重叠就会伤人，不只落点那三格。
  */
 export function sweptBodyCells(from: { x: number; y: number; z: number }, to: { x: number; y: number; z: number }) {
-  const minX = Math.floor(Math.min(from.x, to.x) - 0.3 + 1e-6), maxX = Math.floor(Math.max(from.x, to.x) + 0.3 - 1e-6);
-  const minZ = Math.floor(Math.min(from.z, to.z) - 0.3 + 1e-6), maxZ = Math.floor(Math.max(from.z, to.z) + 0.3 - 1e-6);
-  const minY = Math.floor(Math.min(from.y, to.y) + 1e-6), maxY = Math.floor(Math.max(from.y, to.y) + 1.8 - 1e-6);
+  const span = (lo: number, hi: number) => [Math.floor(lo + 1e-6), Math.floor(hi - 1e-6)] as const;
+  const [fx0, fx1] = span(from.x - 0.3, from.x + 0.3), [fz0, fz1] = span(from.z - 0.3, from.z + 0.3), [fy0, fy1] = span(from.y, from.y + 1.8);
+  const [minX, maxX] = span(Math.min(from.x, to.x) - 0.3, Math.max(from.x, to.x) + 0.3);
+  const [minZ, maxZ] = span(Math.min(from.z, to.z) - 0.3, Math.max(from.z, to.z) + 0.3);
+  const [minY, maxY] = span(Math.min(from.y, to.y), Math.max(from.y, to.y) + 1.8);
   const cells: { x: number; y: number; z: number }[] = [];
-  for (let x = minX; x <= maxX; x++) for (let y = minY; y <= maxY; y++) for (let z = minZ; z <= maxZ; z++) cells.push({ x, y, z });
+  for (let x = minX; x <= maxX; x++) for (let y = minY; y <= maxY; y++) for (let z = minZ; z <= maxZ; z++) {
+    if (x >= fx0 && x <= fx1 && y >= fy0 && y <= fy1 && z >= fz0 && z <= fz1) continue;
+    cells.push({ x, y, z });
+  }
   return cells;
 }
 
@@ -70,15 +75,22 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
       return { allow: false, reason: `host policy rejects geometric ${nonFall.join(', ')} hazard; only ${[...allowedHazards].join(', ')} is allowed` };
     }
     const x = Math.floor(edge.to.x), y = Math.floor(edge.to.y + 0.05), z = Math.floor(edge.to.z);
-    // 身体扫过的每一格：火、岩浆等与身体重叠即伤人；几何评估只报岩浆/水，火要在这里读。
+    const feet = recordedName(read, x, y, z);
+    if (feet !== null && isDangerousBlock(feet)) {
+      return { allow: false, reason: `host policy rejects recorded dangerous block ${feet} at the destination feet cell` };
+    }
+    const head = recordedName(read, x, y + 1, z);
+    if (head !== null && isDangerousBlock(head)) {
+      return { allow: false, reason: `host policy rejects recorded dangerous block ${head} at the destination head cell` };
+    }
+    // 身体扫过的其余格：火、岩浆等与身体重叠即伤人；几何评估只报岩浆/水，火要在这里读。
     for (const cell of sweptBodyCells(edge.from, edge.to)) {
+      if (cell.x === x && cell.z === z && (cell.y === y || cell.y === y + 1)) continue;
       const name = recordedName(read, cell.x, cell.y, cell.z);
       if (name !== null && isDangerousBlock(name)) {
         return { allow: false, reason: `host policy rejects recorded dangerous block ${name} at (${cell.x},${cell.y},${cell.z}) in the swept body` };
       }
     }
-    const feet = recordedName(read, x, y, z);
-    const head = recordedName(read, x, y + 1, z);
     if (head !== null && isWaterBlock(head)) {
       return { allow: false, reason: `host policy rejects recorded water ${head} at the destination head cell (submersion)` };
     }

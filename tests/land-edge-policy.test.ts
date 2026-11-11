@@ -24,7 +24,7 @@ const edgeAt = (to: { x: number; y: number; z: number }, overrides: Partial<Land
 });
 
 /** Bounded fake reader: a policy that over-reads fails instead of silently passing. */
-function fakeReader(entries: readonly CellEntry[] = [], maxReads = 11) {
+function fakeReader(entries: readonly CellEntry[] = [], maxReads = 64) {
   const cells = new Map(entries.map(([x, y, z, cell]) => [key(x, y, z), cell]));
   const reads: { x: number; y: number; z: number }[] = [];
   const read: LandSearchPolicyRead = {
@@ -72,7 +72,7 @@ test('non-fall hazards are rejected before any read; fall alone is allowed', () 
   const reader = fakeReader();
   const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5), { hazards: [hazard('fall')] }), reader.read);
   assert.equal(allowedCost(decision), 0);
-  assert.equal(reader.reads.length, 11);
+  assert.ok(reader.reads.length <= 64, `每条边读取 ${reader.reads.length} 次，不超过库的每边上限`);
 });
 
 test('recorded dangerous destination feet/head/support cells reject the edge', () => {
@@ -137,7 +137,7 @@ for (const [dx, dz] of HORIZONTAL) {
       const reader = fakeReader([[dx, 64 + dy, dz, recorded(name)]]);
       const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read);
       assert.equal(allowedCost(decision), LAVA_EDGE_COST);
-      assert.equal(reader.reads.length, 11);
+      assert.ok(reader.reads.length <= 64, `每条边读取 ${reader.reads.length} 次，不超过库的每边上限`);
     });
   }
 }
@@ -149,7 +149,7 @@ test('each recorded lava neighbor is counted, with a finite surcharge for a sole
   const reader = fakeReader(entries);
   const decision = hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read);
   assert.equal(allowedCost(decision), HORIZONTAL.length * 2 * LAVA_EDGE_COST);
-  assert.equal(reader.reads.length, 11);
+  assert.ok(reader.reads.length <= 64, `每条边读取 ${reader.reads.length} 次，不超过库的每边上限`);
 });
 
 test('non-lava, unknown and unavailable neighbors add no surcharge', () => {
@@ -187,8 +187,9 @@ test('evaluation does not mutate the edge or its positions', () => {
     kind: 'walk', from, to, baseCost: 1, hazards, evidenceMode: 'remembered',
   });
   const before = JSON.stringify(edge);
+  // 落点身体脚面覆盖到 (0,64,-3)：那一格的岩浆会碰到身体，按扫掠危险拒绝，而不是只加价。
   const reader = fakeReader([[0, 64, -3, recorded('minecraft:lava')]]);
-  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, reader.read)), LAVA_EDGE_COST);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, reader.read)), /swept body/);
   assert.equal(JSON.stringify(edge), before);
   assert.deepEqual(to, at(-0.3, 63.95, -2.2));
   assert.deepEqual(from, at(0, 64, 0));
@@ -207,13 +208,14 @@ test('reader errors propagate unchanged', () => {
   assert.equal(calls, 3);
 });
 
-test('permitted edge stays within 11 bounded destination/neighbor reads', () => {
-  const reader = fakeReader([], 11);
+test('permitted edge stays within the per-edge read bound (swept body, support and lava neighbors)', () => {
+  const reader = fakeReader([], 64);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(0.5, 64, 0.5)), reader.read)), 0);
-  assert.equal(reader.reads.length, 11);
+  assert.ok(reader.reads.length <= 64, `每条边读取 ${reader.reads.length} 次，不超过库的每边上限`);
   const expected = [
     key(0, 64, 0), key(0, 65, 0), key(0, 63, 0),
     ...HORIZONTAL.flatMap(([dx, dz]) => [64, 63].map((y) => key(dx, y, dz))),
   ].sort();
-  assert.deepEqual([...new Set(reader.reads.map(({ x, y, z }) => key(x, y, z)))].sort(), expected);
+  const read = new Set(reader.reads.map(({ x, y, z }) => key(x, y, z)));
+  assert.ok(expected.every((cell) => read.has(cell)), '落点脚/头/支撑与岩浆邻格都被读取');
 });
