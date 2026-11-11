@@ -268,6 +268,8 @@ export interface SpatialObservationSink {
   readonly observationAdmitted: boolean;
   /** Host shutdown boundary; a closing sink accepts no begin/interrupt/observe. */
   readonly closing: boolean;
+  /** 整体标过期的次数；变化时已写过的格需要立即重写。 */
+  readonly staleEpoch?: number;
   interrupt(): unknown;
   observe(observations: readonly BlockObservation[]): unknown;
 }
@@ -299,6 +301,7 @@ export class Vision {
   /** 已写进共享空间记忆的视线格：名字没变且未到刷新时间就不重写。 */
   private fed = new Map<string, { name: string; at: number }>();
   private lastSurround: { pos: Vec3Like; at: number; scope: string } | null = null;
+  private fedEpoch: number | undefined;
 
   constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION, private spatial?: SpatialObservationSink) {}
 
@@ -759,8 +762,18 @@ export class Vision {
     }).map(({ value, dist }) => ({ name: value.name, pos: value.pos, dist })).sort((a, b) => a.dist - b.dist);
   }
 
+  /** 记忆整体标过期（死亡、中断、暂停恢复、换会话）后，“已写过”的记录失效：身边的格下一帧立即重写。 */
+  private syncFedEpoch() {
+    const epoch = this.spatial?.staleEpoch;
+    if (epoch === this.fedEpoch) return;
+    this.fedEpoch = epoch;
+    this.fed.clear();
+    this.lastSurround = null;
+  }
+
   /** 写进共享空间记忆：只写变化或到刷新时间的格，近的先写，每次有上限。 */
   private feedSpatial(feed: Map<string, FeedCell>, s: ReturnType<GameAdapter['state']>, eye: Eye, now: number, cap: number) {
+    this.syncFedEpoch();
     for (const [key, f] of this.fed) if (now - f.at > VISION_FEED_REFRESH_MS * 4) this.fed.delete(key);
     const fresh = [...feed.entries()]
       .filter(([key, c]) => { const old = this.fed.get(key); return !old || old.name !== c.name || now - old.at >= VISION_FEED_REFRESH_MS; })
@@ -784,6 +797,7 @@ export class Vision {
     if (!eye || !s.connected || !s.alive || !s.observationReady) return;
     const now = Date.now();
     const scope = `${s.worldId}|${s.dim}|${s.sessionId}`;
+    this.syncFedEpoch();
     const last = this.lastSurround;
     if (last && last.scope === scope && now - last.at < SURROUND_INTERVAL_MS
       && Math.hypot(s.pos.x - last.pos.x, s.pos.y - last.pos.y, s.pos.z - last.pos.z) < SURROUND_MOVE) return;

@@ -62,6 +62,20 @@ test('同一画面不重复写，名字变了立即写，超过刷新时间再�
   assert.equal(spatial.batches.at(-1)!.length, Math.min(VISION_FEED_MAX_CELLS, total), '到刷新时间重写（仍受每帧上限）');
 });
 
+test('记忆整体标过期后（死亡、中断、暂停恢复），身边已写过的格立即重写，不等刷新时间', () => {
+  const adapter = new FakeAdapter();
+  const spatial = { ...sink(), staleEpoch: 0 };
+  const vision = new Vision(adapter, undefined, spatial);
+  drain(vision, spatial);
+  const first = spatial.batches.length;
+  vision.scan();
+  assert.equal(spatial.batches.length, first, '无变化不重写');
+  spatial.staleEpoch++;
+  vision.scan();
+  assert.equal(spatial.batches.length, first + 1, '标过期后立即重写');
+  assert.ok(spatial.batches.at(-1)!.some((c) => c.name === 'air'));
+});
+
 test('未就绪时不写并中断已准入的证据；关停中的共享记忆不写', () => {
   const adapter = new FakeAdapter();
   const spatial = sink();

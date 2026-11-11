@@ -579,6 +579,12 @@ export class SharedSpatialSession {
     return this.closingFlag;
   }
 
+  /** 整体标过期的次数；观察方据此知道“已写过、无变化”的格需要立即重写。 */
+  get staleEpoch(): number {
+    return this.staleCount;
+  }
+  private staleCount = 0;
+
   /**
    * 开始（或切换到）一个就绪观察会话，作用域来自 adapter 真实状态。外部世界或
    * dim='unknown' 是显式失败；同一世界的新 session 先取消旧委托（即使 map/report
@@ -742,6 +748,7 @@ export class SharedSpatialSession {
   /** 外部显式 markStale；返回报告并转发给活跃执行器。 */
   markStale(dim: string, reason: StaleReason): SharedSpatialWriteResult {
     const rejection = this.writeRejection(dim, 'markStale');
+    if (rejection === null) this.staleCount++;
     return rejection === null
       ? this.deliverApplied(this.session.voxel.markStale(dim, reason), 0)
       : { status: 'rejected', reason: rejection };
@@ -1728,6 +1735,7 @@ export class SharedSpatialSession {
         },
       };
     }
+    this.staleCount++;
     return { status: 'written', report: this.session.voxel.markStale(dim, 'observation_gap'), deliveryError: null };
   }
 
