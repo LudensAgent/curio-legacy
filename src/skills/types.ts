@@ -69,6 +69,8 @@ export interface Senses {
   effectiveRange?(): number;
   /** 立即重新看一眼（转头之后调用） */
   refresh(): void;
+  /** 请求后台刷新一帧；不阻塞调用方，命中检查使用当前已完成的帧。 */
+  requestRefresh?(): void;
   markSweep(): void;
   /** 最近的候选干岸；岸附近看到过露出空气的水面时附带岸脚到水面的高度（不知道水面时这些字段省略，不猜）。 */
   nearestLand?(here: Vec3Like, excluded?: Vec3Like[]): { dir: string; dist: number; pos: Vec3Like; climbableFromWater?: boolean; waterTop?: number; heightAboveWater?: number } | null;

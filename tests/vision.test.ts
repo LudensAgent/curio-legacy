@@ -42,6 +42,17 @@ test('看得见视野内的方块；同一方块被墙挡住时看不见（不�
   assert.ok(sees(v2, 'stone'), '应该看见挡在前面的墙');
 });
 
+test('后台分片扫描与同步扫描在同一视点得到同一帧', async () => {
+  const { adapter, vision } = setup();
+  adapter.blocks.push({ name: 'iron_ore', pos: { x: 10, y: 64, z: 0 } });
+  await vision.scanAsync();
+  assert.ok(vision.frame, '分片扫描完成后应提交一帧');
+  assert.ok(sees(vision, 'iron_ore'));
+  const sliced = [...vision.frame!.cats];
+  vision.scan();
+  assert.deepEqual([...vision.frame!.cats], sliced, '同一视点下两种扫描方式的画面分类一致');
+});
+
 test('地下的矿看不见；背后的树看不见，环顾一圈后才知道', async () => {
   const { adapter, vision } = setup();
   adapter.blocks.push({ name: 'diamond_ore', pos: { x: 6, y: 58, z: 0 } }); // 埋在地下

@@ -34,6 +34,8 @@ export interface VisionConfig {
 export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 120, vFov: 96, cols: 40, rows: 32, hearRadius: 10, bandCols: 160, bandRows: 8 };
 const FALLBACK_RANGE = 64;
 const MAX_RANGE = 64;
+/** 后台视觉每片最多连续占用主线程这么久，随后 setImmediate 让出。 */
+const SCAN_SLICE_MS = 8;
 
 /** 维度环境光：末地光照贴图整体提亮；下界没有天光，但维度环境光约 7，玩家仍能看清远处地形。 */
 export const DIM_AMBIENT_LIGHT: Record<string, number> = { the_end: 4, the_nether: 7 };
@@ -131,6 +133,8 @@ export interface VisionFrame {
   cats: number[];
   dists: number[]; // 0..255 归一化
   facing: string;
+  /** 这一帧的实际视点（眼睛位置与朝向）；转身后仍能说明画面来自哪里。 */
+  eye: Eye;
   range: number;
   entities: { name: string; kind: string; u: number; v: number; dist: number }[];
   ts: number;
@@ -200,6 +204,29 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 }
 
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
+
+/** Shared probe caches for one observation operation (multiple 32-cell batches). */
+export interface SightProbeCache {
+  eye: { x: number; y: number; z: number } | null;
+  optics: Map<number, Optics | null>;
+  light: Map<number, number>;
+}
+
+export const newSightProbeCache = (): SightProbeCache => ({ eye: null, optics: new Map(), light: new Map() });
+
+/** Lazily yield the center and the 0.1/0.9 corner samples of each collision box. */
+function* sightSamples(pos: Vec3Like, boxes: readonly (readonly number[])[] | undefined): Generator<readonly [number, number, number]> {
+  if (boxes === undefined) {
+    yield [pos.x + .5, pos.y + .5, pos.z + .5];
+    return;
+  }
+  for (const [x0, y0, z0, x1, y1, z1] of boxes.slice(0, 16)) {
+    yield [pos.x + (x0! + x1!) / 2, pos.y + (y0! + y1!) / 2, pos.z + (z0! + z1!) / 2];
+    for (const fx of [0.1, 0.9]) for (const fy of [0.1, 0.9]) for (const fz of [0.1, 0.9]) {
+      yield [pos.x + x0! + (x1! - x0!) * fx, pos.y + y0! + (y1! - y0!) * fy, pos.z + z0! + (z1! - z0!) * fz];
+    }
+  }
+}
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
 /**
  * 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。已驻留的 Section 直接写入；只有已存盘
@@ -298,6 +325,8 @@ export class Vision {
   private byName = new Map<string, Map<string, Known>>();
   private lastExpiryAt = 0;
   private lastScanAt = 0;
+  /** 后台分片扫描进行中：同步 refresh/scan 不与之并发。 */
+  private scanning = false;
   private scope = '';
   private session = '';
   private scopes = new Map<string, { known: Map<string, Known>; byName: Map<string, Map<string, Known>> }>();
@@ -368,7 +397,37 @@ export class Vision {
   }
 
   // ------------------------------------------------------------ 扫描
+  /** 同步整帧扫描（动作前的“看一眼”）；后台周期用 scanAsync。 */
   scan(scanReason: VisionFrame['scanReason'] = 'direct'): void {
+    if (this.scanning) return;
+    for (const _ of this.scanSlices(scanReason, false)) { /* drain */ }
+  }
+
+  /**
+   * 后台周期扫描：射线、实体确认和共享记忆写入按时间片推进，每片最多
+   * SCAN_SLICE_MS 后通过 setImmediate 让出事件循环。帧只在完整结束后提交；
+   * 作用域在扫描期间改变时丢弃本帧。
+   */
+  async scanAsync(scanReason: VisionFrame['scanReason'] = 'refresh'): Promise<void> {
+    if (this.scanning) return;
+    this.scanning = true;
+    try {
+      const slices = this.scanSlices(scanReason, true);
+      let sliceStart = performance.now();
+      for (;;) {
+        const step = slices.next();
+        if (step.done) break;
+        if (performance.now() - sliceStart >= SCAN_SLICE_MS) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          sliceStart = performance.now();
+        }
+      }
+    } finally {
+      this.scanning = false;
+    }
+  }
+
+  private *scanSlices(scanReason: VisionFrame['scanReason'], sliced: boolean): Generator<void, void, void> {
     const t0 = Date.now();
     const s = this.syncScope();
     this.recordFootprint(s);
@@ -379,7 +438,7 @@ export class Vision {
       this.heard = [];
       this.sightings.clear();
       this.dropSightings.clear();
-      this.visibleNow.clear();
+      this.visibleNow = new Map();
       this.visibleSurfaces.clear();
       return;
     }
@@ -427,7 +486,8 @@ export class Vision {
     const cats: number[] = new Array(cols * rows);
     const dists: number[] = new Array(cols * rows);
     const comp: Record<string, number> = {};
-    this.visibleNow.clear();
+    // 本帧先写影子表，完整结束后再替换；分片期间读者仍看到上一帧。
+    const visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
     const now = Date.now();
     // A quick glance to one side must not erase the floor just seen on the
     // other side. Keep only a few seconds of local visual working memory.
@@ -449,7 +509,7 @@ export class Vision {
       const pos = { x, y, z };
       this.visibleSurfaces.set(k, { name, pos, at: now });
       if (!NOTABLE.has(name) && !GROUND.has(name)) return;
-      this.visibleNow.set(k, { name, pos, dist });
+      visibleNow.set(k, { name, pos, dist });
       this.remember(k, name, pos, now);
     };
 
@@ -539,7 +599,9 @@ export class Vision {
         cats[idx] = CAT_INDEX[c];
         dists[idx] = Math.round((Math.min(dist, range) / range) * 255);
         comp[c] = (comp[c] ?? 0) + 1;
+        if ((i & 15) === 15) yield;
       }
+      yield;
     }
 
     // 地平线高分辨率带：只在当前视野内、绝对俯仰角 -14°..+8° 的范围（远处地物都在这里）
@@ -552,11 +614,11 @@ export class Vision {
         for (let i = 0; i < this.cfg.bandCols; i++) {
           const yaw = eye.yaw + (0.5 - (i + 0.5) / this.cfg.bandCols) * hFov;
           cast(-Math.sin(yaw) * cp, sp, -Math.cos(yaw) * cp);
+          if ((i & 15) === 15) yield;
         }
+        yield;
       }
     }
-    this.composition = comp;
-    this.feedSpatial(feed, s, eye, now, VISION_FEED_MAX_CELLS);
     // 视距：在眼睛高度水平看出去（与低头/抬头无关），左/中/右各 3 条射线取平均，衡量前方是否开阔
     const sector = (from: number, to: number) => {
       let sum = 0;
@@ -573,7 +635,7 @@ export class Vision {
       return Math.round(sum / 3);
     };
     // 画面左侧对应 yaw 偏移为正
-    this.openness = { left: sector(0.5, 1 / 6), center: sector(1 / 6, -1 / 6), right: sector(-1 / 6, -0.5) };
+    const openness = { left: sector(0.5, 1 / 6), center: sector(1 / 6, -1 / 6), right: sector(-1 / 6, -0.5) };
 
     // ---- 实体：视锥 + 视线 + 光照
     const seen: SeenEntity[] = [];
@@ -609,7 +671,14 @@ export class Vision {
       } else if (e.kind !== 'item' && e.kind !== 'other' && e.dist <= (e.kind === 'hostile' ? this.cfg.hearRadius : this.cfg.hearRadius * 0.6)) {
         heard.push({ ...base, how: 'heard', phase: undefined, hp: undefined, velocity: undefined });
       }
+      yield;
     }
+    // 作用域在扫描期间改变：本帧来自旧视点/旧会话，不提交，也不写共享记忆。
+    const current = this.syncScope();
+    if (current.worldId !== s.worldId || current.dim !== s.dim || current.sessionId !== s.sessionId) return;
+    this.visibleNow = visibleNow;
+    this.composition = comp;
+    this.openness = openness;
     this.seen = seen.sort((a, b) => a.dist - b.dist);
     this.heard = heard.sort((a, b) => a.dist - b.dist);
     // 记住亲眼看见过的实体在哪；只记看见的，不记听见/墙后的，也不跟踪视野外的移动
@@ -628,7 +697,8 @@ export class Vision {
       if (this.clearLine(eye, ddx / dist, ddy / dist, ddz / dist, dist - 0.4, opt)) this.dropSightings.delete(id);
     }
     this.lastScanAt = now;
-    this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanReason, scanMs: Date.now() - t0 };
+    this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), eye: { ...eye }, range, entities: ents, ts: now, scanReason, scanMs: Date.now() - t0 };
+    yield* this.feedSpatialSlices(feed, s, eye, now, VISION_FEED_MAX_CELLS, sliced ? 64 : VISION_FEED_MAX_CELLS);
   }
 
   private clearLine(eye: Eye, dx: number, dy: number, dz: number, max: number, opt: (x: number, y: number, z: number) => Optics | null): boolean {
@@ -710,7 +780,7 @@ export class Vision {
   }
 
   /** Inspect a bounded set of actual sight lines, never cached memory behind a wall. */
-  observeBlocks(positions: Vec3Like[]): BlockObservation[] {
+  observeBlocks(positions: Vec3Like[], provided?: SightProbeCache): BlockObservation[] {
     const state = this.syncScope(), eye = this.adapter.eye();
     // A closing shared service must not be re-admitted, interrupted, or written by
     // late reads; stop this shared writer without scanning further.
@@ -720,39 +790,62 @@ export class Vision {
     if (!trustedReady) return [];
     const now = Date.now(), seen = new Set<string>(), out: BlockObservation[] = [];
     const hFov = this.cfg.hFov * Math.PI / 180, vFov = this.cfg.vFov * Math.PI / 180;
+    const range = this.effectiveRange();
+    // 同一次观察的多个批次共用 optics/光照/遮挡射线结果；视点变了就作废，
+    // 避免把另一个站位的查询缓存当成当前证据。
+    const cache = provided ?? newSightProbeCache();
+    const ex = Math.floor(eye.x), ey = Math.floor(eye.y), ez = Math.floor(eye.z);
+    if (cache.eye?.x !== ex || cache.eye?.y !== ey || cache.eye?.z !== ez) {
+      cache.eye = { x: ex, y: ey, z: ez };
+      cache.optics.clear();
+      cache.light.clear();
+    }
+    const cacheKey = (x: number, y: number, z: number) => ((x - ex + 512) * 1025 + (y - ey + 512)) * 1025 + (z - ez + 512);
+    const opticsAt = (x: number, y: number, z: number): Optics | null => {
+      const key = cacheKey(x, y, z);
+      const cached = cache.optics.get(key);
+      if (cached !== undefined) return cached;
+      const value = this.adapter.blockOptics(x, y, z);
+      cache.optics.set(key, value);
+      return value;
+    };
+    const lightAt = (x: number, y: number, z: number): number => {
+      const key = cacheKey(x, y, z);
+      const cached = cache.light.get(key);
+      if (cached !== undefined) return cached;
+      const value = this.visionLight(state, x, y, z);
+      cache.light.set(key, value);
+      return value;
+    };
     for (const pos of positions.slice(0, 32)) {
       if (![pos.x, pos.y, pos.z].every((n) => Number.isFinite(n) && Number.isInteger(n))) continue;
       const key = keyOf(pos.x, pos.y, pos.z);
       if (seen.has(key)) continue;
       seen.add(key);
-      if (Math.hypot(pos.x + .5 - eye.x, pos.y + .5 - eye.y, pos.z + .5 - eye.z) > this.effectiveRange() + 1) continue;
-      const optics = this.adapter.blockOptics(pos.x, pos.y, pos.z);
+      if (Math.hypot(pos.x + .5 - eye.x, pos.y + .5 - eye.y, pos.z + .5 - eye.z) > range + 1) continue;
+      const optics = opticsAt(pos.x, pos.y, pos.z);
       if (!optics) continue;
       const boxes = optics.kind === 'solid' || optics.kind === 'foliage' ? optics.shapes ?? [[0, 0, 0, 1, 1, 1] as const] : undefined;
       // A block's center may be hidden behind the edge of the block underfoot
       // even though part of its top face is visible. Sample inside each actual
-      // collision box, and require a clear, in-view ray for every candidate.
-      const points = boxes
-        ? boxes.slice(0, 16).flatMap(([x0, y0, z0, x1, y1, z1]) =>
-          [[pos.x + (x0 + x1) / 2, pos.y + (y0 + y1) / 2, pos.z + (z0 + z1) / 2],
-            ...[0.1, 0.9].flatMap((fx) => [0.1, 0.9].flatMap((fy) => [0.1, 0.9].map((fz) =>
-              [pos.x + x0 + (x1 - x0) * fx, pos.y + y0 + (y1 - y0) * fy, pos.z + z0 + (z1 - z0) * fz])))])
-        : [[pos.x + .5, pos.y + .5, pos.z + .5]];
-      const visible = points.some(([x, y, z]) => {
+      // collision box, and stop at the first clear, in-view ray. Points are
+      // generated lazily so a visible center costs no corner samples.
+      let visible = false;
+      for (const [x, y, z] of sightSamples(pos, boxes)) {
         const dx = x - eye.x, dy = y - eye.y, dz = z - eye.z, distance = Math.hypot(dx, dy, dz);
-        if (distance < .01 || distance > this.effectiveRange()) return false;
+        if (distance < .01 || distance > range) continue;
         // Every exact vision result must sit inside the configured view cone;
         // underfoot/overhead cells get no contact exemption from turning to look.
-        if (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2) return false;
+        if (Math.abs(norm(yawTo(dx, dz) - eye.yaw)) > hFov / 2 || Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - eye.pitch) > vFov / 2) continue;
         // Thin doors/fences must expose an actual shape, not merely an empty
         // part of their grid cell. Other blocks still occlude the entire ray.
         const hit = boxes ? shapeHitDistance(boxes, eye, dx / distance, dy / distance, dz / distance, pos.x, pos.y, pos.z, distance) : distance;
         if (hit === null || !this.clearLine(eye, dx / distance, dy / distance, dz / distance, hit,
-          (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : this.adapter.blockOptics(bx, by, bz))) return false;
+          (bx, by, bz) => bx === pos.x && by === pos.y && bz === pos.z ? { name: 'air', kind: 'clear' } : opticsAt(bx, by, bz))) continue;
         const near = Math.max(0, hit - .1);
-        const light = this.visionLight(state, Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
-        return hit <= seeRangeOf(light, this.effectiveRange());
-      });
+        const light = lightAt(Math.floor(eye.x + dx / distance * near), Math.floor(eye.y + dy / distance * near), Math.floor(eye.z + dz / distance * near));
+        if (hit <= seeRangeOf(light, range)) { visible = true; break; }
+      }
       if (!visible) continue;
       const block = this.adapter.blockStateAt?.(pos);
       // A fallback optics name is still useful, but empty properties from that
@@ -781,8 +874,9 @@ export class Vision {
     const candidates = [...this.known.entries()].filter(([, value]) => set.has(value.name))
       .map(([key, value]) => ({ key, value, dist: Math.hypot(value.pos.x - s.pos.x, value.pos.y - s.pos.y, value.pos.z - s.pos.z) }))
       .filter((candidate) => candidate.dist <= maxDist);
+    const probe = newSightProbeCache();
     const observed = new Map(Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
-      this.observeBlocks(candidates.slice(index * 32, (index + 1) * 32).map((candidate) => candidate.value.pos)))
+      this.observeBlocks(candidates.slice(index * 32, (index + 1) * 32).map((candidate) => candidate.value.pos), probe))
       .flat().map((block) => [keyOf(block.pos.x, block.pos.y, block.pos.z), block.name]));
     return candidates.filter(({ key, value }) => {
       const current = observed.get(key);
@@ -802,18 +896,32 @@ export class Vision {
 
   /** 写进共享空间记忆：只写变化或到刷新时间的格，近的先写，每次有上限。 */
   private feedSpatial(feed: Map<string, FeedCell>, s: ReturnType<GameAdapter['state']>, eye: Eye, now: number, cap: number) {
+    for (const _ of this.feedSpatialSlices(feed, s, eye, now, cap, cap)) { /* drain */ }
+  }
+
+  /** 分片写入：每 chunk 格提交一次并让出，避免一次观察末尾长时间占住主线程。 */
+  private *feedSpatialSlices(feed: Map<string, FeedCell>, s: ReturnType<GameAdapter['state']>, eye: Eye, now: number, cap: number, chunk: number): Generator<void, void, void> {
     this.syncFedEpoch();
     for (const [key, f] of this.fed) if (now - f.at > VISION_FEED_REFRESH_MS * 4) this.fed.delete(key);
     const fresh = [...feed.entries()]
       .filter(([key, c]) => { const old = this.fed.get(key); return !old || old.name !== c.name || now - old.at >= VISION_FEED_REFRESH_MS; })
       .sort((a, b) => a[1].d - b[1].d).slice(0, cap);
     if (fresh.length === 0 || !this.admitSpatial(s, eye)) return;
-    this.spatial!.observe(fresh.map(([key, c]) => {
+    const scopeKey = `${s.worldId}\u0000${s.dim}`;
+    const current = () => this.scope === scopeKey && this.session === s.sessionId && this.spatial?.closing !== true;
+    const observations: BlockObservation[] = [];
+    for (const [key, c] of fresh) {
+      if (!current()) return;
       this.fed.set(key, { name: c.name, at: now });
       const pos = { x: c.x, y: c.y, z: c.z }, block = this.adapter.blockStateAt?.(pos);
-      return { name: block?.name ?? c.name, properties: { ...block?.properties }, stateComplete: block != null, pos, worldId: s.worldId, sessionId: s.sessionId,
-        dimension: s.dim, observationId: s.observationId, observedAt: now, source: 'vision' as const };
-    }));
+      observations.push({ name: block?.name ?? c.name, properties: { ...block?.properties }, stateComplete: block != null, pos, worldId: s.worldId, sessionId: s.sessionId,
+        dimension: s.dim, observationId: s.observationId, observedAt: now, source: 'vision' as const });
+      if (observations.length >= chunk) {
+        this.spatial!.observe(observations.splice(0));
+        yield;
+      }
+    }
+    if (observations.length > 0) this.spatial!.observe(observations);
   }
 
   /**
@@ -921,7 +1029,16 @@ export class Vision {
   /** 让最近扫描一次（例如转头之后）。距离上次不足 150ms 则跳过。 */
   refresh() {
     this.syncScope();
+    if (this.scanning) return;
     if (Date.now() - this.lastScanAt >= 150) this.scan('refresh');
+  }
+
+  /** 后台周期刷新：分片扫描，避免整帧连续占用主线程；已有新帧时跳过。 */
+  async refreshAsync(): Promise<void> {
+    this.syncScope();
+    if (this.scanning) return;
+    if (Date.now() - this.lastScanAt < 150) return;
+    await this.scanAsync('refresh');
   }
 
   /** 最近一次亲眼看见符合条件的实体在哪里（历史视觉；需要重新看见才能交互） */
@@ -1021,7 +1138,8 @@ export class Vision {
       const unique = [...new Map(positions.map((p) => { const q = { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) }; return [keyOf(q.x, q.y, q.z), q]; })).values()];
       if (unique.length > 128) return 'unknown';
       const seen = new Map<string, BlockObservation>();
-      for (let i = 0; i < unique.length; i += 32) for (const b of this.observeBlocks(unique.slice(i, i + 32))) seen.set(keyOf(b.pos.x, b.pos.y, b.pos.z), b);
+      const probe = newSightProbeCache();
+      for (let i = 0; i < unique.length; i += 32) for (const b of this.observeBlocks(unique.slice(i, i + 32), probe)) seen.set(keyOf(b.pos.x, b.pos.y, b.pos.z), b);
       let missing = false;
       for (const p of unique) {
         const b = seen.get(keyOf(p.x, p.y, p.z));

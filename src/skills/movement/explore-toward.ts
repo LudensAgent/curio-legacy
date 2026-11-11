@@ -70,7 +70,8 @@ export const exploreToward: Skill<ExploreArgs> = {
     const until = args.until;
     let sighting: Record<string, unknown> | undefined;
     const checkSighting = until === undefined ? undefined : () => {
-      ctx.senses.refresh();
+      // 命中检查只读已完成的帧，并请求后台分片刷新；不再每步同步扫整帧。
+      ctx.senses.requestRefresh?.();
       const hit = sighted(ctx, until, { visibleOnly: true, currentViewOnly: true, direction: args.direction });
       if (!hit) return undefined;
       sighting = { found: hit.what, dist: hit.dist, foundPos: hit.pos, foundRef: hit.ref,

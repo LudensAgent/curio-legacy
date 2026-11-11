@@ -8,7 +8,7 @@ import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dist3, effectiveLight, round1, lightAround, shortId } from '../util.ts';
 import { torchCount, nearbyTorchLight } from '../skills/light.ts';
-import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
+import { DIM_AMBIENT_LIGHT, interactiveName, INTERACTIVE_BLOCKS, newSightProbeCache, NOTABLE, type Vision, type VisionSummary } from './vision.ts';
 import { type Drive, type Stock } from '../brain/drives.ts';
 import { causeName } from '../brain/habits.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
@@ -209,6 +209,8 @@ export class Perception {
   onNewItem?: (item: string, heldBefore: Set<string>) => void;
   private latest: Percept | null = null;
   private timer: NodeJS.Timeout | null = null;
+  /** 后台一拍进行中：分片视觉与随后的同步汇总不重叠。 */
+  private ticking = false;
   private lastVisionBody: { scope: string; pos: Vec3Like } | null = null;
   private surfaceScope = '';
   /** Only surface heights stood on and observed in this session; never hidden terrain. */
@@ -226,6 +228,10 @@ export class Perception {
   }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
+
+  requestRefresh(): void {
+    void this.vision.refreshAsync().catch((e: unknown) => this.bus.publish('perception_error', 'P1', String(e instanceof Error ? e.message : e)));
+  }
   currentBlockCandidates(names: string[]) { return this.vision.currentBlockCandidates(names); }
 
   /**
@@ -342,11 +348,12 @@ export class Perception {
 
   start(intervalMs = 700) {
     this.timer = setInterval(() => {
-      try {
-        this.update();
-      } catch (e: any) {
-        this.bus.publish('perception_error', 'P1', String(e?.message ?? e));
-      }
+      if (this.ticking) return;
+      this.ticking = true;
+      void this.vision.refreshAsync()
+        .then(() => this.update())
+        .catch((e: unknown) => this.bus.publish('perception_error', 'P1', String(e instanceof Error ? e.message : e)))
+        .finally(() => { this.ticking = false; });
     }, intervalMs);
   }
 
@@ -562,7 +569,8 @@ export class Perception {
     // 先取刚扫到的表面，再专门看一眼这些格子（视线够得着才算看见）
     const glimpsed = new Map(watched.map((l) => [l.id, this.vision.seenAt(l.pos)]));
     const positions = [...watched, ...boxes].map((l) => l.pos);
-    const seen = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => this.vision.observeBlocks(positions.slice(i * 32, (i + 1) * 32))).flat()
+    const probe = newSightProbeCache();
+    const seen = new Map(Array.from({ length: Math.ceil(positions.length / 32) }, (_, i) => this.vision.observeBlocks(positions.slice(i * 32, (i + 1) * 32), probe)).flat()
       .map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
     for (const l of watched) {
       const observed = seen.get(`${l.pos.x},${l.pos.y},${l.pos.z}`);
