@@ -128,6 +128,23 @@ async function runMakeWay(
       return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
         failure: `规划完成时身体已在 (${from.x.toFixed(2)},${from.y.toFixed(2)},${from.z.toFixed(2)})，不在开路计划起点旁` };
     }
+    // 规划期间身体可能上下移动（滑落、被推开、落到下一格）：只比水平格还不够，
+    // 第一步的脚高必须仍在 move_step 的同层/±1 范围内，否则旧计划必然被动作拒绝。
+    if (first.kind === 'move') {
+      const top = supportTopAt({ x: first.to.x, y: first.to.y - 1, z: first.to.z });
+      const footY = top !== null && top > 0 && top <= 1 ? first.to.y - 1 + top : first.to.y;
+      const dy = footY - from.y;
+      if (dy < -1.01 || dy > 1.01) {
+        return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
+          failure: `规划完成时身体脚高 ${from.y.toFixed(2)}，计划第一步落点脚高 ${footY.toFixed(2)}（相差 ${dy.toFixed(2)} 格）；move_step 只处理同层/±1，旧计划不再适用` };
+      }
+    } else {
+      const footCell = Math.floor(from.y + 0.05);
+      if (first.to.y !== footCell + 1) {
+        return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
+          failure: `规划完成时身体脚高 ${from.y.toFixed(2)}（脚下格 ${footCell}），计划原地垫高到 ${first.to.y}；起点高度已变，旧计划不再适用` };
+      }
+    }
   }
   const run = async (skill: Parameters<typeof validateSkill>[0], raw: Record<string, unknown>) => {
     const validated = validateSkill(skill, raw, ctx.adapter);

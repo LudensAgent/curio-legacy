@@ -15,7 +15,9 @@ export type MakeWayStep = { kind: 'move' | 'pillar'; to: Cell; dig: Cell[]; plac
 
 /** 各动作的代价：能少挖少放就少挖少放，已知可走的格优先。 */
 const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4, unknown: 2 } as const;
-const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16, MAX_DROP = 3;
+const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16;
+/** 开路步由 move_step 执行，它只处理同层/±1；更深的落差不在开路计划里，交回 Agent 选 descend_to 或允许 drop 的路线。 */
+const MAX_DROP = 1;
 /** 每扫这么久让出一次主线程。 */
 const SLICE_MS = 5;
 /** 挖不动或挖了会出事的方块：基岩类、需要高级工具才有掉落的硬方块不规划去挖。 */
@@ -175,7 +177,7 @@ export async function planMakeWay(
           candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + COST.stepUp + dig.length * COST.dig + unsure([...dig, { x: nx, y, z: nz }]) });
         }
       }
-      // 下落：同层两格空着、脚下空，往下找第一个已知支撑面（不挖、不越过未知格）。
+      // 下落：只规划 move_step 能执行的一格落差；更深的落差交回 Agent 选择下行方式。
       if (look(nx, y, nz).kind === 'clear' && look(nx, y + 1, nz).kind === 'clear') {
         for (let d = 1; d <= MAX_DROP; d++) {
           const below = look(nx, y - d, nz);

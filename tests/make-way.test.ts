@@ -49,6 +49,35 @@ test('父任务取消或期限已到时，开路规划不再继续搜索', async
   assert.equal(await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any, { deadlineMs: Date.now() - 1 }), null, '期限已过不再搜索');
 });
 
+test('开路只规划 move_step 能执行的一格落差；两格下落交回 Agent 选下行方式', async () => {
+  const w = world();
+  // x=0 脚高 64（地面 63）；x=1 是两格深的下落（地面 61，脚高 62）；x=2 是必须挖开的墙。
+  for (const x of [0, 1, 2, 3, 4]) for (const z of [-1, 1]) for (const y of [61, 62, 63, 64, 65, 66]) w.put(x, y, z, 'stone');
+  for (const x of [0, 2, 3, 4]) w.put(x, 66, 0, 'stone');
+  w.put(0, 63, 0, 'stone'); for (const y of [64, 65]) w.put(0, y, 0, 'air');
+  w.put(1, 61, 0, 'stone'); for (const y of [62, 63, 64, 65]) w.put(1, y, 0, 'air');
+  for (const y of [62, 63, 64, 65]) w.put(2, y, 0, 'stone');
+  for (const x of [3, 4]) { w.put(x, 61, 0, 'stone'); for (const y of [62, 63, 64, 65]) w.put(x, y, 0, 'air'); }
+  const plan = await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 4.5, y: 62, z: 0.5 }, { dig: {}, maxEdits: 16 }, (cell) => cell.z === 0);
+  assert.equal(plan, null, '不能把两格下落规划成 move_step 再在执行时被拒');
+});
+
+test('开路仍可规划一格下落，并用 move_step 迈下', async () => {
+  const w = world();
+  // x=0 脚高 64；x=1 脚高 63（一格下落）；x=2 是必须挖开的墙；目标 x=4 脚高 63。
+  for (const x of [0, 1, 2, 3, 4]) for (const z of [-1, 1]) for (const y of [61, 62, 63, 64, 65, 66]) w.put(x, y, z, 'stone');
+  for (const x of [0, 1, 2, 3, 4]) w.put(x, 66, 0, 'stone');
+  w.put(0, 63, 0, 'stone'); for (const y of [64, 65]) w.put(0, y, 0, 'air');
+  w.put(1, 62, 0, 'stone'); for (const y of [63, 64, 65]) w.put(1, y, 0, 'air');
+  w.put(2, 62, 0, 'stone'); for (const y of [63, 64, 65]) w.put(2, y, 0, 'stone');
+  for (const x of [3, 4]) { w.put(x, 62, 0, 'stone'); for (const y of [63, 64, 65]) w.put(x, y, 0, 'air'); }
+  const plan = await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 4.5, y: 63, z: 0.5 }, { dig: {}, maxEdits: 16 }, (cell) => cell.z === 0);
+  assert.ok(plan !== null, '一格下落仍应能规划');
+  assert.equal(plan[0]!.kind, 'move');
+  assert.deepEqual(plan[0]!.to, { x: 1, y: 63, z: 0 }, JSON.stringify(plan));
+  assert.ok(plan.some((step) => step.dig.length > 0), '后续仍能规划挖开挡路的墙');
+});
+
 test('前方一格缺口：允许放置时补一块支撑走过去', async () => {
   const w = corridor(8);
   w.put(4, 63, 0, 'air');
