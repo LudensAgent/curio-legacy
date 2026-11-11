@@ -155,6 +155,8 @@ export class SpatialSemanticStore {
 
   private cache: {
     at: number;
+    revision: number;
+    resourceOffsets: Map<string, number>;
     places: PlaceFact[];
     resources: ResourceAnchorFact[];
     containers: ContainerAnchorFact[];
@@ -184,7 +186,8 @@ export class SpatialSemanticStore {
     const places = this.page((after) => this.session.facts.places({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const resources = this.page((after) => this.session.facts.resources({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const containers = this.page((after) => this.session.facts.containers({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
-    this.cache = { at: now, places, resources, containers,
+    this.cache = { at: now, places, resources, containers, revision: this.facts.revision,
+      resourceOffsets: new Map(resources.map((fact, i) => [fact.id, i])),
       placesById: new Map(places.map((fact) => [fact.id, fact])),
       containersById: new Map(containers.map((fact) => [fact.id, fact])),
     };
@@ -350,9 +353,6 @@ export class SpatialSemanticStore {
   private liveResources(): ResourceAnchorFact[] {
     return this.snapshot().resources.filter((fact) => !fact.revoked);
   }
-  private allResources(): ResourceAnchorFact[] {
-    return this.snapshot().resources;
-  }
   private liveContainers(): ContainerAnchorFact[] {
     return this.snapshot().containers.filter((fact) => !fact.gone);
   }
@@ -366,6 +366,7 @@ export class SpatialSemanticStore {
    */
   private resourceIndex: {
     at: number;
+    revision: number;
     buckets: Map<string, string[]>;
     facts: Map<string, ResourceAnchorFact>;
   } | null = null;
@@ -385,12 +386,13 @@ export class SpatialSemanticStore {
   private rebuildResourceIndex(): void {
     const buckets = new Map<string, string[]>();
     const facts = new Map<string, ResourceAnchorFact>();
-    for (const fact of this.allResources()) {
+    const resources = this.page((after) => this.facts.resources({ worldId: this.worldId, after, limit: 100 }));
+    for (const fact of resources) {
       if (fact.revoked) continue;
       this.addResourceBucket(buckets, fact);
       facts.set(fact.id, fact);
     }
-    this.resourceIndex = { at: Date.now(), buckets, facts };
+    this.resourceIndex = { at: Date.now(), revision: this.facts.revision, buckets, facts };
     this.resourceIndexRebuilds += 1;
   }
 
@@ -580,17 +582,28 @@ export class SpatialSemanticStore {
     const version = observation.sourceCellVersion;
     const observedAt = observation.observedAt;
     if (version === undefined || observedAt === undefined) return null;
-    const fact = this.snapshot().resources.find((candidate) => candidate.id === id && !candidate.revoked);
+    if (this.resourceIndex && this.resourceIndex.revision !== this.facts.revision) this.rebuildResourceIndex();
+    const index = this.getResourceIndex();
+    const fact = index.facts.get(id);
     if (fact === undefined) return null;
     if (fact.sourceCellVersion !== undefined && version < fact.sourceCellVersion) return null;
     if (observedAt < fact.observedAt) return null;
     if (version === fact.sourceCellVersion && observedAt === fact.observedAt) return null;
-    return this.upsertResource({
-      ...fact,
-      observedAt,
-      sourceCellVersion: version,
-      ...(observation.source === undefined ? {} : { source: observation.source }),
+    const revision = this.facts.revision;
+    const { record } = this.facts.updateResourceSource(id, {
+      sourceCell: fact.sourceCell, sourceCellVersion: version, observedAt,
+      source: observation.source ?? fact.source,
     });
+    index.facts.set(id, record);
+    index.revision = this.facts.revision;
+    const offset = this.cache?.resourceOffsets.get(id);
+    if (this.cache && this.cache.revision === revision && offset !== undefined) {
+      this.cache.resources[offset] = record;
+      this.cache.revision = index.revision;
+    } else {
+      this.invalidate();
+    }
+    return record;
   }
 
   private retireLandmark(id: string, reason: 'capacity' | 'replaced'): void {

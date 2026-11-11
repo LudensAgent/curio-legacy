@@ -174,3 +174,28 @@ test('pinned 页面不被换出，释放后才能淘汰', { timeout: 30_000 }, a
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
   });
 });
+
+test('manual：历史标记写到存过盘但未驻留的区段时不抛错，如实报 not_resident 并后台加载，之后照常写入', { timeout: 60_000 }, async () => {
+  await withManualSession(async (shared) => {
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    shared.observe(corridor(8, Date.now()));
+    await shared.drainObservations({ deadline: Date.now() + 5000 });
+    await shared.checkpoint();
+    shared.session.unloadSections([START_KEY]);
+    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
+
+    // 以前这里库会抛 VoxelResidencyError，让挖掘/放置在方块已改完后以 ERROR 失败。
+    const modified = shared.markModified(DIM, { x: 2, y: 64, z: 0 }, 'task-1');
+    assert.equal(modified.status, 'rejected');
+    assert.equal(modified.status === 'rejected' && modified.reason.kind, 'not_resident');
+    const traversed = shared.markTraversed(DIM, { x: 3, y: 64, z: 0 });
+    assert.equal(traversed.status === 'rejected' && traversed.reason.kind, 'not_resident');
+
+    // 后台加载完成后，同一区段的历史标记照常写入。
+    const until = Date.now() + 5000;
+    while (shared.session.sectionResidency(START_KEY).residency !== 'resident' && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', '已请求的后台加载应落地');
+    assert.equal(shared.markModified(DIM, { x: 2, y: 64, z: 0 }, 'task-2').status, 'written');
+    assert.equal(shared.markTraversed(DIM, { x: 3, y: 64, z: 0 }).status, 'written');
+  });
+});

@@ -617,7 +617,7 @@ export class Perception {
     const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
     const previous = this.lastVisionBody;
     if (this.vision.frame && this.vision.frame === priorFrame && (!previous || previous.scope !== scope ||
-      previous.pos.x !== s.pos.x || previous.pos.y !== s.pos.y || previous.pos.z !== s.pos.z)) this.vision.scan();
+      previous.pos.x !== s.pos.x || previous.pos.y !== s.pos.y || previous.pos.z !== s.pos.z)) this.vision.scan('movement');
     this.lastVisionBody = { scope, pos: { ...s.pos } };
     this.vision.scanSurroundings();
     const v = this.vision;

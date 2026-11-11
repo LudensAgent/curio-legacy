@@ -166,7 +166,9 @@ export type SharedSpatialWriteRejection =
   | { kind: 'capability_unavailable'; method: MemoryWriteCapability; detail: string }
   | { kind: 'not_ready'; detail: string }
   | { kind: 'closed'; detail: string }
-  | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string };
+  | { kind: 'scope_mismatch'; detail: string; expectedDim: string; actualDim: string }
+  /** manual 模式下目标区段存过盘但还没加载：库会拒绝写入；已请求后台加载，之后的写入/视觉重写会正常落地。 */
+  | { kind: 'not_resident'; detail: string; section: SectionKey };
 
 /** 共享会话直接拥有并仍使用的体素写方法。 */
 export type MemoryWriteMethod = Extract<MemoryWriteCapability, 'markTraversed' | 'markModified' | 'markStale'>;
@@ -730,7 +732,7 @@ export class SharedSpatialSession {
    * 时不调用库、也不回退到更宽的旧后端。
    */
   markTraversed(dim: string, pos: Vec3Like): SharedSpatialWriteResult {
-    const rejection = this.writeRejection(dim, 'markTraversed');
+    const rejection = this.writeRejection(dim, 'markTraversed') ?? this.residencyRejection(dim, pos);
     return rejection === null
       ? this.deliverApplied(this.session.voxel.markTraversed(dim, pos), 1)
       : { status: 'rejected', reason: rejection };
@@ -738,7 +740,7 @@ export class SharedSpatialSession {
 
   /** 已确认自身动作修改的格；`actionId` 必填，未确认的动作不得调用。 */
   markModified(dim: string, pos: Vec3Like, actionId: string): SharedSpatialWriteResult {
-    const rejection = this.writeRejection(dim, 'markModified');
+    const rejection = this.writeRejection(dim, 'markModified') ?? this.residencyRejection(dim, pos);
     return rejection === null
       ? this.deliverApplied(this.session.voxel.markModified(dim, pos, actionId), 1)
       : { status: 'rejected', reason: rejection };
@@ -1692,6 +1694,21 @@ export class SharedSpatialSession {
    * 保留写入的统一门禁：能力 false 不调用（也不回退），关停/未准入/暂停拒绝，
    * 维度不是当前可信维度时拒绝——绝不按时间接近或请求推断写入。
    */
+  /**
+   * 历史标记（traversed/modified）直接写库，不经过观测的待载队列：manual 模式下目标区段存过盘但没驻留时，
+   * 库会抛 VoxelResidencyError，让挖掘/放置动作在方块已经改完之后以 ERROR 失败。这里先看驻留状态：
+   * 未驻留就不调用库、如实返回 not_resident，并请求后台加载这个区段（拿到租约立即释放，区段留在工作集里）。
+   * 少记的这一条不丢信息：动作改变的格会被视觉重新观测，观测走待载队列，加载后照常写入。
+   */
+  private residencyRejection(dim: string, pos: Vec3Like): SharedSpatialWriteRejection | null {
+    if (this.coordinator === null) return null;
+    const key = { worldId: this.worldId, dim, cx: Math.floor(pos.x / 16), cz: Math.floor(pos.z / 16), sy: Math.floor(pos.y / 16) };
+    const residency = this.session.sectionResidency(key).residency;
+    if (residency === 'resident' || residency === 'no_record') return null;
+    void this.coordinator.prepare([key]).then((outcome) => { if (outcome.lease !== null) this.release(outcome.lease.token); }, () => {});
+    return { kind: 'not_resident', detail: `section (${dim}, ${key.cx}, ${key.cz}, ${key.sy}) is ${residency}; requested a background load`, section: key };
+  }
+
   private writeRejection(
     dim: string,
     method: MemoryWriteMethod,

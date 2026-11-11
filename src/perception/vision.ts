@@ -135,6 +135,7 @@ export interface VisionFrame {
   entities: { name: string; kind: string; u: number; v: number; dist: number }[];
   ts: number;
   scanMs: number;
+  scanReason: 'direct' | 'refresh' | 'movement';
 }
 
 const DIR_NAMES = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -353,7 +354,7 @@ export class Vision {
   }
 
   // ------------------------------------------------------------ 扫描
-  scan(): void {
+  scan(scanReason: VisionFrame['scanReason'] = 'direct'): void {
     const t0 = Date.now();
     const s = this.syncScope();
     this.recordFootprint(s);
@@ -418,12 +419,24 @@ export class Vision {
     // other side. Keep only a few seconds of local visual working memory.
     for (const [key, surface] of this.visibleSurfaces) if (now - surface.at > 3000) this.visibleSurfaces.delete(key);
 
+    const noted = new Set<number>();
     const note = (name: string, x: number, y: number, z: number, dist: number) => {
-      this.visibleSurfaces.set(keyOf(x, y, z), { name, pos: { x, y, z }, at: now });
-      if (!NOTABLE.has(name) && !GROUND.has(name)) return;
+      const cell = lk(x, y, z);
+      if (noted.has(cell)) {
+        // A large frame can evict an earlier hit from bounded block memory.
+        if (NOTABLE.has(name) || GROUND.has(name)) {
+          const k = keyOf(x, y, z);
+          if (!this.known.has(k)) this.remember(k, name, { x, y, z }, now);
+        }
+        return;
+      }
+      noted.add(cell);
       const k = keyOf(x, y, z);
-      if (!this.visibleNow.has(k)) this.visibleNow.set(k, { name, pos: { x, y, z }, dist });
-      this.remember(k, name, { x, y, z }, now);
+      const pos = { x, y, z };
+      this.visibleSurfaces.set(k, { name, pos, at: now });
+      if (!NOTABLE.has(name) && !GROUND.has(name)) return;
+      this.visibleNow.set(k, { name, pos, dist });
+      this.remember(k, name, pos, now);
     };
 
     // 本帧视线实际看到的格：第一处看清的命中面，以及命中前紧挨着的透明格。只写这些，不读视线外的方块。
@@ -601,7 +614,7 @@ export class Vision {
       if (this.clearLine(eye, ddx / dist, ddy / dist, ddz / dist, dist - 0.4, opt)) this.dropSightings.delete(id);
     }
     this.lastScanAt = now;
-    this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanMs: Date.now() - t0 };
+    this.frame = { cols, rows, cats, dists, facing: dirOfYaw(eye.yaw), range, entities: ents, ts: now, scanReason, scanMs: Date.now() - t0 };
   }
 
   private clearLine(eye: Eye, dx: number, dy: number, dz: number, max: number, opt: (x: number, y: number, z: number) => Optics | null): boolean {
@@ -892,7 +905,7 @@ export class Vision {
   /** 让最近扫描一次（例如转头之后）。距离上次不足 150ms 则跳过。 */
   refresh() {
     this.syncScope();
-    if (Date.now() - this.lastScanAt >= 150) this.scan();
+    if (Date.now() - this.lastScanAt >= 150) this.scan('refresh');
   }
 
   /** 最近一次亲眼看见符合条件的实体在哪里（历史视觉；需要重新看见才能交互） */

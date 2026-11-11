@@ -65,6 +65,7 @@ export type {
  */
 export type HostFactsPort = Pick<
   FactStore,
+  | 'revision'
   | 'upsertPlace'
   | 'upsertResource'
   | 'upsertContainer'
