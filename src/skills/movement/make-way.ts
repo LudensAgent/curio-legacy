@@ -73,9 +73,14 @@ export async function planMakeWay(
     return [c];
   };
   const supported = (c: Cell) => look(c.x, c.y - 1, c.z).kind === 'standable';
-  const placeable = (c: Cell) => {
-    const below = look(c.x, c.y - 1, c.z);
-    return opts.place !== undefined && (below.kind === 'clear' || (below.kind === 'solid' && isReplaceable(below.name)));
+  // 要放方块的格：空气或可替换（草、火…）直接放；被不可替换的无碰撞物（树苗、花、火把…）占着时，
+  // 授权了 dig 就先把它打掉，否则放不进去。返回要先挖的格，null 表示放不了。
+  const freeing = (c: Cell): Cell[] | null => {
+    if (opts.place === undefined) return null;
+    const here = look(c.x, c.y, c.z);
+    if (here.kind === 'unknown' || here.kind === 'liquid' || here.kind === 'standable') return null;
+    if (here.name === 'air' || here.name === 'cave_air' || here.name === 'void_air' || isReplaceable(here.name)) return [];
+    return here.kind === 'clear' && opts.dig !== undefined && !UNDIGGABLE.test(here.name) ? [c] : null;
   };
   const h = (c: Cell) => Math.hypot(target.x - (c.x + 0.5), target.z - (c.z + 0.5)) + Math.abs(target.y - c.y) * 0.5;
 
@@ -109,7 +114,10 @@ export async function planMakeWay(
         if (feet !== null && head !== null && look(nx, y - 1, nz).kind !== 'danger') {
           const dig = [...feet, ...head];
           if (supported(to)) candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + dig.length * COST.dig });
-          else if (placeable(to)) candidates.push({ step: { kind: 'move', to, dig, place: { x: nx, y: y - 1, z: nz } }, cost: COST.move + dig.length * COST.dig + COST.place });
+          else {
+            const free = freeing({ x: nx, y: y - 1, z: nz });
+            if (free !== null) candidates.push({ step: { kind: 'move', to, dig: [...dig, ...free], place: { x: nx, y: y - 1, z: nz } }, cost: COST.move + (dig.length + free.length) * COST.dig + COST.place });
+          }
         }
       }
       // 上一级：起跳要自己头顶再高一格空着；落点脚、头空着且脚下本来就有支撑。
@@ -136,9 +144,10 @@ export async function planMakeWay(
       }
     }
     // 原地垫高一格：头顶再高一格要空（或挖开）。
-    if (opts.place !== undefined) {
-      const lift = clearing({ x, y: y + 2, z });
-      if (lift !== null) candidates.push({ step: { kind: 'pillar', to: { x, y: y + 1, z }, dig: lift }, cost: COST.pillar + lift.length * COST.dig });
+    // 原地垫高：方块放进身体所在的脚格（被树苗等占着要先打掉），头顶再高一格要空（或挖开）。
+    {
+      const free = freeing({ x, y, z }), lift = clearing({ x, y: y + 2, z });
+      if (free !== null && lift !== null) candidates.push({ step: { kind: 'pillar', to: { x, y: y + 1, z }, dig: [...free, ...lift] }, cost: COST.pillar + (free.length + lift.length) * COST.dig });
     }
     for (const { step, cost } of candidates) {
       const to = step.to;

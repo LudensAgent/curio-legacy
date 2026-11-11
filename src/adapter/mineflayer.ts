@@ -70,6 +70,7 @@ import type {
   SmeltOpts,
   SmeltResult,
 } from './types.ts';
+import { isReplaceable } from '../perception/geometry.ts';
 
 type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; blocks: { pos: Vec3Like; rel?: [number, number, number]; facing?: string }[] };
 
@@ -4311,8 +4312,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       return { ok: false, reason: 'NO_REFERENCE' };
     }
     if (here && here.boundingBox === 'block') return { ok: false, reason: 'OCCUPIED' };
-    // 脚下这格有火把、花、铁轨、按钮这类没碰撞但也不会被顶掉的东西：服务器不让往里放方块
-    if (here && !/^(air|cave_air|void_air|water|short_grass|grass|tall_grass|fern|large_fern|dead_bush|seagrass|tall_seagrass|snow)$/.test(here.name)) return { ok: false, reason: `BLOCKED:${here.name}` };
+    // 脚下这格有火把、花、树苗、铁轨、按钮这类没碰撞但也不会被顶掉的东西：服务器不让往里放方块。
+    // 可替换口径与放置/规划共用 isReplaceable（原版 #minecraft:replaceable）。
+    if (here && !isReplaceable(here.name) && here.name !== 'snow') return { ok: false, reason: `BLOCKED:${here.name}` };
     const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => b.equip(item, 'hand'), check);

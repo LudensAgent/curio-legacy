@@ -82,3 +82,20 @@ test('parseMakeWay：只有写了 dig/place 才授权；参数非法时拒绝', 
   assert.equal(parseMakeWay({ maxEdits: 4 }).ok, false);
   assert.equal(parseMakeWay({ dig: true, maxEdits: 99 }).ok, false);
 });
+
+test('坑底长着树苗：同时授权 dig 时先打掉树苗再垫高；只授权 place 时不在这格垫高', async () => {
+  const w = world();
+  for (let x = -2; x <= 4; x++) for (let z = -2; z <= 2; z++) {
+    w.put(x, 63, z, x === 0 && z === 0 ? 'air' : 'dirt');
+    for (const y of [64, 65, 66]) w.put(x, y, z, 'air');
+  }
+  w.put(0, 61, 0, 'dirt'); w.put(0, 62, 0, 'birch_sapling');
+  // 坑壁是挖不动的黑曜石：只能原地垫高出去。
+  for (const [x, z] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) for (const y of [62, 63]) w.put(x, y, z, 'obsidian');
+  const both = await planMakeWay(w.map, D, { x: 0, y: 62, z: 0 }, { x: 3.5, y: 64, z: 0.5 }, { dig: {}, place: { item: 'cobblestone' }, maxEdits: 16 }, any);
+  assert.ok(both !== null);
+  assert.equal(both[0]!.kind, 'pillar');
+  assert.deepEqual(both[0]!.dig[0], { x: 0, y: 62, z: 0 }, '先打掉脚格里的树苗');
+  const placeOnly = await planMakeWay(w.map, D, { x: 0, y: 62, z: 0 }, { x: 3.5, y: 64, z: 0.5 }, { place: { item: 'cobblestone' }, maxEdits: 16 }, any);
+  assert.ok(placeOnly === null || placeOnly.every((s) => !(s.kind === 'pillar' && s.to.y === 63 && s.to.x === 0 && s.to.z === 0)), '树苗占着的格放不进方块');
+});

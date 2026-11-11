@@ -27,8 +27,11 @@ export type StateAt = (pos: Vec3Like) => ObservedState | null;
 
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const REPLACEABLE = new Set(['air', 'cave_air', 'void_air', 'water', 'lava', 'bubble_column']);
-/** 原版放置时可被方块替换的地面植物与火：1.20.1 的草、花、树苗、蘑菇、下界根须/菌、藤蔓、海草、枯灌木等。 */
-const REPLACEABLE_PLANT = /^(short_grass|grass|tall_grass|fern|large_fern|dead_bush|dandelion|poppy|blue_orchid|allium|azure_bluet|red_tulip|orange_tulip|white_tulip|pink_tulip|oxeye_daisy|cornflower|lily_of_the_valley|wither_rose|torchflower|pitcher_plant|.*_sapling|mangrove_propagule|.*_mushroom|crimson_fungus|warped_fungus|crimson_roots|warped_roots|nether_sprouts|vine|glow_lichen|hanging_roots|seagrass|tall_seagrass|fire|soul_fire)$/;
+/**
+ * 原版 1.20.1 `#minecraft:replaceable` 中的植物与火：放方块时直接被顶掉（雪层按已占用处理，见下）。
+ * 花、树苗、蘑菇、下界菌不在标签里——它们占着格子时方块放不进去，要先破坏。
+ */
+const REPLACEABLE_PLANT = /^(short_grass|grass|tall_grass|fern|large_fern|dead_bush|vine|glow_lichen|hanging_roots|seagrass|tall_seagrass|crimson_roots|warped_roots|nether_sprouts|fire|soul_fire|light|structure_void)$/;
 
 /**
  * 放方块时这一格能否被替换：空气、流体，以及原版可被方块直接替换的地面植物/火。
