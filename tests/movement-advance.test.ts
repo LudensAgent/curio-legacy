@@ -576,7 +576,7 @@ test('方向探索直接以已记录体素里沿方向最远的前沿为目的�
 
 test('farthestFrontier：在走廊内找沿方向最远、可站立且紧挨未知的格；试过的跳过；前方全已封闭时没有前沿', async (t) => {
   const map = corridor(60, -1, [-1, 2]);
-  const at = { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 1, z: 0 }, maxLateral: 4, maxAlong: 200 };
+  const at = { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 1, z: 0 }, maxLateral: 4, maxAlong: 200, anchorY: 64 };
   const far = await farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, () => false);
   assert.deepEqual(far && { x: Math.floor(far.x), y: far.y }, { x: 60, y: 64 }, '远超 16 格的已知通道尽头');
   const next = await farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, (cell) => Math.floor(cell.x) === 60);
@@ -670,4 +670,18 @@ test('开路：困在 1×1 深两格的坑里，授权 place 后原地垫高一�
   const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like; name: string }[] } | undefined)?.edits ?? [];
   assert.deepEqual(edits.map((e) => `${e.kind}@${e.pos.x},${e.pos.y},${e.pos.z}`), ['place@0,62,0']);
   assert.equal(adapter.inv.get('cobblestone'), 7, '只用了一块圆石');
+});
+
+test('farthestFrontier：高度参照固定为出发脚高，身体往下走一段后不会把更深的旧矿道算进来', async () => {
+  const map = corridor(30, -1, [-3, 3]);
+  // 出发高度 y=64 的地表已知到 x=30；地下 y=44（出发高度以下 20 格）有一条旧矿道一直延伸到 x=60。
+  const mine: Vec3Like[] = [], floor: Vec3Like[] = [];
+  for (let x = 0; x <= 60; x++) { mine.push({ x, y: 44, z: 0 }, { x, y: 45, z: 0 }); floor.push({ x, y: 43, z: 0 }); }
+  fill(map, 'minecraft:stone', floor);
+  fill(map, 'minecraft:air', mine);
+  const at = { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 1, z: 0 }, maxLateral: 4, maxAlong: 200, anchorY: 64 };
+  assert.equal((await farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, () => false))?.y, 64);
+  // 身体已经下到 y=58：以当前脚高为参照会把 y=44 的矿道算进 ±16，以出发脚高为参照则不会。
+  const lower = await farthestFrontier(map, DIM, at, { x: 10.5, y: 58, z: 0.5 }, () => false);
+  assert.equal(lower?.y, 64, `仍选地表前沿：${JSON.stringify(lower)}`);
 });

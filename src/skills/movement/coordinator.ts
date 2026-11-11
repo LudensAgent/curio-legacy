@@ -145,8 +145,14 @@ async function runMakeWay(
       edits.push({ kind: 'place', pos: { ...placed }, name: item === 'any' ? nameAt(placed) : item.replace(/^minecraft:/, '') });
     }
     if (step.kind === 'move') {
-      failure = await run(moveStep, { xyz: [step.to.x, step.to.y, step.to.z] }) ?? undefined;
-      if (failure !== undefined) break;
+      // place_support 为看见参照面可能已经挪动身体：已站进目标格列且脚高相符就不再迈；同列不同高说明计划不再适用，交回重规划。
+      const now = ctx.adapter.state().pos;
+      const inColumn = Math.floor(now.x) === step.to.x && Math.floor(now.z) === step.to.z;
+      if (inColumn && Math.abs(now.y - step.to.y) > 0.5) { failure = `身体已在目标格列 (${step.to.x},${step.to.z})，但脚高 ${now.y.toFixed(2)} 与计划 ${step.to.y} 不符`; break; }
+      if (!inColumn) {
+        failure = await run(moveStep, { xyz: [step.to.x, step.to.y, step.to.z] }) ?? undefined;
+        if (failure !== undefined) break;
+      }
     }
     executed++;
     // 做完第一处改动就交回：挖开后视觉会看到新露出的格（可能是液体或空腔），后面按新证据重新规划。
@@ -511,7 +517,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const voxel = spatial.session.voxel;
       const frontier = session.intent.kind !== 'advance' || session.bearing === undefined ? null : await farthestFrontier(voxel, scope.dim, {
         origin: session.frozenOrigin, bearing: session.bearing,
-        maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance,
+        maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance, anchorY: session.frozenOrigin.y,
       }, state.pos, (cell) => triedFrontiers.has(cellText(cell)));
       if (ctx.signal.aborted) { stop = stopOf('CANCELLED', '规划前沿时父任务取消'); break; }
       const frontierGoal = frontier === null ? undefined : cellText(frontier);
@@ -825,7 +831,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         stop = modeGap
           ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式`, { modeGap: { problem: segment.problemKind } })
-          : stopOf('TARGET_UNRESOLVED', segment.detail ?? 'waypoint/脚高无法解析');
+          : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${segment.search.policy?.firstRejection === undefined ? ''
+            : `；被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}`}`);
         break;
       }
       if (segment.outcome === 'unknown_boundary') {
