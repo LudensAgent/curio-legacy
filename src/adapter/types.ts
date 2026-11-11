@@ -223,6 +223,12 @@ export interface MoveOpts {
    * 台阶与小落差，调用方从实测位置复验下一段真实几何；停稳的末点用于原目标本身就是一个格子的情况。
    */
   passColumn?: boolean;
+  /**
+   * 连续路线中间点交接：在 physicsTick 内到达当前脚位时调用，参数是当时的实测位置。
+   * 返回 true 表示下一步已复验有效：本次控制不释放运动键，由调用方紧接着的下一段
+   * 身体控制接续；返回 false 或省略时按原逻辑制动。仅在 settleAtTarget 为 false 时有意义。
+   */
+  onCheckpoint?: (measured: Vec3Like) => boolean;
 }
 
 /**

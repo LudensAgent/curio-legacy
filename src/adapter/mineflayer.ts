@@ -1043,6 +1043,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         opts.maxDropDown,
         opts.settleAtTarget !== false,
         opts.passColumn === true,
+        opts.onCheckpoint,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
@@ -1349,6 +1350,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     maxDropDown = 1,
     settleAtTarget = true,
     passColumn = false,
+    onCheckpoint?: (measured: Vec3Like) => boolean,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
     // 浅水里站在地面上（涉水）仍是地面行走；悬浮游泳、岩浆和乘骑不是。
@@ -1487,6 +1489,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let crossedCheckpoint = false;
     let coastingToCheckpoint = false;
     let airCoast = false;
+    let continued = false;
     let previousX = p0.x, previousZ = p0.z;
     let wake: (() => void) | undefined;
     const stopWaiting = () => wake?.();
@@ -1537,6 +1540,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         return;
       }
+      // 连续路线中间点：在 physicsTick 内复验下一步；有效就保持运动键，
+      // 由调用方紧接着的下一段身体控制接续，不经过“松键—异步返回—再按键”的间隙。
+      if (handOff && !settleAtTarget && onCheckpoint?.(b.entity.position) === true) {
+        // 只保留前进；跳跃/疾跑由下一段按自己的落点重新决定，避免跨点残留。
+        b.setControlState('jump', false);
+        b.setControlState('sprint', false);
+        continued = true;
+        crossedCheckpoint = true;
+        stopWaiting();
+        return;
+      }
       // Mineflayer 可在同一调用栈补跑多个物理帧。到位或到达平地制动点时立即松键，
       // 让下一帧按真实惯性前进；异步控制恢复后还会重新检查最新脚位。
       crossedCheckpoint = true;
@@ -1585,7 +1599,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     } finally {
       if (mode === 'feet') b.removeListener?.('physicsTick', onPhysicsTick);
       signal.removeEventListener('abort', stopWaiting);
-      if (ownsControls()) {
+      if (ownsControls() && !continued) {
         try { b.setControlState('forward', false); } catch { /* ignore */ }
         try { b.setControlState('jump', false); } catch { /* ignore */ }
         try { b.setControlState('sprint', false); } catch { /* ignore */ }

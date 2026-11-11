@@ -933,6 +933,8 @@ async function runNavigationSegmentInner(
     preview = task;
   };
 
+  let holding = false;
+  try {
   for (const [index, transition] of transitions.entries()) {
     physicalIndex = index;
     if (ctx.signal.aborted) return cancelledHere(index, transition, ctx.adapter.state().pos);
@@ -1071,6 +1073,13 @@ async function runNavigationSegmentInner(
         && goalReached(request.goal, transition.to, true);
       // 台阶与落差有腾空段，落点难精确命中：站进目标格列即交接，下一段从实测位置复验。
       passColumn = cellFinish || continuous && (sameHeading || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
+      // 连续路线的下一步在 physicsTick 到达本点时复验；有效就保持运动键，由紧接着的
+      // 下一段身体控制接续。只对同高行走/台阶启用；下落与终点仍按原逻辑制动。
+      const checkpoint = continuous && next !== undefined && !directionalFinish
+        && (next.kind === 'walk' || next.kind === 'step')
+        ? (measured: Vec3Like) => verifyLandRoute(voxel, { ...currentRequest, measuredStart: measured }, [next], Date.now()).transitions[0]?.status === 'OPEN'
+        : undefined;
+      if (checkpoint !== undefined) holding = true;
       try {
         execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(
@@ -1087,6 +1096,7 @@ async function runNavigationSegmentInner(
             ...(request.allowed.includes('drop') ? { maxDropDown: Math.max(4, Math.ceil(drop)) }
               : transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: directionalFinish ? { ...request.corridor, minimumAlong: request.minimumAlong } : request.corridor }),
+            ...(checkpoint === undefined ? {} : { onCheckpoint: checkpoint }),
           },
         );
         execution.handedOver = continuous;
@@ -1208,6 +1218,10 @@ async function runNavigationSegmentInner(
     }
     // 下一窗口来不及在末步发出前完成时，这一步已经按完整停稳执行，可在这里等待有界搜索。
     if (index + 1 === transitions.length && preview !== undefined) await preview;
+  }
+  } finally {
+    // 中间点交接可能保留运动键；本段退出（含提前返回/异常）时由宿主统一释放。
+    if (holding) ctx.adapter.stopAll?.();
   }
 
   if (ctx.signal.aborted) return receipt('cancelled', { stopCode: 'cancelled', detail: '后续窗口规划或移动已取消，保留已确认位移' });
