@@ -5,6 +5,8 @@ import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSki
 import { navigateTo } from './navigate.ts';
 import type { SegmentReceipt } from './segment.ts';
 import { findMovementSession } from './session.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, parseMakeWay, type MakeWayOptions } from './make-way.ts';
+import type { MakeWayEdit } from './coordinator.ts';
 
 type TravelTarget =
   | { x: number; y?: number; z: number }
@@ -19,6 +21,8 @@ type TravelToArgs = {
   timeoutMs: number;
   sessionId?: string;
   swim?: boolean;
+  /** 显式授权开路（dig/place）；省略时不挖不放。 */
+  makeWay?: MakeWayOptions;
 };
 
 /** 目标只给 x/z 时，在共享 VoxelMap 的同列观测里解析脚高；解析不到就报缺口，不猜落脚高度。 */
@@ -83,14 +87,14 @@ function parseTarget(raw: unknown): TravelTarget | string {
  */
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
-  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或需要移动但目标列缺证据时如实报缺口。无 y 且尚未在到达范围内时，用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），实测站稳并进入范围即停止；路线目标仍是原坐标，不会把范围目标改成更近的点。默认不下水，swim:true 时才涉水并代为游泳。只接受 to/range/timeoutMs/sessionId/swim（以及通用 make），其他参数一律拒绝。',
-  argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号","swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）}；只接受 to/range/timeoutMs/sessionId/swim/make，未知参数会被拒绝。',
+  description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或需要移动但目标列缺证据时如实报缺口。无 y 且尚未在到达范围内时，用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），实测站稳并进入范围即停止；路线目标仍是原坐标，不会把范围目标改成更近的点。默认不下水，swim:true 时才涉水并代为游泳。' + MAKE_WAY_DOC + '。只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits（以及通用 make），其他参数一律拒绝。',
+  argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号","swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,' + MAKE_WAY_ARGS_DOC + '}；只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits/make，未知参数会被拒绝。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const allowedKeys = new Set(['to', 'range', 'timeoutMs', 'sessionId', 'swim', 'make']);
+    const allowedKeys = new Set(['to', 'range', 'timeoutMs', 'sessionId', 'swim', 'dig', 'place', 'maxEdits', 'make']);
     const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
     if (unknown.length) return { ok: false, error: `travel_to 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
     const to = parseTarget(a.to);
@@ -99,8 +103,10 @@ export const travelTo: Skill<TravelToArgs> = {
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 10000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 10000–600000 的整数' };
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
     if (a.swim !== undefined && typeof a.swim !== 'boolean') return { ok: false, error: 'swim 需要 true 或 false' };
+    const makeWay = parseMakeWay(a);
+    if (!makeWay.ok) return makeWay;
     return { ok: true, args: { to, range: a.range ?? 2, timeoutMs: a.timeoutMs ?? 180000, ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
-      ...(a.swim === true ? { swim: true } : {}) } };
+      ...(a.swim === true ? { swim: true } : {}), ...(makeWay.value === undefined ? {} : { makeWay: makeWay.value }) } };
   },
   async run(ctx, args) {
     const { adapter } = ctx;
@@ -255,6 +261,7 @@ export const travelTo: Skill<TravelToArgs> = {
         ...nested.args,
         rolling: true,
         ...(args.swim === true ? { swim: true } : {}),
+        ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
         arrival: { radius: args.range, metric: requestedY ? '3d' : 'horizontal' },
       });
     } catch (error) {
@@ -293,7 +300,9 @@ export const travelTo: Skill<TravelToArgs> = {
       return receipt({ ...moved, data: { ...routeFacts, outcome: 'FAILED' as const } }, 'FAILED');
     }
     if (arrived(end, endState.onGround)) {
-      const effects = moved.status === 'succeeded' ? '' : '；VoxelMap A* 没有报成功，但实测位置满足原到达条件';
+      const madeWay = (moved.data?.makeWay as { edits: MakeWayEdit[] } | undefined)?.edits ?? [];
+      const effects = (moved.status === 'succeeded' ? '' : '；VoxelMap A* 没有报成功，但实测位置满足原到达条件')
+        + (madeWay.length === 0 ? '' : `；代为开路改动 ${madeWay.length} 处：${madeWay.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}(${edit.pos.x},${edit.pos.y},${edit.pos.z})`).join('、')}`);
       return receipt(ok(`到了 ${label} 附近：实测 ${at(end)}，距离 ${round1(gap(end))} 格 ≤ range ${args.range}（水平位移 ${movedFacts.displacement.horizontal} 格）${effects}`, {
         ...routeFacts, outcome: 'ARRIVED' as const,
       }), 'ARRIVED');

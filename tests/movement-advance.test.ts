@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { farthestFrontier } from '../src/skills/movement/frontier.ts';
-import { advance } from '../src/skills/movement/index.ts';
+import { advance, travelTo } from '../src/skills/movement/index.ts';
 import { acquireSessionLease, clearMovementSessions, findMovementSession, releaseSessionLease } from '../src/skills/movement/session.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
 import type { MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
@@ -585,4 +585,81 @@ test('farthestFrontier：在走廊内找沿方向最远、可站立且紧挨未�
   const closed = corridor(8, -1, [-1, 1]);
   fill(closed, 'minecraft:netherrack', [-2, -1, 0, 1, 2].flatMap((z) => [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x: z === -2 || z === 2 || x === 9 || x === -1 ? x : 99, y, z })))));
   assert.equal(await farthestFrontier(closed, DIM, { ...at, maxLateral: 1 }, { x: 0.5, y: 64, z: 0.5 }, () => false), null, '前方被已知的墙围死：没有前沿');
+});
+
+test('开路：普通路线被已知的墙堵死时，授权 dig 才挖开挡路的格继续走；不授权就如实停下', async (t) => {
+  for (const dig of [false, true]) {
+    clearMovementSessions();
+    // 一格宽的通道，x=6 整面墙（地图与身体世界一致），两侧与头顶封死，绕不过去。
+    const map = corridor(20, -1, [0, 0]);
+    // 墙与头顶覆盖通道里刚记的空气：观测时间要更晚，同一毫秒内容不同会被判成观测矛盾。
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const wall = [64, 65].map((y) => ({ x: 6, y, z: 0 }));
+    fill(map, 'minecraft:stone', wall);
+    fill(map, 'minecraft:stone', Array.from({ length: 22 }, (_, i) => i - 1).flatMap((x) => [-1, 1].flatMap((z) => [63, 64, 65, 66].map((y) => ({ x, y, z })))));
+    fill(map, 'minecraft:stone', Array.from({ length: 22 }, (_, i) => i - 1).map((x) => ({ x, y: 66, z: 0 })));
+    const { adapter, ctx } = setup(map);
+    t.after(() => ctx.memory.close());
+    for (const pos of wall) adapter.blocks.push({ name: 'stone', pos });
+    // 真实会话会把挖过的格标成“动作效果待确认”，等视觉重写；这里由下面的挖掘钩子直接同步体素。
+    Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+    // 没有真实感知：挖掉后把体素同步成空气，代替视觉刷新。
+    const realDig = adapter.dig.bind(adapter);
+    adapter.dig = async (pos, signal) => {
+      const r = await realDig(pos, signal);
+      if (r.ok) fill(map, 'minecraft:air', [pos]);
+      return r;
+    };
+    const validated = travelTo.validate({ to: { x: 12, y: 64, z: 0 }, range: 1, ...(dig ? { dig: true, maxEdits: 4 } : {}) }, adapter);
+    assert.ok(validated.ok, validated.ok ? '' : validated.error);
+    const result = await travelTo.run(ctx, validated.args);
+    if (!dig) {
+      assert.equal(result.status, 'failed', result.summary);
+      assert.ok(Math.floor(adapter.pos.x) < 6, '没授权就不挖、不穿墙');
+      assert.ok(!adapter.actions.some((a) => a.startsWith('dig:')));
+    } else {
+      assert.equal(result.status, 'succeeded', result.summary);
+      assert.ok(adapter.pos.x >= 11, `挖穿墙走进目标范围（实测 x=${adapter.pos.x}）`);
+      assert.equal(adapter.actions.filter((a) => a === 'dig:stone').length, 2, '只挖挡路的脚、头两格');
+      const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
+      assert.deepEqual(edits.map((e) => `${e.kind}@${e.pos.x},${e.pos.y}`).sort(), ['dig@6,64', 'dig@6,65']);
+      assert.match(result.summary, /代为开路改动 2 处：挖开 stone\(6,6[45],0\)/);
+    }
+  }
+});
+
+test('开路：困在 1×1 深两格的坑里，授权 place 后原地垫高一格再迈上地面', async (t) => {
+  clearMovementSessions();
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const ground: Vec3Like[] = [], stone: Vec3Like[] = [], air: Vec3Like[] = [];
+  for (let x = -2; x <= 5; x++) for (let z = -2; z <= 2; z++) {
+    const pit = x === 0 && z === 0;
+    (pit ? air : ground).push({ x, y: 63, z });
+    (pit ? air : stone).push({ x, y: 62, z });
+    stone.push({ x, y: 61, z });
+    for (const y of [64, 65, 66]) air.push({ x, y, z });
+  }
+  fill(map, 'minecraft:grass_block', ground);
+  fill(map, 'minecraft:stone', stone);
+  fill(map, 'minecraft:air', air);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  adapter.removed.add('0,63,0'); adapter.removed.add('0,62,0');
+  adapter.pos = { x: 0.5, y: 62, z: 0.5 };
+  adapter.inv.set('cobblestone', 8);
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  const realPillar = adapter.pillarUp.bind(adapter);
+  adapter.pillarUp = async (items, signal) => {
+    const r = await realPillar(items, signal);
+    if (r.ok) fill(map, 'minecraft:cobblestone', [{ x: 0, y: 62, z: 0 }]);
+    return r;
+  };
+  const validated = travelTo.validate({ to: { x: 4, y: 64, z: 0 }, range: 1, place: 'cobblestone' }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await travelTo.run(ctx, validated.args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(adapter.pos.y >= 64 && adapter.pos.x >= 3, `爬出坑走到地面（实测 ${JSON.stringify(adapter.pos)}）`);
+  const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like; name: string }[] } | undefined)?.edits ?? [];
+  assert.deepEqual(edits.map((e) => `${e.kind}@${e.pos.x},${e.pos.y},${e.pos.z}`), ['place@0,62,0']);
+  assert.equal(adapter.inv.get('cobblestone'), 7, '只用了一块圆石');
 });

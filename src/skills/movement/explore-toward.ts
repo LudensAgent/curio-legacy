@@ -3,6 +3,7 @@ import { lookAround, sighted } from '../movement.ts';
 import { fail, isAbort, obj, ok, runSkill, type Skill, type SkillResult } from '../types.ts';
 import { coordinatorResult, runMovementCoordinator } from './coordinator.ts';
 import { CARDINAL_DIRECTIONS, type CardinalDirection } from './session.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, parseMakeWay, type MakeWayOptions } from './make-way.ts';
 
 type ExploreArgs = {
   direction: CardinalDirection;
@@ -14,6 +15,8 @@ type ExploreArgs = {
   timeoutMs: number;
   sessionId?: string;
   swim?: boolean;
+  /** 显式授权开路（dig/place）；省略时不挖不放。 */
+  makeWay?: MakeWayOptions;
 };
 
 export const MAX_EXPLORE_DISTANCE = 512;
@@ -21,14 +24,14 @@ export const MAX_EXPLORE_DISTANCE = 512;
 /** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已确认的 walk/step/drop 与跨越 1–3 格缺口的 jump。未知前沿有界观察后，相关证据变化才继续，否则返回边界。不挖放；默认不下水，swim:true 时才涉水并代为游泳。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
-  argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多32步）,"maxLateralDrift"?:16（0-64，0 只直行）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/swim/make，未知参数会被拒绝；until 只认本次实际看见的目标。',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已确认的 walk/step/drop 与跨越 1 格缺口的 jump（原地起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
+  argsDoc: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多32步）,"maxLateralDrift"?:16（0-64，0 只直行）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,' + MAKE_WAY_ARGS_DOC + '}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/swim/dig/place/maxEdits/make，未知参数会被拒绝；until 只认本次实际看见的目标。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const allowedKeys = new Set(['direction', 'distance', 'until', 'segment', 'maxLateralDrift', 'timeoutMs', 'sessionId', 'origin', 'swim', 'make']);
+    const allowedKeys = new Set(['direction', 'distance', 'until', 'segment', 'maxLateralDrift', 'timeoutMs', 'sessionId', 'origin', 'swim', 'dig', 'place', 'maxEdits', 'make']);
     const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
     if (unknown.length) return { ok: false, error: `explore_toward 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
     const direction = String(a.direction ?? '').toUpperCase();
@@ -40,6 +43,8 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
     if (a.swim !== undefined && typeof a.swim !== 'boolean') return { ok: false, error: 'swim 需要 true 或 false' };
+    const makeWay = parseMakeWay(a);
+    if (!makeWay.ok) return makeWay;
     const origin = a.origin === undefined ? { ...adapter.state().pos } : obj(a.origin);
     if (![origin.x, origin.y, origin.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return { ok: false, error: 'origin 需要 {x,y,z} 有限数字' };
     return { ok: true, args: {
@@ -49,6 +54,7 @@ export const exploreToward: Skill<ExploreArgs> = {
       ...(a.until === undefined ? {} : { until: (a.until as string).trim().toLowerCase() }),
       ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
       ...(a.swim === true ? { swim: true } : {}),
+      ...(makeWay.value === undefined ? {} : { makeWay: makeWay.value }),
     } };
   },
   async run(ctx, args) {
@@ -78,6 +84,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         maxObservations: 32, maxObservedCells: 2048, maxNoProgressSegments: 4,
         sessionId: args.sessionId, deadlineMs: deadline, allowUnknownCorridor: false, observeFrontierBeyondSegments: true,
         ...(args.swim === true ? { swim: true } : {}),
+        ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
       });
       last = coordinatorResult(outcome, extra);
       if (!outcome.ok) return last;

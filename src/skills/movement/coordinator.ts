@@ -10,6 +10,8 @@ import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
+import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
+import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -86,6 +88,65 @@ export interface CoordinatorRequest {
    * 用 swim_path 游向已观察到的、沿委托有推进的岸边站立格（没有岸时游向前方水面点）。
    */
   swim?: boolean;
+  /** 委托显式授权开路：普通路线走不通时，规划并执行挖开/补支撑/原地垫高的路线（见 make-way.ts）。 */
+  makeWay?: MakeWayOptions;
+}
+
+/** 为开路实际做的一次改动：挖开了哪一格（原来是什么），或在哪放了什么。 */
+export type MakeWayEdit = { kind: 'dig' | 'place'; pos: Vec3Like; name: string };
+/** 一段代为开路的执行：计划几步、实际走了几步、停在哪、为什么停。 */
+export type MakeWayLegReceipt = { from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string };
+/** 普通路线以这些原因停下时，授权了开路就先试开路。 */
+const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
+/** 一次调用最多开路几段；每段仍受改动次数与期限约束。 */
+const MAX_MAKE_WAY_LEGS = 16;
+
+/**
+ * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell，只用授权工具或当前手持），再补支撑（place_support）
+ * 或原地垫高（pillar_one，只用授权方块），然后迈到下一格（move_step）。每个基础动作照常做自己的安全检查；
+ * 任一步失败就停下，把原因交回。改动逐条记入 edits。
+ */
+async function runMakeWay(
+  ctx: SkillCtx, steps: MakeWayStep[], opts: MakeWayOptions, edits: MakeWayEdit[], deadline: number,
+  nameAt: (cell: Vec3Like) => string,
+): Promise<MakeWayLegReceipt> {
+  const from = { ...ctx.adapter.state().pos };
+  const run = async (skill: Parameters<typeof validateSkill>[0], raw: Record<string, unknown>) => {
+    const validated = validateSkill(skill, raw, ctx.adapter);
+    if (!validated.ok) return `${skill.name} 参数被拒：${validated.error}`;
+    const result = await runSkill({ ...ctx, deadline }, skill, validated.args);
+    return result.status === 'succeeded' ? null : `${skill.name}：${result.summary}`;
+  };
+  let executed = 0;
+  let failure: string | undefined;
+  outer: for (const step of steps) {
+    if (ctx.signal.aborted || Date.now() >= deadline) { failure = ctx.signal.aborted ? '父任务取消' : '期限已到'; break; }
+    for (const cell of step.dig) {
+      if (edits.length >= opts.maxEdits) { failure = `开路改动已达上限 ${opts.maxEdits} 次`; break outer; }
+      const name = nameAt(cell);
+      // 规划时已用体素确认六个邻格都有记录且不是液体，邻格未在当前视野里看清不再拦。
+      failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig?.tool === undefined ? {} : { tool: opts.dig.tool }) }) ?? undefined;
+      if (failure !== undefined) break outer;
+      edits.push({ kind: 'dig', pos: { ...cell }, name });
+    }
+    if (step.place !== undefined || step.kind === 'pillar') {
+      if (edits.length >= opts.maxEdits) { failure = `开路改动已达上限 ${opts.maxEdits} 次`; break; }
+      const item = opts.place!.item;
+      failure = (step.kind === 'pillar'
+        ? await run(pillarOne, { item })
+        : await run(placeSupport, { xyz: [step.place!.x, step.place!.y, step.place!.z], item })) ?? undefined;
+      if (failure !== undefined) break;
+      const placed = step.kind === 'pillar' ? { x: step.to.x, y: step.to.y - 1, z: step.to.z } : step.place!;
+      // 刚放下时视觉可能还没重写这一格：指定了方块就记它，写 any 才读体素。
+      edits.push({ kind: 'place', pos: { ...placed }, name: item === 'any' ? nameAt(placed) : item.replace(/^minecraft:/, '') });
+    }
+    if (step.kind === 'move') {
+      failure = await run(moveStep, { xyz: [step.to.x, step.to.y, step.to.z] }) ?? undefined;
+      if (failure !== undefined) break;
+    }
+    executed++;
+  }
+  return { from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed, ...(failure === undefined ? {} : { failure }) };
 }
 
 /** 一段由协调器代为执行的游泳：目标来自已观察体素，结果按实测记录。 */
@@ -112,6 +173,7 @@ export type CoordinatorOutcome =
       stop: StopReceipt;
       observation?: ObservationReceipt;
       swimLegs?: SwimLegReceipt[];
+      makeWay?: { edits: MakeWayEdit[]; legs: MakeWayLegReceipt[] };
     };
 
 const STOP_FAILURE: Record<StopReason, FailureCode> = {
@@ -313,6 +375,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
 
   const segments: SegmentReceipt[] = [];
   const swimLegs: SwimLegReceipt[] = [];
+  const makeWayEdits: MakeWayEdit[] = [];
+  const makeWayLegs: MakeWayLegReceipt[] = [];
   let observation: ObservationReceipt | undefined;
   let invocationTransitions = 0;
   let stop: StopReceipt | null = null;
@@ -351,6 +415,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       return Math.hypot(goal.x - from.x, goal.z - from.z) - Math.hypot(goal.x - p.x, goal.z - p.z);
     };
     const withinCorridor = (p: Vec3Like) => session.intent.kind !== 'advance' || Math.abs(progressOf(session, p, 0).lateral) <= session.intent.maxLateralDrift;
+    for (;;) {
     while (executedSegments < request.maxSegments) {
       if (ctx.signal.aborted) {
         stop = stopOf('CANCELLED', '父任务取消；保留已确认的位移');
@@ -909,6 +974,35 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
     }
+    // 普通路线走不通且委托授权了开路：在已记录体素上规划挖开/补支撑/垫高的路线，执行完回到普通路线。
+    const makeWay = request.makeWay;
+    if (makeWay === undefined || stop === null || !MAKE_WAY_STOPS.has(stop.reason) || makeWayEdits.length >= makeWay.maxEdits
+      || makeWayLegs.length >= MAX_MAKE_WAY_LEGS || Date.now() >= deadline || ctx.signal.aborted) break;
+    const voxel = spatial.session.voxel;
+    const here = ctx.adapter.state().pos;
+    const target = session.intent.kind === 'navigate' ? session.intent.to : (() => {
+      const bearing = session.bearing!;
+      const ahead = Math.min(24, Math.max(1, session.intent.distance - progressOf(session, here, 0).along));
+      return { x: here.x + bearing.x * ahead, y: here.y, z: here.z + bearing.z * ahead };
+    })();
+    const start = { x: Math.floor(here.x), y: Math.floor(here.y + 0.05), z: Math.floor(here.z) };
+    const steps = await planMakeWay(voxel, scope.dim, start, target, makeWay, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }));
+    if (steps === null) break;
+    const leg = await runMakeWay(ctx, steps, makeWay, makeWayEdits, deadline, (cell) => {
+      const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
+      return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
+    });
+    makeWayLegs.push(leg);
+    if (leg.executed === 0) {
+      stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
+      break;
+    }
+    // 开出了路：从新位置回到普通路线。
+    stop = null;
+    session.progress.stagnationSegments = 0;
+    session.progress.lastProgressAt = Date.now();
+    session.phase = 'replanning';
+    }
 
     if (stop === null) {
       stop = stopOf('BUDGET_EXHAUSTED', `本次调用分段上限 ${request.maxSegments} 已用尽；冻结意图未完成，已确认进展与 session 保留`);
@@ -943,12 +1037,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     status,
     ...(status === 'failed' ? { failureCode: STOP_FAILURE[finalStop.reason] } : {}),
     summary: renderSummary(session, finalStop, segments) + (swimLegs.length === 0 ? ''
-      : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`),
+      : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`)
+      + (makeWayLegs.length === 0 ? '' : `；代为开路 ${makeWayLegs.length} 段：${makeWayEdits.length === 0 ? '没有改动方块' : makeWayEdits.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、')}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`),
     session,
     segments,
     stop: finalStop,
     ...(observation === undefined ? {} : { observation }),
     ...(swimLegs.length === 0 ? {} : { swimLegs }),
+    ...(makeWayLegs.length === 0 ? {} : { makeWay: { edits: makeWayEdits, legs: makeWayLegs } }),
   };
 }
 
@@ -960,6 +1056,7 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
   return {
     ...extra,
     ...(outcome.swimLegs === undefined ? {} : { swimLegs: outcome.swimLegs }),
+    ...(outcome.makeWay === undefined ? {} : { makeWay: outcome.makeWay }),
     ...(replans.length === 0 ? {} : {
       replanCount: replans.length,
       replans: replans.map((segment) => ({

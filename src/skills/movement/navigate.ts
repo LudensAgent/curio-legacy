@@ -4,6 +4,7 @@ import { obj, type Skill } from '../types.ts';
 import { coordinatorData, runMovementCoordinator, type CoordinatorOutcome } from './coordinator.ts';
 import { targetKindOf, type NavigationArrival, type NavigationTargetKind } from './goal.ts';
 import type { MoveMode } from './session.ts';
+import type { MakeWayOptions } from './make-way.ts';
 
 type NavigateArgs = {
   to: Vec3Like;
@@ -14,6 +15,8 @@ type NavigateArgs = {
   rolling?: boolean;
   /** 内部委托（travel_to）显式允许涉水与代为游泳；公开 navigate_to 不接受。 */
   swim?: boolean;
+  /** 内部委托（travel_to）显式授权开路；公开 navigate_to 不接受。 */
+  makeWay?: MakeWayOptions;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -204,6 +207,7 @@ export const navigateTo: Skill<NavigateArgs> = {
       intent: { kind: 'navigate', to: { ...args.to }, targetKind, ...(args.arrival === undefined ? {} : { arrival: { ...args.arrival } }), allowed: args.allowed, historical: args.historical !== false },
       ...(args.rolling ? { rolling: true } : {}),
       ...(args.swim ? { swim: true } : {}),
+      ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? Math.min(32, maxSteps),
       maxTransitions: args.maxTransitions ?? Math.min(1024, maxSteps * maxSegments),

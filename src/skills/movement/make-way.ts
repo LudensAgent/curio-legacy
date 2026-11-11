@@ -1,0 +1,191 @@
+import type { Vec3Like } from '../../adapter/types.ts';
+import { evidenceStale, type VoxelMap } from 'curio-minecraft-3d-memory';
+import { hasAnyCollision, isReplaceable, supportTop } from '../../perception/geometry.ts';
+import { isDangerousBlock, isWaterBlock } from '../../spatial/land-edge-policy.ts';
+
+/**
+ * 开路授权：普通路线走不通时，允许在已记录体素上规划“挖开/补支撑/原地垫高”的路线（类似 pathfinder 的
+ * canDig/scaffolding）。只在显式授权时启用；挖用 tool（缺省用当前手持），放用 item（必填，或 "any"）。
+ */
+export type MakeWayOptions = { dig?: { tool?: string }; place?: { item: string }; maxEdits: number };
+
+type Cell = { x: number; y: number; z: number };
+/** 一步开路：先挖 dig 中的格、再在 place 补支撑（或 pillar 原地垫高），然后站到 to。 */
+export type MakeWayStep = { kind: 'move' | 'pillar'; to: Cell; dig: Cell[]; place?: Cell };
+
+/** 各动作的代价：能少挖少放就少挖少放，已知可走的格优先。 */
+const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4 } as const;
+const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16, MAX_DROP = 3;
+/** 每扫这么久让出一次主线程。 */
+const SLICE_MS = 5;
+/** 挖不动或挖了会出事的方块：基岩类、需要高级工具才有掉落的硬方块不规划去挖。 */
+const UNDIGGABLE = /^(bedrock|barrier|end_portal_frame|end_portal|nether_portal|end_gateway|command_block|chain_command_block|repeating_command_block|structure_block|jigsaw|obsidian|crying_obsidian|reinforced_deepslate|respawn_anchor|ancient_debris|spawner)$/;
+/** 头顶压着会落下来的方块：挖开下面的格会让它掉下来砸进身体所在格。 */
+const FALLING = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|anvil|chipped_anvil|damaged_anvil|pointed_dripstone|scaffolding)$|_concrete_powder$/;
+
+const keyOf = (c: Cell) => `${c.x},${c.y},${c.z}`;
+const stem = (name: string) => name.replace(/^minecraft:/, '');
+
+type Kind = 'unknown' | 'clear' | 'standable' | 'solid' | 'liquid' | 'danger';
+
+/**
+ * 在已记录体素上找一条允许挖开/补支撑/垫高的路线，走向 target。未观察、待重新确认的格一律不当可走/可挖；
+ * 危险格、液体、紧挨液体或有未记录邻格的格不挖，上方压着沙砾的格不挖。到不了时返回离目标最近（至少近 3 格）的部分路线。
+ * 只读体素，不动身体；返回 null 表示没有可用路线。
+ */
+export async function planMakeWay(
+  voxel: VoxelMap, dim: string, start: Cell, target: Vec3Like, opts: MakeWayOptions,
+  allowed: (cell: Cell) => boolean,
+): Promise<MakeWayStep[] | null> {
+  const kinds = new Map<string, { kind: Kind; name: string }>();
+  const look = (x: number, y: number, z: number) => {
+    const key = `${x},${y},${z}`;
+    let hit = kinds.get(key);
+    if (hit === undefined) {
+      const view = voxel.cellAt(dim, x, y, z);
+      if (!view.observed || evidenceStale(view.evidence) || !view.evidence.observation.stateComplete) hit = { kind: 'unknown', name: '' };
+      else {
+        const { name: raw, properties } = view.evidence.observation.state;
+        const name = stem(raw);
+        hit = {
+          name,
+          kind: isDangerousBlock(name) ? 'danger'
+            : name === 'lava' || isWaterBlock(name) ? 'liquid'
+              : supportTop(name, properties) !== null ? 'standable'
+                : hasAnyCollision(name, properties) ? 'solid' : 'clear',
+        };
+      }
+      kinds.set(key, hit);
+    }
+    return hit;
+  };
+  // 身体要占的格：已经空着就不用挖；实心且允许挖、挖得动、不邻液体、上方不压落体才挖。不可行返回 null。
+  const clearing = (c: Cell): Cell[] | null => {
+    const here = look(c.x, c.y, c.z);
+    if (here.kind === 'clear') return [];
+    if (here.kind !== 'standable' && here.kind !== 'solid') return null;
+    if (opts.dig === undefined || UNDIGGABLE.test(here.name)) return null;
+    const near = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
+    // 六个邻格都要在体素里有记录且不是液体（岩浆既是液体也在危险名单里，两者都挡）：挖开后不会有液体流进来。
+    // 执行时据此显式告诉 mine_cell 接受“当前视野没看清邻格”，依据是已记录的体素，不是盲挖。
+    if (near.some(([dx, dy, dz]) => { const n = look(c.x + dx, c.y + dy, c.z + dz); return n.kind === 'unknown' || n.kind === 'liquid' || n.name === 'lava'; })) return null;
+    if (FALLING.test(look(c.x, c.y + 1, c.z).name)) return null;
+    return [c];
+  };
+  const supported = (c: Cell) => look(c.x, c.y - 1, c.z).kind === 'standable';
+  const placeable = (c: Cell) => {
+    const below = look(c.x, c.y - 1, c.z);
+    return opts.place !== undefined && (below.kind === 'clear' || (below.kind === 'solid' && isReplaceable(below.name)));
+  };
+  const h = (c: Cell) => Math.hypot(target.x - (c.x + 0.5), target.z - (c.z + 0.5)) + Math.abs(target.y - c.y) * 0.5;
+
+  type Node = { cell: Cell; g: number; f: number; parent: Node | null; step: MakeWayStep | null };
+  const startNode: Node = { cell: start, g: 0, f: h(start), parent: null, step: null };
+  const open: Node[] = [startNode];
+  const best = new Map<string, number>([[keyOf(start), 0]]);
+  let closest = startNode;
+  let expanded = 0;
+  let sliceEnd = performance.now() + SLICE_MS;
+  while (open.length > 0 && expanded < MAX_NODES) {
+    if (performance.now() >= sliceEnd) {
+      await new Promise((resolve) => setImmediate(resolve));
+      sliceEnd = performance.now() + SLICE_MS;
+    }
+    let bi = 0;
+    for (let i = 1; i < open.length; i++) if (open[i]!.f < open[bi]!.f) bi = i;
+    const node = open.splice(bi, 1)[0]!;
+    if ((best.get(keyOf(node.cell)) ?? Infinity) < node.g) continue;
+    expanded++;
+    if (h(node.cell) < h(closest.cell)) closest = node;
+    if (h(node.cell) <= 1) { closest = node; break; }
+    const { x, y, z } = node.cell;
+    const candidates: { step: MakeWayStep; cost: number }[] = [];
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = x + dx, nz = z + dz;
+      // 同层：脚、头两格要空（或挖开），脚下有支撑（或补一块）。
+      {
+        const to = { x: nx, y, z: nz };
+        const feet = clearing(to), head = clearing({ ...to, y: y + 1 });
+        if (feet !== null && head !== null && look(nx, y - 1, nz).kind !== 'danger') {
+          const dig = [...feet, ...head];
+          if (supported(to)) candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + dig.length * COST.dig });
+          else if (placeable(to)) candidates.push({ step: { kind: 'move', to, dig, place: { x: nx, y: y - 1, z: nz } }, cost: COST.move + dig.length * COST.dig + COST.place });
+        }
+      }
+      // 上一级：起跳要自己头顶再高一格空着；落点脚、头空着且脚下本来就有支撑。
+      {
+        const to = { x: nx, y: y + 1, z: nz };
+        const lift = clearing({ x, y: y + 2, z }), feet = clearing(to), head = clearing({ ...to, y: y + 2 });
+        if (lift !== null && feet !== null && head !== null && supported(to) && look(nx, y, nz).kind !== 'danger') {
+          const dig = [...lift, ...feet, ...head];
+          candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + COST.stepUp + dig.length * COST.dig });
+        }
+      }
+      // 下落：同层两格空着、脚下空，往下找第一个已知支撑面（不挖、不越过未知格）。
+      if (look(nx, y, nz).kind === 'clear' && look(nx, y + 1, nz).kind === 'clear') {
+        for (let d = 1; d <= MAX_DROP; d++) {
+          const below = look(nx, y - d, nz);
+          if (below.kind !== 'clear') break;
+          const floor = look(nx, y - d - 1, nz);
+          if (floor.kind === 'standable') {
+            candidates.push({ step: { kind: 'move', to: { x: nx, y: y - d, z: nz }, dig: [] }, cost: COST.move + d * COST.dropPerBlock });
+            break;
+          }
+          if (floor.kind !== 'clear') break;
+        }
+      }
+    }
+    // 原地垫高一格：头顶再高一格要空（或挖开）。
+    if (opts.place !== undefined) {
+      const lift = clearing({ x, y: y + 2, z });
+      if (lift !== null) candidates.push({ step: { kind: 'pillar', to: { x, y: y + 1, z }, dig: lift }, cost: COST.pillar + lift.length * COST.dig });
+    }
+    for (const { step, cost } of candidates) {
+      const to = step.to;
+      if (Math.abs(to.x - start.x) > MAX_RADIUS || Math.abs(to.z - start.z) > MAX_RADIUS || Math.abs(to.y - start.y) > MAX_RISE) continue;
+      if (!allowed(to)) continue;
+      if (look(to.x, to.y, to.z).kind === 'danger' || look(to.x, to.y + 1, to.z).kind === 'danger') continue;
+      const g = node.g + cost;
+      const key = keyOf(to);
+      if ((best.get(key) ?? Infinity) <= g) continue;
+      best.set(key, g);
+      open.push({ cell: to, g, f: g + h(to), parent: node, step });
+    }
+  }
+  if (closest === startNode || h(start) - h(closest.cell) < 3 && h(closest.cell) > 1) return null;
+  const steps: MakeWayStep[] = [];
+  for (let n: Node | null = closest; n !== null && n.step !== null; n = n.parent) steps.push(n.step);
+  steps.reverse();
+  return steps.some((step) => step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') ? steps : null;
+}
+
+/** 默认与上限：一次调用最多为开路改动这么多格（挖开 + 放置合计）。 */
+export const MAKE_WAY_DEFAULT_EDITS = 16, MAKE_WAY_MAX_EDITS = 64;
+/** 开路参数的说明片段，三个入口共用，与 parseMakeWay 一致。 */
+export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块）,"maxEdits"?:1-64（默认 16，挖开+放置合计）';
+/** 开路参数的行为说明，三个入口共用。 */
+export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、危险格、上方压着沙砾的格不挖），逐步用 mine_cell/place_support/pillar_one/move_step 执行，走完回到普通路线；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
+
+/** 从委托参数解析开路授权；没有写 dig/place 返回 undefined。参数非法返回错误。 */
+export function parseMakeWay(a: Record<string, unknown>): { ok: true; value: MakeWayOptions | undefined } | { ok: false; error: string } {
+  if (a.dig !== undefined && a.dig !== true && a.dig !== false && (typeof a.dig !== 'string' || a.dig.trim() === '')) return { ok: false, error: 'dig 需要 true/false 或工具名' };
+  if (a.place !== undefined && (typeof a.place !== 'string' || a.place.trim() === '')) return { ok: false, error: 'place 需要方块名或 "any"' };
+  if (a.maxEdits !== undefined && (!Number.isInteger(a.maxEdits) || (a.maxEdits as number) < 1 || (a.maxEdits as number) > MAKE_WAY_MAX_EDITS)) return { ok: false, error: `maxEdits 需要 1–${MAKE_WAY_MAX_EDITS} 的整数` };
+  const dig = a.dig === true ? {} : typeof a.dig === 'string' ? { tool: a.dig.trim() } : undefined;
+  const place = typeof a.place === 'string' ? { item: a.place.trim() } : undefined;
+  if (dig === undefined && place === undefined) {
+    if (a.maxEdits !== undefined) return { ok: false, error: 'maxEdits 只在写了 dig 或 place 时有意义' };
+    return { ok: true, value: undefined };
+  }
+  return { ok: true, value: { ...(dig === undefined ? {} : { dig }), ...(place === undefined ? {} : { place }), maxEdits: (a.maxEdits as number | undefined) ?? MAKE_WAY_DEFAULT_EDITS } };
+}
+
+/** 把开路授权还原成委托参数（嵌套调用时原样传下去）。 */
+export function makeWayArgs(opts: MakeWayOptions | undefined): Record<string, unknown> {
+  if (opts === undefined) return {};
+  return {
+    ...(opts.dig === undefined ? {} : { dig: opts.dig.tool ?? true }),
+    ...(opts.place === undefined ? {} : { place: opts.place.item }),
+    maxEdits: opts.maxEdits,
+  };
+}
