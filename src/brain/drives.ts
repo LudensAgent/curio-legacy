@@ -108,7 +108,7 @@ export function computeDrives(p: Percept, memory: WorldMemory): { drives: Drive[
   const hostiles = p.nearby.hostile.length;
   const animals = (p.vision?.seen_entities ?? []).filter((e) => FOOD_ANIMALS.includes(e.name));
   // 有没有自己的房子：看建筑档案里是否有验收通过的作品（房子是自己设计的，名字不固定）
-  const homeBuilt = (() => { try { return buildingArchiveFor(memory as any).list().some((p) => p.status === 'complete' && (!p.worldId || p.worldId === memory.worldId)); } catch { return false; } })()
+  const homeBuilt = (() => { try { return buildingArchiveFor(memory as any).listRef().some((p) => p.status === 'complete' && (!p.worldId || p.worldId === memory.worldId)); } catch { return false; } })()
     || memory.landmarks().some((l) => l.label.startsWith('我的hut') || l.label.startsWith('我的big_hut'));
   const bedPlaced = memory.landmarks().some((l) => l.label === '我的床');
   const recent = memory.recentGoals(6);

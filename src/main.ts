@@ -393,7 +393,7 @@ curator.start();
 const scorecard = new Scorecard(bus, () => adapter.state(), path.join(config.dataDir, 'scorecard.json'), () => ({
   skills: behaviors.list().map((b) => behaviors.statsOf(b.name) ?? { ok: 0, fail: 0 }),
   knowHow: selfModel.data.knowHow, // 回调在定时取样时才执行，那时 selfModel 已经建好
-  housesComplete: (() => { try { return buildingArchiveFor(memory).list().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
+  housesComplete: (() => { try { return buildingArchiveFor(memory).listRef().filter((p) => p.status === 'complete').length; } catch { return 0; } })(),
 }), () => arbiter.paused);
 scorecard.start();
 behaviors.drops = () => {
@@ -722,7 +722,7 @@ function heavySnapshot(state: ReturnType<typeof adapter.state>) {
       preferences: memory.preferences(),
       decisions: memory.decisions().slice(-10),
       projects: memory.projects().slice(-10),
-      artifacts: buildingArchiveFor(memory).list().filter((p) => p.worldId === state.worldId && p.dimension === state.dim).slice(-8).map((p) => ({ id: p.id, status: p.status,
+      artifacts: buildingArchiveFor(memory).listRef().filter((p) => p.worldId === state.worldId && p.dimension === state.dim).slice(-8).map((p) => ({ id: p.id, status: p.status,
         name: p.versions.at(-1)?.spec.name, version: p.versions.at(-1)?.version, defects: p.inspections.at(-1)?.defects.length,
         feedback: p.feedback.slice(-3) })),
       lessons: memory.lessonsFor(8),

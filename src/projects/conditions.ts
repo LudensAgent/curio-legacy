@@ -46,7 +46,7 @@ export function validateCondition(raw: unknown, adapter: Pick<GameAdapter, 'isKn
       (!raw.landmarkId || l.id === raw.landmarkId) && l.dim === raw.dimension &&
       (l.kind !== 'resource' || Date.now() - l.ts <= 15 * 60_000) && (raw.landmarkId ? dist3(l.pos, raw.pos) <= 1 : near(l.pos)),
     ) || (!raw.landmarkId && (() => {
-      try { return buildingArchiveFor(memory).list().some((p) => p.dimension === raw.dimension && near(p.origin)); } catch { return false; }
+      try { return buildingArchiveFor(memory).listRef().some((p) => p.dimension === raw.dimension && near(p.origin)); } catch { return false; }
     })()) || (!raw.landmarkId && (activeDrafts()?.list(8) ?? []).some((d) => !!d.site && near(d.site)));
     const observed = observationReady(state) && state.worldId === memory.worldId && state.dim === raw.dimension && dist3(state.pos, raw.pos) <= 1;
     if (!known && !observed) throw new Error('位置必须来自当前观测或同一世界内已有的可信记忆');

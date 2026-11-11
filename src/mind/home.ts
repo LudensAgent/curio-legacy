@@ -15,8 +15,8 @@ export const dirOf = (from: Vec3Like, to: Vec3Like) => {
 };
 
 export function myBuilds(memory: WorldMemory, state: Pick<AgentState, 'worldId' | 'dim' | 'pos'>, n = 5): BuildNote[] {
-  let projects: ReturnType<ReturnType<typeof buildingArchiveFor>['list']> = [];
-  try { projects = buildingArchiveFor(memory).list(); } catch { return []; }
+  let projects: ReturnType<ReturnType<typeof buildingArchiveFor>['listRef']> = [];
+  try { projects = buildingArchiveFor(memory).listRef(); } catch { return []; }
   // 放弃了的不再记挂（只在选址时避开那块地）
   return projects.filter((p) => p.worldId === state.worldId && p.dimension === state.dim && p.status !== 'abandoned').map((p) => {
     const last = p.inspections.at(-1);
