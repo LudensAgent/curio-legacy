@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { spatialExtrema } from '../src/skills/spatial-extrema.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -26,13 +27,15 @@ test('spatial_extrema：explored 按区块访问记录给八方位最远与边�
   assert.deepEqual(r.data?.bounds, { minX: -16, maxX: 63, minZ: 0, maxZ: 15 });
 });
 
-test('spatial_extrema：deepest/farthest/gaps 已退役，只能 explored；参数边界仍校验', () => {
+test('spatial_extrema：farthest/gaps 已退役；explored/deepest 可用；参数边界仍校验', () => {
   const w = new FakeAdapter();
-  for (const metric of ['deepest', 'farthest', 'gaps'] as const) {
+  for (const metric of ['farthest', 'gaps'] as const) {
     const parsed = spatialExtrema.validate({ metric }, w);
     assert.equal(parsed.ok, false);
-    if (!parsed.ok) assert.match(parsed.error, /已退役|只支持 explored/);
+    if (!parsed.ok) assert.match(parsed.error, /已退役/);
   }
+  assert.ok(spatialExtrema.validate({ metric: 'deepest', radius: 64 }, w).ok);
+  assert.equal(spatialExtrema.validate({ metric: 'deepest', radius: 0 }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'nope' }, w).ok, false);
   assert.equal(spatialExtrema.validate({ metric: 'explored', kinds: ['dug'] }, w).ok, false, '片段 kinds 不再接受');
   assert.equal(spatialExtrema.validate({ metric: 'explored', origin: { x: 0, y: 0 } }, w).ok, false);
@@ -46,4 +49,21 @@ test('spatial_extrema：跨维度 explored 没给 origin 时拒绝，不读片�
   assert.equal(r.status, 'failed');
   assert.equal(r.failureCode, 'BAD_ARGS');
   assert.equal(queried, false, 'explored 不读片段/查询端口');
+});
+
+test('spatial_extrema：deepest 返回半径内身体实际站过的最低脚格（以前走过的矿道最深处）', async () => {
+  const voxel = new VoxelMap('fake-world', { validityWindowMs: 1e12 });
+  voxel.beginSession('s');
+  // 一条往下挖的阶梯矿道：站过 y=64..20；另有一处更深的到访记录在半径外。
+  for (let i = 0; i <= 44; i++) voxel.markTraversed(DIM, { x: 10 + i, y: 64 - i, z: 3 });
+  voxel.markTraversed(DIM, { x: 500, y: 5, z: 0 });
+  voxel.markTraversed('the_nether', { x: 0, y: 1, z: 0 });
+  const spatial = { closing: false, session: { lifecycle: 'open', voxel, voxelLoading: 'eager' } } as unknown as SharedSpatialSession;
+  const r = await spatialExtrema.run(ctxOf(spatial), { metric: 'deepest', radius: 128 });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.deepest, { x: 54, y: 20, z: 3 });
+  assert.match(r.summary, /最低脚格是 \(54,20,3\)/);
+  const none = await spatialExtrema.run(ctxOf(spatial), { metric: 'deepest', radius: 5 });
+  assert.equal(none.data?.deepest, null);
+  assert.match(none.summary, /没有身体站过的记录/);
 });

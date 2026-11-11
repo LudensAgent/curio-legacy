@@ -138,12 +138,13 @@ test('spatial_query 不再有旧路线兼容门面：未知 kind 原样交给库
   assert.deepEqual(forwarded.map((request) => (request as { kind: string }).kind), ['fragments', 'traversals', 'historyRoute', 'components', 'segments', 'edges']);
 });
 
-test('spatial_extrema 只保留 explored；deepest/farthest/gaps 被拒绝', () => {
+test('spatial_extrema 不读路线片段：farthest/gaps 被拒绝；explored 与按体素到访标记的 deepest 可用', () => {
   const adapter = new FakeAdapter();
-  for (const metric of ['deepest', 'farthest', 'gaps'] as const) {
+  for (const metric of ['farthest', 'gaps'] as const) {
     assert.equal(spatialExtrema.validate({ metric }, adapter).ok, false);
   }
   assert.ok(spatialExtrema.validate({ metric: 'explored' }, adapter).ok);
+  assert.ok(spatialExtrema.validate({ metric: 'deepest' }, adapter).ok);
 });
 
 test('advance 恢复保留方向/距离/模式与预算，不能扩大或换向', () => {
