@@ -86,7 +86,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         maxObservations: 32, maxObservedCells: 2048, maxNoProgressSegments: 4,
         sessionId: args.sessionId, deadlineMs: deadline, allowUnknownCorridor: false, observeFrontierBeyondSegments: true,
         ...(args.swim === true ? { swim: true } : {}),
-        ...makeWayRequest(args),
+        ...makeWayRequest(args), makeWayAvailable: true,
       });
       last = coordinatorResult(outcome, extra);
       if (!outcome.ok) return last;

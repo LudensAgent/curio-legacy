@@ -263,7 +263,7 @@ export const travelTo: Skill<TravelToArgs> = {
         ...nested.args,
         rolling: true,
         ...(args.swim === true ? { swim: true } : {}),
-        ...makeWayRequest(args),
+        ...makeWayRequest(args), makeWayAvailable: true,
         arrival: { radius: args.range, metric: requestedY ? '3d' : 'horizontal' },
       });
     } catch (error) {

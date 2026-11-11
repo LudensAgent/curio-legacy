@@ -17,6 +17,8 @@ type NavigateArgs = {
   swim?: boolean;
   /** 内部委托（travel_to）显式授权开路；公开 navigate_to 不接受。 */
   makeWay?: MakeWayOptions;
+  /** 内部委托（travel_to）支持开路参数：没授权时回执写明“未挖未放”。 */
+  makeWayAvailable?: boolean;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -208,6 +210,7 @@ export const navigateTo: Skill<NavigateArgs> = {
       ...(args.rolling ? { rolling: true } : {}),
       ...(args.swim ? { swim: true } : {}),
       ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
+      ...(args.makeWayAvailable === true ? { makeWayAvailable: true } : {}),
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? Math.min(32, maxSteps),
       maxTransitions: args.maxTransitions ?? Math.min(1024, maxSteps * maxSegments),

@@ -90,6 +90,8 @@ export interface CoordinatorRequest {
   swim?: boolean;
   /** 委托显式授权开路：普通路线走不通时，规划并执行挖开/补支撑/原地垫高的路线（见 make-way.ts）。 */
   makeWay?: MakeWayOptions;
+  /** 入口支持 dig/place 但本次没授权：走不通时回执写明这一事实，由调用方决定要不要授权。 */
+  makeWayAvailable?: boolean;
 }
 
 /** 为开路实际做的一次改动：挖开了哪一格（原来是什么），或在哪放了什么。 */
@@ -1052,6 +1054,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     ...(status === 'failed' ? { failureCode: STOP_FAILURE[finalStop.reason] } : {}),
     summary: renderSummary(session, finalStop, segments) + (swimLegs.length === 0 ? ''
       : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`)
+      + (request.makeWay === undefined && request.makeWayAvailable === true && MAKE_WAY_STOPS.has(finalStop.reason)
+        ? '；本次没有授权 dig/place，没有挖也没有放' : '')
       + (makeWayLegs.length === 0 ? '' : `；代为开路 ${makeWayLegs.length} 段：${makeWayEdits.length === 0 ? '没有改动方块' : makeWayEdits.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、')}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`),
     session,
     segments,
