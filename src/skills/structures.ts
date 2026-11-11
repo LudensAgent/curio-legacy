@@ -1,6 +1,6 @@
 import type { BlockHit, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
-import { EYE_DESCENT_LABEL, excavatePath, excavationSkill, trustedExcavationEntry, type ExcavationArgs } from './excavation.ts';
+import { EXCAVATION_MAX_STEPS, EYE_DESCENT_LABEL, excavatePath, excavationSkill, trustedExcavationEntry, type ExcavationArgs } from './excavation.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 
 /** Known blocks can include old, currently occluded memories. Structure proof
@@ -87,7 +87,7 @@ interface StructureSearchArgs {
   steps?: number;
 }
 export const searchStructure: Skill<StructureSearchArgs> = {
-  name: 'search_structure', description: '模型显式选择眼迹、从可信下降/已探索入口挖阶梯，或在当前层开挖单条门室搜索通道。后两种每次最多8格，不保证覆盖地下；只有当前实际看到末地门框才确认结构。', argsDoc: '{"kind":"stronghold","method"?:"eye|excavate|room_search","entry"?:"<waypointId>","direction"?:"north|east|south|west","steps"?:1-8}', timeoutMs: 240000, movement: true,
+  name: 'search_structure', description: '模型显式选择眼迹、从可信下降/已探索入口挖阶梯，或在当前层开挖单条门室搜索通道。后两种每次最多 ' + EXCAVATION_MAX_STEPS + ' 格，不保证覆盖地下；只有当前实际看到末地门框才确认结构。', argsDoc: '{"kind":"stronghold","method"?:"eye|excavate|room_search","entry"?:"<waypointId>","direction"?:"north|east|south|west","steps"?:1-' + EXCAVATION_MAX_STEPS + '}', timeoutMs: 240000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), method = value.method ?? 'eye';
     if (value.kind !== 'stronghold' || !['eye', 'excavate', 'room_search'].includes(method)) return { ok: false, error: 'kind=stronghold；method=eye|excavate|room_search' };

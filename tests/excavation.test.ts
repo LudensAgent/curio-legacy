@@ -714,3 +714,14 @@ test('tunnel receipt reports how many steps were already open ground, not just "
   assert.equal(r.status, 'succeeded', r.summary);
   assert.match(r.summary, /3 格里挖掉 2 块、补了 1 处支撑、1 格本来就能直接走/);
 });
+
+test('excavate_run 的目录、参数说明与校验用同一个步数上限', async () => {
+  const { excavateRun } = await import('../src/skills/movement/excavate.ts');
+  const { EXCAVATION_MAX_STEPS } = await import('../src/skills/excavation.ts');
+  const { movesCatalog } = await import('../src/mind/prompt.ts');
+  const shown = `"steps"?:1-${EXCAVATION_MAX_STEPS},`;
+  assert.ok(excavateRun.catalog!.includes(shown));
+  assert.ok(excavateRun.argsDoc.includes(shown));
+  const line = movesCatalog(28).split(/\r?\n/).find((l) => l.startsWith('- excavate_run '));
+  assert.ok(line?.includes(shown), `system 目录里展示的上限要与校验一致：${line}`);
+});

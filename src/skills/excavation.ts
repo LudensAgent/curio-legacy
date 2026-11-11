@@ -10,7 +10,7 @@ import { markSelfModified } from '../spatial/shared-session.ts';
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
 
 /** 一次开挖的步数上限：每一步都照样逐格确认、遇险就停；上限只防失控，不把一条长巷切成很多段（每段结束都要重新思考）。 */
-const EXCAVATION_MAX_STEPS = 32;
+export const EXCAVATION_MAX_STEPS = 32;
 export interface ExcavationArgs {
   entry: string;
   mode: 'stairs' | 'stairs_up' | 'tunnel';
