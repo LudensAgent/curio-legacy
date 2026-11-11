@@ -336,7 +336,18 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
       });
     }
     ctx.setStationaryWait?.(true);
-    const result = await adapter.enterPortalAt(endpoint.pos, signal);
+    const result = await adapter.enterPortalAt(endpoint.pos, signal).catch((error: unknown) => {
+      // 被取消/到期时把身体此刻的实测事实带回去：走到了哪、离门多远、在不在门方块里。
+      if (isAbort(error)) {
+        const now = adapter.state();
+        const dist = Math.hypot(now.pos.x - (endpoint.pos.x + 0.5), now.pos.y - endpoint.pos.y, now.pos.z - (endpoint.pos.z + 0.5));
+        Object.assign(error as object, { partial: {
+          position: { ...now.pos }, portal: { ...endpoint.pos }, bodyPortal: now.bodyPortal ?? null,
+          progressNote: `停下时脚位 (${now.pos.x.toFixed(1)},${now.pos.y.toFixed(1)},${now.pos.z.toFixed(1)})，距门方块 ${dist.toFixed(1)} 格，${now.bodyPortal ? `身体在 ${now.bodyPortal} 方块里` : '身体不在门方块里'}${now.dim === endpoint.dim ? '' : `，已在 ${now.dim}`}`,
+        } });
+      }
+      throw error;
+    });
     throwIfAborted(signal);
     // 把身体实际经历的时间线写给心智：它需要知道“开始就在门里 / 出去多久 / 在门里待了多久”，
     // 才能判断该不该先离开门再进，而不是只看到一个超时码。

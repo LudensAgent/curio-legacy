@@ -383,7 +383,9 @@ export class Arbiter extends EventEmitter {
         if (timeout !== null) clearTimeout(timeout);
         if (controller.signal.reason === 'TIMEOUT' && (result.status === 'cancelled' || result.status === 'succeeded')) {
           // 已过期限的执行不能因为技能忽略 abort 或恰好收尾就改报成功；保留已发生的数据。
-          result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时`, ...(result.data ? { data: result.data } : {}) };
+          // 保留技能带回的实测事实（取消时的 progressNote 等），不只报一个超时码。
+          const note = typeof result.data?.progressNote === 'string' ? `；${result.data.progressNote}` : '';
+          result = { status: 'failed', failureCode: 'TIMEOUT', summary: `${skill.name} 超时${note}`, ...(result.data ? { data: result.data } : {}) };
         }
         if (controller.signal.aborted && controller.signal.reason !== 'TIMEOUT' && result.status === 'succeeded') {
           result = { status: 'cancelled', summary: `${skill.name} 已被取消（结果作废）`, ...(result.data ? { data: result.data } : {}) };

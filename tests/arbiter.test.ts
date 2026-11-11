@@ -340,3 +340,27 @@ test('取消时技能附带的 progressNote 进入取消回执摘要，partial �
     delete SKILLS.test_progress_note;
   }
 });
+
+test('期限到时技能被取消：TIMEOUT 回执保留技能带回的实测事实（progressNote），不只报“超时”', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_deadline_note = {
+    name: 'test_deadline_note', description: '', argsDoc: '{}', timeoutMs: 60_000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run(ctx) {
+      try { await sleep(5_000, ctx.signal); } catch (error) {
+        throw Object.assign(error as object, { partial: { progressNote: '停下时脚位 (1.0,64.0,2.0)，距门方块 3.0 格，身体不在门方块里' } });
+      }
+      return { status: 'succeeded', summary: '不应走到' };
+    },
+  };
+  try {
+    const done = next();
+    const info = arbiter.start({ skill: 'test_deadline_note' }, 'rule', { deadlineMs: Date.now() + 50 });
+    assert.ok(!('error' in info));
+    const o = await done;
+    assert.equal(o.result.failureCode, 'TIMEOUT');
+    assert.match(o.result.summary, /test_deadline_note 超时；停下时脚位 \(1\.0,64\.0,2\.0\)，距门方块 3\.0 格/);
+  } finally {
+    delete SKILLS.test_deadline_note;
+  }
+});
