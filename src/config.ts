@@ -61,7 +61,8 @@ if (voxelLoadingRaw !== 'eager' && voxelLoadingRaw !== 'manual') {
 const voxelLoading: 'eager' | 'manual' = voxelLoadingRaw;
 // manual 工作集的字节上限。residentBytes 是库的解码体素估算，不是进程 RSS；
 // 32MiB 在已被探索的密集矿道里会长期贴边，只比上限高一点也永远腾不出空间。
-const maxResidentMb = num('SPATIAL_MAX_RESIDENT_MB', 64);
+// 体素包含身边开放空间与贴地空气后，64MiB 很快被尚未保存的区段占满；默认放宽到 256MiB。
+const maxResidentMb = num('SPATIAL_MAX_RESIDENT_MB', 256);
 if (!Number.isFinite(maxResidentMb) || maxResidentMb <= 0 || maxResidentMb > 1024) {
   throw new Error(`SPATIAL_MAX_RESIDENT_MB 必须是 (0,1024] 内的数字，收到：${maxResidentMb}`);
 }
@@ -196,7 +197,7 @@ export const config = {
      * 系统的内存上限。旧路线 Fragment/Topology 不再由会话加载。
      */
     voxelLoading,
-    /** manual 工作集的 residentBytes 上限；默认 64MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
+    /** manual 工作集的 residentBytes 上限；默认 256MiB，可用 SPATIAL_MAX_RESIDENT_MB 调整。 */
     maxResidentMb,
     maxResidentBytes,
     /** 单次空间快照的序列化字节上限；默认 1024MiB，可用 SPATIAL_SNAPSHOT_MAX_MB 调整。 */

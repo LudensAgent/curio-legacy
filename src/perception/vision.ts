@@ -206,8 +206,11 @@ export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
  * 到刷新时间会重写）。近处透明格整段记录后，一个新画面约有一两千格，上限需让它在几帧内写完。
  */
 export const VISION_FEED_MAX_CELLS = 512;
-/** 同一格名字没变时，隔这么久才重写一次（刷新新鲜度）。 */
-export const VISION_FEED_REFRESH_MS = 5000;
+/**
+ * 同一格名字没变时，隔这么久才重写一次（刷新新鲜度）。证据 5 分钟才过期，没必要频繁重写：
+ * 每次重写都让区段变“脏”，下次保存前不能换出常驻内存，频繁刷新会让工作集塞满、新区段加载不进来。
+ */
+export const VISION_FEED_REFRESH_MS = 60_000;
 /** 每条视线除命中格外，还写入命中前紧挨着的几格透明格（命中面上方的落脚/头部空间）。 */
 const FEED_TRAIL = 3;
 /**
