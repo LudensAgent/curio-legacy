@@ -1545,6 +1545,11 @@ export class Mind {
         // 走 glance——认真想要十几秒，着火时等不起。
         if (!cause && !state.inLava) return;
         const why = cause || '身体在岩浆里';
+        // 只是摔了一下（伤害已经结束、没有着火/岩浆/怪）：不打断手上的移动，把事实交回心智，要不要停由它定。
+        if (/伤害类型 fall/.test(cause) && !/伤害类型 (?!fall)|着火|lava|岩浆/.test(cause) && !state.inLava) {
+          this.requestThink(`正在 ${cur.skill} 时摔了一下（血 ${hp}，${why}）；手上的事没停`, 'glance');
+          return;
+        }
         if (waterEscape) {
           this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
           return;
