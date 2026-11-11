@@ -2256,14 +2256,17 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (here.shapes?.length === 0 || here.boundingBox === 'empty') {
       if (typeof b.world?.raycast !== 'function') return false;
       const direction = center.minus(from);
-      const hit = b.world.raycast(from, direction.normalize(), direction.norm() + 0.05);
+      // vec3 的 normalize() 原地修改：先取长度，否则射程会变成 1 格。
+      const length = direction.norm();
+      const hit = b.world.raycast(from, direction.normalize(), length + 0.05);
       return !hit?.position || hit.position.equals(target) || hit.position.distanceTo(center) >= distance - 0.55;
     }
     if (typeof b.world?.raycast !== 'function') return false;
     for (const f of faces) {
       const point = target.offset(0.5 + f.x * 0.5, 0.5 + f.y * 0.5, 0.5 + f.z * 0.5);
       const direction = point.minus(from);
-      const hit = b.world.raycast(from, direction.normalize(), direction.norm() + 0.05);
+      const length = direction.norm();
+      const hit = b.world.raycast(from, direction.normalize(), length + 0.05);
       if (hit?.position?.equals(target)) return true;
     }
     return false;
