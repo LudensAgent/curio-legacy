@@ -133,6 +133,12 @@ export class ContainerLedger {
       .map(clone);
   }
 
+  /** 只读这只箱子内容的观察时间，不复制整条记录（地标视图逐条要用，复制会把箱子内容反复深拷贝）。 */
+  chestObservedAt(dim: string, pos: Vec3Like): number | undefined {
+    const entry = this.data.chests[this.key(dim, pos)];
+    return entry?.worldId === this.worldId ? (entry.contents?.observedAt || entry.ts) : undefined;
+  }
+
   chestAt(dim: string, pos: Vec3Like): ContainerEntry | undefined {
     const entry = this.data.chests[this.key(dim, pos)];
     return entry?.worldId === this.worldId ? clone(entry) : undefined;

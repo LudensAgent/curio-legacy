@@ -615,10 +615,15 @@ export class Perception {
     const priorFrame = this.vision.frame;
     this.vision.refresh();
     const scope = `${s.worldId}:${s.sessionId}:${s.dim}`;
+    // 身体离上一帧的拍摄位置挪了半格以上，而这一拍没扫到（距上次扫描不足 150ms），才补扫一帧。
+    // 以前任何细微位移都补扫，移动中别的动作刚 refresh 过也会再扫一遍，整帧射线一秒能跑六七次。
     const previous = this.lastVisionBody;
-    if (this.vision.frame && this.vision.frame === priorFrame && (!previous || previous.scope !== scope ||
-      previous.pos.x !== s.pos.x || previous.pos.y !== s.pos.y || previous.pos.z !== s.pos.z)) this.vision.scan('movement');
-    this.lastVisionBody = { scope, pos: { ...s.pos } };
+    if (this.vision.frame !== priorFrame) this.lastVisionBody = { scope, pos: { ...s.pos } };
+    else if (this.vision.frame && (!previous || previous.scope !== scope
+      || Math.hypot(previous.pos.x - s.pos.x, previous.pos.y - s.pos.y, previous.pos.z - s.pos.z) >= 0.5)) {
+      this.vision.scan('movement');
+      this.lastVisionBody = { scope, pos: { ...s.pos } };
+    }
     this.vision.scanSurroundings();
     const v = this.vision;
     const here = s.pos;
@@ -650,6 +655,10 @@ export class Perception {
           if (observed?.name === name) this.memory.addLandmark(kind, name, s.dim, pos, 24, this.resourceEvidence(observed));
         } else this.memory.addLandmark(kind, name, s.dim, pos, 24);
       };
+      // 地标表每拍只取一次：逐格判断时反复取会把整表（含箱子记录）重建上百遍。循环里删掉的按 id 记下，不再当作存在。
+      let marks: ReturnType<typeof this.memory.landmarks> | null = null;
+      const removed = new Set<string>();
+      const landmarks = () => (marks ??= this.memory.landmarks()).filter((l) => !removed.has(l.id));
       for (const b of v.visibleNow.values()) {
         if (!NOTABLE.has(b.name)) continue;
         if (this.memory.markSeen('blocks', b.name)) {
@@ -660,8 +669,8 @@ export class Perception {
         // 岩浆只把源头记成资源（浇水能变黑曜石、能舀）；流动的岩浆只算危险
         const level = b.name === 'lava' ? this.adapter.blockStateAt?.(b.pos)?.properties.level : undefined;
         if (b.name === 'lava' && level !== undefined && Number(level) !== 0) {
-          for (const l of this.memory.landmarks().filter((l) => l.kind === 'resource' && l.label === 'lava' && l.dim === s.dim
-            && l.pos.x === b.pos.x && l.pos.y === b.pos.y && l.pos.z === b.pos.z)) this.memory.removeLandmark(l.id);
+          for (const l of landmarks().filter((l) => l.kind === 'resource' && l.label === 'lava' && l.dim === s.dim
+            && l.pos.x === b.pos.x && l.pos.y === b.pos.y && l.pos.z === b.pos.z)) { this.memory.removeLandmark(l.id); removed.add(l.id); }
         }
         if (isResourceBlock(b.name) && (b.name !== 'lava' || level !== undefined && Number(level) === 0)) note('resource', b.name, b.pos);
         if (DANGER.has(b.name) || isResourceBlock(b.name)) continue;
@@ -669,7 +678,7 @@ export class Perception {
           // 看见的功能方块记成地标（自己放下的已记为“我的X”，附近有就不重复记）
           const zh = interactiveName(b.name)!;
           const container = isContainerLandmark(b.name);
-          const mine = this.memory.landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= (container ? 0.1 : 2));
+          const mine = landmarks().some((l) => l.label === `我的${zh}` && l.dim === s.dim && Math.hypot(l.pos.x - b.pos.x, l.pos.y - b.pos.y, l.pos.z - b.pos.z) <= (container ? 0.1 : 2));
           if (!mine) this.memory.addLandmark('discovery', zh, s.dim, b.pos, container ? 0.1 : 6);
         } else if (STRUCTURE_HINT.has(b.name)) this.memory.addLandmark('discovery', b.name, s.dim, b.pos);
       }

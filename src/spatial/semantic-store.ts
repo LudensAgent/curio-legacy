@@ -347,7 +347,7 @@ export class SpatialSemanticStore {
     const record = this.placeRecord(fact.id);
     const pos = sourcePoint(fact);
     const container = isContainerLandmark(fact.label);
-    const entry = container ? this.containerLedgerStore.chestAt(fact.dim, pos) : undefined;
+    const observedAt = container ? this.containerLedgerStore.chestObservedAt(fact.dim, pos) : undefined;
     return {
       id: fact.id,
       kind,
@@ -362,7 +362,7 @@ export class SpatialSemanticStore {
       ...(container ? {
         radius: 0,
         precise: true,
-        observedAt: entry?.contents?.observedAt || entry?.ts || fact.observedAt,
+        observedAt: observedAt || fact.observedAt,
       } : {}),
     };
   }
