@@ -166,6 +166,19 @@ export class SpatialSemanticStore {
     live: { places?: PlaceFact[]; resources?: ResourceAnchorFact[]; containers?: ContainerAnchorFact[] };
   } | null = null;
 
+  /** 传送门投影：只有 portal 事实变化或整表重读时才重建。 */
+  private portalFacts: PlaceFact[] | null = null;
+
+  /**
+   * 消失地点的空间索引：精确格键 + 16³ 桶 + 现存事实的格键。
+   * 每次缓存重读或写入后作废，下一次查询重建；查询本身不再扫全部历史。
+   */
+  private goneIndex: {
+    exact: Map<string, GoneSpot[]>;
+    buckets: Map<string, GoneSpot[]>;
+    liveCells: Map<string, { label: string; pos: Vec3Like }[]>;
+  } | null = null;
+
   private page<T>(query: (after: string | undefined) => { items: T[]; nextAfter?: string }): T[] {
     const out: T[] = [];
     let after: string | undefined;
@@ -188,6 +201,8 @@ export class SpatialSemanticStore {
     this.cache = { revision, places, resources, containers, at: { places: positions(places), resources: positions(resources), containers: positions(containers) }, live: {} };
     // 资源近邻索引是同一投影的派生：整表重读时一起作废，下次用到再从缓存建。
     this.resourceIndex = null;
+    this.portalFacts = null;
+    this.goneIndex = null;
     return this.cache;
   }
 
@@ -201,7 +216,7 @@ export class SpatialSemanticStore {
   private stored(kind: 'containers', before: number, record: ContainerAnchorFact): void;
   private stored(kind: 'places' | 'resources' | 'containers', before: number, record: PlaceFact | ResourceAnchorFact | ContainerAnchorFact): void {
     const cache = this.cache;
-    if (cache === null || cache.revision !== before) { this.cache = null; this.resourceIndex = null; return; }
+    if (cache === null || cache.revision !== before) { this.cache = null; this.resourceIndex = null; this.portalFacts = null; this.goneIndex = null; return; }
     const list = cache[kind] as { id: string }[], at = cache.at[kind];
     const i = at.get(record.id);
     if (i !== undefined) list[i] = record;
@@ -213,6 +228,8 @@ export class SpatialSemanticStore {
     }
     cache.live[kind] = undefined;
     cache.revision = this.facts.revision;
+    this.goneIndex = null;
+    if (kind === 'places' && isPlaceFact(record) && record.kind === 'portal') this.portalFacts = null;
   }
 
   private factById<K extends 'places' | 'resources' | 'containers'>(kind: K, id: string): NonNullable<SpatialSemanticStore['cache']>[K][number] | undefined {
@@ -479,6 +496,23 @@ export class SpatialSemanticStore {
 
   // ---------------------------------------------------------------- landmarks
 
+  /** Live portal place facts; the filtered projection is reused until a portal fact changes. */
+  portalPlaces(): PlaceFact[] {
+    if (this.portalFacts === null) {
+      this.portalFacts = this.snapshot().places.filter((fact) => fact.kind === 'portal' && !fact.gone);
+    }
+    return this.portalFacts;
+  }
+
+  /** A portal fact written by the travel store: patch the projection cache instead of invalidating it. */
+  writePortalPlace(fact: PlaceFact): PlaceFact {
+    const before = this.facts.revision;
+    const { record } = this.facts.upsertPlace(fact);
+    this.stored('places', before, record);
+    this.portalFacts = null;
+    return record;
+  }
+
   /** All legacy landmark views, including stations but excluding typed records. */
   landmarks(): Landmark[] {
     const snapshot = this.snapshot();
@@ -707,38 +741,73 @@ export class SpatialSemanticStore {
     // first-batch limitation).
   }
 
-  goneNear(dim: string, pos: Vec3Like, radius = 3): GoneSpot[] {
-    const at = point(pos);
-    const livePlaces = this.livePlaces().filter((fact) => fact.dim === dim && this.landmarkKindOf(fact) !== undefined);
-    const liveResources = this.liveResources().filter((fact) => fact.dim === dim);
-    const live = [
-      ...livePlaces.map((fact) => ({ label: fact.label, pos: sourcePoint(fact) })),
-      ...liveResources.map((fact) => ({ label: fact.label, pos: fact.sourceCell })),
-    ];
-    const out: GoneSpot[] = [];
-    const push = (label: string, gonePos: Vec3Like, reason: string | undefined, ts: number) => {
-      if (reason !== undefined && CONTROL_GONE_REASONS.has(reason)) return;
-      if (live.some((other) => other.label === label && dist3(other.pos, gonePos) <= 1)) return;
-      out.push({ worldId: this.worldId, dim, label, pos: point(gonePos), now: reason ?? 'gone', ts });
+  /**
+   * 消失地点的空间索引：精确格键供半径 0 查询，16³ 桶供半径查询；现存事实单独按格键索引，
+   * 保留“同一标签的新鲜事实覆盖历史消失记录”的规则。每次投影写入或重读后作废。
+   */
+  private goneSpatial(): NonNullable<SpatialSemanticStore['goneIndex']> {
+    if (this.goneIndex !== null) return this.goneIndex;
+    const exact = new Map<string, GoneSpot[]>();
+    const buckets = new Map<string, GoneSpot[]>();
+    const liveCells = new Map<string, { label: string; pos: Vec3Like }[]>();
+    const cellKey = (dim: string, p: Vec3Like) => `${dim}|${keyOf(p)}`;
+    const bucketKey = (dim: string, p: Vec3Like) => `${dim}|${Math.floor(p.x / 16)},${Math.floor(p.y / 16)},${Math.floor(p.z / 16)}`;
+    const push = <T>(map: Map<string, T[]>, key: string, value: T) => {
+      const list = map.get(key);
+      if (list === undefined) map.set(key, [value]);
+      else list.push(value);
     };
-    for (const fact of this.snapshot().places) {
-      if (!fact.gone || fact.dim !== dim) continue;
-      const gonePos = sourcePoint(fact);
-      if (dist3(gonePos, at) > radius) continue;
-      push(fact.label.startsWith('gone: ') ? fact.label.slice('gone: '.length) : fact.label,
-        gonePos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
+    const addGone = (dim: string, label: string, pos: Vec3Like, reason: string | undefined, ts: number) => {
+      if (reason !== undefined && CONTROL_GONE_REASONS.has(reason)) return;
+      const spot: GoneSpot = { worldId: this.worldId, dim, label, pos: point(pos), now: reason ?? 'gone', ts };
+      push(exact, cellKey(dim, spot.pos), spot);
+      push(buckets, bucketKey(dim, spot.pos), spot);
+    };
+    const addLive = (dim: string, label: string, pos: Vec3Like) => {
+      const rounded = point(pos);
+      push(liveCells, cellKey(dim, rounded), { label, pos: rounded });
+    };
+    const snapshot = this.snapshot();
+    for (const fact of snapshot.places) {
+      const pos = sourcePoint(fact);
+      if (fact.gone) {
+        addGone(fact.dim, fact.label.startsWith('gone: ') ? fact.label.slice('gone: '.length) : fact.label,
+          pos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
+      } else if (this.landmarkKindOf(fact) !== undefined) addLive(fact.dim, fact.label, pos);
     }
-    for (const fact of this.snapshot().resources) {
-      if (!fact.revoked || fact.dim !== dim || dist3(fact.sourceCell, at) > radius) continue;
-      push(fact.label, fact.sourceCell, goneReasonOf(fact.revokedSource), fact.revokedAt ?? fact.observedAt);
+    for (const fact of snapshot.resources) {
+      if (fact.revoked) addGone(fact.dim, fact.label, fact.sourceCell, goneReasonOf(fact.revokedSource), fact.revokedAt ?? fact.observedAt);
+      else addLive(fact.dim, fact.label, fact.sourceCell);
     }
-    for (const fact of this.snapshot().containers) {
-      if (!fact.gone || fact.dim !== dim || dist3(fact.pos, at) > radius) continue;
+    for (const fact of snapshot.containers) {
+      if (!fact.gone) continue;
       const record = this.containerRecord(fact.id);
-      push(record?.label ?? (this.containerRole(fact) === 'furnace' ? 'furnace' : 'chest'),
+      addGone(fact.dim, record?.label ?? (this.containerRole(fact) === 'furnace' ? 'furnace' : 'chest'),
         fact.pos, goneReasonOf(fact.goneSource), fact.goneAt ?? fact.observedAt);
     }
-    return out;
+    this.goneIndex = { exact, buckets, liveCells };
+    return this.goneIndex;
+  }
+
+  goneNear(dim: string, pos: Vec3Like, radius = 3): GoneSpot[] {
+    const at = point(pos);
+    const index = this.goneSpatial();
+    const candidates: GoneSpot[] = [];
+    if (radius <= 0) {
+      candidates.push(...(index.exact.get(`${dim}|${keyOf(at)}`) ?? []));
+    } else {
+      const minX = Math.floor((at.x - radius) / 16), maxX = Math.floor((at.x + radius) / 16);
+      const minY = Math.floor((at.y - radius) / 16), maxY = Math.floor((at.y + radius) / 16);
+      const minZ = Math.floor((at.z - radius) / 16), maxZ = Math.floor((at.z + radius) / 16);
+      for (let bx = minX; bx <= maxX; bx++) for (let by = minY; by <= maxY; by++) for (let bz = minZ; bz <= maxZ; bz++) {
+        const list = index.buckets.get(`${dim}|${bx},${by},${bz}`);
+        if (list !== undefined) candidates.push(...list);
+      }
+    }
+    const liveLabelNear = (spot: GoneSpot) => [[0, 0, 0], [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+      .some(([dx, dy, dz]) => index.liveCells.get(`${dim}|${spot.pos.x + dx},${spot.pos.y + dy},${spot.pos.z + dz}`)
+        ?.some((live) => live.label === spot.label && dist3(live.pos, spot.pos) <= 1) === true);
+    return candidates.filter((spot) => dist3(spot.pos, at) <= radius && !liveLabelNear(spot));
   }
 
   removeLandmark(id: string): boolean {

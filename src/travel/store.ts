@@ -35,7 +35,7 @@ const stores = new WeakMap<WorldMemory, SpatialTravelStore>();
 export function travelStore(memory: WorldMemory): SpatialTravelStore {
   let store = stores.get(memory);
   if (!store || store.world !== memory.worldId) {
-    store = new SpatialTravelStore(memory.semanticStore.stores, memory.worldId);
+    store = new SpatialTravelStore(memory.semanticStore, memory.worldId);
     stores.set(memory, store);
   }
   return store;
