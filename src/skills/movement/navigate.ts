@@ -12,6 +12,8 @@ type NavigateArgs = {
   /** 内部已验证委托的验收条件；公开 navigate_to 保持精确目标语义。 */
   arrival?: NavigationArrival;
   rolling?: boolean;
+  /** 内部委托（travel_to）显式允许涉水与代为游泳；公开 navigate_to 不接受。 */
+  swim?: boolean;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -171,6 +173,7 @@ export const navigateTo: Skill<NavigateArgs> = {
     const outcome = await runMovementCoordinator(ctx, {
       intent: { kind: 'navigate', to: { ...args.to }, targetKind, ...(args.arrival === undefined ? {} : { arrival: { ...args.arrival } }), allowed: args.allowed, historical: args.historical !== false },
       ...(args.rolling ? { rolling: true } : {}),
+      ...(args.swim ? { swim: true } : {}),
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? maxSteps,
       maxTransitions: args.maxTransitions ?? maxSteps * maxSegments,

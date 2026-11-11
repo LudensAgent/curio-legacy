@@ -57,6 +57,8 @@ export type SegmentRequest = {
   checkSighting?: () => string | undefined;
   allowed: MoveMode[];
   historical: boolean;
+  /** 委托显式允许涉水（swim:true）：搜索与逐段复验接受接触水的地面边。 */
+  wade?: boolean;
   /** 本段最多执行多少个已确认 transition。 */
   maxTransitions: number;
   allowUnknownCorridor: boolean;
@@ -353,6 +355,7 @@ async function runNavigationSegmentInner(
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: { feet: { ...state.pos }, width: 0.6, height: 1.8, pose: 'standing' as const },
     goal: request.goal, allowed: request.allowed, maxDrop: 4, rules: walkLandRules, signal: ctx.signal,
+    ...(request.wade === true ? { wade: true } : {}),
     ...(request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
     ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
     ...(request.searchLimits?.maxNodes === undefined ? {} : { maxNodes: request.searchLimits.maxNodes }),
@@ -701,7 +704,7 @@ async function runNavigationSegmentInner(
   // 也不在一次同步调用里重算整条路线。
   const currentRequest = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
-    body: base.body, rules: walkLandRules,
+    body: base.body, rules: walkLandRules, ...(request.wade === true ? { wade: true } : {}),
   };
   // manual 下先保护本次真正会读的 Section：搜索与执行之间可能发生周期 checkpoint，
   // 未 pin 的页面会被保存后换出，逐步复验随后只能看到 UNKNOWN。依赖只来自已选

@@ -26,7 +26,7 @@ import {
   type LandSearchKind,
   type LandSearchPolicySummary,
 } from 'curio-minecraft-3d-memory/navigation';
-import { hostLandEdgePolicy } from './land-edge-policy.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy, isWaterBlock } from './land-edge-policy.ts';
 import type { NavigationGoal } from '../skills/movement/goal.ts';
 import { stanceFor } from '../skills/movement/goal.ts';
 
@@ -99,6 +99,8 @@ export interface LandSearchRequest {
   rules: LandRules;
   /** current 只认当前证据；remembered 用过期几何做候选，绝不冒充当前 OPEN。 */
   evidenceMode?: 'current' | 'remembered';
+  /** 委托显式允许涉水：接受身体接触水的地面边（不含淹没、水流、气泡柱）。 */
+  wade?: boolean;
   allowed?: readonly LandSearchKind[];
   corridor?: LandSearchCorridor;
   maxDrop?: number;
@@ -212,6 +214,12 @@ interface Check {
   obstacle?: Vec3Like;
 }
 
+function waterAt(map: VoxelMap, dim: string, pos: Vec3Like): boolean {
+  const p = cell(pos);
+  const view = map.cellAt(dim, p.x, p.y, p.z);
+  return view.observed && isWaterBlock(view.evidence.observation.state.name);
+}
+
 function dangerousAt(map: VoxelMap, dim: string, pos: Vec3Like): string | null {
   const p = cell(pos);
   const view = map.cellAt(dim, p.x, p.y, p.z);
@@ -269,9 +277,11 @@ function checkTransition(
 }
 
 /** OPEN 且只有可声明的 fall hazard；危险方块仍由宿主风险策略拒绝。 */
-function safe(check: Check, map: VoxelMap, dim: string, to: Vec3Like): boolean {
+function safe(check: Check, map: VoxelMap, dim: string, to: Vec3Like, wade: boolean): boolean {
   if (check.status !== 'OPEN') return false;
-  if (check.hazards.some((hazard) => hazard.kind !== 'fall')) return false;
+  if (check.hazards.some((hazard) => hazard.kind !== 'fall' && !(wade && hazard.kind === 'water_contact'))) return false;
+  // step/drop 几何只报坠落：落点脚/头格的已观察水由这里判定，与搜索边策略一致。
+  if (waterAt(map, dim, { ...to, y: to.y + 1 }) || !wade && waterAt(map, dim, to)) return false;
   return dangerousAt(map, dim, to) === null
     && dangerousAt(map, dim, { ...to, y: to.y + 1 }) === null
     && dangerousAt(map, dim, { ...to, y: to.y - 1 }) === null;
@@ -370,7 +380,7 @@ function libraryRequest(request: LandSearchRequest): LibraryRequest {
     ...(request.goal.arrival !== undefined ? { goalMetric: request.goal.arrival.metric }
       : request.goalMetric === undefined ? {} : { goalMetric: request.goalMetric }),
     rules: request.rules,
-    edgePolicy: hostLandEdgePolicy,
+    edgePolicy: request.wade === true ? hostWadingEdgePolicy : hostLandEdgePolicy,
     ...(request.evidenceMode === undefined ? {} : { evidenceMode: request.evidenceMode }),
     ...(request.allowed === undefined ? {} : { allowed: request.allowed }),
     ...(request.corridor === undefined ? {} : { corridor: request.corridor }),
@@ -455,7 +465,7 @@ export async function searchLandRouteAsync(map: VoxelMap, request: LandSearchReq
 }
 
 /** 对已选路线逐段用当前证据复验；remembered 候选在执行前必须过这一关。 */
-export function verifyLandRoute(map: VoxelMap, request: Pick<LandSearchRequest, 'worldId' | 'dim' | 'sessionId' | 'body' | 'rules'> & {
+export function verifyLandRoute(map: VoxelMap, request: Pick<LandSearchRequest, 'worldId' | 'dim' | 'sessionId' | 'body' | 'rules' | 'wade'> & {
   /** 执行前复验第一步的真实起点；计划落点保持不变。 */
   measuredStart?: Vec3Like;
 }, transitions: readonly LandSearchTransition[], now = Date.now()): LandRouteVerification {
@@ -469,12 +479,17 @@ export function verifyLandRoute(map: VoxelMap, request: Pick<LandSearchRequest, 
     const drifted = from.x !== transition.from.x || from.y !== transition.from.y || from.z !== transition.from.z;
     const check = checkTransition(map, request, kind, from, transition.to, limits, now, drifted ? transition.from : undefined);
     // 搜索层拒绝的危险格/非下落 hazard 也要在复验层保持一致，不能只靠 evaluate 的几何状态。
-    const hazardBlocked = check.status === 'OPEN' && !safe(check, map, request.dim, transition.to);
+    const hazardBlocked = check.status === 'OPEN' && !safe(check, map, request.dim, transition.to, request.wade === true);
     const status = hazardBlocked ? 'BLOCKED' : check.status;
+    const rejectedHazards = [...new Set(check.hazards.map((hazard) => hazard.kind)
+      .filter((kind) => kind !== 'fall' && !(request.wade === true && kind === 'water_contact')))];
     const reason = hazardBlocked
-      ? dangerousAt(map, request.dim, transition.to)
+      ? (rejectedHazards.length > 0 ? `路线经过不允许的 hazard（${rejectedHazards.join('、')}）` : undefined)
+        ?? dangerousAt(map, request.dim, transition.to)
         ?? dangerousAt(map, request.dim, { ...transition.to, y: transition.to.y + 1 })
         ?? dangerousAt(map, request.dim, { ...transition.to, y: transition.to.y - 1 })
+        ?? (waterAt(map, request.dim, { ...transition.to, y: transition.to.y + 1 }) ? '落点头部格已观察为水（会被淹没）'
+          : request.wade !== true && waterAt(map, request.dim, transition.to) ? '落点脚部格已观察为水；本次委托没有允许涉水' : undefined)
         ?? '路线经过不允许的 hazard'
       : check.reason;
     results.push({

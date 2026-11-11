@@ -1,12 +1,14 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import { shortId } from '../../util.ts';
-import { fail, isAbort, ok, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
+import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../spatial/land-search.ts';
 import { cellGoal, feetReached, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
 import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
+import { findSwimTarget, waterAhead } from './swim-leg.ts';
+import { swimPath } from './water.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
   type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
@@ -79,7 +81,21 @@ export interface CoordinatorRequest {
    * 由调用方续接同一 session 继续确认已观测的前缀。其他入口保持原有语义。
    */
   observeFrontierBeyondSegments?: boolean;
+  /**
+   * 委托显式允许下水：陆地路线接受涉水；身体在水中悬浮，或陆路在水边走不下去时，
+   * 用 swim_path 游向已观察到的、沿委托有推进的岸边站立格（没有岸时游向前方水面点）。
+   */
+  swim?: boolean;
 }
+
+/** 一段由协调器代为执行的游泳：目标来自已观察体素，结果按实测记录。 */
+export type SwimLegReceipt = {
+  mode: 'dry_shore' | 'water_point'; target: Vec3Like; from: Vec3Like; to: Vec3Like;
+  status: SkillStatus; summary: string; oxygenBefore: number; oxygenAfter: number;
+};
+
+/** 一次调用最多代为游泳的段数；每段仍受原期限约束。 */
+const MAX_SWIM_LEGS = 8;
 
 export type CoordinatorOutcome =
   | { ok: false; failureCode: FailureCode; summary: string; data?: Record<string, unknown> }
@@ -92,6 +108,7 @@ export type CoordinatorOutcome =
       segments: SegmentReceipt[];
       stop: StopReceipt;
       observation?: ObservationReceipt;
+      swimLegs?: SwimLegReceipt[];
     };
 
 const STOP_FAILURE: Record<StopReason, FailureCode> = {
@@ -292,6 +309,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   }
 
   const segments: SegmentReceipt[] = [];
+  const swimLegs: SwimLegReceipt[] = [];
   let observation: ObservationReceipt | undefined;
   let invocationTransitions = 0;
   let stop: StopReceipt | null = null;
@@ -319,6 +337,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     session.phase = 'executing';
     let executedSegments = 0;
     const deviations = new Set<string>();
+    let swimPending = false;
+    // 委托推进量：方向委托按冻结轴线的前进，到点委托按到目标的水平距离缩短；横向授权仍是硬限制。
+    const gainFrom = (from: Vec3Like) => (p: Vec3Like) => {
+      if (session.intent.kind === 'advance') return progressOf(session, p, 0).along - progressOf(session, from, 0).along;
+      const goal = session.intent.to;
+      return Math.hypot(goal.x - from.x, goal.z - from.z) - Math.hypot(goal.x - p.x, goal.z - p.z);
+    };
+    const withinCorridor = (p: Vec3Like) => session.intent.kind !== 'advance' || Math.abs(progressOf(session, p, 0).lateral) <= session.intent.maxLateralDrift;
     while (executedSegments < request.maxSegments) {
       if (ctx.signal.aborted) {
         stop = stopOf('CANCELLED', '父任务取消；保留已确认的位移');
@@ -364,6 +390,39 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         stop = stopOf('BUDGET_EXHAUSTED', `本次调用 transition 上限 ${request.invocationMaxTransitions} 已用尽；累计进展保留`);
         break;
       }
+      if (request.swim === true && (swimPending || state.inWater && !state.onGround)) {
+        swimPending = false;
+        if (swimLegs.length >= MAX_SWIM_LEGS) {
+          stop = stopOf('BUDGET_EXHAUSTED', `本次调用已代为游泳 ${MAX_SWIM_LEGS} 段；已确认进展与 session 保留`);
+          break;
+        }
+        const target = findSwimTarget(spatial.session.voxel, scope.dim, state.pos, gainFrom(state.pos), withinCorridor);
+        if (target === null) {
+          stop = stopOf('UNKNOWN_BOUNDARY', '在水中或水边，但沿委托方向没有已观察到的岸边站立格或水面点可游向；没有下水');
+          break;
+        }
+        const validated = validateSkill(swimPath, {
+          mode: target.mode, xyz: [target.pos.x, target.pos.y, target.pos.z],
+          timeoutMs: Math.max(1000, Math.min(20000, deadline - Date.now())),
+        }, ctx.adapter);
+        if (!validated.ok) {
+          stop = stopOf('ACTION_FAILURE', `游泳目标没有通过 swim_path 参数校验：${validated.error}`);
+          break;
+        }
+        const swimResult = await runSkill({ ...ctx, deadline }, swimPath, validated.args);
+        const end = ctx.adapter.state();
+        swimLegs.push({ mode: target.mode, target: { ...target.pos }, from: { ...state.pos }, to: { ...end.pos },
+          status: swimResult.status, summary: swimResult.summary, oxygenBefore: state.oxygen, oxygenAfter: end.oxygen });
+        if (swimResult.status === 'cancelled') { stop = stopOf('CANCELLED', '游泳时父任务取消；实测位置保留'); break; }
+        if (Math.hypot(end.pos.x - state.pos.x, end.pos.z - state.pos.z) < 1) {
+          stop = stopOf('PHYSICAL_FAILURE', `游向 ${cellText(target.pos)} 没有推进：${swimResult.summary}`);
+          break;
+        }
+        executedSegments += 1;
+        session.progress.stagnationSegments = 0;
+        session.progress.lastProgressAt = Date.now();
+        continue;
+      }
       const remainingCumulative = session.budget.maxTransitions - session.counters.confirmedTransitions;
       const perSegment = Math.max(1, Math.min(
         request.maxStepsPerSegment * (request.rolling ? request.maxSegments - executedSegments : 1),
@@ -394,6 +453,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const, minimumAlong: session.intent.distance } : {}),
         allowed: session.intent.allowed,
         historical: session.intent.historical,
+        ...(request.swim === true ? { wade: true } : {}),
         ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
         maxTransitions: perSegment,
         allowUnknownCorridor: request.allowUnknownCorridor,
@@ -436,6 +496,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       if (progressed) session.progress.lastProgressAt = Date.now();
       ctx.progress(Math.min(1, executedSegments / request.maxSegments), `${session.intent.kind} ${executedSegments}/${request.maxSegments}`);
+      // 陆路在水边走不下去：委托允许下水时，下一轮先游一段，再从实测位置继续陆路。
+      if (request.swim === true && !['reached_waypoint', 'replan', 'sighting', 'cancelled', 'timeout'].includes(segment.outcome)
+        && closeReasonOf(session, after.pos, Date.now(), after.onGround, false) === null
+        && waterAhead(voxel, scope.dim, after.pos, gainFrom(after.pos))) {
+        swimPending = true;
+        continue;
+      }
 
       if (segment.outcome === 'cancelled') {
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
@@ -751,11 +818,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     ok: true,
     status,
     ...(status === 'failed' ? { failureCode: STOP_FAILURE[finalStop.reason] } : {}),
-    summary: renderSummary(session, finalStop, segments),
+    summary: renderSummary(session, finalStop, segments) + (swimLegs.length === 0 ? ''
+      : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`),
     session,
     segments,
     stop: finalStop,
     ...(observation === undefined ? {} : { observation }),
+    ...(swimLegs.length === 0 ? {} : { swimLegs }),
   };
 }
 
@@ -766,6 +835,7 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
   const replans = outcome.segments.filter((segment) => segment.outcome === 'replan');
   return {
     ...extra,
+    ...(outcome.swimLegs === undefined ? {} : { swimLegs: outcome.swimLegs }),
     ...(replans.length === 0 ? {} : {
       replanCount: replans.length,
       replans: replans.map((segment) => ({
