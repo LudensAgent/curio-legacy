@@ -180,12 +180,18 @@ export function parseMakeWay(a: Record<string, unknown>): { ok: true; value: Mak
   return { ok: true, value: { ...(dig === undefined ? {} : { dig }), ...(place === undefined ? {} : { place }), maxEdits: (a.maxEdits as number | undefined) ?? MAKE_WAY_DEFAULT_EDITS } };
 }
 
-/** 把开路授权还原成委托参数（嵌套调用时原样传下去）。 */
-export function makeWayArgs(opts: MakeWayOptions | undefined): Record<string, unknown> {
+/** 把开路授权还原成平铺的委托参数：校验结果必须能再次通过校验（计划录入后、执行前会再校验一次）。 */
+export function makeWayArgs(opts: MakeWayOptions | undefined): { dig?: true | string; place?: string; maxEdits?: number } {
   if (opts === undefined) return {};
   return {
     ...(opts.dig === undefined ? {} : { dig: opts.dig.tool ?? true }),
     ...(opts.place === undefined ? {} : { place: opts.place.item }),
     maxEdits: opts.maxEdits,
   };
+}
+
+/** 已校验的平铺参数 → 交给协调器的开路授权；没有授权返回空对象。 */
+export function makeWayRequest(args: { dig?: true | string; place?: string; maxEdits?: number }): { makeWay?: MakeWayOptions } {
+  const parsed = parseMakeWay(args);
+  return parsed.ok && parsed.value !== undefined ? { makeWay: parsed.value } : {};
 }

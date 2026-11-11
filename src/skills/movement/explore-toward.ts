@@ -3,7 +3,7 @@ import { lookAround, sighted } from '../movement.ts';
 import { fail, isAbort, obj, ok, runSkill, type Skill, type SkillResult } from '../types.ts';
 import { coordinatorResult, runMovementCoordinator } from './coordinator.ts';
 import { CARDINAL_DIRECTIONS, type CardinalDirection } from './session.ts';
-import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, parseMakeWay, type MakeWayOptions } from './make-way.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
 
 type ExploreArgs = {
   direction: CardinalDirection;
@@ -15,8 +15,10 @@ type ExploreArgs = {
   timeoutMs: number;
   sessionId?: string;
   swim?: boolean;
-  /** 显式授权开路（dig/place）；省略时不挖不放。 */
-  makeWay?: MakeWayOptions;
+  /** 显式授权开路；保持委托原样的平铺参数，校验结果可再次通过校验（计划录入后执行前会再校验一次）。 */
+  dig?: true | string;
+  place?: string;
+  maxEdits?: number;
 };
 
 export const MAX_EXPLORE_DISTANCE = 512;
@@ -54,7 +56,7 @@ export const exploreToward: Skill<ExploreArgs> = {
       ...(a.until === undefined ? {} : { until: (a.until as string).trim().toLowerCase() }),
       ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
       ...(a.swim === true ? { swim: true } : {}),
-      ...(makeWay.value === undefined ? {} : { makeWay: makeWay.value }),
+      ...makeWayArgs(makeWay.value),
     } };
   },
   async run(ctx, args) {
@@ -84,7 +86,7 @@ export const exploreToward: Skill<ExploreArgs> = {
         maxObservations: 32, maxObservedCells: 2048, maxNoProgressSegments: 4,
         sessionId: args.sessionId, deadlineMs: deadline, allowUnknownCorridor: false, observeFrontierBeyondSegments: true,
         ...(args.swim === true ? { swim: true } : {}),
-        ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
+        ...makeWayRequest(args),
       });
       last = coordinatorResult(outcome, extra);
       if (!outcome.ok) return last;
