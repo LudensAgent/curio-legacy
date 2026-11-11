@@ -442,3 +442,22 @@ test('分片搜索：持续被新观测作废时重跑次数有界，最终如�
   assert.equal(result.invalidatedAttempts, 3);
   assert.equal(result.transitions.length, 0);
 });
+
+test('危险策略检查身体扫过的全部格子：斜向不擦过拐角的火，偏心贴着火走也拒绝', () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(3, 1, 3));
+  fillBox(map, 'minecraft:stone', at(-1, -1, -1), at(3, -1, 3));
+  fill(map, 'minecraft:fire', [at(1, 0, 0)]);
+  const diagonal = searchLandRoute(map, request(at(0.5, 0, 0.5), goalOf(at(1, 0, 1)), { allowed: ['walk'], maxDrop: 0 }), 2000);
+  assert.equal(diagonal.status, 'FOUND', JSON.stringify(diagonal.boundaries.slice(0, 3)));
+  assert.ok(diagonal.transitions.every((transition) => transition.from.x === transition.to.x || transition.from.z === transition.to.z),
+    '拐角 (1,0,0) 有火：不走斜线，改走另一侧');
+  assert.ok(diagonal.points.every((p) => !(Math.floor(p.x) === 1 && Math.floor(p.z) === 0)));
+  // 身体在格内偏东 0.3：沿 z 方向走时身体会碰到东侧 (1,0,1) 的火。
+  fill(map, 'minecraft:fire', [at(1, 0, 1)]);
+  const verification = verifyLandRoute(map, request(at(0.8, 0, 0.5), goalOf(at(0, 0, 2))), [
+    { kind: 'walk', from: at(0.8, 0, 0.5), to: at(0.8, 0, 1.5), drop: 0 },
+  ], 2000);
+  assert.equal(verification.transitions[0]!.status, 'BLOCKED');
+  assert.match(verification.transitions[0]!.reason ?? '', /fire/);
+});
