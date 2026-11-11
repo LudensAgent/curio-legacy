@@ -90,6 +90,7 @@ function parseTarget(raw: unknown): TravelTarget | string {
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
   description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收；没有 VoxelMap 或需要移动但目标列缺证据时如实报缺口。无 y 且尚未在到达范围内时，用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），实测站稳并进入范围即停止；路线目标仍是原坐标，不会把范围目标改成更近的点。默认不下水，swim:true 时才涉水并代为游泳。' + MAKE_WAY_DOC + '。只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits（以及通用 make），其他参数一律拒绝。',
+  catalog: '{"to":{x,y,z}|{x,z}|"地标名"|"base"|"death"|"portal:<id>","range"?:2,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:16,"sessionId"?}：去一个确定的位置（坐标、地标、死亡点、已登记的门）；按已记录体素寻路走过去，默认不挖不放，写 dig/place 才在走不通时代为挖开挡路格、补支撑或垫高',
   argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号","swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,' + MAKE_WAY_ARGS_DOC + '}；只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits/make，未知参数会被拒绝。',
   timeoutMs: 600000,
   movement: true,

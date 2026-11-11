@@ -15,6 +15,7 @@ type SwimArgs = { xyz?: Vec3Like; mode: SwimMode; timeoutMs?: number };
 export const swimPath: Skill<SwimArgs> = {
   name: 'swim_path',
   description: '在水面/水中执行一次有界游泳：mode:"water_point" 到指定水中点，mode:"dry_shore" 到指定干岸并离水站稳，mode:"surface" 有界上浮换气。不挖、不垫、不换目标；未到时如实报告位置、氧气、阶段、头顶挡块和最近开口水面。',
+  catalog: '{"mode":"water_point|dry_shore|surface","xyz"?:[x,y,z]}：在水里游一段：到水中点、上到干岸站稳，或上浮换气（surface 不写 xyz）；不挖、不垫、不换目标',
   argsDoc: '{"xyz":[x,y,z], "mode":"water_point|dry_shore|surface", "timeoutMs"?:1000-20000}；surface 不接受 xyz；water_point/dry_shore 必须给 xyz（脚坐标；整数 x/z 按方块坐标取格心 +0.5；目标格必须可查询/已加载〔blockAt 非 null〕，否则拒绝）。旧名 step/dig_at/place_at 不再注册（改用 move_step/mine_cell/place_cell）；自动 ≤4 格落差已移交 descend_to/move_step，水中上岸由 swim_path 完成；jump/climb_one 的替代是 pillar_one 与 move_step [1,1,0]。',
   timeoutMs: 25000,
   movement: true,

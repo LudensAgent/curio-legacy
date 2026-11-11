@@ -408,6 +408,7 @@ const modeRank = (mode: RouteMode) => mode === 'current' ? 0 : mode === 'histori
 export const approachVisible: Skill<Args> = {
   name: 'approach_visible',
   description: '接近一个已经看见或记得的附近目标：位置（站立脚位）、方块（走到旁侧合法站立格）或实体。先用已观察几何验证支撑、身体净空、危险格和交互距离，再在所有合法站位中比较已观察路线（当前证据优先，可用历史体素候选），只执行一次有界接近；不改目标、不挖/放/建、不换维度。方块目标认得出才接近（此刻看见、空间记忆里观察过或本会话亲眼见过）；也可写记得的地标。默认后端是共享空间记忆路线（几格外未观察就只走前缀）；没有可用证据时返回缺口，不使用其他规划后端。ARRIVED 只按实测位置与原到达条件确认；未到达时返回 PARTIAL/UNKNOWN/BLOCKED/UNSUPPORTED/INVALIDATED 等真实结局与边界。',
+  catalog: '{"target":{"pos":{x,y,z}}|{"block":{x,y,z}}|{"entity":{"id":…}}|{"entity":{"name":"cow"}}|{"landmark":"base"}}：站到一个已看见或记得的附近目标旁边（64 格内）；没看见过的远处用 travel_to/explore_toward',
   argsDoc: '{"target":{"pos":{"x":0,"y":64,"z":0}}} 或 {"target":{"block":{"x":0,"y":64,"z":0}}} 或 {"target":{"entity":{"id":123}}} 或 {"target":{"entity":{"name":"cow"}}} 或 {"target":{"landmark":"base"}}（target 里只放 pos/block/entity/landmark 之一，不要再套 kind；block 是整数方块坐标，不是站立格；entity 需已看见/记得，优先用 look_around 回执的 id/foundRef，方向+距离不是坐标，不要自己推算）；pos 只写已确认/待解析的站立脚位（y 可为近似值，按同列实际支撑解析），不是方向+距离的推算点；没看见过的远处地点用 travel_to / explore_toward；"radius"?:64（默认 64、上限 64，且不超过当前视觉有效范围）, "backend"?:"spatial"（唯一后端）, "allowed"?:["walk","step","drop"], "historical"?:true, "maxSteps"?:1-64（省略时按选定路线推导）, "allowUnknownCorridor"?:false。',
   timeoutMs: 45000,
   movement: true,

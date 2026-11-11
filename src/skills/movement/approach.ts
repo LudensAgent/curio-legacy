@@ -35,6 +35,7 @@ const point = (v: unknown): Vec3Like | null => {
 export const goNear: Skill<ApproachArgs> = {
   name: 'go_near',
   description: '走到指定容器/门/床/传送门方块旁的一个相邻站立格，为后续 take_items/sleep/travel_portal 做准备。只做路线规划与移动，不打开、不拿、不睡、不穿门，不换交互目标；没有可到达的相邻站立格就停下报事实。',
+  catalog: '{"target":{x,y,z}}：走到容器/门/床/传送门方块旁的站立格（target 是方块坐标，不是站立格）',
   argsDoc: '{"target":{"x":整数,"y":整数,"z":整数}（容器/门/床/传送门的方块坐标）,"allowed"?":["walk","step","drop"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false}；不是站立格，站立格先用 resolve_target。',
   timeoutMs: 30000,
   movement: true,

@@ -117,6 +117,11 @@ export interface Skill<A = any> {
   description: string;
   /** 给 LLM 看的参数格式 */
   argsDoc: string;
+  /**
+   * 系统提示词动作目录里的一行：最常用参数 + 一句用途（含会改变什么）。省略时目录用 argsDoc + 说明首句。
+   * 完整参数与说明不进目录，用 {"kind":"moves","names":[…]} 查（返回 argsDoc 与 description）。
+   */
+  catalog?: string;
   timeoutMs: number;
   /** 是否属于移动型技能（用于卡死检测） */
   movement: boolean;

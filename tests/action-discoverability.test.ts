@@ -49,13 +49,13 @@ test('approach_visible 在静态指导与目录里可发现，target 三种写�
 
 test('公开目录区分直线施工与共享体素导航，不再宣传旧寻路后端或施工参数', () => {
   const catalog = movesCatalog(28);
-  assert.match(catalog, /excavate_run .*不会改走旁边/);
+  assert.match(catalog, /excavate_run .*施工.*不走现成的路/);
   assert.match(deliberateSystem(''), /navigate_to/);
   assert.match(moveDetails(['excavate_run']), /不会自动绕旁路.*不会改走旁边/);
   const excavation = moveDetails(['excavate_run']);
-  assert.match(excavation, /travel_to\/navigate_to 按位置、explore_toward\/advance 按方向，通过共享 VoxelMap 三维寻路/);
-  assert.match(excavation, /已观测的通道参与路线搜索/);
-  assert.match(excavation, /不读取历史路线或路径片段，不挖掘或放置/);
+  assert.match(excavation, /沿现有地形移动用 travel_to（去确定位置）\/explore_toward（朝方向探索）/);
+  assert.match(excavation, /写 dig\/place 时才在走不通处代为挖开或补路/);
+  assert.match(excavation, /寻路失败本身不证明需要开挖/);
   assert.doesNotMatch(excavation, /授权施工时先按不施工搜索|NoPath|只做直接寻路/);
   const travel = moveDetails(['travel_to']);
   assert.match(travel, /共享 VoxelMap A\*/);

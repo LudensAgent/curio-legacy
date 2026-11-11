@@ -8,6 +8,8 @@ import { SelfModel } from '../src/mind/self.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { FakeAdapter } from './fake-adapter.ts';
+import { moveStep } from '../src/skills/movement/index.ts';
+import { makeCtx } from './survival-helpers.ts';
 
 test('回矿道和地表找矿不因关键词自动收到开挖阶梯指令', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
@@ -25,7 +27,8 @@ test('回矿道和地表找矿不因关键词自动收到开挖阶梯指令', (t
     for (const tier of ['deliberate', 'glance'] as const) {
       const [system, user] = buildMindMessages({ ...ctx, tier });
       assert.doesNotMatch(user.content, /要下矿先想好|下矿有稳定下行辅助/);
-      const guide = system.content.split('\n').find((line) => line.startsWith('【走到哪】'))!;
+      // 【走到哪】是一段按意图分行的短表：取到下一个【相对坐标】段落为止。
+      const guide = system.content.slice(system.content.indexOf('【走到哪】'), system.content.indexOf('【相对坐标】'));
       assert.match(guide, /travel_to.*range/);
       assert.match(guide, /navigate_to/);
       assert.match(guide, /explore_toward/);
@@ -56,4 +59,22 @@ test('保存的目标与清单标明模型来源，不能凭文字标注变成�
   }
   assert.equal(self.data.plan?.goal, goal);
   assert.deepEqual(self.data.plan?.steps.map((step) => step.text), steps);
+});
+
+test('move_step 遇到 2 格高差时并列给出几种做法，不只递一条可照抄的 excavate_run 命令', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  // 东边一列挖空两格：可站立脚高是 y=62，比当前低 2 格。
+  adapter.removed.add('1,63,0'); adapter.removed.add('1,62,0');
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const validated = moveStep.validate({ to: [1, 0, 0], facing: 'E' }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await moveStep.run(ctx, validated.args);
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /2 格高差，move_step 不处理；可选：/);
+  assert.match(result.summary, /descend_to/);
+  assert.match(result.summary, /travel_to\/navigate_to/);
+  assert.match(result.summary, /excavate_run stairs/);
+  assert.doesNotMatch(result.summary, /excavate_run \{"mode"/, '不递可照抄的施工命令');
 });

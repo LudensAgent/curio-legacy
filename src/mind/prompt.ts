@@ -144,10 +144,9 @@ function briefOf(d: string, n: number): string {
   return `${at > n / 2 ? cut.slice(0, at) : cut}…`;
 }
 
-/** 移动/潜水上浮这类动作在两种思考档位里都要给足副作用说明 */
-function descOf(s: { name: string; description: string }, chars: number): string {
-  return ['look', 'swim_path', 'boat_path', 'navigate_to', 'advance', 'travel_to', 'plan_route', 'excavate_run', 'descend_to'].includes(s.name) ? s.description.replace(/\s+/g, ' ')
-    : chars ? briefOf(s.description, chars) : '';
+/** 目录里的一句用途；有 catalog 的动作已自带参数与用途。 */
+function descOf(s: { description: string }, chars: number): string {
+  return chars ? briefOf(s.description, chars) : '';
 }
 
 /**
@@ -158,6 +157,7 @@ function descOf(s: { name: string; description: string }, chars: number): string
 export function movesCatalog(chars = 40, core: Set<string> = new Set(COMMON_MOVES)): string {
   const visible = Object.values(SKILLS).filter((s) => !LLM_HIDDEN.has(s.name) && !isSkillDisabled(s.name) && !ADVANCED.test(s.name));
   const detailed = visible.filter((s) => core.has(s.name)).map((s) => {
+    if (s.catalog) return `- ${s.name} ${s.catalog}`;
     // argsDoc 常以句号收尾，直接接“：用途”会出现“。：”，读起来像参数的一部分。
     const args = s.argsDoc.trim().replace(/[。；;]$/, '');
     const desc = descOf(s, chars);
@@ -248,7 +248,14 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
-【走到哪】按目标选一个移动动作，失败保留回执中的具体原因：身边一格（含上下一级台阶）→ move_step；到坐标或记得的地标/base/死亡点/传送门附近 → travel_to {"to":{"x":0,"y":64,"z":0},"range":2}（range 为 1–16 的到达范围，无 y 按水平格距、有 y 按三维格距；路线目标仍是原坐标）；要到指定格或精确连续脚位 → navigate_to {"to":{"x":0,"y":64,"z":0}}（整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收，不会用格心或附近格顶替）。两者都按已记录体素做有界 3D 搜索，默认不挖不放（travel_to/explore_toward 写 dig/place 才在普通路线走不通时代为开路）；缺证据时停在已确认边界并报缺口；回执带 sessionId，仍要完成同一目标时原样传回。朝某方向找没见过的东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；要按冻结方向推进一段 → advance；看见过/记得的方块、实体或站位，要站到旁边 → approach_visible（target 只放 pos/block/entity/landmark 之一，不要套 kind；实体用 look_around 回执的 id）；容器/门/床/传送门方块 → go_near {"target":{x,y,z}} 走到旁边，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
+【走到哪】按意图选一个移动动作（失败看回执里的具体原因再决定换法）：
+- 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
+- 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
+- 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工，不负责绕路去某处）
+- 身边相邻一格（含上下一级台阶）→ move_step；改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
+- 站到看见过/记得的附近目标旁 → approach_visible；容器/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）
+- 要到一个确切的格或精确连续脚位 → navigate_to
+移动回执带 sessionId，仍要完成同一目标时原样传回。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖；段后按实测位置重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
 【原地上下】move_step [0,1,0] 原地上移要求梯子；相邻上下台阶可用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）。assess_landings 返回当前可见的落点候选及未确认项，descend_to 核实所选落点后下降。施工动作会改变地形：pillar_one {"item":"any"}（或指定材料）消耗一块材料垫高，起跳需要头顶上方两格都空；mine_cell [0,-1,0] 挖空脚下支撑后身体会下落，无需再 move_step。上下行也可由【走到哪】中的导航按已观测路线执行，是否施工由你决定。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -266,7 +273,7 @@ const CHOOSE = `【选动作】
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与是否改变地形由你决定。
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design 请建筑师画图纸，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）；不要自己画图纸
-- 上不去的高处由你决定用梯子、垫高或另找路；navigate_to/advance 不挖墙、不垫路、不搭柱，改变地形要显式用 mine_cell / place_cell / place_support / pillar_one / excavate_run。`;
+- 上不去的高处由你决定：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。`;
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。内部思考有预算：最多比较两套可行方案，同一事实/同一权衡只评估一次；已有足够信息就停止推理并直接给出能执行的 JSON。不要重算已经给出的背包/箱子/目标，也不要列举用不上的配方、去不了的远处选项或已经排除的方案；卡住时先选一个可验证的下一步，做完再看结果。

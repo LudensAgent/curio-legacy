@@ -50,8 +50,12 @@ function stairHandoff(feet: Vec3Like, target: Vec3Like, delta: number): { mode: 
   return { mode: delta > 0 ? 'stairs_up' : 'stairs', direction, steps: Math.max(1, Math.min(8, Math.ceil(Math.abs(delta)))) };
 }
 
+/** 高差超出 move_step 时并列能做到的几类做法，不偏向任何一种、不给可直接照抄的施工命令。 */
 function stairHint(stair: ReturnType<typeof stairHandoff>): string {
-  return `这是 ${stair.steps} 格高差，move_step 不处理；可朝 ${stair.direction} 用 excavate_run {"mode":"${stair.mode}","direction":"${stair.direction}","steps":${stair.steps}} 开挖阶梯，或 ${stair.mode === 'stairs_up' ? 'place_support/pillar_one 补一级' : 'assess_landings 选相邻落点后用 descend_to'}（由你决定）`;
+  const ways = stair.mode === 'stairs_up'
+    ? ['pillar_one 原地垫高后再迈', 'place_support 在前方补一级', 'travel_to/navigate_to 走别的已知路（travel_to 写 place 可代为垫高）', `excavate_run stairs_up 朝 ${stair.direction} 开上行阶梯`]
+    : ['assess_landings 选落点后 descend_to', 'travel_to/navigate_to 允许 drop 下去', `excavate_run stairs 朝 ${stair.direction} 开下行阶梯`];
+  return `这是 ${stair.steps} 格高差，move_step 不处理；可选：${ways.join('；')}（由你决定）`;
 }
 
 /**
@@ -89,6 +93,7 @@ function shapeOf(name: string, properties: Record<string, string | number | bool
 const moveStepSkill: Skill<MoveArgs> = {
   name: 'move_step',
   description: '站到身边相邻的一格（[前,上,右] 或 xyz）。相对写法只锁定相邻那一列：同列在当前脚高 ±1 格内若有唯一可站立脚高（含半砖、雪层、地毯、土径等分数脚高），宿主按实际碰撞顶面执行，“上”分量写错也不拒绝，回执用 requestedAt/resolvedAt 写明实际是同层/上一级（高 0.01–1 格，如 [1,1,0]）/下一级（支撑顶面低 0.01–1 格）；绝对 xyz 的 y 是你写明的脚高，须与实际一致。上升超过 0.6 格要起跳，头顶需净空；脚下是梯子时 [0,1,0] 沿梯子爬一格。同列 ±1 内没有可站立面（下方是空腔、落差或高差超过 1 格）时如实返回支撑格和落差，不换列、不自动改落点；补支撑用 place_support，更大落差用 descend_to。落点身体格/支撑格是岩浆、火、岩浆块、仙人掌、细雪等，或旁边/头顶有可流入的岩浆时默认不迈并列出危险格，allowHazard:true 显式接受后照迈。在岩浆/水里或乘骑时不做普通迈步。',
+  catalog: '{"to":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"allowHazard"?:true：迈到相邻一格（同层或上下一级，高差 ≤1 格）；落点危险默认不迈',
   argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "allowHazard"?true} 或 {"xyz":[x,y,z], "allowHazard"?true}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；相对写法 [1,0,0]/[1,1,0]/[1,-1,0] 都锁定同一相邻列，宿主在 ±1 内（上一级高 0.01–1 格，超过 0.6 格要起跳；下一级支撑顶面低 0.01–1 格）按实际脚高执行；同列 [0,1,0] 只在梯子上可爬；allowHazard 默认 false）',
   timeoutMs: 8000,
   movement: true,
@@ -458,6 +463,7 @@ const moveStepSkill: Skill<MoveArgs> = {
 const mineCellSkill: Skill<MineArgs> = {
   name: 'mine_cell',
   description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格未看清时默认不挖（无法排除侧后方液体流入）；allowUnknownAdjacent:true 显式接受未知邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
+  catalog: '{"at":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"tool"?:"物品名","wet"?/"lava"?/"fall"?/"allowUnknownAdjacent"?:true：挖掉身边指定的一格（[0,-1,0] 是脚下支撑）；液体邻格、挖脚下落差、邻格未看清要显式授权',
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,

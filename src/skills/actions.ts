@@ -576,6 +576,7 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
 export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number } }> = {
   name: 'look',
   description: '转头看向一个方向（N…NW、up 抬头、down 低头）或一格坐标；只转头不走。之后用 use_item（扔雪球、末影珍珠、鸡蛋）或 toss_item 就朝这边',
+  catalog: '{"dir"?:"N|NE|E|SE|S|SW|W|NW|up|down","xyz"?:[x,y,z]}：转头看向一个方向或一格；只转头不走（之后 use_item/toss_item 朝这边）',
   argsDoc: '{"dir"?: "N|NE|E|SE|S|SW|W|NW|up|down", "xyz"?: [x,y,z] 或 {"x":0,"y":64,"z":0}}',
   timeoutMs: 3000,
   movement: false,
