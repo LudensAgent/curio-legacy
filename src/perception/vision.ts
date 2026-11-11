@@ -216,6 +216,23 @@ const FEED_TRAIL = 3;
  */
 const VISION_NEAR_FEED_RADIUS = 12;
 const CLEAR_AIR: Optics = { name: 'air', kind: 'clear' };
+/**
+ * 身体周围可感知的开放空间：从身体所在格沿透明格（空气/水）连通扩展，水平半径与上下范围内，
+ * 记录贴地的透明格与包围这片空间的表面方块。玩家对身边地形的感知不限于正前方视锥；
+ * 不穿墙：封闭在实心方块后面的洞穴、矿石不会被扩展到。只写导航体素，不进资源记忆。
+ */
+export const SURROUND_RADIUS = 16;
+const SURROUND_DOWN = 6, SURROUND_UP = 5;
+/**
+ * 行走判定读取目标列从“脚下最大落差再下一格”到头顶的全部格（4 格落差时为脚下 5 格到脚上 2 格）。
+ * 这一层里开放空间的空气全记，悬崖边整列都有证据；更高处只记贴地空气。
+ */
+const SURROUND_WALK_BAND_UP = 2;
+/** 身体移动这么远、或隔这么久才重扫一次周边。 */
+const SURROUND_MOVE = 2, SURROUND_INTERVAL_MS = 1500;
+/** 周边扫描每次最多写入的格数（近的先写）；首轮未写完的下一轮继续。 */
+const SURROUND_MAX_CELLS = 1024;
+type FeedCell = { x: number; y: number; z: number; name: string; d: number };
 
 /** Nearest opaque shape hit, rather than the boundary of a thin block's voxel. */
 function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: number, dy: number, dz: number,
@@ -278,6 +295,7 @@ export class Vision {
   private spatialScope: string | null = null;
   /** 已写进共享空间记忆的视线格：名字没变且未到刷新时间就不重写。 */
   private fed = new Map<string, { name: string; at: number }>();
+  private lastSurround: { pos: Vec3Like; at: number; scope: string } | null = null;
 
   constructor(private adapter: GameAdapter, public cfg: VisionConfig = DEFAULT_VISION, private spatial?: SpatialObservationSink) {}
 
@@ -403,7 +421,6 @@ export class Vision {
     };
 
     // 本帧视线实际看到的格：第一处看清的命中面，以及命中前紧挨着的透明格。只写这些，不读视线外的方块。
-    type FeedCell = { x: number; y: number; z: number; name: string; d: number };
     const feed = new Map<string, FeedCell>();
     const keep = (c: FeedCell) => {
       const k = keyOf(c.x, c.y, c.z), old = feed.get(k);
@@ -506,19 +523,7 @@ export class Vision {
       }
     }
     this.composition = comp;
-    // 视线看到的格写进共享空间记忆：只写变化或到刷新时间的格，近的先写，每帧有上限。
-    for (const [key, f] of this.fed) if (now - f.at > VISION_FEED_REFRESH_MS * 4) this.fed.delete(key);
-    const fresh = [...feed.entries()]
-      .filter(([key, c]) => { const old = this.fed.get(key); return !old || old.name !== c.name || now - old.at >= VISION_FEED_REFRESH_MS; })
-      .sort((a, b) => a[1].d - b[1].d).slice(0, VISION_FEED_MAX_CELLS);
-    if (fresh.length > 0 && this.admitSpatial(s, eye)) {
-      this.spatial!.observe(fresh.map(([key, c]) => {
-        this.fed.set(key, { name: c.name, at: now });
-        const pos = { x: c.x, y: c.y, z: c.z }, block = this.adapter.blockStateAt?.(pos);
-        return { name: block?.name ?? c.name, properties: { ...block?.properties }, stateComplete: block != null, pos, worldId: s.worldId, sessionId: s.sessionId,
-          dimension: s.dim, observationId: s.observationId, observedAt: now, source: 'vision' as const };
-      }));
-    }
+    this.feedSpatial(feed, s, eye, now, VISION_FEED_MAX_CELLS);
     // 视距：在眼睛高度水平看出去（与低头/抬头无关），左/中/右各 3 条射线取平均，衡量前方是否开阔
     const sector = (from: number, to: number) => {
       let sum = 0;
@@ -749,6 +754,75 @@ export class Vision {
       if (current && current !== value.name) { this.forget(key); return false; }
       return true;
     }).map(({ value, dist }) => ({ name: value.name, pos: value.pos, dist })).sort((a, b) => a.dist - b.dist);
+  }
+
+  /** 写进共享空间记忆：只写变化或到刷新时间的格，近的先写，每次有上限。 */
+  private feedSpatial(feed: Map<string, FeedCell>, s: ReturnType<GameAdapter['state']>, eye: Eye, now: number, cap: number) {
+    for (const [key, f] of this.fed) if (now - f.at > VISION_FEED_REFRESH_MS * 4) this.fed.delete(key);
+    const fresh = [...feed.entries()]
+      .filter(([key, c]) => { const old = this.fed.get(key); return !old || old.name !== c.name || now - old.at >= VISION_FEED_REFRESH_MS; })
+      .sort((a, b) => a[1].d - b[1].d).slice(0, cap);
+    if (fresh.length === 0 || !this.admitSpatial(s, eye)) return;
+    this.spatial!.observe(fresh.map(([key, c]) => {
+      this.fed.set(key, { name: c.name, at: now });
+      const pos = { x: c.x, y: c.y, z: c.z }, block = this.adapter.blockStateAt?.(pos);
+      return { name: block?.name ?? c.name, properties: { ...block?.properties }, stateComplete: block != null, pos, worldId: s.worldId, sessionId: s.sessionId,
+        dimension: s.dim, observationId: s.observationId, observedAt: now, source: 'vision' as const };
+    }));
+  }
+
+  /**
+   * 周边地形感知（见 SURROUND_RADIUS）：身体移动或间隔到期时，从身体所在格沿空气/水连通扩展，
+   * 写入贴地透明格与包围开放空间的表面方块。导航因此在身边始终有完整、新鲜的地形。
+   */
+  scanSurroundings(): void {
+    const s = this.syncScope();
+    const eye = this.adapter.eye();
+    if (!eye || !s.connected || !s.alive || !s.observationReady) return;
+    const now = Date.now();
+    const scope = `${s.worldId}|${s.dim}|${s.sessionId}`;
+    const last = this.lastSurround;
+    if (last && last.scope === scope && now - last.at < SURROUND_INTERVAL_MS
+      && Math.hypot(s.pos.x - last.pos.x, s.pos.y - last.pos.y, s.pos.z - last.pos.z) < SURROUND_MOVE) return;
+    this.lastSurround = { pos: { ...s.pos }, at: now, scope };
+    const fx = Math.floor(s.pos.x), fy = Math.floor(s.pos.y), fz = Math.floor(s.pos.z);
+    const optics = new Map<string, Optics | null>();
+    const opt = (x: number, y: number, z: number) => {
+      const key = keyOf(x, y, z);
+      let o = optics.get(key);
+      if (o === undefined) { o = this.adapter.blockOptics(x, y, z); optics.set(key, o); }
+      return o;
+    };
+    const open = (o: Optics | null) => o !== null && (o.kind === 'clear' || o.kind === 'water');
+    const inside = (x: number, y: number, z: number) => y >= fy - SURROUND_DOWN && y <= fy + SURROUND_UP
+      && (x - fx) ** 2 + (z - fz) ** 2 <= SURROUND_RADIUS ** 2;
+    const feed = new Map<string, FeedCell>();
+    const record = (x: number, y: number, z: number, name: string) => {
+      feed.set(keyOf(x, y, z), { x, y, z, name, d: Math.hypot(x + 0.5 - s.pos.x, y - s.pos.y, z + 0.5 - s.pos.z) });
+    };
+    const seen = new Set<string>();
+    const queue: [number, number, number][] = [];
+    for (const y of [fy, fy + 1]) if (open(opt(fx, y, fz))) { seen.add(keyOf(fx, y, fz)); queue.push([fx, y, fz]); }
+    const steps = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
+    for (let head = 0; head < queue.length; head++) {
+      const [x, y, z] = queue[head]!;
+      const here = opt(x, y, z)!;
+      // 行走判定层内的透明格全记；更高处只记贴地那层（脚部/头部净空）与水，半空空气全记会撑满常驻内存。
+      if (here.kind === 'water' || y <= fy + SURROUND_WALK_BAND_UP
+        || [1, 2].some((below) => { const o = opt(x, y - below, z); return o !== null && !open(o); })) record(x, y, z, here.name);
+      for (const [dx, dy, dz] of steps) {
+        const nx = x + dx, ny = y + dy, nz = z + dz;
+        if (!inside(nx, ny, nz)) continue;
+        const key = keyOf(nx, ny, nz);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const o = opt(nx, ny, nz);
+        if (o === null) continue;
+        if (open(o)) queue.push([nx, ny, nz]);
+        else record(nx, ny, nz, o.name);
+      }
+    }
+    this.feedSpatial(feed, s, eye, now, SURROUND_MAX_CELLS);
   }
 
   /** 这一格这几秒内亲眼看见是什么（看不见返回 null，不透视） */

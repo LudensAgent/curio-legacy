@@ -97,3 +97,31 @@ test('近处视线穿过的透明格整段写入：平地前方的脚部与头�
   assert.ok(spatial.batches.length <= 6, `一个画面应在几帧内写完，实际 ${spatial.batches.length} 帧、${cells.length} 格`);
   assert.ok(firstScanMs < 250, `单次扫描耗时 ${firstScanMs.toFixed(1)}ms`);
 });
+
+test('周边扫描：身后与脚下的地形也写入，16 格内贴地空气与表面方块都有证据', () => {
+  const adapter = new FakeAdapter();
+  const spatial = sink();
+  const vision = new Vision(adapter, undefined, spatial);
+  for (let i = 0; i < 8; i++) { vision.scanSurroundings(); Reflect.set(vision, 'lastSurround', null); }
+  const cells = new Map(spatial.batches.flat().map((c) => [`${c.pos.x},${c.pos.y},${c.pos.z}`, c.name]));
+  for (const x of [-12, -6, 0, 6, 12]) {
+    assert.equal(cells.get(`${x},63,0`), 'grass_block', `x=${x} 的地面（含身后）`);
+    assert.equal(cells.get(`${x},64,0`), 'air', `x=${x} 的脚部空气`);
+    assert.equal(cells.get(`${x},65,0`), 'air', `x=${x} 的头部空气`);
+  }
+  assert.equal(cells.get('0,62,0'), undefined, '地面下方被遮住的方块不写');
+  assert.equal(cells.get('0,68,0'), undefined, '半空空气不写');
+  assert.ok(![...cells.keys()].some((key) => Math.hypot(Number(key.split(',')[0]), Number(key.split(',')[2])) > 16.01), '不超过半径');
+});
+
+test('周边扫描不穿墙：被实心方块围住的空腔不写入', () => {
+  const adapter = new FakeAdapter();
+  // 地下 y=60 处一个与地面不连通的空腔。
+  adapter.blocks.push({ name: 'air', pos: { x: 3, y: 60, z: 0 } }, { name: 'iron_ore', pos: { x: 4, y: 60, z: 0 } });
+  const spatial = sink();
+  const vision = new Vision(adapter, undefined, spatial);
+  for (let i = 0; i < 8; i++) { vision.scanSurroundings(); Reflect.set(vision, 'lastSurround', null); }
+  const cells = new Map(spatial.batches.flat().map((c) => [`${c.pos.x},${c.pos.y},${c.pos.z}`, c.name]));
+  assert.equal(cells.get('3,60,0'), undefined);
+  assert.equal(cells.get('4,60,0'), undefined, '封闭空腔旁的矿石不写');
+});

@@ -233,8 +233,8 @@ export const travelTo: Skill<TravelToArgs> = {
       maxSteps,
       maxStepsPerSegment: Math.min(32, maxSteps),
       maxSegments: MAX_SEGMENTS,
-      // 边走边规划时每接一段窗口就搜索一次：预算随直线距离增长，不让固定 6 次截断长途委托。
-      maxSearches: Math.min(32, 6 + Math.ceil(direct / 8)),
+      // 边走边规划时每接一段窗口、每次绕路都要搜索：预算约每格一次，只防无限循环，不截断长途委托。
+      maxSearches: Math.min(128, 16 + Math.ceil(direct)),
       deadlineMs: deadline,
       ...(args.sessionId === undefined ? {} : { sessionId: args.sessionId }),
     }, adapter);
