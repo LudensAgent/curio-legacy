@@ -115,3 +115,21 @@ test('桥头：前方是缺口、缺口上方一格有方块（高出两格）�
   assert.deepEqual(placed[1]!.to, { x: 4, y: 71, z: 0 }, '垫高后迈上缺口上方那块');
   assert.equal(await planMakeWay(w.map, D, { x: 3, y: 69, z: 0 }, target, { dig: {}, maxEdits: 16 }, any), null, '只能挖时上不去');
 });
+
+test('往看不见的岩体里挖：授权 dig 时路线穿过墙后未知格，第一步只挖已看见的墙面；没授权 dig 不进未知', async () => {
+  const w = world();
+  // 通道 x=0..3（脚 y=64），x=4 的墙面看见了，x>=5 全是未知。
+  for (let x = -1; x <= 3; x++) {
+    w.put(x, 63, 0, 'netherrack');
+    for (const y of [64, 65]) w.put(x, y, 0, x === -1 ? 'netherrack' : 'air');
+    w.put(x, 66, 0, 'netherrack');
+    for (const z of [-1, 1]) for (const y of [63, 64, 65, 66]) w.put(x, y, z, 'netherrack');
+  }
+  for (const y of [64, 65]) w.put(4, y, 0, 'netherrack');
+  const plan = await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 12.5, y: 64, z: 0.5 }, { dig: {}, maxEdits: 16 }, any);
+  assert.ok(plan !== null, '应规划出穿进岩体的路线');
+  const firstEdit = plan.find((s) => s.dig.length > 0)!;
+  assert.deepEqual(firstEdit.dig.map((c) => `${c.x},${c.y}`).sort(), ['4,64', '4,65'], '第一处只挖已看见的墙面');
+  assert.ok(plan.at(-1)!.to.x >= 8, `路线延伸进未知岩体：${JSON.stringify(plan.at(-1))}`);
+  assert.equal(await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 12.5, y: 64, z: 0.5 }, { place: { item: 'netherrack' }, maxEdits: 16 }, any), null);
+});

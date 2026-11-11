@@ -14,7 +14,7 @@ type Cell = { x: number; y: number; z: number };
 export type MakeWayStep = { kind: 'move' | 'pillar'; to: Cell; dig: Cell[]; place?: Cell };
 
 /** 各动作的代价：能少挖少放就少挖少放，已知可走的格优先。 */
-const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4 } as const;
+const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4, unknown: 2 } as const;
 const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16, MAX_DROP = 3;
 /** 每扫这么久让出一次主线程。 */
 const SLICE_MS = 5;
@@ -30,7 +30,7 @@ type Kind = 'unknown' | 'clear' | 'standable' | 'solid' | 'liquid' | 'danger';
 
 /**
  * 在已记录体素上找一条允许挖开/补支撑/垫高的路线，走向 target。未观察、待重新确认的格一律不当可走/可挖；
- * 危险格、液体、紧挨已记录液体的格不挖，上方压着沙砾的格不挖；未记录的邻格不拦（岩体里看不见）。到不了时返回离目标最近（至少近 3 格）的部分路线。
+ * 危险格、液体、紧挨已记录液体的格不挖，上方压着沙砾的格不挖；授权了 dig 时墙后未知的格按可挖岩石规划（另加代价）。到不了时返回离目标最近（至少近 3 格）的部分路线。
  * 只读体素，不动身体；返回 null 表示没有可用路线。
  */
 export async function planMakeWay(
@@ -60,10 +60,13 @@ export async function planMakeWay(
     return hit;
   };
   // 身体要占的格：已经空着就不用挖；实心且允许挖、挖得动、不邻液体、上方不压落体才挖。不可行返回 null。
+  // 授权了 dig 时，墙后看不见的未知格按“大概是岩石、可挖”规划（加 COST.unknown）：执行只做到第一处改动，
+  // 走到跟前、挖开前一格后视觉看清了再按真实情况重新规划；第一步要挖的格是已看见的墙面。
   const clearing = (c: Cell): Cell[] | null => {
     const here = look(c.x, c.y, c.z);
     if (here.kind === 'clear') return [];
-    if (here.kind !== 'standable' && here.kind !== 'solid') return null;
+    if (here.kind === 'unknown' && opts.dig === undefined) return null;
+    if (here.kind !== 'standable' && here.kind !== 'solid' && here.kind !== 'unknown') return null;
     if (opts.dig === undefined || UNDIGGABLE.test(here.name)) return null;
     const near = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const;
     // 已记录的液体邻格不挖（岩浆既是液体也在危险名单里，两者都挡）。往岩体里挖时墙后与两侧本来就看不见：
@@ -72,7 +75,13 @@ export async function planMakeWay(
     if (FALLING.test(look(c.x, c.y + 1, c.z).name)) return null;
     return [c];
   };
-  const supported = (c: Cell) => look(c.x, c.y - 1, c.z).kind === 'standable';
+  // 脚下支撑：已记录的可站立面；授权了 dig 时岩体里看不见的支撑按“大概有”规划（加 COST.unknown），到跟前看清再定。
+  const supported = (c: Cell) => {
+    const below = look(c.x, c.y - 1, c.z).kind;
+    return below === 'standable' || (below === 'unknown' && opts.dig !== undefined);
+  };
+  // 一步里有几处是按“未知但大概如此”规划的：每处加 COST.unknown，已知可走的路线优先。
+  const unsure = (cells: readonly Cell[]) => cells.filter((cell) => look(cell.x, cell.y, cell.z).kind === 'unknown').length * COST.unknown;
   // 要放方块的格：空气或可替换（草、火…）直接放；被不可替换的无碰撞物（树苗、花、火把…）占着时，
   // 授权了 dig 就先把它打掉，否则放不进去。返回要先挖的格，null 表示放不了。
   const freeing = (c: Cell): Cell[] | null => {
@@ -113,10 +122,10 @@ export async function planMakeWay(
         const feet = clearing(to), head = clearing({ ...to, y: y + 1 });
         if (feet !== null && head !== null && look(nx, y - 1, nz).kind !== 'danger') {
           const dig = [...feet, ...head];
-          if (supported(to)) candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + dig.length * COST.dig });
+          if (supported(to)) candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + dig.length * COST.dig + unsure([...dig, { x: nx, y: y - 1, z: nz }]) });
           else {
             const free = freeing({ x: nx, y: y - 1, z: nz });
-            if (free !== null) candidates.push({ step: { kind: 'move', to, dig: [...dig, ...free], place: { x: nx, y: y - 1, z: nz } }, cost: COST.move + (dig.length + free.length) * COST.dig + COST.place });
+            if (free !== null) candidates.push({ step: { kind: 'move', to, dig: [...dig, ...free], place: { x: nx, y: y - 1, z: nz } }, cost: COST.move + (dig.length + free.length) * COST.dig + COST.place + unsure(dig) });
           }
         }
       }
@@ -126,7 +135,7 @@ export async function planMakeWay(
         const lift = clearing({ x, y: y + 2, z }), feet = clearing(to), head = clearing({ ...to, y: y + 2 });
         if (lift !== null && feet !== null && head !== null && supported(to) && look(nx, y, nz).kind !== 'danger') {
           const dig = [...lift, ...feet, ...head];
-          candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + COST.stepUp + dig.length * COST.dig });
+          candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + COST.stepUp + dig.length * COST.dig + unsure([...dig, { x: nx, y, z: nz }]) });
         }
       }
       // 下落：同层两格空着、脚下空，往下找第一个已知支撑面（不挖、不越过未知格）。
@@ -147,7 +156,7 @@ export async function planMakeWay(
     // 原地垫高：方块放进身体所在的脚格（被树苗等占着要先打掉），头顶再高一格要空（或挖开）。
     {
       const free = freeing({ x, y, z }), lift = clearing({ x, y: y + 2, z });
-      if (free !== null && lift !== null) candidates.push({ step: { kind: 'pillar', to: { x, y: y + 1, z }, dig: [...free, ...lift] }, cost: COST.pillar + (free.length + lift.length) * COST.dig });
+      if (free !== null && lift !== null) candidates.push({ step: { kind: 'pillar', to: { x, y: y + 1, z }, dig: [...free, ...lift] }, cost: COST.pillar + (free.length + lift.length) * COST.dig + unsure(lift) });
     }
     for (const { step, cost } of candidates) {
       const to = step.to;
