@@ -352,12 +352,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const startChunks = ctx.memory.visitedChunkCount;
   // 这一段实际做了什么：开挖是固定方向直线施工，平地上也是一格一格迈；按实数报，不让“挖出 N 格”掩盖其实没挖。
   const workNote = () => completed ? `（${completed} 格里挖掉 ${excavated} 块、补了 ${filled} 处支撑、${openSteps} 格本来就能直接走）` : '';
-  // 一个新区块都没进时说清楚：挖出来的是新通道，但这一带以前就来过（历史事实，不替它选方向）。
-  const visitedNote = () => {
-    if (ctx.memory.visitedChunkCount > startChunks) return `，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块`;
-    const bounds = ctx.memory.visitedExtent(origin.dim).bounds;
-    return bounds === null ? '，没进新区块' : `，没进新区块（这段全在去过的区块里；${origin.dim} 区块访问外框 x ${bounds.minX}..${bounds.maxX}、z ${bounds.minZ}..${bounds.maxZ}，只是历史记录）`;
-  };
+  // 进了新区块就报；没进不另加评语：以前到过某个区块不等于那里看全了，每段都重复“没进新区块”会被读成“这条路没用”。
+  const visitedNote = () => ctx.memory.visitedChunkCount > startChunks ? `，新进入 ${ctx.memory.visitedChunkCount - startChunks} 个区块` : '';
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,

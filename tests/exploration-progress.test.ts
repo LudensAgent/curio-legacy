@@ -203,5 +203,6 @@ test('提示词用边走边看的方向探索，不再把长按 press_keys 当�
   assert.match(choose, /explore_toward 朝你选的方向边走边看/);
   assert.match(choose, /停止后按实测位置和观测决定是否续走/);
   assert.match(choose, /进入新区块[^；\n]*不等于已看清/);
-  assert.match(source, /只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算/);
+  assert.match(source, /到过的区块也不等于搜过/);
+  assert.doesNotMatch(source, /单纯位移不算/, '提示词不把沿已走过的路移动说成没有进展');
 });

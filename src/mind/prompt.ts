@@ -271,7 +271,7 @@ const ROUTINE_OF_THINKING = `【每次这样想】
 4. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
 
 const CHOOSE = `【选动作】
-- 去某处 → 按【走到哪】选；找没见过的东西 → look_around 看当前视野，explore_toward 朝你选的方向边走边看（until 在本轮视野看见就停）；停止后按实测位置和观测决定是否续走。进入新区块算探索进展但不等于已看清那片区域；只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 去某处 → 按【走到哪】选；找没见过的东西 → look_around 看当前视野，explore_toward 朝你选的方向边走边看（until 在本轮视野看见就停）；停止后按实测位置和观测决定是否续走。进入新区块不等于已看清那片区域，到过的区块也不等于搜过——隧道里只看得见沿途；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…"} 查它在哪个箱子，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与是否改变地形由你决定。

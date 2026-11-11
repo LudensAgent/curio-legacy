@@ -974,6 +974,11 @@ export class Mind {
       ...(record.completion === 'attempt' ? [`有界尝试：${a.attemptOnly?.reason ?? '收工条件不能验收目标'}（操作结束不代表目标完成）`] : []),
       ...(record.resource?.goalIncomplete ? [`资源目标未完成（定位${record.resource.located ? '是' : '否'}、取得${record.resource.acquired ? '是' : '否'}）`] : []),
       ...(a.planCoverageGap ? [`计划覆盖缺口：${a.planCoverageGap}`] : []),
+      // 这一趟离入口的最远点在这段活里推进了：如实说推进到多远（沿旧路走回前沿同样算，不看是否进了新区块）。
+      ...(this.safe(() => this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt), false) ? (() => {
+        const leg = this.d.excursions!.current(state.worldId)!;
+        return [`这一趟身体站过的离入口最远点推进到 ${leg.farthest.dist} 格 (${leg.farthest.x},${leg.farthest.y},${leg.farthest.z})`];
+      })() : []),
       ...(record.exploration?.localOnly ? [`本次实测离起点最远 ${record.exploration.maxHorizontal.toFixed(1)} 格、访问 ${record.exploration.visitedCells} 个脚格、新区块 +${newChunks ?? 0}；只在原地/附近观察，不能说明远处区域已搜索`] : []),
     ];
     if (completionNotes.length) {

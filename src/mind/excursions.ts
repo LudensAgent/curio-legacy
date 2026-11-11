@@ -165,6 +165,9 @@ export class ExcursionLog {
     this.respawning = true;
   }
 
+  /** 当前还没结束的一段（只读）。 */
+  current(worldId: string): Readonly<Leg> | undefined { return this.open(worldId); }
+
   /** 当前这段从 since 之后，离入口的最远点是否又推进了至少一个检查点（FRONTIER_STEP 格）。 */
   frontierAdvancedSince(worldId: string, since: number): boolean {
     const leg = this.open(worldId);
