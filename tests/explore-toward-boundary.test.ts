@@ -191,7 +191,8 @@ test('未开启探索标志的 advance 在分段上限处仍按原语义停在�
   const result = await advance.run(ctx, validation.args);
 
   assert.equal(result.status, 'failed', result.summary);
-  assert.equal((result.data?.stop as { reason: string }).reason, 'UNKNOWN_BOUNDARY');
+  // 唯一的一段走到已知通道尽头的前沿就用完。
+  assert.equal((result.data?.stop as { reason: string }).reason, 'BUDGET_EXHAUSTED');
   assert.equal(observations, 0, '通用 advance 不因本次探索修复而自动扩大观察范围');
   assert.ok(Math.floor(adapter.pos.x) <= 3, `只走到已知前缀（实际 x=${adapter.pos.x}）`);
 });

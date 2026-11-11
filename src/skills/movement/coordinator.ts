@@ -8,6 +8,7 @@ import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal
 import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
+import { farthestFrontier } from './frontier.ts';
 import { swimPath } from './water.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
@@ -439,6 +440,17 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const voxel = spatial.session.voxel;
       const goalAt = (pos: Vec3Like): NavigationGoal => {
         if (session.intent.kind === 'navigate') return goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
+        // 方向探索就是去一个目的地：已记录体素里沿方向最远、可站立且紧挨未知的前沿；寻路负责怎么走过去。
+        // 没有前沿（前方全已知或全未知）时，按冻结方向取前方路点。
+        const frontier = session.bearing === undefined ? null : farthestFrontier(voxel, scope.dim, {
+          origin: session.frozenOrigin, bearing: session.bearing,
+          maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance,
+        }, pos, (cell) => triedFrontiers.has(cellText(cell)));
+        if (frontier !== null) {
+          frontierGoal = cellText(frontier);
+          return cellGoal({ x: Math.floor(frontier.x), z: Math.floor(frontier.z) }, frontier.y, frontier);
+        }
+        frontierGoal = undefined;
         const waypoint = waypointOf(session, pos, request.maxStepsPerSegment,
           (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
         const goal = cellGoal(waypoint, waypoint.y, waypoint);
@@ -451,6 +463,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         return goal;
       };
+      let frontierGoal: string | undefined;
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
         goal: goalAt(state.pos),
@@ -495,6 +508,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         + Math.abs(after.pos.y - segment.measuredStart.y);
       const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
       if (!progressed) session.counters.idleSearches += segment.searches;
+      // 朝这个前沿走不出一步：换下一个前沿，不反复挑同一处。
+      if (!progressed && frontierGoal !== undefined) triedFrontiers.add(frontierGoal);
       if (!isReplan) {
         // 原地补证据不是一次身体执行；保留本次窗口，观察成功后仍能执行原委托。
         // 搜索、观察、无进展次数与 deadline 继续约束原地重试。

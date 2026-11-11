@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { farthestFrontier } from '../src/skills/movement/frontier.ts';
 import { advance } from '../src/skills/movement/index.ts';
 import { acquireSessionLease, clearMovementSessions, findMovementSession, releaseSessionLease } from '../src/skills/movement/session.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
@@ -182,7 +183,8 @@ test('方向推进走到已知坡道的真实前沿，不在坡道中途声称�
   t.after(() => ctx.memory.close());
   const result = await advance.run(ctx, args({ direction: 'E', distance: 20, maxSegments: 1, maxStepsPerSegment: 16 }));
   assert.equal(result.status, 'failed', result.summary);
-  assert.equal((result.data?.stop as { reason: string }).reason, 'UNKNOWN_BOUNDARY');
+  // 这一段直接以已知坡道末端的前沿为目的地，到达后唯一的一段用完。
+  assert.equal((result.data?.stop as { reason: string }).reason, 'BUDGET_EXHAUSTED');
   assert.deepEqual(adapter.pos, { x: 12.5, y: 52, z: 0.5 });
   assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 12);
   assert.equal((result.data?.progress as { along: number }).along, 12);
@@ -255,8 +257,8 @@ test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕�
   assert.ok(progress.along >= 19.99, `along=${progress.along}`);
   assert.ok(progress.lateral <= 1.01, `final lateral=${progress.lateral}`);
   const counters = r.data?.counters as { confirmedRouteLength: number };
-  // 绕过三格墙比直行 20 格长；斜向绕行比只横移更短（约 20 + 2(√2−1)）。
-  assert.ok(counters.confirmedRouteLength > 20.5, `detour path=${counters.confirmedRouteLength}`);
+  // 绕过三格墙比直行 20 格长；朝走廊内的前沿斜插一次即可（约 20 + (√2−1)）。
+  assert.ok(counters.confirmedRouteLength > 20.3, `detour path=${counters.confirmedRouteLength}`);
   assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '绕行也只迈步，不挖/不放');
 });
 
@@ -559,4 +561,28 @@ test('前方有墙：像 pathfinder 一样先走到离目标最近的已达格�
   t.after(() => ctx.memory.close());
   const result = await advance.run(ctx, args({ direction: 'E', distance: 32, maxLateralDrift: 4 }));
   assert.ok(Math.floor(adapter.pos.x) >= 7, `走到墙跟前（实测 x=${adapter.pos.x.toFixed(2)}）：${result.summary}`);
+});
+
+test('方向探索直接以已记录体素里沿方向最远的前沿为目的地，不受周边扫描半径限制', async (t) => {
+  // 已知通道一直延伸到 x=60（远超 16 格），x=61 以后未知；中间 x=20 有一面墙，需沿 z=2 的岔道绕过。
+  const wall = (x: number, _y: number, z: number) => x === 20 && z <= 1;
+  const map = corridor(60, -1, [-1, 2], wall);
+  fill(map, 'minecraft:netherrack', [-1, 0, 1].flatMap((z) => [63, 64, 65, 66].map((y) => ({ x: 20, y, z }))));
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const result = await advance.run(ctx, args({ direction: 'E', distance: 96, maxLateralDrift: 4 }));
+  assert.ok(Math.floor(adapter.pos.x) >= 59, `走到远处前沿（实测 x=${adapter.pos.x.toFixed(2)}）：${result.summary}`);
+});
+
+test('farthestFrontier：在走廊内找沿方向最远、可站立且紧挨未知的格；试过的跳过；前方全已封闭时没有前沿', (t) => {
+  const map = corridor(60, -1, [-1, 2]);
+  const at = { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 1, z: 0 }, maxLateral: 4, maxAlong: 200 };
+  const far = farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, () => false);
+  assert.deepEqual(far && { x: Math.floor(far.x), y: far.y }, { x: 60, y: 64 }, '远超 16 格的已知通道尽头');
+  const next = farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, (cell) => Math.floor(cell.x) === 60);
+  assert.ok(next !== null && Math.floor(next.x) < 60, '试过的前沿跳过，换下一个');
+  t.diagnostic(`next=${JSON.stringify(next)}`);
+  const closed = corridor(8, -1, [-1, 1]);
+  fill(closed, 'minecraft:netherrack', [-2, -1, 0, 1, 2].flatMap((z) => [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x: z === -2 || z === 2 || x === 9 || x === -1 ? x : 99, y, z })))));
+  assert.equal(farthestFrontier(closed, DIM, { ...at, maxLateral: 1 }, { x: 0.5, y: 64, z: 0.5 }, () => false), null, '前方被已知的墙围死：没有前沿');
 });
