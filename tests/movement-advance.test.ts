@@ -548,3 +548,15 @@ test('advance 参数校验：拒绝对角线、区域/until 与越界距离', ()
   }
   assert.equal(advance.validate({ direction: 'E', distance: 20 }, adapter).ok, true);
 });
+
+test('前方有墙：像 pathfinder 一样先走到离目标最近的已达格，不在原地停下', async (t) => {
+  const map = corridor(8, -1, [-3, 3]);
+  // x=9 整面墙，墙后未知；走廊内全部已观测。
+  fill(map, 'minecraft:netherrack', [-3, -2, -1, 0, 1, 2, 3].flatMap((z) => [63, 64, 65, 66, 67].map((y) => ({ x: 9, y, z }))));
+  fill(map, 'minecraft:netherrack', [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((x) => [-4, 4].flatMap((z) => [63, 64, 65, 66].map((y) => ({ x, y, z })))));
+  fill(map, 'minecraft:netherrack', [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap((x) => [-3, -2, -1, 0, 1, 2, 3].map((z) => ({ x, y: 67, z }))));
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const result = await advance.run(ctx, args({ direction: 'E', distance: 32, maxLateralDrift: 4 }));
+  assert.ok(Math.floor(adapter.pos.x) >= 7, `走到墙跟前（实测 x=${adapter.pos.x.toFixed(2)}）：${result.summary}`);
+});

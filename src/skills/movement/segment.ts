@@ -380,8 +380,14 @@ async function runNavigationSegmentInner(
     // 范围导航可从已知前缀端点观察绕路。远端一条出边碰墙，不会使到端点的 OPEN 路段失效。
     const approachBlocker = goal.arrival !== undefined && result.status === 'INSUFFICIENT_EVIDENCE'
       && prefix?.knownBlockerAhead?.status === 'BLOCKED';
+    // 像 pathfinder 的部分路线：到不了目标时，走到离目标最近的已达格。只要它确实更近（≥1 格），
+    // 尽头有墙也照走，到了从实测位置重新搜索；不再更近才算真走不通，交给协调器绕行。
+    const from = result.from, to = result.target;
+    const startDistance = result.goalMetric === 'horizontal' ? Math.hypot(to.x - from.x, to.z - from.z)
+      : Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+    const closer = prefix !== undefined && prefix.distanceToTarget <= startDistance - 1;
     const usable = prefix !== undefined && prefix.transitions.length > 0
-      && (prefix.knownBlockerAhead === undefined || reachesArrival || approachBlocker);
+      && (prefix.knownBlockerAhead === undefined || reachesArrival || approachBlocker || closer);
     return { usable, reachesArrival };
   };
   /**

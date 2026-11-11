@@ -204,7 +204,8 @@ test('STALE 刷新证据后重新规划；BLOCKED/UNSUPPORTED 在证据不变时
     t.after(() => ctx.memory.close());
     const blocked = await navigateTo.run(ctx, navArgs());
     assert.equal((blocked.data?.blockerAhead as { status?: string } | undefined)?.status, 'UNSUPPORTED');
-    assert.equal(adapter.actions.length, 0, '能力缺口前不自动前进');
+    assert.ok(adapter.actions.every((action) => action.startsWith('moveTo')), '只走路，不挖不放');
+    assert.ok(Math.floor(adapter.pos.x) < 4, '可以沿部分路线走到缺口跟前，但不进入能力缺口');
     // 显式观察：同一格现在确认是空气（世界已变化/更清晰的证据），不是宿主改挖法。
     observe(map, 'minecraft:air', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }]);
     observe(map, 'minecraft:air', [5, 6].flatMap((x) => [{ x, y: 64, z: 0 }, { x, y: 65, z: 0 }]));
