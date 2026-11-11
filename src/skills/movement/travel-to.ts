@@ -236,6 +236,9 @@ export const travelTo: Skill<TravelToArgs> = {
       maxSegments: MAX_SEGMENTS,
       // 边走边规划时每接一段窗口、每次绕路都要搜索：预算约每格一次，只防无限循环，不截断长途委托。
       maxSearches: Math.min(128, 16 + Math.ceil(direct)),
+      // 观察次数同理：长途上每遇到一段证据边界都可能要看一眼，默认 2 次会截断委托。
+      maxObservations: Math.min(64, 8 + Math.ceil(direct / 4)),
+      maxObservedCells: Math.min(4096, 512 + Math.ceil(direct) * 16),
       deadlineMs: deadline,
       ...(args.sessionId === undefined ? {} : { sessionId: args.sessionId }),
     }, adapter);

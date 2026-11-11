@@ -123,7 +123,31 @@ test('真实物理：连续上台阶从格列远端起步也能跳上去，不�
   assert.equal(result.status, 'succeeded', result.summary);
   assert.ok(dispatches.slice(0, -1).every((dispatch) => dispatch.continuous));
   const { stopped, back } = middle(frames, dispatches);
-  assert.equal(stopped, 0, '中间没有停车帧');
+  assert.ok(stopped <= 2, `贴墙起跳时每级台阶最多 1 帧速度归零，实际 ${stopped} 帧`);
   assert.equal(back, 0, '中间没有后退修正');
   assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [9, 66, 0]);
+});
+
+test('真实物理：上一级台阶后接平地，起跳不越过台阶上的落点，一路不停车', { timeout: 30_000 }, async (t) => {
+  const { ctx, timer, entity, frames, dispatches } = setup((x) => x >= 3 ? 64 : 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 12, z0: -2, z1: 2 });
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const result = await navigateTo.run(ctx, { to: { x: 8, y: 65, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.replanCount, undefined, `没有因越过落点而重新规划：${result.summary}`);
+  assert.ok(dispatches.slice(0, -1).every((dispatch) => dispatch.continuous));
+  const { back } = middle(frames, dispatches);
+  assert.equal(back, 0, '中间没有后退修正');
+  assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [8, 65, 0]);
+});
+
+test('真实物理：上台阶后紧接转弯，起跳惯性不越过转弯点', { timeout: 30_000 }, async (t) => {
+  // x≥3 一侧高一格；z 方向只开一条 x=3 的通道，上台阶后必须转向 +z。
+  const { ctx, timer, entity, frames, dispatches } = setup((x, z) => x >= 4 && z < 1 ? 70 : x >= 3 ? 64 : 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 8, z0: -2, z1: 8 });
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const result = await navigateTo.run(ctx, { to: { x: 3, y: 65, z: 6 }, allowed: ['walk', 'step'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.replanCount, undefined, `没有因越过落点而重新规划：${result.summary}`);
+  const { back } = middle(frames, dispatches);
+  assert.equal(back, 0, '中间没有后退修正');
+  assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [3, 65, 6]);
 });

@@ -110,7 +110,7 @@ export const navigateTo: Skill<NavigateArgs> = {
     }
     const ints: [string, number, number][] = [
       ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 1024],
-      ['maxSearches', 1, 128], ['maxObservations', 0, 8], ['maxObservedCells', 0, 512],
+      ['maxSearches', 1, 128], ['maxObservations', 0, 64], ['maxObservedCells', 0, 4096],
       ['maxNoProgressSegments', 1, 8],
     ];
     for (const [key, min, max] of ints) {

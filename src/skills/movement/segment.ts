@@ -965,6 +965,7 @@ async function runNavigationSegmentInner(
     let actionError: unknown = null;
     let continuous = false;
     let passColumn = false;
+    let cellFinish = false;
     if (transition.kind === 'jump') {
       const remaining = request.deadline - Date.now();
       if (remaining < 1) {
@@ -1047,7 +1048,11 @@ async function runNavigationSegmentInner(
         && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical)
         && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
         && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
-      passColumn = continuous && (sameHeading || transition.kind === 'drop' || windowEnd);
+      // 原目标是一个格子时，最后一步只需站进这一格并停稳，不必对准计划里的连续点。
+      cellFinish = next === undefined && !directionalFinish && request.goal.kind === 'cell' && smallEdge(transition)
+        && goalReached(request.goal, transition.to, true);
+      // 台阶与落差有腾空段，落点难精确命中：站进目标格列即交接，下一段从实测位置复验。
+      passColumn = cellFinish || continuous && (sameHeading || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
       try {
         execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(
@@ -1057,7 +1062,8 @@ async function runNavigationSegmentInner(
             // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。一格内的步行/台阶/落差
             // 正常不到 1 秒，3 秒没落位就按执行偏差处理；多格下落保留更长时限。
             timeoutMs: Math.min(transition.kind === 'drop' && drop > 1 + FEET_ARRIVAL_TOLERANCE.vertical ? 6000 : 3000, Math.floor(remaining)),
-            ...(continuous ? { settleAtTarget: false, ...(passColumn ? { passColumn: true } : {}) } : {}),
+            ...(continuous ? { settleAtTarget: false } : {}),
+            ...(passColumn ? { passColumn: true } : {}),
             ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: directionalFinish ? { ...request.corridor, minimumAlong: request.minimumAlong } : request.corridor }),
           },
@@ -1128,9 +1134,9 @@ async function runNavigationSegmentInner(
     }
 
     const arrived = ctx.adapter.state();
-    // 停稳的地面 transition 必须在原计划连续端点落稳；格列交接的中间点按实测站进目标格列、
-    // 脚高相符确认，下一段再从这个实测位置复验真实几何。
-    const reached = passColumn
+    // 停稳的地面 transition 必须在原计划连续端点落稳；不停车交接的中间点按实测站进目标格列、
+    // 脚高相符确认（与身体控制的交接口径一致），下一段再从这个实测位置复验真实几何。
+    const reached = continuous || cellFinish
       ? arrived.onGround && Math.floor(arrived.pos.x) === Math.floor(transition.to.x) && Math.floor(arrived.pos.z) === Math.floor(transition.to.z)
         && Math.abs(arrived.pos.y - transition.to.y) <= FEET_ARRIVAL_TOLERANCE.vertical
       : transitionReached(request, transition, arrived.pos, arrived.onGround);

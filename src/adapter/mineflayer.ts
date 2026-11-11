@@ -19,6 +19,20 @@ import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproa
 import { MAX_STEP_RISE, MAX_WALK_TO_DISTANCE } from 'curio-minecraft-3d-memory';
 import { FEET_ARRIVAL_TOLERANCE } from './types.ts';
 
+/** 常见伤害类型的中文说明（1.20.1 minecraft:damage_type）；未列出的直接报原名。 */
+const DAMAGE_LABEL: Record<string, string> = {
+  in_fire: '站在火里', on_fire: '身上着火', lava: '岩浆', hot_floor: '踩在岩浆块等热地面上', fall: '摔落',
+  drown: '溺水', in_wall: '卡在方块里窒息', cactus: '仙人掌', sweet_berry_bush: '甜浆果丛', starve: '饥饿',
+  mob_attack: '生物近战攻击', mob_attack_no_aggro: '生物近战攻击', player_attack: '玩家攻击', arrow: '箭',
+  trident: '三叉戟', fireball: '火球', unattributed_fireball: '火球', mob_projectile: '生物弹射物',
+  explosion: '爆炸', player_explosion: '爆炸', bad_respawn_point: '床/重生锚爆炸', magic: '魔法/药水',
+  indirect_magic: '魔法/药水', wither: '凋零效果', wither_skull: '凋零之首', freeze: '冰冻（细雪）',
+  lightning_bolt: '闪电', falling_block: '坠落方块', falling_anvil: '铁砧', falling_stalactite: '钟乳石',
+  stalagmite: '石笋', fly_into_wall: '撞墙（滑翔）', out_of_world: '掉出世界', dragon_breath: '龙息',
+  sting: '蜜蜂蜇', thorns: '荆棘', sonic_boom: '监守者音波', generic: '通用伤害', generic_kill: '被杀死',
+  cramming: '实体挤压', outside_border: '世界边界外', thrown: '投掷物',
+};
+
 import type {
   InvItem,
   InventorySlot,
@@ -504,6 +518,22 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     bot.on('entityEffect', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.set(eff.id, Date.now()); });
     bot.on('entityEffectEnd', (e: any, eff: any) => { if (e === bot.entity) this.effectSeenAt.delete(eff.id); });
     bot.on('respawn', () => { resetOwnOxygen(bot); this.newSession(); this.emit('respawn'); });
+    // 1.20+ 服务器在 damage_event 里直接给出伤害类型与来源实体；登录包的注册表给出类型 ID 对应的名字。
+    // 挂在 mineflayer 自己的 damage_event 处理之前：它会同步发出 entityHurt，此时要已经记下这次伤害。
+    bot._client.on('login', (packet: any) => {
+      const list = (packet?.dimensionCodec ? simplify(packet.dimensionCodec) : undefined)?.['minecraft:damage_type']?.value;
+      if (Array.isArray(list)) this.damageTypes = new Map(list.map((entry: any) => [Number(entry.id), String(entry.name).replace(/^minecraft:/, '')]));
+    });
+    bot._client.prependListener('damage_event', (packet: any) => {
+      if (packet?.entityId !== bot.entity?.id) return;
+      const entity = (id: number) => id > 0 ? bot.entities[id - 1] : undefined;
+      const describe = (e: any) => e ? `${e.username ?? e.name ?? e.type ?? 'entity'}${e.position && bot.entity?.position ? ` ${e.position.distanceTo(bot.entity.position).toFixed(1)} 格` : ''}` : undefined;
+      const cause = entity(packet.sourceCauseId), direct = entity(packet.sourceDirectId);
+      this.lastDamage = {
+        type: this.damageTypes.get(packet.sourceTypeId) ?? `damage_type#${packet.sourceTypeId}`,
+        cause: describe(cause), direct: direct !== cause ? describe(direct) : undefined, at: Date.now(),
+      };
+    });
     bot.on('entityHurt', (e: any) => {
       if (e === bot.entity) this.emit('hurt', this.hurtCause());
     });
@@ -942,6 +972,13 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready) return '';
     const b = this.bot, p = b.entity.position;
     const out: string[] = [];
+    // 服务器给出的伤害事实优先：类型（火、岩浆、摔落、溺水、生物攻击……）与造成伤害的实体。
+    const damage = this.lastDamage !== null && Date.now() - this.lastDamage.at < 1000 ? this.lastDamage : null;
+    if (damage) {
+      out.push(`伤害类型 ${damage.type}${DAMAGE_LABEL[damage.type] ? `（${DAMAGE_LABEL[damage.type]}）` : ''}`);
+      if (damage.cause) out.push(`来源 ${damage.cause}`);
+      if (damage.direct) out.push(`直接命中 ${damage.direct}`);
+    }
     const at = (dx: number, dy: number, dz: number) => b.blockAt(p.offset(dx, dy, dz))?.name as string | undefined;
     const touching = new Set([at(0, 0, 0), at(0, 1, 0)].filter((n): n is string => !!n && !/^(air|cave_air|void_air)$/.test(n)));
     for (const n of touching) out.push(`身体碰着 ${n}`);
@@ -959,7 +996,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     for (const e of ranged) out.push(`${e.name} 在 ${e.dist.toFixed(1)} 格`);
     if (ownOxygen(b) <= 0) out.push('没气了');
     if ((b.food ?? 20) <= 0) out.push('饿着');
-    return out.slice(0, 4).join('、');
+    return out.slice(0, damage ? 6 : 4).join('、');
   }
 
   async moveTo(target: MoveTarget, opts: MoveOpts): Promise<void> {
@@ -995,7 +1032,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         sprint,
         opts.maxDropDown,
         opts.settleAtTarget !== false,
-        opts.settleAtTarget === false && opts.passColumn === true,
+        opts.passColumn === true,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
@@ -1340,7 +1377,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const p = b.entity.position;
       return corridor.minimumAlong - ((p.x - corridor.origin.x) * corridor.bearing.x + (p.z - corridor.origin.z) * corridor.bearing.z);
     };
-    const settled = () => atEndpoint() && alongRemaining() <= 0;
+    // 中间点脚位窗：冲过了一点但仍站在目标格内、脚高相符，也算到位（交接后从实测位置复验下一段）。
+    const overshotInColumn = () => !settleAtTarget && mode === 'feet' && b.entity.onGround
+      && Math.abs(b.entity.position.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical
+      && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz;
+    const passedPoint = () => -(b.entity.position.x - tx) * Math.sin(heading) - (b.entity.position.z - tz) * Math.cos(heading) > 0;
+    const settled = () => (atEndpoint() || overshotInColumn() && passedPoint()) && alongRemaining() <= 0;
     const p0 = b.entity.position;
     const p0y = p0.y;
     const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
@@ -1367,8 +1409,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const p = b.entity.position;
       if (mode !== 'feet' || settleAtTarget || !b.entity.onGround || Math.abs(p.y - target.y) > FEET_ARRIVAL_TOLERANCE.vertical || atEndpoint()) return 0;
       const past = -(p.x - tx) * Math.sin(heading) - (p.z - tz) * Math.cos(heading);
-      // 格列验收时，只有越过目标格列（落在下一列）才算越过中间点。
-      return passColumn ? past - 0.5 : past;
+      // 格列验收时，只有越过目标格列（落在下一列）才算越过中间点；脚位窗验收时，仍在目标格内的少量冲过算到位。
+      if (passColumn) return past - 0.5;
+      return Math.floor(p.x) === fx && Math.floor(p.z) === fz ? 0 : past;
     };
     const checkPosition = () => {
       if (p0y - b.entity.position.y > maxDropDown + FEET_ARRIVAL_TOLERANCE.vertical) {
@@ -1422,17 +1465,33 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let overshot = false;
     let crossedCheckpoint = false;
     let coastingToCheckpoint = false;
+    let airCoast = false;
     let previousX = p0.x, previousZ = p0.z;
     let wake: (() => void) | undefined;
     const stopWaiting = () => wake?.();
     const onPhysicsTick = () => {
       if (crossedCheckpoint || signal.aborted || !ownsControls()) return;
       if (stepUp) b.setControlState('jump', holdJump());
+      // 已升过台阶、身体在目标格上方：松开前进在空中减速，落在这一格里，不被起跳惯性带到下一格。
+      if (stepUp && !b.entity.onGround && b.entity.position.y >= target.y - 0.05
+        && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz) {
+        b.setControlState('forward', false);
+        b.setControlState('sprint', false);
+        airCoast = true;
+        return;
+      }
+      // 落地后恢复前进：落点可能还差一点才到目标点。
+      if (airCoast && b.entity.onGround) {
+        airCoast = false;
+        b.setControlState('forward', true);
+      }
       const e = b.entity;
       const p = e.position, v = e.velocity;
       const stepX = p.x - previousX, stepZ = p.z - previousZ;
       previousX = p.x; previousZ = p.z;
-      if (!atEndpoint() && passedIntermediate() <= 1e-9 && !(flatFinish && e.onGround && v && dist() <= flatBrakeDistance(Math.hypot(v.x, v.z)))) {
+      const pastPoint = -(p.x - tx) * Math.sin(heading) - (p.z - tz) * Math.cos(heading);
+      const handOff = atEndpoint() || overshotInColumn() && pastPoint > 0;
+      if (!handOff && passedIntermediate() <= 1e-9 && !(flatFinish && e.onGround && v && dist() <= flatBrakeDistance(Math.hypot(v.x, v.z)))) {
         // 若松键一帧就能入窗，而再走一帧后惯性会滑出，先滑入。下一帧仍读实际落脚。
         const coast = !settleAtTarget && !passColumn && !horizontalJump && e.onGround && v
           && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical
@@ -1459,7 +1518,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       // 水平推进：按当前速度与「地面→下落」的状态变化估算制动距离，只有当身体会停在目标列内才松键。
       // 下降时身体离开支撑、水平速度在空中衰减更慢，须更早松键，让速度在到达边缘时降到能靠空中滑行落到中心。
       // 不以固定水平距离提前刹车——否则寻路停在距中心很近但仍由原支撑托住时，刚前进就松键、一步迈不出去。
-      while (!crossedCheckpoint && !atEndpoint() && Date.now() < deadline) {
+      while (!crossedCheckpoint && !atEndpoint() && !(overshotInColumn() && passedPoint()) && Date.now() < deadline) {
         check();
         checkPosition();
         if (horizontalJump && needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
@@ -5226,6 +5285,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    */
   /** 最近一次自己推进到的船位置（见 ride 里的说明） */
   private lastBoat: { v: any; pos: any; at: number } | null = null;
+  /** 登录包注册表里的伤害类型 ID → 名字（1.20.1 的 minecraft:damage_type）。 */
+  private damageTypes = new Map<number, string>();
+  /** 最近一次自己受到的伤害（damage_event），供 hurt 事件报告真实来源。 */
+  private lastDamage: { type: string; cause?: string; direct?: string; at: number } | null = null;
   async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;
