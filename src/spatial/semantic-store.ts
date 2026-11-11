@@ -71,8 +71,6 @@ const keyOf = (p: Vec3Like) => `${Math.round(p.x)},${Math.round(p.y)},${Math.rou
 const sourcePoint = (fact: PlaceFact): Vec3Like =>
   fact.location.kind === 'exact' ? fact.location.pos : fact.location.center;
 
-/** 语义事实全量重扫间隔：只用来发现其他写入方新增的事实。 */
-const SEMANTIC_RESCAN_MS = 30_000;
 /** 重复看见已记地标时，至少隔这么久才刷新一次它的观察时间。 */
 const LANDMARK_REFRESH_MS = 60_000;
 
@@ -153,20 +151,20 @@ export class SpatialSemanticStore {
 
   // ---------------------------------------------------------------- fact cache
 
+  /**
+   * 事实端口的本地投影。有效性只看库的写入修订号（任何真实改动都会 +1，含别的模块直接写库）：
+   * 修订号没变就复用；自己写入后按返回的记录就地更新一条并跟上修订号，不再整表重读。
+   * 以前每次写入都清空缓存、下一次读取再按 100 条一页全量翻页（每页都从头扫一遍，约 O(N²/100)）
+   * 并逐条克隆，视觉每帧的地标写入因此把主线程卡到几百毫秒到一秒以上。
+   */
   private cache: {
-    at: number;
     revision: number;
-    resourceOffsets: Map<string, number>;
     places: PlaceFact[];
     resources: ResourceAnchorFact[];
     containers: ContainerAnchorFact[];
-    placesById: Map<string, PlaceFact>;
-    containersById: Map<string, ContainerAnchorFact>;
+    at: { places: Map<string, number>; resources: Map<string, number>; containers: Map<string, number> };
+    live: { places?: PlaceFact[]; resources?: ResourceAnchorFact[]; containers?: ContainerAnchorFact[] };
   } | null = null;
-
-  private invalidate(): void {
-    this.cache = null;
-  }
 
   private page<T>(query: (after: string | undefined) => { items: T[]; nextAfter?: string }): T[] {
     const out: T[] = [];
@@ -181,64 +179,98 @@ export class SpatialSemanticStore {
   }
 
   private snapshot(): NonNullable<SpatialSemanticStore['cache']> {
-    const now = Date.now();
-    if (this.cache !== null && now - this.cache.at <= SEMANTIC_RESCAN_MS) return this.cache;
+    const revision = this.facts.revision;
+    if (this.cache !== null && this.cache.revision === revision) return this.cache;
     const places = this.page((after) => this.session.facts.places({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const resources = this.page((after) => this.session.facts.resources({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
     const containers = this.page((after) => this.session.facts.containers({ worldId: this.worldId, includeGone: true, after, limit: 100 }));
-    this.cache = { at: now, places, resources, containers, revision: this.facts.revision,
-      resourceOffsets: new Map(resources.map((fact, i) => [fact.id, i])),
-      placesById: new Map(places.map((fact) => [fact.id, fact])),
-      containersById: new Map(containers.map((fact) => [fact.id, fact])),
-    };
+    const positions = <T extends { id: string }>(list: T[]) => new Map(list.map((fact, i) => [fact.id, i]));
+    this.cache = { revision, places, resources, containers, at: { places: positions(places), resources: positions(resources), containers: positions(containers) }, live: {} };
+    // 资源近邻索引是同一投影的派生：整表重读时一起作废，下次用到再从缓存建。
+    this.resourceIndex = null;
     return this.cache;
+  }
+
+  /**
+   * 自己的一次写入落库后，把库返回的记录并进缓存。写入前的修订号对不上（期间有别处写过库），
+   * 就整个作废，下次读取按库重读；对得上就只改这一条。新 id 按库的分页顺序（id 字典序）插入，
+   * 保证 find 的先后与全量重读一致。
+   */
+  private stored(kind: 'places', before: number, record: PlaceFact): void;
+  private stored(kind: 'resources', before: number, record: ResourceAnchorFact): void;
+  private stored(kind: 'containers', before: number, record: ContainerAnchorFact): void;
+  private stored(kind: 'places' | 'resources' | 'containers', before: number, record: PlaceFact | ResourceAnchorFact | ContainerAnchorFact): void {
+    const cache = this.cache;
+    if (cache === null || cache.revision !== before) { this.cache = null; this.resourceIndex = null; return; }
+    const list = cache[kind] as { id: string }[], at = cache.at[kind];
+    const i = at.get(record.id);
+    if (i !== undefined) list[i] = record;
+    else {
+      let low = 0, high = list.length;
+      while (low < high) { const middle = (low + high) >>> 1; if (list[middle]!.id <= record.id) low = middle + 1; else high = middle; }
+      list.splice(low, 0, record);
+      for (let k = low; k < list.length; k++) at.set(list[k]!.id, k);
+    }
+    cache.live[kind] = undefined;
+    cache.revision = this.facts.revision;
+  }
+
+  private factById<K extends 'places' | 'resources' | 'containers'>(kind: K, id: string): NonNullable<SpatialSemanticStore['cache']>[K][number] | undefined {
+    const snapshot = this.snapshot();
+    const i = snapshot.at[kind].get(id);
+    return i === undefined ? undefined : snapshot[kind][i];
   }
 
   // ------------------------------------------------------------- business state
 
   private placeRecord(id: string): HostPlaceRecord | undefined {
-    return this.snapshot().placesById.get(id)?.hostData as HostPlaceRecord | undefined;
+    return this.factById('places', id)?.hostData as HostPlaceRecord | undefined;
   }
 
   private containerRecord(id: string): HostContainerRecord | undefined {
-    return this.snapshot().containersById.get(id)?.hostData as HostContainerRecord | undefined;
+    return this.factById('containers', id)?.hostData as HostContainerRecord | undefined;
   }
 
   private notePlaceRecord(id: string, patch: Partial<HostPlaceRecord>): void {
-    const fact = this.snapshot().places.find((candidate) => candidate.id === id);
+    const fact = this.factById('places', id);
     if (fact === undefined) return;
-    this.session.facts.updateHostData('place', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
-    this.invalidate();
+    const before = this.facts.revision;
+    const { record } = this.session.facts.updateHostData('place', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
+    this.stored('places', before, record as PlaceFact);
   }
 
   private noteContainerRecord(id: string, patch: Partial<HostContainerRecord>): void {
-    const fact = this.snapshot().containers.find((candidate) => candidate.id === id);
+    const fact = this.factById('containers', id);
     if (fact === undefined) return;
-    this.session.facts.updateHostData('container', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
-    this.invalidate();
+    const before = this.facts.revision;
+    const { record } = this.session.facts.updateHostData('container', id, jsonRecord({ ...fact.hostData, ...patch }) as JsonObject);
+    this.stored('containers', before, record as ContainerAnchorFact);
   }
 
   // --------------------------------------------------------------- write paths
 
   private upsertPlace(fact: PlaceFact): PlaceFact {
-    const hostData = fact.hostData ?? this.snapshot().places.find((existing) => existing.id === fact.id)?.hostData;
+    const hostData = fact.hostData ?? this.factById('places', fact.id)?.hostData;
+    const before = this.facts.revision;
     const result = this.session.facts.upsertPlace(hostData === undefined ? fact : { ...fact, hostData });
-    this.invalidate();
+    this.stored('places', before, result.record);
     return result.record;
   }
 
   private upsertResource(fact: ResourceAnchorFact): ResourceAnchorFact {
-    const hostData = fact.hostData ?? this.snapshot().resources.find((existing) => existing.id === fact.id)?.hostData;
+    const hostData = fact.hostData ?? this.factById('resources', fact.id)?.hostData;
+    const before = this.facts.revision;
     const result = this.session.facts.upsertResource(hostData === undefined ? fact : { ...fact, hostData });
-    this.invalidate();
+    this.stored('resources', before, result.record);
     this.applyResourceFact(result.record);
     return result.record;
   }
 
   private upsertContainer(fact: ContainerAnchorFact): ContainerAnchorFact {
-    const hostData = fact.hostData ?? this.snapshot().containers.find((existing) => existing.id === fact.id)?.hostData;
+    const hostData = fact.hostData ?? this.factById('containers', fact.id)?.hostData;
+    const before = this.facts.revision;
     const result = this.session.facts.upsertContainer(hostData === undefined ? fact : { ...fact, hostData });
-    this.invalidate();
+    this.stored('containers', before, result.record);
     return result.record;
   }
 
@@ -261,21 +293,22 @@ export class SpatialSemanticStore {
 
   private markPlaceFactGone(fact: PlaceFact, reason?: string): void {
     const evidence = this.placeGoneEvidence(reason, fact);
-    this.session.facts.markPlaceGone(fact.id, evidence);
-    this.invalidate();
+    const before = this.facts.revision;
+    this.stored('places', before, this.session.facts.markPlaceGone(fact.id, evidence).record);
   }
 
   private revokeResourceFact(fact: ResourceAnchorFact, reason?: string): void {
     const evidence = this.placeGoneEvidence(reason, fact);
-    this.session.facts.revokeResource(fact.id, evidence);
-    this.invalidate();
-    this.applyResourceFact({ ...fact, revoked: true, revokedAt: evidence.observedAt, revokedSource: evidence.source });
+    const before = this.facts.revision;
+    const { record } = this.session.facts.revokeResource(fact.id, evidence);
+    this.stored('resources', before, record);
+    this.applyResourceFact(record);
   }
 
   private markContainerFactGone(fact: ContainerAnchorFact, reason?: string): void {
     const evidence = this.placeGoneEvidence(reason, fact);
-    this.session.facts.markContainerGone(fact.id, evidence);
-    this.invalidate();
+    const before = this.facts.revision;
+    this.stored('containers', before, this.session.facts.markContainerGone(fact.id, evidence).record);
   }
 
   // --------------------------------------------------------------- role views
@@ -347,14 +380,18 @@ export class SpatialSemanticStore {
     };
   }
 
+  // 只读视图：同一投影版本内复用，写入后由 stored() 作废对应的一类。调用方不得修改返回的数组。
   private livePlaces(): PlaceFact[] {
-    return this.snapshot().places.filter((fact) => !fact.gone);
+    const snapshot = this.snapshot();
+    return snapshot.live.places ??= snapshot.places.filter((fact) => !fact.gone);
   }
   private liveResources(): ResourceAnchorFact[] {
-    return this.snapshot().resources.filter((fact) => !fact.revoked);
+    const snapshot = this.snapshot();
+    return snapshot.live.resources ??= snapshot.resources.filter((fact) => !fact.revoked);
   }
   private liveContainers(): ContainerAnchorFact[] {
-    return this.snapshot().containers.filter((fact) => !fact.gone);
+    const snapshot = this.snapshot();
+    return snapshot.live.containers ??= snapshot.containers.filter((fact) => !fact.gone);
   }
 
   // ---------------------------------------------------------------- resource index
@@ -365,8 +402,6 @@ export class SpatialSemanticStore {
    * an external rescan (or a cold start) rebuilds every bucket.
    */
   private resourceIndex: {
-    at: number;
-    revision: number;
     buckets: Map<string, string[]>;
     facts: Map<string, ResourceAnchorFact>;
   } | null = null;
@@ -386,18 +421,18 @@ export class SpatialSemanticStore {
   private rebuildResourceIndex(): void {
     const buckets = new Map<string, string[]>();
     const facts = new Map<string, ResourceAnchorFact>();
-    const resources = this.page((after) => this.facts.resources({ worldId: this.worldId, after, limit: 100 }));
-    for (const fact of resources) {
-      if (fact.revoked) continue;
+    for (const fact of this.liveResources()) {
       this.addResourceBucket(buckets, fact);
       facts.set(fact.id, fact);
     }
-    this.resourceIndex = { at: Date.now(), revision: this.facts.revision, buckets, facts };
+    this.resourceIndex = { buckets, facts };
     this.resourceIndexRebuilds += 1;
   }
 
   private getResourceIndex(): NonNullable<SpatialSemanticStore['resourceIndex']> {
-    if (this.resourceIndex === null || Date.now() - this.resourceIndex.at > SEMANTIC_RESCAN_MS) this.rebuildResourceIndex();
+    // snapshot() 在库被别处改过时会重读并作废索引；索引本身随自己的写入逐条更新。
+    this.snapshot();
+    if (this.resourceIndex === null) this.rebuildResourceIndex();
     return this.resourceIndex!;
   }
 
@@ -582,27 +617,18 @@ export class SpatialSemanticStore {
     const version = observation.sourceCellVersion;
     const observedAt = observation.observedAt;
     if (version === undefined || observedAt === undefined) return null;
-    if (this.resourceIndex && this.resourceIndex.revision !== this.facts.revision) this.rebuildResourceIndex();
-    const index = this.getResourceIndex();
-    const fact = index.facts.get(id);
+    const fact = this.getResourceIndex().facts.get(id);
     if (fact === undefined) return null;
     if (fact.sourceCellVersion !== undefined && version < fact.sourceCellVersion) return null;
     if (observedAt < fact.observedAt) return null;
     if (version === fact.sourceCellVersion && observedAt === fact.observedAt) return null;
-    const revision = this.facts.revision;
+    const before = this.facts.revision;
     const { record } = this.facts.updateResourceSource(id, {
       sourceCell: fact.sourceCell, sourceCellVersion: version, observedAt,
       source: observation.source ?? fact.source,
     });
-    index.facts.set(id, record);
-    index.revision = this.facts.revision;
-    const offset = this.cache?.resourceOffsets.get(id);
-    if (this.cache && this.cache.revision === revision && offset !== undefined) {
-      this.cache.resources[offset] = record;
-      this.cache.revision = index.revision;
-    } else {
-      this.invalidate();
-    }
+    this.stored('resources', before, record);
+    this.applyResourceFact(record);
     return record;
   }
 
