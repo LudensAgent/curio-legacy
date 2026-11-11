@@ -408,7 +408,7 @@ export const hitEntity: Skill<{ entity: string | number; hits: number }> = {
 // ------------------------------------------------------------------ dismount
 export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> = {
   name: 'dismount',
-  description: '从正在乘坐的东西上下来。完成条件：实际乘骑状态确认已不在乘坐（disembarked:true）；底层报 ok 但仍显示乘坐算失败',
+  description: '从正在乘坐的东西上下来。完成条件：实际乘骑状态确认已不在乘坐（disembarked:true）；底层报 ok 但仍显示乘坐算失败。落点由游戏按下船时的朝向在载具周围寻找，写 toward 会先朝向那一处；找不到可站处时可能落到船顶或水中。回执报告实测落点是否在地面（onGround）、是否在水中（inWater）与脚下方块，不把下船等同于上岸',
   argsDoc: '{"toward"?: [x,y,z]（下船时朝向的落脚处）}',
   timeoutMs: 8000,
   movement: false,
@@ -429,7 +429,10 @@ export const dismount: Skill<{ toward?: { x: number; y: number; z: number } }> =
     // 下乘以实际乘骑状态确认，不能只看底层返回 ok；停船/靠岸仍保持乘坐是另一件事。
     if (after.riding) return fail('EFFECT_NOT_CONFIRMED', `下乘未确认：仍显示在乘坐 ${after.riding}`, { riding: after.riding, stillRiding: true, disembarked: false, position: { ...after.pos }, measuredAt });
     const at = `(${after.pos.x.toFixed(2)},${after.pos.y.toFixed(2)},${after.pos.z.toFixed(2)})`;
-    return ok(`已从 ${before.riding} 下来，现在站在 ${at}`, { riding: null, stillRiding: false, disembarked: true, from: before.riding, position: { ...after.pos }, measuredAt, ...(args.toward ? { toward: { ...args.toward } } : {}) });
+    const below = ctx.adapter.blockAt({ x: Math.floor(after.pos.x), y: Math.ceil(after.pos.y) - 1, z: Math.floor(after.pos.z) }) ?? null;
+    const landing = after.inWater ? '在水中' : after.onGround ? `站在地面上（脚下 ${below ?? '未知'}）` : `脚下没有着地（脚下 ${below ?? '未知'}）`;
+    return ok(`已从 ${before.riding} 下来，实测在 ${at}，${landing}`, { riding: null, stillRiding: false, disembarked: true, from: before.riding, position: { ...after.pos },
+      onGround: after.onGround, inWater: after.inWater, below, measuredAt, ...(args.toward ? { toward: { ...args.toward } } : {}) });
   },
 };
 
