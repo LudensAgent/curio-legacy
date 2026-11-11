@@ -290,6 +290,12 @@ setInterval(() => library.prune(), 60_000).unref();
   }, 1000).unref();
   if (process.env.STALL_PROFILER !== '0') startStallProfiler(path.join(config.dataDir, 'logs'), (r) => {
     bus.publish('event_loop_profile', 'P1', `卡顿那段时间 CPU 花在：${r.top.join('；')}${r.file ? `（完整采样：${path.basename(r.file)}）` : ''}`, { stallMs: r.stallMs, top: r.top, file: r.file });
+  }, {
+    // 100ms 级的阻塞不会被踢，但会让身体物理顿一下：每分钟最多记一次，只写汇总不存采样文件。
+    onJank: (r) => {
+      const task = arbiter.info();
+      bus.publish('event_loop_jank', 'P3', `主线程单次阻塞最长 ${r.maxMs.toFixed(0)}ms（p99 ${r.p99Ms.toFixed(0)}ms）；当时手上：${task ? `${task.source} ${task.skill}` : '空闲'}；CPU 花在：${r.top.join('；')}`, { maxMs: Math.round(r.maxMs), p99Ms: Math.round(r.p99Ms), top: r.top, task: task?.skill ?? null });
+    },
   });
 }
 // ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
