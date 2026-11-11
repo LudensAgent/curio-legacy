@@ -21,6 +21,7 @@ import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
+import { describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
 import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
@@ -87,6 +88,8 @@ export interface MindContext {
   learnFrom?: { stuck: { what: string; why: string; skill?: string; code?: string }; solved: { what: string; routine: string[] } };
   /** 这一趟下地：下来多久、背包多了什么、是不是手上的活快收工了（给“下矿的账”） */
   trip?: { minutes: number; gained: Record<string, number>; nearEnd: boolean };
+  /** 出行记录（认真想时给）：每段在某维度的在线经历、走到的最远脚格、怎么结束、吃了多少 */
+  excursions?: readonly Leg[];
   /** 打猎的账（给“肉快打光了”这种事实） */
   hunting?: HuntTally | null;
   /** 材料账：木料/矿石各跑过几段活、一共多少、走了多远（给重复跑腿的事实，不替 Agent 决定备多少） */
@@ -779,6 +782,19 @@ function worldKnowledge(ctx: MindContext) {
     `访问过 ${extent.chunks} 个区块，外框 x ${extent.bounds.minX}..${extent.bounds.maxX}、z ${extent.bounds.minZ}..${extent.bounds.maxZ}`,
     '只是走过的历史记录，不代表那片看全了',
   ].join('；');
+  // 出行记录：本维度最近几段，以及身边 16 格内的门通往的维度最近几段（站在门前要不要进、带什么，由它掂量）。
+  // 按数据是否存在给出，不看打算的措辞。
+  const legs = (ctx.excursions ?? []).filter((l) => l.worldId === s.worldId && l.onlineMs >= 60_000);
+  const portalNear = (dim: string) => (pos: Vec3Like) => portalSnapshot.endpoints
+    .filter((e) => e.dim === dim && Math.hypot(e.pos.x - pos.x, e.pos.y - pos.y, e.pos.z - pos.z) <= 6)
+    .sort((a, b) => Math.hypot(a.pos.x - pos.x, a.pos.z - pos.z) - Math.hypot(b.pos.x - pos.x, b.pos.z - pos.z))[0]?.id ?? null;
+  const tripsHere = legs.filter((l) => l.dim === p.self.dim).slice(-3)
+    .map((l) => describeLeg(l, { here, portalNear: portalNear(l.dim) }));
+  const beyond = [...new Set(portalSnapshot.endpoints
+    .filter((e) => e.dim === p.self.dim && Math.hypot(e.pos.x - here.x, e.pos.y - here.y, e.pos.z - here.z) <= 16)
+    .flatMap((e) => portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => endpointById.get(r.toId)?.dim))
+    .filter((d): d is string => !!d && d !== p.self.dim))];
+  const tripsBeyond = beyond.flatMap((dim) => legs.filter((l) => l.dim === dim).slice(-3).map((l) => describeLeg(l, { portalNear: portalNear(dim) })));
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
@@ -803,6 +819,9 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
+    ...(tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
+    ...(tripsBeyond.length ? { my_trips_beyond_nearby_portal: tripsBeyond } : {}),
+    ...(tripsHere.length || tripsBeyond.length ? { trips_note: LEG_NOTE } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
     ...(lastDeaths.length ? { last_deaths: lastDeaths } : {}),
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子

@@ -30,6 +30,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
+import { describeLeg, type ExcursionLog } from './excursions.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, NextDraft, Noticing } from './types.ts';
 
@@ -50,6 +51,8 @@ export interface MindDeps {
   behaviors?: BehaviorEngine;
   /** 收获账本：做过的事的投入产出、东西出现在哪（想事时按关键词想起来） */
   ledger?: LedgerView | null;
+  /** 出行记录：每次换维度/死亡/长时间未观测之间的身体经历与消耗（只记事实） */
+  excursions?: ExcursionLog | null;
   /** 心智觉得刚才的事值得练成技能：交给后台去写 */
   onWorthLearning?: (note: string) => void;
   timing?: Partial<typeof DEFAULT_TIMING>;
@@ -374,6 +377,7 @@ export class Mind {
       this.listening = false;
     }
     this.d.self.flush();
+    this.safe(() => this.d.excursions?.save(true), undefined);
   }
 
   // ---------------------------------------------------------------- 主循环
@@ -392,6 +396,7 @@ export class Mind {
     }
     this.seenAlive = true;
     this.d.memory.setWorld(state.worldId);
+    if (!this.paused) this.safe(() => this.d.excursions?.sample(state), undefined);
     const sessionChanged = !!this.lastSession && this.lastSession !== state.sessionId;
     // 换作用域后，在途思考和预排 next 都绑定旧世界的观察/坐标，先作废；重新评估后才启动。
     // 主动 travel_portal 与非预期传送都适用：跨维度的下一步应在到达后按新位置重新确认。
@@ -1463,6 +1468,10 @@ export class Mind {
 
   private onEvent(ev: AgentEvent) {
     if (ev.type === 'notice') return;
+    if (ev.type === 'death') this.safe(() => {
+      const d = (ev.data ?? {}) as Record<string, unknown>;
+      this.d.excursions?.died(String(d.message ?? d.cause ?? ev.msg).replace(/^死亡 @ \([^)]*\)，?/, '').slice(0, 80), ev.ts);
+    }, undefined);
     if (ev.type === 'death' || ev.type === 'task_end') this.safe(() => this.strategy.onEvent(ev, {
       phase: this.safe(() => this.d.perception.snapshot().time.phase, ''), bedDist: this.bedDist(), doing: this.activity?.what ?? this.lastRecord?.what ?? '' }), undefined);
     const n = this.attention.fromEvent(ev);
@@ -1662,6 +1671,7 @@ export class Mind {
         this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
+      ...(tier === 'deliberate' && this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
       materials: ledger ? this.safe(() => ({ wood: ledger.materialTally('wood'), ore: ledger.materialTally('ore') }), null) : null,
       ...(this.trip ? { trip: { minutes: (Date.now() - this.trip.since) / 60_000, gained: diffInventory(this.trip.inventory, inventoryOf(state)).gained, nearEnd: reason === Mind.NEAR_END_REASON } } : {}),
       ...(reviewing ? { stageReview: this.safe(() => this.stageReviewFacts(), { why: this.review?.why ?? '' }) } : {}),
@@ -1784,6 +1794,9 @@ export class Mind {
       agenda: this.d.self.data.agenda, builds: myBuilds(this.d.memory, this.d.adapter.state(), 8),
       supply: consumptionSummary(this.d.self.history(20).map((r) => r.lost)),
     }), [] as string[]);
+    // 出行记录：最近几段较长的出行各花了多久、走到哪、怎么结束、吃了多少（只给经历，结论由回想自己得出）
+    const legs = this.safe(() => (this.d.excursions?.legs() ?? []).filter((l) => l.onlineMs >= 3 * 60_000).slice(-5).map((l) => `出行记录：${describeLeg(l)}`), [] as string[]);
+    strategy.push(...legs);
     this.d.thinker.reflect(this.d.self, this.d.persona, controller.signal, strategy).then((c) => {
       if (this.reflecting !== controller) return;
       this.reflecting = null;
