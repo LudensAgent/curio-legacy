@@ -152,6 +152,8 @@ export interface SegmentReceipt {
 
 const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
+/** 剩余这么多步时开始从路线尾点规划下一窗口。更早开始会在证据尚未到达的尾点上多耗搜索预算。 */
+const PREVIEW_LEAD_STEPS = 3;
 /** manual 模式下，一次搜索因未驻留页面最多重试加载几轮；每轮都受 deadline/搜索预算约束。 */
 const MAX_RESIDENCY_ROUNDS = 8;
 /** 这些搜索终态可能仅由未驻留页面造成；prepare 后值得重试。 */
@@ -833,7 +835,7 @@ async function runNavigationSegmentInner(
   const startPreview = (index: number) => {
     const nextWindow = request.nextWindow;
     if (nextWindow === undefined || previewClosed || preview !== undefined || previewEnd.error !== undefined
-      || transitions.length - index > 3 || transitions.length >= request.maxTransitions
+      || transitions.length - index > PREVIEW_LEAD_STEPS || transitions.length >= request.maxTransitions
       || searches >= request.searchBudget || Date.now() >= request.deadline || ctx.signal.aborted) return;
     const tail = transitions[transitions.length - 1]!.to;
     if (meetsDistance(request, tail) || request.goalMetric !== 'horizontal' && goalReached(request.goal, tail, true)) return;
@@ -1029,13 +1031,19 @@ async function runNavigationSegmentInner(
       const sameHeading = next !== undefined
         && transition.to.x - transition.from.x === next.to.x - next.from.x
         && transition.to.z - transition.from.z === next.to.z - next.from.z;
-      continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
+      const smallEdge = (edge: LandSearchTransition) => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 1;
+      const intentEnd = directionalFinish || request.goalMetric !== 'horizontal' && goalReached(request.goal, transition.to, true);
+      // 计划窗口的末步不是委托终点：不必精确对准末点，站进目标格列后松键自然停下（由外层 settleMovement 确认），
+      // 不做前后点按修正；下一段从实测停点重新规划。
+      const windowEnd = ctx.adapter.settleMovement !== undefined && next === undefined && !intentEnd
+        && smallEdge(transition) && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
+      continuous = windowEnd || ctx.adapter.settleMovement !== undefined && next !== undefined
         && !directionalFinish
-        && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 1)
+        && [transition, next].every(smallEdge)
         && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical)
         && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
         && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
-      passColumn = continuous && (sameHeading || transition.kind === 'drop');
+      passColumn = continuous && (sameHeading || transition.kind === 'drop' || windowEnd);
       try {
         execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(

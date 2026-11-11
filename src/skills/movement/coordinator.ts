@@ -4,7 +4,7 @@ import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type Skil
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../spatial/land-search.ts';
-import { cellGoal, feetReached, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
+import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
 import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
@@ -656,7 +656,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         // 感知在走前缀期间仍会更新地图。旧搜索边界已可通时，不能要求本次
         // observe 再产生一次变化；只复验当前脚边这条边，OPEN 才从实测位置重搜。
         const canProceed = () => {
-          if (boundary === undefined || !feetReached(boundary.from, after.pos, after.onGround)) return false;
+          // 窗口末端松键自然停下，身体只保证在边界起点所在格列；复验从实测位置出发。
+          if (boundary === undefined || !after.onGround || Math.floor(after.pos.x) !== Math.floor(boundary.from.x)
+            || Math.floor(after.pos.z) !== Math.floor(boundary.from.z) || Math.abs(after.pos.y - boundary.from.y) > 0.05) return false;
           const check = verifyLandRoute(voxel, {
             ...scope, body: { feet: { ...after.pos }, width: 0.6, height: 1.8, pose: 'standing' },
             rules: walkLandRules, measuredStart: after.pos,
