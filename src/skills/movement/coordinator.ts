@@ -10,6 +10,7 @@ import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
+import { supportTop } from '../../perception/geometry.ts';
 import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
 import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
@@ -97,7 +98,8 @@ export interface CoordinatorRequest {
 /** 为开路实际做的一次改动：挖开了哪一格（原来是什么），或在哪放了什么。 */
 export type MakeWayEdit = { kind: 'dig' | 'place'; pos: Vec3Like; name: string };
 /** 一段代为开路的执行：计划几步、实际走了几步、停在哪、为什么停。 */
-export type MakeWayLegReceipt = { from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string };
+/** stale：开路计划算完时身体已不在计划起点旁（还在滑动/被推开），这一段没执行，应按实测位置重新规划。 */
+export type MakeWayLegReceipt = { from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string; stale?: true };
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
 /** 一次调用最多开路几段（每段只做到第一处改动）；总改动数另受 maxEdits 约束。 */
@@ -113,8 +115,20 @@ const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
 async function runMakeWay(
   ctx: SkillCtx, steps: MakeWayStep[], opts: MakeWayOptions, edits: MakeWayEdit[], deadline: number,
   nameAt: (cell: Vec3Like) => string,
+  /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
+  supportTopAt: (cell: Vec3Like) => number | null,
 ): Promise<MakeWayLegReceipt> {
   const from = { ...ctx.adapter.state().pos };
+  // 规划是异步的：算完时身体可能还在滑动或已被推开。第一步的落点不在身边相邻格（或同格）就不执行，交回重规划。
+  const first = steps[0];
+  if (first !== undefined) {
+    const feet = { x: Math.floor(from.x), z: Math.floor(from.z) };
+    const reach = Math.abs(first.to.x - feet.x) + Math.abs(first.to.z - feet.z);
+    if (first.kind === 'move' ? reach !== 1 : reach !== 0) {
+      return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
+        failure: `规划完成时身体已在 (${from.x.toFixed(2)},${from.y.toFixed(2)},${from.z.toFixed(2)})，不在开路计划起点旁` };
+    }
+  }
   const run = async (skill: Parameters<typeof validateSkill>[0], raw: Record<string, unknown>) => {
     const validated = validateSkill(skill, raw, ctx.adapter);
     if (!validated.ok) return `${skill.name} 参数被拒：${validated.error}`;
@@ -150,7 +164,10 @@ async function runMakeWay(
       const inColumn = Math.floor(now.x) === step.to.x && Math.floor(now.z) === step.to.z;
       if (inColumn && Math.abs(now.y - step.to.y) > 0.5) { failure = `身体已在目标格列 (${step.to.x},${step.to.z})，但脚高 ${now.y.toFixed(2)} 与计划 ${step.to.y} 不符`; break; }
       if (!inColumn) {
-        failure = await run(moveStep, { xyz: [step.to.x, step.to.y, step.to.z] }) ?? undefined;
+        // 落点按脚下已记录方块的真实顶面给脚高（灵魂沙、半砖等不是整格），否则 move_step 会按“脚高不符”拒绝。
+        const top = supportTopAt({ x: step.to.x, y: step.to.y - 1, z: step.to.z });
+        const footY = top !== null && top > 0 && top <= 1 ? step.to.y - 1 + top : step.to.y;
+        failure = await run(moveStep, { xyz: [step.to.x, footY, step.to.z] }) ?? undefined;
         if (failure !== undefined) break;
       }
     }
@@ -1020,8 +1037,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     const leg = await runMakeWay(ctx, steps, makeWay, makeWayEdits, deadline, (cell) => {
       const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
       return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
+    }, (cell) => {
+      const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
+      if (!view.observed) return null;
+      const state = view.evidence.observation.state;
+      return supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
     });
     makeWayLegs.push(leg);
+    // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
+    if (leg.stale) { stop = null; continue; }
     if (leg.executed === 0) {
       stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
       break;
