@@ -78,3 +78,22 @@ test('未就绪时不写并中断已准入的证据；关停中的共享记忆�
   new Vision(new FakeAdapter(), undefined, closing).scan();
   assert.equal(closing.batches.length, 0);
 });
+
+test('近处视线穿过的透明格整段写入：平地前方的脚部与头部空气都有证据，空区段也不跳过', () => {
+  // 地面 y=63 正好在区段边界下方，脚/头空气所在的 64..79 区段整段为空。
+  const adapter = new FakeAdapter();
+  const spatial = sink();
+  const vision = new Vision(adapter, undefined, spatial);
+  const started = performance.now();
+  vision.scan();
+  const firstScanMs = performance.now() - started;
+  drain(vision, spatial);
+  const cells = spatial.batches.flat();
+  const air = new Set(cells.filter((c) => c.name === 'air').map((c) => `${c.pos.x},${c.pos.y},${c.pos.z}`));
+  for (let x = 1; x <= 8; x++) {
+    assert.ok(air.has(`${x},64,0`), `前方 ${x} 格的脚部空气要有证据`);
+    assert.ok(air.has(`${x},65,0`), `前方 ${x} 格的头部空气要有证据`);
+  }
+  assert.ok(spatial.batches.length <= 6, `一个画面应在几帧内写完，实际 ${spatial.batches.length} 帧、${cells.length} 格`);
+  assert.ok(firstScanMs < 250, `单次扫描耗时 ${firstScanMs.toFixed(1)}ms`);
+});

@@ -201,15 +201,21 @@ function sectionExit(ox: number, oy: number, oz: number, dx: number, dy: number,
 const keyOf = (x: number, y: number, z: number) => `${x},${y},${z}`;
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
 /**
- * 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。刚出生/换维度时多数区块已存盘未驻留，
- * 观测先进共享会话的待载队列（上限 MAX_PENDING_OBSERVATIONS=256，所有写入方共用）；每帧只占一半，
- * 留出加载追上和其他写入方的余量。扫描约 150 ms 一次，仍是每秒数百格。
+ * 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。已驻留的 Section 直接写入；只有已存盘
+ * 未驻留的格才进共享会话的待载队列（上限 MAX_PENDING_OBSERVATIONS=256，所有写入方共用，超出记为缺口，
+ * 到刷新时间会重写）。近处透明格整段记录后，一个新画面约有一两千格，上限需让它在几帧内写完。
  */
-export const VISION_FEED_MAX_CELLS = 128;
+export const VISION_FEED_MAX_CELLS = 512;
 /** 同一格名字没变时，隔这么久才重写一次（刷新新鲜度）。 */
 export const VISION_FEED_REFRESH_MS = 5000;
 /** 每条视线除命中格外，还写入命中前紧挨着的几格透明格（命中面上方的落脚/头部空间）。 */
 const FEED_TRAIL = 3;
+/**
+ * 这个距离内，视线穿过的每个透明格都已被看清，全部写入。只记命中前几格时，平地上头部高度的空气
+ * 只有身前一格被记录，行走所需的身体净空在两格外就成了未观察。更远处仍只记命中前几格。
+ */
+const VISION_NEAR_FEED_RADIUS = 12;
+const CLEAR_AIR: Optics = { name: 'air', kind: 'clear' };
 
 /** Nearest opaque shape hit, rather than the boundary of a thin block's voxel. */
 function shapeHitDistance(shapes: NonNullable<Optics['shapes']>, eye: Eye, dx: number, dy: number, dz: number,
@@ -413,6 +419,10 @@ export class Vision {
       const trail: FeedCell[] = [];
       const pass = (x: number, y: number, z: number, name: string, d: number) => {
         if (hitCat) return;
+        if (d <= VISION_NEAR_FEED_RADIUS) {
+          if (d <= seeRange(light(x, y, z))) keep({ x, y, z, name, d });
+          return;
+        }
         trail.push({ x, y, z, name, d });
         if (trail.length > FEED_TRAIL) trail.shift();
       };
@@ -423,13 +433,15 @@ export class Vision {
       };
       raycast(eye.x, eye.y, eye.z, dx, dy, dz, range, (x, y, z, d) => {
         if (y > 320 || y < -64) return true; // 出了世界高度
-        if (sectionEmpty(x, y, z)) {
+        const empty = sectionEmpty(x, y, z);
+        if (empty && d > VISION_NEAR_FEED_RADIUS) {
           // 整个 16³ 区段都是空气：直接跳到区段出口（远处天空方向的射线因此很便宜）
           const te = sectionExit(eye.x, eye.y, eye.z, dx, dy, dz, x, y, z);
           lx = Math.floor(eye.x + dx * (te - 0.01)); ly = Math.floor(eye.y + dy * (te - 0.01)); lz = Math.floor(eye.z + dz * (te - 0.01));
           return te;
         }
-        const o = opt(x, y, z);
+        // 近处的空区段逐格走完：地面恰在区段边界下方时，脚部与头部空气就在这个空区段里。
+        const o = empty ? CLEAR_AIR : opt(x, y, z);
         if (!o) { if (!hitCat) { hitCat = 'unknown'; hitDist = d; } return true; }
         if (o.kind === 'clear') {
           if ((NOTABLE.has(o.name) || GROUND.has(o.name)) && d <= seeRange(light(x, y, z))) note(o.name, x, y, z, d); // 透明物体同样需要看清，之后仍可透过它看向别处
@@ -736,6 +748,14 @@ export class Vision {
 
   /** 这一格这几秒内亲眼看见是什么（看不见返回 null，不透视） */
   seenAt(pos: Vec3Like): string | null { return this.visibleSurfaces.get(keyOf(pos.x, pos.y, pos.z))?.name ?? null; }
+
+  /** 本帧射线命中的候选表面，包括不记入资源记忆的普通方块。移动后仍需复核视线。 */
+  currentBlockCandidates(names: string[]): Pick<BlockHit, 'name' | 'pos'>[] {
+    const state = this.adapter.state();
+    if (!this.frame || !state.observationReady || this.scope !== `${state.worldId}\u0000${state.dim}` || this.session !== state.sessionId) return [];
+    return [...this.visibleSurfaces.values()].filter(hit => hit.at === this.lastScanAt && names.includes(hit.name))
+      .map(hit => ({ name: hit.name, pos: { ...hit.pos } }));
+  }
 
   /** 只读最近所见的原时间与作用域；不扫描，也不把旧会话的表面当成新观察。 */
   seenEvidence(pos: Vec3Like) {

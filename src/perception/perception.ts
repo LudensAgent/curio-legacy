@@ -226,6 +226,7 @@ export class Perception {
   }
 
   observeBlocks(positions: Vec3Like[]) { return this.vision.observeBlocks(positions); }
+  currentBlockCandidates(names: string[]) { return this.vision.currentBlockCandidates(names); }
 
   /**
    * 刚观察到的格在共享体素图里的实际证据版本与时间。
