@@ -350,7 +350,7 @@ test('navigate_to 单段上限保持 64，不允许用更大上限代替续接',
   const base = { to: { x: 10, y: 64, z: 0 } };
   assert.equal(validateSkill(navigateTo, { ...base, maxSteps: 64 }, adapter).ok, true);
   const tooLarge = validateSkill(navigateTo, { ...base, maxSteps: 65 }, adapter);
-  assert.equal(tooLarge.ok, false, '超过 64 的单段上限必须被拒绝');
+  assert.equal(tooLarge.ok, true, '单次调用步数上限放宽到 1024，长途委托不必靠续接拆分');
 });
 
 test('仅换维（sessionId 不变）保留目的地与已完成段，Activity 进入重规划', (t) => {

@@ -94,6 +94,8 @@ export type SwimLegReceipt = {
   status: SkillStatus; summary: string; oxygenBefore: number; oxygenAfter: number;
 };
 
+/** 一次调用最多绕向前沿点的次数；绕不了就按真实原因交回。 */
+const MAX_DETOURS = 4;
 /** 一次调用最多代为游泳的段数；每段仍受原期限约束。 */
 const MAX_SWIM_LEGS = 8;
 
@@ -170,7 +172,7 @@ function stateFacts(session: MovementSession) {
 function continuationOf(session: MovementSession) {
   const reason = session.stop?.reason;
   const budgetExhausted = session.counters.confirmedTransitions >= session.budget.maxTransitions
-    || session.counters.searches >= session.budget.maxSearches;
+    || session.counters.idleSearches >= session.budget.maxSearches;
   const canContinue = reason !== undefined && canResume(reason) && !budgetExhausted && Date.now() <= session.expiresAt;
   return {
     canContinue,
@@ -338,6 +340,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     let executedSegments = 0;
     const deviations = new Set<string>();
     const refusedEdges = new Set<string>();
+    const triedFrontiers = new Set<string>();
     let swimPending = false;
     // 委托推进量：方向委托按冻结轴线的前进，到点委托按到目标的水平距离缩短；横向授权仍是硬限制。
     const gainFrom = (from: Vec3Like) => (p: Vec3Like) => {
@@ -383,8 +386,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         stop = stopOf('BUDGET_EXHAUSTED', `累计 transition 预算 ${session.budget.maxTransitions} 已用尽；已确认段与 session 保留`);
         break;
       }
-      if (session.counters.searches >= session.budget.maxSearches) {
-        stop = stopOf('BUDGET_EXHAUSTED', `累计搜索预算 ${session.budget.maxSearches} 已用尽；已确认段与 session 保留`);
+      if (session.counters.idleSearches >= session.budget.maxSearches) {
+        stop = stopOf('BUDGET_EXHAUSTED', `没有带来位移的搜索已达 ${session.budget.maxSearches} 次；已确认段与 session 保留`);
         break;
       }
       if (invocationTransitions >= request.invocationMaxTransitions) {
@@ -459,7 +462,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         maxTransitions: perSegment,
         allowUnknownCorridor: request.allowUnknownCorridor,
         deadline,
-        searchBudget: Math.max(0, session.budget.maxSearches - session.counters.searches),
+        searchBudget: Math.max(0, session.budget.maxSearches - session.counters.idleSearches),
         ...(request.searchLimits === undefined ? {} : { searchLimits: request.searchLimits }),
         onPhase: (phase) => ctx.setStationaryWait?.(phase === 'searching'),
       });
@@ -489,6 +492,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const measuredMove = Math.hypot(after.pos.x - segment.measuredStart.x, after.pos.z - segment.measuredStart.z)
         + Math.abs(after.pos.y - segment.measuredStart.y);
       const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
+      if (!progressed) session.counters.idleSearches += segment.searches;
       if (!isReplan) {
         // 原地补证据不是一次身体执行；保留本次窗口，观察成功后仍能执行原委托。
         // 搜索、观察、无进展次数与 deadline 继续约束原地重试。
@@ -528,6 +532,59 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         stop = stopOf(closeAfterSegment.reason, closeAfterSegment.detail);
         break;
       }
+      // 只要还在推进就继续：本段有实测位移、调用方给的分段数还没用完，就从新位置继续规划。
+      // 周边感知一直在刷新地形；边界、阻挡、窗口用完都只是这一段的结束，不是整趟委托的结束。
+      const SOFT_ENDS = ['unknown_boundary', 'blocked', 'partial_prefix', 'no_path', 'corridor_exhausted', 'reached_waypoint'];
+      if (progressed && SOFT_ENDS.includes(segment.outcome) && executedSegments < request.maxSegments && Date.now() < deadline) {
+        session.phase = 'replanning';
+        continue;
+      }
+      /**
+       * 即将因阻挡/证据边界/无路而停下时的最后一招：绕向一个还有未探索出边的前沿点
+       * （已走代价 + 剩余估计最小），走过去后从那里重新规划。每个前沿点只试一次，每次调用最多绕
+       * MAX_DETOURS 次；绕不了就按原来的真实原因停下。
+       */
+      const tryDetour = async (): Promise<'moved' | 'none' | 'cancelled'> => {
+        if (triedFrontiers.size >= MAX_DETOURS || Date.now() >= deadline) return 'none';
+        const goalPoint = session.intent.kind === 'navigate' ? session.intent.to : undefined;
+        const remainingOf = (p: Vec3Like) => goalPoint !== undefined ? Math.hypot(goalPoint.x - p.x, goalPoint.z - p.z)
+          : -progressOf(session, p, 0).along;
+        // 已经站在目标列上（只是脚高等精确条件达不到）：绕路不会让目标变得可达。
+        if (remainingOf(after.pos) < 1) return 'none';
+        const here = cellText(after.pos);
+        const frontier = segment.search.boundaries
+          .filter((boundary) => boundary.status === 'UNKNOWN' || boundary.status === 'STALE')
+          .map((boundary) => boundary.from)
+          .filter((from) => cellText(from) !== here && !triedFrontiers.has(cellText(from)) && withinCorridor(from))
+          .sort((a, b) => Math.hypot(a.x - after.pos.x, a.z - after.pos.z) + remainingOf(a)
+            - (Math.hypot(b.x - after.pos.x, b.z - after.pos.z) + remainingOf(b)))[0];
+        if (frontier === undefined) return 'none';
+        triedFrontiers.add(cellText(frontier));
+        const detour = await runNavigationSegment(ctx, {
+          goal: cellGoal({ x: Math.floor(frontier.x), z: Math.floor(frontier.z) }, frontier.y, frontier),
+          allowed: session.intent.allowed,
+          historical: session.intent.historical,
+          ...(request.swim === true ? { wade: true } : {}),
+          ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+          maxTransitions: Math.max(1, Math.min(request.maxStepsPerSegment, session.budget.maxTransitions - session.counters.confirmedTransitions)),
+          allowUnknownCorridor: request.allowUnknownCorridor,
+          deadline,
+          searchBudget: Math.max(0, session.budget.maxSearches - session.counters.idleSearches),
+          ...(request.searchLimits === undefined ? {} : { searchLimits: request.searchLimits }),
+        });
+        segments.push(detour);
+        session.lastSegment = detour;
+        session.counters.searches += detour.searches;
+        session.counters.confirmedTransitions += detour.confirmed.length;
+        invocationTransitions += detour.confirmed.length;
+        session.counters.confirmedRouteLength += detour.pathLength;
+        if (detour.outcome === 'cancelled') return 'cancelled';
+        if (detour.confirmed.length === 0) { session.counters.idleSearches += detour.searches; return 'none'; }
+        session.progress.stagnationSegments = 0;
+        session.progress.lastProgressAt = Date.now();
+        session.phase = 'replanning';
+        return 'moved';
+      };
       if (segment.outcome === 'replan') {
         // 计划过时：同一条边被当前证据再次拒绝，说明重搜仍会走到这里，如实按阻挡停下。
         if (segment.stopCode === 'stale_plan' && segment.transition !== undefined) {
@@ -549,8 +606,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         // 不把实测起点覆盖成计划点；保留冻结目标，从实测位置重新搜索。
         // 搜索次数与 deadline 由 session/本次调用预算继续约束，不重置、不延长。
-        if (session.counters.searches >= session.budget.maxSearches) {
-          stop = stopOf('BUDGET_EXHAUSTED', `起点与计划不一致，累计搜索预算 ${session.budget.maxSearches} 已用尽；原目标与实测进展保留`);
+        if (session.counters.idleSearches >= session.budget.maxSearches) {
+          stop = stopOf('BUDGET_EXHAUSTED', `没有带来位移的搜索已达 ${session.budget.maxSearches} 次；原目标与实测进展保留`);
           break;
         }
         if (Date.now() >= deadline) {
@@ -579,6 +636,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           modeGap: { required: segment.disallowed?.kind ?? 'unknown', allowed: session.intent.allowed },
         });
         break;
+      }
+      if (segment.outcome === 'corridor_exhausted' || segment.outcome === 'no_path') {
+        const detoured = await tryDetour();
+        if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+        if (detoured === 'moved') continue;
       }
       if (segment.outcome === 'corridor_exhausted') {
         stop = stopOf('DETOUR_TOO_LARGE', segment.detail ?? '授权横向走廊内没有可走路线；外侧绕行未授权');
@@ -633,6 +695,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
             continue;
           }
         }
+        const detoured = await tryDetour();
+        if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+        if (detoured === 'moved') continue;
         stop = stopOf('BLOCKED', segment.detail ?? '已观测到物理阻挡；未自动挖/放', {
           ...(segment.blocker === undefined ? {} : { blocker: segment.blocker }),
           ...(segment.blockerAhead === undefined ? {} : { boundaries: [segment.blockerAhead] }),
@@ -645,6 +710,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       if (segment.outcome === 'unsupported') {
         const modeGap = segment.problemKind === 'UNSUPPORTED_ENVIRONMENT';
+        // 只是危险策略拒绝了几条边（火、岩浆旁）：先绕向别的前沿点，而不是当成目标无法解析。
+        if (!modeGap && (segment.search.policy?.rejectedEdges ?? 0) > 0) {
+          const detoured = await tryDetour();
+          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'moved') continue;
+        }
         stop = modeGap
           ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式`, { modeGap: { problem: segment.problemKind } })
           : stopOf('TARGET_UNRESOLVED', segment.detail ?? 'waypoint/脚高无法解析');
@@ -703,6 +774,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           }
         }
         if ((boundary === undefined || boundaryDone) && (!needCurrent || currentDone)) {
+          const detoured = await tryDetour();
+          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'moved') continue;
           stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已在这个站位观察过相关证据；没有新的相关证据时不重复观察/搜索', {
             boundaries: boundary === undefined ? [] : [boundary],
           });
@@ -784,6 +858,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         const boundarySighting = request.checkSighting?.();
         if (boundarySighting !== undefined) { stop = stopOf('UNTIL_SEEN', boundarySighting); break; }
         if (!observation.relatedChanged) {
+          const detoured = await tryDetour();
+          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'moved') continue;
           stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', {
             boundaries: boundary === undefined ? [] : [boundary],
           });

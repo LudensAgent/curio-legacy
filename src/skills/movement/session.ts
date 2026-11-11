@@ -75,6 +75,8 @@ export interface MovementBudget {
 
 export interface MovementCounters {
   searches: number;
+  /** 没有带来任何位移的搜索；搜索预算只约束这一部分，正常推进中的规划不消耗预算。 */
+  idleSearches: number;
   segments: number;
   confirmedTransitions: number;
   /** 沿实际确认路线累计，不等于净位移。 */
@@ -215,7 +217,7 @@ export function createMovementSession(opts: {
     phase: 'planning',
     budget: { ...opts.budget },
     counters: {
-      searches: 0, segments: 0, confirmedTransitions: 0, confirmedRouteLength: 0,
+      searches: 0, idleSearches: 0, segments: 0, confirmedTransitions: 0, confirmedRouteLength: 0,
       newChunks: 0, newObservedCells: 0, observations: 0,
     },
     measured: {

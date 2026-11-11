@@ -102,14 +102,14 @@ export const navigateTo: Skill<NavigateArgs> = {
       return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop、jump、ladder' };
     }
     if (a.historical !== undefined && typeof a.historical !== 'boolean') return { ok: false, error: 'historical 需要布尔值' };
-    if (a.maxSteps !== undefined && (!Number.isInteger(a.maxSteps) || a.maxSteps < 1 || a.maxSteps > 64)) {
-      return { ok: false, error: 'maxSteps 需要 1–64 的整数' };
+    if (a.maxSteps !== undefined && (!Number.isInteger(a.maxSteps) || a.maxSteps < 1 || a.maxSteps > 1024)) {
+      return { ok: false, error: 'maxSteps 需要 1–1024 的整数' };
     }
     if (a.allowUnknownCorridor !== undefined && typeof a.allowUnknownCorridor !== 'boolean') {
       return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
     }
     const ints: [string, number, number][] = [
-      ['maxSegments', 1, 16], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 1024],
+      ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 1024],
       ['maxSearches', 1, 128], ['maxObservations', 0, 8], ['maxObservedCells', 0, 512],
       ['maxNoProgressSegments', 1, 8],
     ];

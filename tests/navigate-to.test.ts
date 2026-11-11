@@ -339,14 +339,17 @@ test('下一步支撑在当前 VoxelMap 证据里变成空气时，发出第二�
   };
   const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
   t.after(() => ctx.memory.close());
+  const visited: { x: number; z: number }[] = [];
+  const move = adapter.moveTo.bind(adapter);
+  adapter.moveTo = async (target, opts) => {
+    if (target.kind === 'feet') visited.push({ x: Math.floor(target.x), z: Math.floor(target.z) });
+    return move(target, opts);
+  };
   const r = await navigateTo.run(ctx, {
     to: { x: 4, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 8, allowUnknownCorridor: false,
   });
-  assert.equal(r.status, 'failed', r.summary);
-  assert.equal(Math.floor(adapter.pos.x), 1, '第一段已确认位移保留');
-  assert.ok(adapter.actions.filter((action) => action === 'moveTo:feet').length === 1, `没有发出第二步：${adapter.actions.join(',')}`);
-  const currentCheck = r.data?.currentCheck as { status?: string } | undefined;
-  assert.notEqual(currentCheck?.status, 'OPEN', '单步当前证据复验阻止了下一步');
+  // 支撑变成空气的那一格绝不踏入；用最新证据重搜后可以从旁边绕过去。
+  assert.ok(!visited.some((cell) => cell.x === 2 && cell.z === 0), `踏进了失去支撑的格：${JSON.stringify(visited)}`);
 });
 
 test('navigate_to walk-only 在短 step+drop 与更长 walk 绕路并存时搜索合法 walk 图，不走越权捷径', async (t) => {

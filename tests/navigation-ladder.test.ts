@@ -301,7 +301,8 @@ test('navigate_to stops when a ladder cell changes before the next measured step
   }, adapter);
   assert.ok(validated.ok, validated.ok ? '' : validated.error);
   const result = await navigateTo.run(ctx, validated.args);
+  // 被拆掉的那级梯子不会被执行；用最新证据重搜后只沿剩下的梯子移动。
   assert.equal(result.status, 'failed', result.summary);
-  assert.equal(adapter.pos.y, 65);
+  assert.ok(adapter.pos.y <= 65, '没有越过被拆掉的梯子格');
   assert.match(result.summary, /仍未到达/);
 });

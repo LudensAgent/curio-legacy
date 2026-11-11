@@ -27,8 +27,9 @@ const TARGET_FOOT_SCAN = 16;
 const MAX_DETOUR_FACTOR = 3;
 const DETOUR_SLACK = 8;
 /** navigate_to 单次调用的 transition 硬上限。 */
-const HARD_MAX_STEPS = 64;
-const MAX_SEGMENTS = 4;
+/** 单次委托的步数与分段上限只防失控，不截断正常长途：每格约 3 步余量，分段随推进续接。 */
+const HARD_MAX_STEPS = 1024;
+const MAX_SEGMENTS = 64;
 const TARGET_ERROR = 'to 需要坐标 {x,z}/{x,y,z}/"x,z"/"x,y,z"、记得的地标名/base、"death" 或 "portal:<id>"';
 
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
