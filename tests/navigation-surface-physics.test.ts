@@ -172,7 +172,9 @@ test('方向末点短0.03格就失败或取消时，回执保留位移且不计�
       corridor: { origin: from, bearing: { x: 1, z: 0 }, maxLateral: 0 }, maxTransitions: 1,
       allowUnknownCorridor: false, deadline: ctx.deadline, searchBudget: 1,
     });
-    assert.equal(result.outcome, cancelled ? 'cancelled' : 'physical_failure');
+    // 没落位但站在地上是执行偏差：段交回协调器从实测位置重新规划，不当作确认过线。
+    assert.equal(result.outcome, cancelled ? 'cancelled' : 'replan');
+    if (!cancelled) assert.equal(result.stopCode, 'execution_deviation');
     assert.equal(result.confirmed.length, 0);
     assert.equal(result.partialDisplacement?.atTarget, false);
     assert.equal(result.measuredEnd.x, from.x + 0.97);

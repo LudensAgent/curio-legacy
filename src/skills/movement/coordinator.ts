@@ -318,6 +318,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
 
     session.phase = 'executing';
     let executedSegments = 0;
+    const deviations = new Set<string>();
     while (executedSegments < request.maxSegments) {
       if (ctx.signal.aborted) {
         stop = stopOf('CANCELLED', '父任务取消；保留已确认的位移');
@@ -460,6 +461,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'replan') {
+        // 执行偏差只在每个脚格重试一次；同一处再偏差说明身体做不到这段计划，如实停下。
+        if (segment.stopCode === 'execution_deviation') {
+          const cell = `${Math.floor(after.pos.x)},${Math.floor(after.pos.y)},${Math.floor(after.pos.z)}`;
+          if (deviations.has(cell)) {
+            stop = stopOf('PHYSICAL_FAILURE', `${segment.detail ?? '执行偏差'}；同一站位已重新规划过一次，仍未按计划落位`);
+            break;
+          }
+          deviations.add(cell);
+        }
         // 不把实测起点覆盖成计划点；保留冻结目标，从实测位置重新搜索。
         // 搜索次数与 deadline 由 session/本次调用预算继续约束，不重置、不延长。
         if (session.counters.searches >= session.budget.maxSearches) {

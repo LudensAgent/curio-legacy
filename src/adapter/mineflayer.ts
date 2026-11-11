@@ -16,6 +16,7 @@ import { isClimbableBlockName } from './land-rules.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
+import { MAX_STEP_RISE, MAX_WALK_TO_DISTANCE } from 'curio-minecraft-3d-memory';
 import { FEET_ARRIVAL_TOLERANCE } from './types.ts';
 
 import type {
@@ -994,6 +995,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         sprint,
         opts.maxDropDown,
         opts.settleAtTarget !== false,
+        opts.settleAtTarget === false && opts.passColumn === true,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
       if (outcome === 'arrived') return;
@@ -1299,9 +1301,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     sprint = false,
     maxDropDown = 1,
     settleAtTarget = true,
+    passColumn = false,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
-    if (!e?.position || !e.onGround || e.isInWater || e.isInLava || b.vehicle) return 'blocked';
+    // 浅水里站在地面上（涉水）仍是地面行走；悬浮游泳、岩浆和乘骑不是。
+    if (!e?.position || !e.onGround || e.isInLava || b.vehicle) return 'blocked';
     if (typeof b.setControlState !== 'function' || typeof b.clearControlStates !== 'function') return 'blocked';
     if (Date.now() >= deadline) return 'timeout';
     const fx = Math.floor(target.x), fz = Math.floor(target.z);
@@ -1325,6 +1329,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         return Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= 0.01
           && (target.centerRadius === undefined || Math.hypot(p.x - tx, p.z - tz) <= target.centerRadius);
       }
+      if (passColumn) {
+        return Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
+      }
       return Math.hypot(p.x - target.x, p.z - target.z) <= FEET_ARRIVAL_TOLERANCE.horizontal
         && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
     };
@@ -1340,10 +1347,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (Date.now() >= deadline) return 'timeout';
     // A horizontal jump is a single, already-proved gap crossing at the same
     // feet height. It never changes the target, climbs, or bridges terrain.
-    const maxStartDistance = horizontalJump ? 4.2 : 1.2;
+    // 普通一步从上一点所在格列内任意位置出发（含斜向），与几何复验的 MAX_WALK_TO_DISTANCE 一致。
+    const maxStartDistance = horizontalJump ? 4.2 : MAX_WALK_TO_DISTANCE;
     if (mode === 'feet' && dist() > maxStartDistance) return 'blocked';
     if (!Number.isInteger(maxDropDown) || maxDropDown < 1 || maxDropDown > 32) throw new Error('BAD_ARGS: 明确下行需要 1–32 格上限');
-    if (horizontalJump ? Math.abs(p0y - target.y) > 0.01 : target.y - p0y > 1 || p0y - target.y > maxDropDown) return 'blocked';
+    if (horizontalJump ? Math.abs(p0y - target.y) > 0.01 : target.y - p0y > MAX_STEP_RISE + 1e-6 || p0y - target.y > maxDropDown) return 'blocked';
     const initialDistance = dist();
     const heading = Math.atan2(-(tx - p0.x), -(tz - p0.z));
     const epoch = this.actionEpoch, dimension = this.currentDimension();
@@ -1358,7 +1366,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const passedIntermediate = () => {
       const p = b.entity.position;
       if (mode !== 'feet' || settleAtTarget || !b.entity.onGround || Math.abs(p.y - target.y) > FEET_ARRIVAL_TOLERANCE.vertical || atEndpoint()) return 0;
-      return -(p.x - tx) * Math.sin(heading) - (p.z - tz) * Math.cos(heading);
+      const past = -(p.x - tx) * Math.sin(heading) - (p.z - tz) * Math.cos(heading);
+      // 格列验收时，只有越过目标格列（落在下一列）才算越过中间点。
+      return passColumn ? past - 0.5 : past;
     };
     const checkPosition = () => {
       if (p0y - b.entity.position.y > maxDropDown + FEET_ARRIVAL_TOLERANCE.vertical) {
@@ -1381,8 +1391,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
     // 同脚高但超过相邻格的距离由调用方证实的水平 jump 消耗一次起跳。
     // 只在这段身体控制里补一次跳跃；目标/落点仍由调用方决定。
-    const needsJump = target.y > p0y + 0.6 || (horizontalJump && initialDistance > 1.2);
-    if (needsJump) b.setControlState('jump', true);
+    const stepUp = !horizontalJump && target.y > p0y + 0.6;
+    const needsJump = stepUp || (horizontalJump && initialDistance > 1.2);
+    // 上台阶：身体贴近目标格列、脚仍低于目标高度时按住跳跃，升上去就松开。起点可能在上一格列远端，
+    // 固定时长的一次起跳会在离台阶还远处用掉。水平跳跃仍是一次起跳。
+    // 起跳到升过一格约需 4 个物理刻：按当前水平速度提前这段距离起跳，避免先撞上台阶边停住。
+    const nearRise = () => {
+      const p = b.entity.position, v = b.entity.velocity;
+      const lead = 0.35 + 4.5 * (v ? Math.hypot(v.x, v.z) : 0);
+      return Math.hypot(Math.max(fx - p.x, 0, p.x - (fx + 1)), Math.max(fz - p.z, 0, p.z - (fz + 1))) <= Math.max(0.65, lead);
+    };
+    const holdJump = () => stepUp && b.entity.position.y < target.y - 0.05 && (nearRise() || b.entity.isCollidedHorizontally === true);
+    if (horizontalJump && needsJump) b.setControlState('jump', true);
+    if (stepUp) b.setControlState('jump', holdJump());
     // sprint 只来自本次委托的执行请求；只在平走、无需跳跃/跨空时按住，
     // 逐段 feet 控制能看到外层非本地 moveTo 通过异步作用域传下来的同一请求。
     const sprinting = mode === 'feet' && sprint && !needsJump && !horizontalJump && Math.abs(target.y - p0y) <= 0.05;
@@ -1406,13 +1427,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const stopWaiting = () => wake?.();
     const onPhysicsTick = () => {
       if (crossedCheckpoint || signal.aborted || !ownsControls()) return;
+      if (stepUp) b.setControlState('jump', holdJump());
       const e = b.entity;
       const p = e.position, v = e.velocity;
       const stepX = p.x - previousX, stepZ = p.z - previousZ;
       previousX = p.x; previousZ = p.z;
       if (!atEndpoint() && passedIntermediate() <= 1e-9 && !(flatFinish && e.onGround && v && dist() <= flatBrakeDistance(Math.hypot(v.x, v.z)))) {
         // 若松键一帧就能入窗，而再走一帧后惯性会滑出，先滑入。下一帧仍读实际落脚。
-        const coast = !settleAtTarget && !horizontalJump && e.onGround && v
+        const coast = !settleAtTarget && !passColumn && !horizontalJump && e.onGround && v
           && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical
           && Math.hypot(p.x + v.x - tx, p.z + v.z - tz) <= FEET_ARRIVAL_TOLERANCE.horizontal
           && Math.hypot(p.x + stepX + v.x - tx, p.z + stepZ + v.z - tz) > FEET_ARRIVAL_TOLERANCE.horizontal;
@@ -1440,7 +1462,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       while (!crossedCheckpoint && !atEndpoint() && Date.now() < deadline) {
         check();
         checkPosition();
-        if (needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
+        if (horizontalJump && needsJump && Date.now() >= jumpReleaseAt) b.setControlState('jump', false);
+        if (stepUp) b.setControlState('jump', holdJump());
         const d = dist();
         const v = b.entity.velocity;
         const speed = v ? Math.hypot(v.x, v.z) : 0;
@@ -1518,8 +1541,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           const forward = -dx * Math.sin(heading) - dz * Math.cos(heading);
           const right = dx * Math.cos(heading) - dz * Math.sin(heading);
           const fineFinish = corridor?.minimumAlong !== undefined && d <= FEET_ARRIVAL_TOLERANCE.horizontal * 2;
-          const keys: ('forward' | 'back' | 'left' | 'right' | 'sneak')[] = [
+          const keys: ('forward' | 'back' | 'left' | 'right' | 'sneak' | 'jump')[] = [
             ...(fineFinish ? ['sneak' as const] : []),
+            ...(stepUp && p.y < target.y - 0.05 ? ['jump' as const] : []),
             ...(Math.abs(forward) > 0.02 ? [forward > 0 ? 'forward' as const : 'back' as const] : []),
             ...(Math.abs(right) > 0.02 ? [right > 0 ? 'right' as const : 'left' as const] : []),
           ];

@@ -1,8 +1,7 @@
 import { supportTop } from '../perception/geometry.ts';
 import {
   evaluateLandTransition,
-  evaluateWalkSegment,
-  evaluateWalkStep,
+  evaluateWalkTo,
   resolveLandLimits,
   type BodyContext,
   type HazardFact,
@@ -234,17 +233,17 @@ function checkTransition(
 ): Check {
   const body = { ...request.body, feet: { ...from } };
   if (kind === 'walk') {
-    const dx = to.x - (plannedFrom ?? from).x, dz = to.z - (plannedFrom ?? from).z;
-    const direction = Math.abs(dx) > EPS
-      ? { axis: 'x' as const, sign: Math.sign(dx) as 1 | -1 }
-      : { axis: 'z' as const, sign: Math.sign(dz) as 1 | -1 };
+    // 直线 walk（四向或斜向）从实测起点证明到原计划落点的整段扫掠与连续支撑；
+    // 有起点偏差时只接受仍在计划起点格列内、脚高 0.05 内的实测位置。
     const query = {
       worldId: request.worldId, dim: request.dim, sessionId: request.sessionId,
-      mode: 'walk' as const, body, direction,
+      mode: 'walk' as const, body, direction: { axis: 'x' as const, sign: 1 as const },
     };
-    const evaluation = plannedFrom === undefined
-      ? evaluateWalkStep(map, query, request.rules.shapeProvider, now)
-      : evaluateWalkSegment(map, query, to, request.rules.shapeProvider, now, 0.05);
+    const outsideColumn = plannedFrom !== undefined
+      && (Math.floor(from.x) !== Math.floor(plannedFrom.x) || Math.floor(from.z) !== Math.floor(plannedFrom.z));
+    const evaluation = outsideColumn
+      ? { status: 'UNSUPPORTED' as const, reason: 'actual start must stand in the planned start column', hazards: [], obstacles: [], problem: undefined }
+      : evaluateWalkTo(map, query, to, request.rules.shapeProvider, now, { feetTolerance: plannedFrom === undefined ? 0 : 0.05 });
     const obstacle = evaluation.obstacles.find((entry) => entry.kind === 'block');
     return {
       status: evaluation.status,

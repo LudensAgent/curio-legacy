@@ -254,7 +254,8 @@ test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕�
   assert.ok(progress.along >= 19.99, `along=${progress.along}`);
   assert.ok(progress.lateral <= 1.01, `final lateral=${progress.lateral}`);
   const counters = r.data?.counters as { confirmedRouteLength: number };
-  assert.ok(counters.confirmedRouteLength > 21, `detour path=${counters.confirmedRouteLength}`);
+  // 绕过三格墙比直行 20 格长；斜向绕行比只横移更短（约 20 + 2(√2−1)）。
+  assert.ok(counters.confirmedRouteLength > 20.5, `detour path=${counters.confirmedRouteLength}`);
   assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '绕行也只迈步，不挖/不放');
 });
 

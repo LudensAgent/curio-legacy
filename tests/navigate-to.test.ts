@@ -257,12 +257,12 @@ test('navigate_to 小偏差从实测脚位复验并到达原 cell 目标，计�
   assert.ok(Math.abs(segment.confirmed[1]!.measuredHorizontal - 0.95) <= 1e-9);
 });
 
-test('navigate_to 已确认一步后发生超容差偏移，下一步必须从实测位置重搜原目标', async (t) => {
+test('navigate_to 已确认一步后在计划起点格列内偏移：从实测位置复验下一步几何，不重搜', async (t) => {
   const { adapter, ctx } = setup(flatMap());
   t.after(() => ctx.memory.close());
   let drifted = false;
   ctx.progress = (_fraction, detail) => {
-    // 模拟服务器在第一步落点已确认后、第二步执行前推移身体。
+    // 模拟服务器在第一步落点已确认后、第二步执行前推移身体，仍在同一格列。
     if (!drifted && detail === 'segment 1/3') {
       drifted = true;
       adapter.pos = { ...adapter.pos, x: adapter.pos.x + 0.2 };
@@ -275,17 +275,40 @@ test('navigate_to 已确认一步后发生超容差偏移，下一步必须从�
   });
   assert.equal(drifted, true, '测试确实发生段间漂移');
   assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(r.data?.requestedTarget, target, '不改原 cell 目标');
+  assert.equal(r.data?.replanCount, undefined);
+  assert.equal((r.data?.counters as { searches: number }).searches, 1);
+  const segment = r.data?.lastSegment as SegmentReceipt;
+  assert.deepEqual(segment.confirmed[1]!.measuredFrom, { x: 1.7, y: 64, z: 0.5 }, '第二步从偏移后的实测起点出发');
+  assert.deepEqual(segment.confirmed[1]!.transition.from, { x: 1.5, y: 64, z: 0.5 }, '计划几何不被实测改写');
+  assert.equal(Math.floor(adapter.pos.x), 3);
+});
+
+test('navigate_to 已确认一步后偏移出计划起点格列，下一步必须从实测位置重搜原目标', async (t) => {
+  const { adapter, ctx } = setup(flatMap());
+  t.after(() => ctx.memory.close());
+  let drifted = false;
+  ctx.progress = (_fraction, detail) => {
+    if (!drifted && detail === 'segment 1/3') {
+      drifted = true;
+      adapter.pos = { ...adapter.pos, x: adapter.pos.x - 0.6 };
+    }
+  };
+  const target = { x: 3, y: 64, z: 0 };
+  const r = await navigateTo.run(ctx, {
+    to: target, allowed: ['walk', 'step'], historical: false, maxSteps: 16, maxSegments: 4,
+    allowUnknownCorridor: false,
+  });
+  assert.equal(drifted, true, '测试确实发生段间漂移');
+  assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(r.data?.requestedTarget, target, '重搜不改原 cell 目标');
   assert.equal(r.data?.replanCount, 1);
-  assert.equal((r.data?.counters as { searches: number }).searches, 2);
   const replan = (r.data?.replans as { plannedStart: Vec3Like; measuredEnd: Vec3Like }[])[0]!;
   assert.deepEqual(replan.plannedStart, { x: 1.5, y: 64, z: 0.5 });
-  assert.deepEqual(replan.measuredEnd, { x: 1.7, y: 64, z: 0.5 });
+  assert.equal(Math.floor(replan.measuredEnd.x), 0, '实测已离开计划起点格列');
   const segment = r.data?.lastSegment as SegmentReceipt;
   assert.deepEqual(segment.confirmed[0]!.transition.from, replan.measuredEnd, '新路线必须从偏移后的实测起点出发');
-  assert.deepEqual(segment.confirmed[0]!.measuredFrom, replan.measuredEnd);
-  assert.deepEqual(adapter.pos, { x: 3.7, y: 64, z: 0.5 }, '重搜保持原目标格，并保留实测格内偏移');
-  assert.equal(adapter.actions.filter((action) => action === 'moveTo:feet').length, 3, '重搜前不执行失去起点依据的旧第二步');
+  assert.equal(Math.floor(adapter.pos.x), 3);
 });
 
 test('隐藏的已加载客户端方块不成为已观察 blocker：导航只按合法 VoxelMap 证据判断', async (t) => {

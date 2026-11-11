@@ -1,4 +1,4 @@
-import { type AgentState, type Vec3Like } from '../../adapter/types.ts';
+import { FEET_ARRIVAL_TOLERANCE, type AgentState, type Vec3Like } from '../../adapter/types.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
 import {
   searchLandRouteAsync, summarizeBoundaries, verifyLandRoute,
@@ -924,11 +924,14 @@ async function runNavigationSegmentInner(
         ...(route.policy === undefined ? {} : { policy: route.policy }),
       });
     }
-    // 身体按已声明的到达精度停下，不会精确等于计划浮点坐标。步行/台阶/下落在这个
-    // 范围内复验“实测起点 → 原计划落点”的真实几何；更大偏差仍从实测位置重规划。
+    // 身体不会精确停在计划浮点坐标；连续交接时也只保证站进计划格列。步行/台阶/下落
+    // 只要实测仍站在计划起点格列、脚高相符，就复验“实测起点 → 原计划落点”的真实几何；
+    // 离开起点格列才从实测位置重规划。
     const startDrift = current.pos.x !== transition.from.x || current.pos.y !== transition.from.y || current.pos.z !== transition.from.z;
     const canVerifyResidual = (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop')
-      && feetReached(transition.from, current.pos, current.onGround);
+      && current.onGround
+      && Math.floor(current.pos.x) === Math.floor(transition.from.x) && Math.floor(current.pos.z) === Math.floor(transition.from.z)
+      && Math.abs(current.pos.y - transition.from.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
     if (startDrift && !canVerifyResidual) {
       return receipt('replan', {
         stopCode: 'start_drift',
@@ -952,6 +955,7 @@ async function runNavigationSegmentInner(
     startPreview(index);
     let actionError: unknown = null;
     let continuous = false;
+    let passColumn = false;
     if (transition.kind === 'jump') {
       const remaining = request.deadline - Date.now();
       if (remaining < 1) {
@@ -1016,26 +1020,29 @@ async function runNavigationSegmentInner(
         return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
       }
       const next = transitions[index + 1];
-      // 已证实的同向 walk/step/小落差链保留中间速度；转向、大落差、边界和末点仍停车。
-      // <=0.6 的地面小落差仍由身体控制落边制动，真实落地到位后才交接。
-      // 前视用下一段计划几何，交接时仍会以上方实测起点再次复验，不能跳过未知格。
+      // 已证实的 walk/step/一格内落差链在中间点不停车（含转向、斜向）；多格下落、边界和末点仍停稳。
+      // 同向与落差只要求站进目标格列；转向仍进入 0.12 格脚位窗，让身体留在本格列内再转向。
+      // 前视用下一段计划几何，交接时仍会以实测起点再次复验，不能跳过未知格。
+      const sameHeading = next !== undefined
+        && transition.to.x - transition.from.x === next.to.x - next.from.x
+        && transition.to.z - transition.from.z === next.to.z - next.from.z;
       continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
         && !directionalFinish
-        && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 0.6)
-        && (transition.kind !== 'drop' || drop <= 0.6)
-        && transition.to.x - transition.from.x === next.to.x - next.from.x
-        && transition.to.z - transition.from.z === next.to.z - next.from.z
+        && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 1)
+        && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical)
         && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
         && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
+      passColumn = continuous && (sameHeading || transition.kind === 'drop');
       try {
         execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(
           { kind: 'feet', x: transition.to.x, y: transition.to.y, z: transition.to.z },
           {
             signal: ctx.signal,
-            // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。
-            timeoutMs: Math.min(6000, Math.floor(remaining)),
-            ...(continuous ? { settleAtTarget: false } : {}),
+            // 不能把剩余 50ms 扩成 1s；向下取整后不超过原 deadline。一格内的步行/台阶/落差
+            // 正常不到 1 秒，3 秒没落位就按执行偏差处理；多格下落保留更长时限。
+            timeoutMs: Math.min(transition.kind === 'drop' && drop > 1 + FEET_ARRIVAL_TOLERANCE.vertical ? 6000 : 3000, Math.floor(remaining)),
+            ...(continuous ? { settleAtTarget: false, ...(passColumn ? { passColumn: true } : {}) } : {}),
             ...(transition.kind === 'drop' && drop > 1 ? { maxDropDown: Math.ceil(drop) } : {}),
             ...(request.corridor === undefined ? {} : { corridor: directionalFinish ? { ...request.corridor, minimumAlong: request.minimumAlong } : request.corridor }),
           },
@@ -1083,6 +1090,16 @@ async function runNavigationSegmentInner(
         return receipt('replan', { stopCode: 'checkpoint_passed', detail: actionError.message,
           partialDisplacement: partial, stepIndex: index, transition, measuredEnd: stopped });
       }
+      // 身体没按计划落位但仍稳稳站在地面上（被台阶边挡住、落点偏了等）：这是执行偏差，
+      // 不是路线结论。从实测位置重搜原目标；同一脚格再次偏差时由协调器停下报事实。
+      const message = actionError instanceof Error ? actionError.message : String(actionError);
+      const end = ctx.adapter.state();
+      if (transition.kind !== 'jump' && transition.kind !== 'ladder' && end.onGround && !end.inLava
+        && /^(TIMEOUT|NOT_CONFIRMED)/.test(message)) {
+        return receipt('replan', { stopCode: 'execution_deviation',
+          detail: `第 ${index + 1} 段 ${transition.kind} 没有按计划落位（${message}）；从实测位置重新规划原目标`,
+          partialDisplacement: partial, stepIndex: index, transition, measuredEnd: stopped });
+      }
       return {
         ...receipt('physical_failure', {
           stopCode: 'step_failed',
@@ -1096,8 +1113,12 @@ async function runNavigationSegmentInner(
     }
 
     const arrived = ctx.adapter.state();
-    // 所有地面 transition 都必须在原计划连续端点落稳，格内位置不能顶替它。
-    const reached = transitionReached(request, transition, arrived.pos, arrived.onGround);
+    // 停稳的地面 transition 必须在原计划连续端点落稳；格列交接的中间点按实测站进目标格列、
+    // 脚高相符确认，下一段再从这个实测位置复验真实几何。
+    const reached = passColumn
+      ? arrived.onGround && Math.floor(arrived.pos.x) === Math.floor(transition.to.x) && Math.floor(arrived.pos.z) === Math.floor(transition.to.z)
+        && Math.abs(arrived.pos.y - transition.to.y) <= FEET_ARRIVAL_TOLERANCE.vertical
+      : transitionReached(request, transition, arrived.pos, arrived.onGround);
     if (!reached) {
       return {
         ...receipt('physical_failure', {
