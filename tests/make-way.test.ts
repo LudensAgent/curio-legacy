@@ -38,6 +38,17 @@ test('正前方是已知的墙：允许挖时规划挖开脚、头两格穿过�
   assert.equal(await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 8.5, y: 64, z: 0.5 }, { maxEdits: 16 }, any), null);
 });
 
+test('父任务取消或期限已到时，开路规划不再继续搜索', async () => {
+  const w = corridor(8);
+  for (const y of [64, 65]) w.put(4, y, 0, 'stone');
+  const start = { x: 0, y: 64, z: 0 }, target = { x: 8.5, y: 64, z: 0.5 };
+  assert.ok(await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any) !== null);
+  const aborted = new AbortController();
+  aborted.abort();
+  assert.equal(await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any, { signal: aborted.signal }), null, '取消后不再搜索');
+  assert.equal(await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any, { deadlineMs: Date.now() - 1 }), null, '期限已过不再搜索');
+});
+
 test('前方一格缺口：允许放置时补一块支撑走过去', async () => {
   const w = corridor(8);
   w.put(4, 63, 0, 'air');

@@ -36,6 +36,7 @@ type Kind = 'unknown' | 'clear' | 'standable' | 'solid' | 'liquid' | 'danger';
 export async function planMakeWay(
   voxel: VoxelMap, dim: string, start: Cell, target: Vec3Like, opts: MakeWayOptions,
   allowed: (cell: Cell) => boolean,
+  budget: { signal?: AbortSignal; deadlineMs?: number } = {},
 ): Promise<MakeWayStep[] | null> {
   const kinds = new Map<string, { kind: Kind; name: string }>();
   const look = (x: number, y: number, z: number) => {
@@ -95,20 +96,53 @@ export async function planMakeWay(
   const h = (c: Cell) => Math.hypot(target.x - (c.x + 0.5), target.z - (c.z + 0.5)) + Math.abs(target.y - c.y) * 0.5;
 
   type Node = { cell: Cell; g: number; f: number; parent: Node | null; step: MakeWayStep | null };
+  type OpenEntry = { node: Node; seq: number };
+  // 稳定最小堆：f 相同时按插入序号先到先出，与原线性扫描挑“第一个最小值”的选择顺序一致。
+  const open: OpenEntry[] = [];
+  let nextSeq = 0;
+  const openLess = (a: OpenEntry, b: OpenEntry) => a.node.f < b.node.f || (a.node.f === b.node.f && a.seq < b.seq);
+  const openPush = (node: Node) => {
+    const entry: OpenEntry = { node, seq: nextSeq++ };
+    open.push(entry);
+    let index = open.length - 1;
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (!openLess(entry, open[parent]!)) break;
+      open[index] = open[parent]!;
+      index = parent;
+    }
+    open[index] = entry;
+  };
+  const openPop = (): Node => {
+    const first = open[0]!;
+    const last = open.pop()!;
+    if (open.length === 0) return first.node;
+    let index = 0;
+    for (;;) {
+      const left = index * 2 + 1, right = left + 1;
+      if (left >= open.length) break;
+      const child = right < open.length && openLess(open[right]!, open[left]!) ? right : left;
+      if (!openLess(open[child]!, last)) break;
+      open[index] = open[child]!;
+      index = child;
+    }
+    open[index] = last;
+    return first.node;
+  };
   const startNode: Node = { cell: start, g: 0, f: h(start), parent: null, step: null };
-  const open: Node[] = [startNode];
+  openPush(startNode);
   const best = new Map<string, number>([[keyOf(start), 0]]);
   let closest = startNode;
   let expanded = 0;
   let sliceEnd = performance.now() + SLICE_MS;
   while (open.length > 0 && expanded < MAX_NODES) {
+    // 取消/期限由调用方决定；规划只是委托的一部分，不能越过它继续占主线程。
+    if (budget.signal?.aborted || (budget.deadlineMs !== undefined && Date.now() >= budget.deadlineMs)) return null;
     if (performance.now() >= sliceEnd) {
       await new Promise((resolve) => setImmediate(resolve));
       sliceEnd = performance.now() + SLICE_MS;
     }
-    let bi = 0;
-    for (let i = 1; i < open.length; i++) if (open[i]!.f < open[bi]!.f) bi = i;
-    const node = open.splice(bi, 1)[0]!;
+    const node = openPop();
     if ((best.get(keyOf(node.cell)) ?? Infinity) < node.g) continue;
     expanded++;
     if (h(node.cell) < h(closest.cell)) closest = node;
@@ -175,7 +209,7 @@ export async function planMakeWay(
       const key = keyOf(to);
       if ((best.get(key) ?? Infinity) <= g) continue;
       best.set(key, g);
-      open.push({ cell: to, g, f: g + h(to), parent: node, step });
+      openPush({ cell: to, g, f: g + h(to), parent: node, step });
     }
   }
   if (closest === startNode || h(start) - h(closest.cell) < 3 && h(closest.cell) > 1) return null;

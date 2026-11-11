@@ -1026,7 +1026,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       return { x: here.x + bearing.x * ahead, y: here.y, z: here.z + bearing.z * ahead };
     })();
     const start = { x: Math.floor(here.x), y: Math.floor(here.y + 0.05), z: Math.floor(here.z) };
-    const steps = await planMakeWay(voxel, scope.dim, start, target, makeWay, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }));
+    const steps = await planMakeWay(voxel, scope.dim, start, target, makeWay, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
+      { signal: ctx.signal, deadlineMs: deadline });
+    if (steps === null && ctx.signal.aborted) { stop = stopOf('CANCELLED', '开路规划时父任务取消'); break; }
+    if (steps === null && Date.now() >= deadline) { stop = stopOf('TIMEOUT', '开路规划到达原期限'); break; }
     if (steps === null) {
       // 说清试过开路、用了哪些授权、缺哪种手段：是否补授权由调用方决定。
       const granted = [makeWay.dig === undefined ? null : 'dig', makeWay.place === undefined ? null : `place(${makeWay.place.item})`].filter((x): x is string => x !== null);
