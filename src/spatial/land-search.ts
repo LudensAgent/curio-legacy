@@ -142,6 +142,8 @@ export interface LandSearchResult {
   budget?: LandSearchBudget;
   evaluatedAt: number;
   stats: LibraryResult['stats'];
+  /** 因搜索期间依赖 Section 被新观测改变而作废、随后用最新地图重跑的次数；只有分片搜索会出现。 */
+  invalidatedAttempts?: number;
   /** 由显式兼容调用方填充；普通搜索返回不做隐式整条路线复验。 */
   verification?: LandRouteVerification;
   /** 兼容旧读取方：等于 target，绝不是吸附后的支撑面。 */
@@ -427,9 +429,30 @@ export function searchLandRoute(map: VoxelMap, request: LandSearchRequest, now =
   return normalize(librarySearchLandRoute(map, libraryRequest(request), now));
 }
 
+/**
+ * 分片搜索每片的工作量上限。库默认 32 个读/边就让出一次，繁忙的事件循环里每次让出约要数毫秒，
+ * 百余节点的搜索因此拖到半秒，期间视觉写入几乎必然作废它。单片时长仍由 maxSliceMs（默认 5ms）限制。
+ */
+const ASYNC_WORK_PER_SLICE = 4096;
+/**
+ * 搜索期间依赖的 Section 被新观测改变时，库返回 INVALIDATED 而不给结果。这是地图并发更新的
+ * 一致性冲突，不是路线结论：用最新地图重跑同一请求，次数有界，并受原 signal / deadline 约束。
+ */
+const MAX_INVALIDATION_RERUNS = 3;
+
 /** 分片入口：库在约 maxSliceMs 计算后让出事件循环；返回同样的宿主结果。 */
 export async function searchLandRouteAsync(map: VoxelMap, request: LandSearchRequest, now = Date.now()): Promise<LandSearchResult> {
-  return normalize(await librarySearchLandRouteAsync(map, libraryRequest(request), now));
+  const libRequest = libraryRequest({ maxWorkPerSlice: ASYNC_WORK_PER_SLICE, ...request });
+  const startedAt = Date.now();
+  let result = await librarySearchLandRouteAsync(map, libRequest, now);
+  let invalidatedAttempts = 0;
+  while (result.status === 'INVALIDATED' && invalidatedAttempts < MAX_INVALIDATION_RERUNS
+    && request.signal?.aborted !== true && (request.deadlineMs === undefined || Date.now() < request.deadlineMs)) {
+    invalidatedAttempts += 1;
+    // 证据新鲜度按调用方的时间基准推进到重跑时刻。
+    result = await librarySearchLandRouteAsync(map, libRequest, now + Date.now() - startedAt);
+  }
+  return { ...normalize(result), ...(invalidatedAttempts === 0 ? {} : { invalidatedAttempts }) };
 }
 
 /** 对已选路线逐段用当前证据复验；remembered 候选在执行前必须过这一关。 */

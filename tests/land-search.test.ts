@@ -377,7 +377,7 @@ test('分片搜索：异步入口真实让出事件循环，取消不再等完�
   assert.equal(cancelled.status, 'CANCELLED');
 });
 
-test('分片搜索：依赖 Section 在搜索中途变化时 INVALIDATED，而不是返回旧 OPEN', { timeout: 5000 }, async () => {
+test('分片搜索：依赖 Section 在搜索中途变化时作废旧结果，用最新地图重跑', { timeout: 5000 }, async () => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   fillBox(map, 'minecraft:air', at(-1, 0, -1), at(6, 2, 1));
   fill(map, 'minecraft:stone', [0, 1, 2, 3, 4, 5].map((x) => at(x, -1, 0)));
@@ -406,6 +406,39 @@ test('分片搜索：依赖 Section 在搜索中途变化时 INVALIDATED，而�
   const result = await searchLandRouteAsync(map, request(at(0.5, 0, 0.5), goalOf(at(5, 0, 0)), {
     maxSearchMs: 5000, maxWorkPerSlice: 1,
   }), 2000);
+  assert.equal(result.invalidatedAttempts, 1, '中途变化的那次搜索不能直接返回旧结果');
+  assert.equal(result.status, 'FOUND', JSON.stringify(result.stats));
+  assert.ok(result.transitions.length > 0);
+});
+
+test('分片搜索：持续被新观测作废时重跑次数有界，最终如实返回 INVALIDATED', { timeout: 5000 }, async () => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  fillBox(map, 'minecraft:air', at(-1, 0, -1), at(6, 2, 1));
+  fill(map, 'minecraft:stone', [0, 1, 2, 3, 4, 5].map((x) => at(x, -1, 0)));
+  const readSectionRef = map.sectionRef.bind(map);
+  let writes = 0, pending = false;
+  map.sectionRef = (dim, x, y, z) => {
+    if (!pending && dim === DIM && Math.floor(x / 16) === 0 && Math.floor(y / 16) === 0 && Math.floor(z / 16) === 0) {
+      pending = true;
+      // setImmediate 排在搜索本片结束后的下一次让出之前，写入必然发生在搜索途中。
+      setImmediate(() => {
+        pending = false;
+        writes += 1;
+        sequence += 1;
+        // 每次写入都是此前没观察过的新格，变化会作废依赖这个 Section 的搜索。
+        map.observe({
+          worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now(), sequence,
+          source: 'vision', evidence: 'seen', stateComplete: true,
+          state: { name: 'minecraft:air', properties: {} }, pos: at(writes, 8, 0),
+        });
+      });
+    }
+    return readSectionRef(dim, x, y, z);
+  };
+  const result = await searchLandRouteAsync(map, request(at(0.5, 0, 0.5), goalOf(at(5, 0, 0)), {
+    maxSearchMs: 5000, maxWorkPerSlice: 1,
+  }), 2000);
   assert.equal(result.status, 'INVALIDATED', JSON.stringify(result.stats));
+  assert.equal(result.invalidatedAttempts, 3);
   assert.equal(result.transitions.length, 0);
 });
