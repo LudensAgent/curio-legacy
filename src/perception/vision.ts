@@ -211,8 +211,8 @@ export const VISION_FEED_REFRESH_MS = 5000;
 /** 每条视线除命中格外，还写入命中前紧挨着的几格透明格（命中面上方的落脚/头部空间）。 */
 const FEED_TRAIL = 3;
 /**
- * 这个距离内，视线穿过的每个透明格都已被看清，全部写入。只记命中前几格时，平地上头部高度的空气
- * 只有身前一格被记录，行走所需的身体净空在两格外就成了未观察。更远处仍只记命中前几格。
+ * 这个距离内，视线穿过的、贴近地面（脚部/头部高度）的透明格都已被看清，全部写入。只记命中前几格时，
+ * 平地上头部高度的空气只有身前一格被记录，行走所需的身体净空在两格外就成了未观察。更远处仍只记命中前几格。
  */
 const VISION_NEAR_FEED_RADIUS = 12;
 const CLEAR_AIR: Optics = { name: 'air', kind: 'clear' };
@@ -410,6 +410,14 @@ export class Vision {
       if (!old || c.d < old.d) feed.set(k, c);
     };
 
+    // 近处只整段记录行走需要的那一层透明格：正下方一两格内有非透明方块（脚部/头部净空）。
+    // 半空中的空气不影响行走，全记会让每个区段的证据量暴涨、撑满常驻内存预算。
+    const grounded = (x: number, y: number, z: number) => [1, 2].some((below) => {
+      if (sectionEmpty(x, y - below, z)) return false;
+      const o = opt(x, y - below, z);
+      return o !== null && o.kind !== 'clear';
+    });
+
     /** 一条视线：返回第一眼看到的表面类别与距离；沿途记录值得注意的方块 */
     const cast = (dx: number, dy: number, dz: number): { cat: Cat; dist: number } => {
       let hitCat: Cat | null = null;
@@ -419,10 +427,7 @@ export class Vision {
       const trail: FeedCell[] = [];
       const pass = (x: number, y: number, z: number, name: string, d: number) => {
         if (hitCat) return;
-        if (d <= VISION_NEAR_FEED_RADIUS) {
-          if (d <= seeRange(light(x, y, z))) keep({ x, y, z, name, d });
-          return;
-        }
+        if (d <= VISION_NEAR_FEED_RADIUS && grounded(x, y, z) && d <= seeRange(light(x, y, z))) keep({ x, y, z, name, d });
         trail.push({ x, y, z, name, d });
         if (trail.length > FEED_TRAIL) trail.shift();
       };
