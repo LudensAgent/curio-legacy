@@ -1283,7 +1283,11 @@ const pillarOneSkill: Skill<{ item?: string }> = {
             : adapterReason === 'OCCUPIED' || String(adapterReason).startsWith('BLOCKED:') ? 'PATH_NOT_FOUND'
               : 'EFFECT_NOT_CONFIRMED';
       const blocked = String(adapterReason ?? adapterError).startsWith('BLOCKED:') || adapterReason === 'NO_REFERENCE';
-      return fail(code, `原地垫高没成：${reason}${r?.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, {
+      // 脚下这格被无碰撞但不可替换的东西占着（树苗、花、火把、铁轨…）：游戏不让把方块放进去，说清缺口。
+      const occupant = adapterReason?.startsWith('BLOCKED:') ? adapterReason.slice('BLOCKED:'.length) : undefined;
+      const occupied = occupant === undefined ? ''
+        : `；身体所在这格 (${feet.x},${feet.y},${feet.z}) 有 ${occupant} 占着，方块放不进去，要垫高得先把它挖掉（本动作没有授予挖掘）`;
+      return fail(code, `原地垫高没成：${reason}${occupied}${r?.clearanceDetail ? `；${r.clearanceDetail}` : ''}`, {
         pillarFailure: adapterReason ?? 'ADAPTER_ERROR', facing, consumed, inventory,
         ...(adapterError ? { adapterError } : {}),
         ...(r?.clearance ? { failureCause: 'PILLAR_CLEARANCE', pillarClearance: r.clearance } : {}),
