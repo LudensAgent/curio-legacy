@@ -188,7 +188,7 @@ export async function planMakeWay(
 /** 默认与上限：一次调用最多为开路改动这么多格（挖开 + 放置合计）。 */
 export const MAKE_WAY_DEFAULT_EDITS = 16, MAKE_WAY_MAX_EDITS = 64;
 /** 开路参数的说明片段，三个入口共用，与 parseMakeWay 一致。 */
-export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块）,"maxEdits"?:1-64（默认 16，挖开+放置合计）';
+export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-64（默认 16，挖开+放置合计）';
 /** 开路参数的行为说明，三个入口共用。 */
 export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、危险格、上方压着沙砾的格不挖），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one/move_step 执行；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
 

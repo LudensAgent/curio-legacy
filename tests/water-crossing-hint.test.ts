@@ -9,7 +9,7 @@ const S = (inventory: { name: string; count: number }[]) => ({ inventory } as an
 test('waterCrossingHint：站在水边、有木板和方块时，报出垫路方块和船的代价', () => {
   const hint = waterCrossingHint(P(false, { layers: { 'u0': ['~~'] } }), S([{ name: 'cobblestone', count: 20 }, { name: 'oak_planks', count: 6 }]));
   assert.ok(hint);
-  assert.match(hint!, /能垫路的方块 26 块/);
+  assert.match(hint!, /any 能用的土石类方块 20 块/); // 木板不在 any 范围内，单独按造船报
   assert.match(hint!, /木板 6 块（够造一只船）/);
 });
 
@@ -20,7 +20,7 @@ test('waterCrossingHint：在船上不提示', () => {
 test('waterCrossingHint：没木板没方块时报出缺料', () => {
   const hint = waterCrossingHint(P(true, null), S([]));
   assert.ok(hint);
-  assert.match(hint!, /没有能垫路的方块/);
+  assert.match(hint!, /any 能用的土石类方块没有/);
   assert.match(hint!, /没有船，木板也不够造/);
 });
 

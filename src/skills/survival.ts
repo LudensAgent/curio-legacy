@@ -6,14 +6,26 @@ import { findStation } from './stations.ts';
 import { canSleepAt } from '../perception/perception.ts';
 import { creatureSpotsNear } from '../memory/creature-spots.ts';
 
-/** 可以用来封顶/搭建的方块（不含会下落的沙子沙砾） */
+/**
+ * item:"any" 与程序自动挑选垫脚/封顶方块时允许用的方块：常见的土石类填充方块（不含会下落的沙子沙砾），
+ * 按这个顺序优先用。原木、木板、矿物块等另有用途的方块不在其中——要用它们由 Agent 写明方块名，
+ * 程序不替它把这些材料花掉。
+ */
 export const PLACEABLE = [
-  'dirt', 'cobblestone', 'cobbled_deepslate', 'stone', 'andesite', 'granite', 'diorite', 'deepslate', 'netherrack',
+  'dirt', 'netherrack', 'cobblestone', 'cobbled_deepslate', 'andesite', 'granite', 'diorite', 'tuff',
+  'deepslate', 'stone', 'blackstone', 'basalt', 'end_stone',
+];
+/** 能站稳的木质方块：只用于判断落脚是否安全，不参与自动挑选垫脚材料。 */
+const WOOD_FLOOR = [
   'oak_planks', 'birch_planks', 'spruce_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks',
   'oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log',
 ];
+/** 说明 any 的范围：给回执和动作说明用，避免 Agent 以为 any 会用背包里任何方块。 */
+/** 动作说明里的一句话版本。 */
+export const ANY_FILL_NOTE = 'any 只用泥土、下界岩、圆石等土石类填充方块，不用原木、木板、矿物块';
+export const PLACEABLE_DOC = '泥土、下界岩、圆石、深板岩圆石、安山岩、花岗岩、闪长岩、凝灰岩、深板岩、石头、黑石、玄武岩、末地石（按此顺序优先）；不含原木、木板、矿物块等，要用它们写方块名';
 const DIGGABLE = new Set(['dirt', 'grass_block', 'coarse_dirt', 'podzol', 'stone', 'andesite', 'granite', 'diorite', 'deepslate', 'tuff', 'sand', 'gravel', 'clay', 'sandstone']);
-const SAFE_FLOOR = new Set([...DIGGABLE, ...PLACEABLE, 'bedrock'].filter((name) => !['sand', 'gravel'].includes(name)));
+const SAFE_FLOOR = new Set([...DIGGABLE, ...PLACEABLE, ...WOOD_FLOOR, 'bedrock'].filter((name) => !['sand', 'gravel'].includes(name)));
 const AIR = new Set(['air', 'cave_air', 'void_air']);
 const PLANTS = new Set(['short_grass', 'grass', 'tall_grass', 'fern', 'large_fern', 'dead_bush', 'snow', 'dandelion', 'poppy']);
 const FOOD_ANIMALS = new Set(['cow', 'pig', 'sheep', 'chicken', 'rabbit', 'mooshroom']);
@@ -109,7 +121,7 @@ async function enclosure(ctx: SkillCtx, args: { until: 'day' | 'healed' }, why: 
   const open = (p: { x: number; y: number; z: number }) => { const n = adapter.blockAt(p); return n === null || AIR.has(n) || PLANTS.has(n) || n === 'water'; };
   const need = cells.filter(open);
   const blocks = adapter.state().inventory.filter((i) => PLACEABLE.includes(i.name)).reduce((a, i) => a + i.count, 0);
-  if (blocks < need.length) return fail('MISSING_MATERIALS', `${why}；附近 12 格也没有能挖坑的泥土/石头地，就地围起来要 ${need.length} 个方块，背包只有 ${blocks} 个（泥土/圆石/木板/原木）`);
+  if (blocks < need.length) return fail('MISSING_MATERIALS', `${why}；附近 12 格也没有能挖坑的泥土/石头地，就地围起来要 ${need.length} 个方块，背包只有 ${blocks} 个（${PLACEABLE_DOC}）`);
   ctx.progress(0.1, `${why}，就地用方块围起来（${need.length} 块）`);
   let placed = 0;
   for (const p of need.sort((a, b) => a.y - b.y)) {

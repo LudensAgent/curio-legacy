@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { dirName } from '../perception/perception.ts';
 import { FOOD_VALUE } from '../skills/food.ts';
+import { PLACEABLE } from '../skills/survival.ts';
 
 /**
  * 出行记录：按在线观测把身体的经历切成一段段（换维度、死亡、长时间未观测就分段），
@@ -19,7 +20,6 @@ const SAMPLE_MS = 1000;
 const GAP_MS = 15_000;
 /** 最远点每推进这么多格记一个前沿检查点（给无进展判断用；更细的抖动不算推进） */
 const FRONTIER_STEP = 8;
-const BLOCKS = /^(cobblestone|cobbled_deepslate|stone|dirt|netherrack|deepslate|blackstone|basalt|andesite|diorite|granite|tuff|.*_planks)$/;
 const ARMOR_SLOTS = new Set(['head', 'torso', 'legs', 'feet']);
 
 export interface Supplies {
@@ -66,7 +66,7 @@ function suppliesOf(s: AgentState): Supplies {
     pickaxes: picks.reduce((n, i) => n + i.count, 0),
     pickaxeDurability: picks.reduce((n, i) => n + (i.durabilities?.length ? i.durabilities.reduce((a, b) => a + b, 0) : (i.durability?.left ?? 0)), 0),
     armor: armor.reduce((n, e) => n + e.durabilityRemaining!, 0), armorMax: armor.reduce((n, e) => n + (e.durabilityMax ?? 0), 0),
-    blocks: count(BLOCKS), torches: count(/^torch$/), hp: Math.round(s.hp * 10) / 10, hunger: s.food,
+    blocks: s.inventory.filter((i) => PLACEABLE.includes(i.name)).reduce((n, i) => n + i.count, 0), torches: count(/^torch$/), hp: Math.round(s.hp * 10) / 10, hunger: s.food,
   };
 }
 
@@ -221,7 +221,7 @@ export function describeLeg(leg: Leg, opts: { now?: number; here?: Vec3Like; por
     `身体站过的离入口最远处 ${at3(far)}，离入口 ${far.dist} 格${fromHere}`,
     ending,
     `饥饿值累计降 ${leg.hungerDrop} 点${eatenText}`,
-    `${end ? '出发→结束' : '出发→现在'}：背包食物 ${a.foodPoints}→${b.foodPoints} 饥饿点、镐 ${a.pickaxes}→${b.pickaxes} 把（耐久合计 ${a.pickaxeDurability}→${b.pickaxeDurability}）、身上护甲耐久 ${a.armor}→${b.armor}、垫路方块 ${a.blocks}→${b.blocks}、火把 ${a.torches}→${b.torches}`,
+    `${end ? '出发→结束' : '出发→现在'}：背包食物 ${a.foodPoints}→${b.foodPoints} 饥饿点、镐 ${a.pickaxes}→${b.pickaxes} 把（耐久合计 ${a.pickaxeDurability}→${b.pickaxeDurability}）、身上护甲耐久 ${a.armor}→${b.armor}、土石类填充方块 ${a.blocks}→${b.blocks}、火把 ${a.torches}→${b.torches}`,
   ].join('；');
 }
 

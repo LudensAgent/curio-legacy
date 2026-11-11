@@ -389,3 +389,18 @@ test('place_support：换站位移动部分发生后不按旧起点继续', asyn
   assert.equal((r.data?.problem as { kind?: string } | undefined)?.kind, 'STANCE_MOVE_PARTIAL');
   assert.equal(w.inv.get('stone'), 2, '没有发生放置消耗');
 });
+
+test('any 只用土石类填充方块：背包里只有原木和金块时报缺口并列出 any 不会动用的方块', async () => {
+  const { pillarOne } = await import('../src/skills/movement/primitives.ts');
+  const { FakeAdapter } = await import('./fake-adapter.ts');
+  const adapter = new FakeAdapter();
+  adapter.inv.set('oak_log', 12);
+  adapter.inv.set('gold_block', 60);
+  (adapter as unknown as { pillarUp: () => Promise<{ ok: boolean }> }).pillarUp = async () => { throw new Error('不应放置'); };
+  const r = await pillarOne.run({ adapter, signal: new AbortController().signal, deadline: Date.now() + 5000, progress() {} } as never, { item: 'any' });
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'MISSING_MATERIALS');
+  assert.match(r.summary, /oak_log×12/);
+  assert.match(r.summary, /gold_block×60/);
+  assert.match(r.summary, /any 不会用它们/);
+});

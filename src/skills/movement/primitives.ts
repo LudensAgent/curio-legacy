@@ -8,7 +8,7 @@ import { classifyBlock, MAN_MADE_NOTE, OWN_BUILDING_HINT, ownBuildingAt, storedC
 import { noteEdit } from '../../mind/edits.ts';
 import { isDangerousBlock } from '../../spatial/land-search.ts';
 import { markSelfModified } from '../../spatial/shared-session.ts';
-import { PLACEABLE } from '../survival.ts';
+import { ANY_FILL_NOTE, PLACEABLE, PLACEABLE_DOC } from '../survival.ts';
 import { isStation, rememberStation } from '../stations.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from '../types.ts';
 import { absValue, after, facingArg, parseRel, relValue, toRel, visibleCells, visibleStates, type Rel } from './coordinates.ts';
@@ -872,7 +872,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
 const placeSupportSkill: Skill<SupportArgs> = {
   name: 'place_support',
   description: '在指定格形成可站立支撑（[前,上,右] 或 xyz）。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。已有可站立顶面（整块、半砖、雪层等）就算满足，不要求与 item 同名，也不再消耗材料；只有空气/可替换植物才放 item。支持脚下一格和脚下两格；当前站位看不到参照面时会后退/侧移或潜行到支撑块边缘再放。脚下两格的边缘放置需要支撑块下方那一格是同层实心参照方块；没有就如实失败，改用 descend_to 或换到能看见参照面的站位。成功回执返回 consumed=放置前后目标材料总数之差；失败回执返回每次尝试的实际站位与参照面事实。只放这一格，不换材料、不换目标，不自动清障/垫高。',
-  argsDoc: '{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any；xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）',
+  argsDoc: `{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any，${ANY_FILL_NOTE}；xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）`,
   timeoutMs: 20000,
   movement: true,
   // 计划录入只检查写法；目标是否在放置范围由执行前按最新位置确认。
@@ -980,7 +980,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     }
     const inv = adapter.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
-    if (!names.length || countItems(adapter, names) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块' : args.item}`, { ...after(ctx, args.facing, pos), ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('support_formed') });
+    if (!names.length || countItems(adapter, names) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? anyShortfall(adapter, inv) : args.item}`, { ...after(ctx, args.facing, pos), ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('support_formed') });
     const beforeCount = countItems(adapter, names);
     // 库存更新可能滞后：看到净减少才算确认消耗；成功但暂时 0 消耗标为 pending，不冒充真实零消耗。
     const consumptionFacts = (effectExpected: boolean) => consumptionReceipt(adapter, names, beforeCount, { pendingWhenZero: effectExpected });
@@ -1226,7 +1226,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
 const pillarOneSkill: Skill<{ item?: string }> = {
   name: 'pillar_one',
   description: '原地垫高一格：跳起来往脚下放一块方块并确认真的站上去。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。头顶/侧上方阻挡时返回具体格，由你决定先 mine_cell。只垫一格，不连续爬升，不挖头顶。',
-  argsDoc: '{"item":"方块名|any"}（item 必填：已知方块名或字面 any；不会默认自选材料）',
+  argsDoc: `{"item":"方块名|any"}（item 必填：已知方块名或字面 any，${ANY_FILL_NOTE}；不会默认自选材料）`,
   timeoutMs: 20000,
   movement: true,
   validate(raw, adapter) {
@@ -1248,7 +1248,7 @@ const pillarOneSkill: Skill<{ item?: string }> = {
     if (!adapter.pillarUp) return fail('ERROR', '当前适配器没有原地垫高能力', { ...problemOf('CAPABILITY_MISSING', 'precondition'), ...effectUnconfirmed('movement') });
     const inv = adapter.state().inventory;
     const names = args.item === 'any' ? PLACEABLE.filter((n) => inv.some((i) => i.name === n && i.count > 0)) : [args.item];
-    if (!names.length || countItems(adapter, names) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? '能垫的方块（泥土/圆石/木板…）' : args.item}`, { ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('movement') });
+    if (!names.length || countItems(adapter, names) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item === 'any' ? anyShortfall(adapter, inv) : args.item}`, { ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('movement') });
     const beforeCount = countItems(adapter, names);
     const startState = adapter.state();
     // 垫脚块放在脚踩的支撑方块上面一格；灵魂沙/半砖上 feetCell 是支撑方块本身，不能当放置格。
@@ -1333,6 +1333,12 @@ const pillarOneSkill: Skill<{ item?: string }> = {
   },
 };
 
+
+/** any 没有可用材料时的缺口说明：any 的范围，以及背包里另有、但 any 不会动用的方块（要用由 Agent 写明）。 */
+function anyShortfall(adapter: { resolveBlockNames(query: string): string[] }, inv: { name: string; count: number }[]) {
+  const others = inv.filter((i) => i.count > 0 && !PLACEABLE.includes(i.name) && adapter.resolveBlockNames(i.name).includes(i.name));
+  return `any 能用的方块（${PLACEABLE_DOC}）${others.length ? `；背包里另有 ${others.slice(0, 6).map((i) => `${i.name}×${i.count}`).join('、')} 可以放置，any 不会用它们，要用就写方块名` : ''}`;
+}
 export const moveStep = withExecutionLink(moveStepSkill);
 export const mineCell = withExecutionLink(mineCellSkill);
 export const placeCell = withExecutionLink(placeCellSkill);

@@ -247,6 +247,15 @@ const BOAT_THRUST = 0.028;
 const BOAT_TURN = (9 * Math.PI) / 180;
 const BOAT_ROW_ANGLE = (35 * Math.PI) / 180;
 
+/** 按调用方给出的名字顺序挑背包里的物品：itemNames 表达优先级（例如 any 的填充方块顺序），不按背包槽位先后。 */
+function preferredItem<T extends { name: string }>(items: T[], itemNames: string[]): T | undefined {
+  for (const name of itemNames) {
+    const item = items.find((candidate) => candidate.name === name);
+    if (item) return item;
+  }
+  return undefined;
+}
+
 export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   bot: any = null;
   mcData: any = null;
@@ -1982,7 +1991,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!tried.length) {
       return { ok: false, reason: `EDGE_NO_REFERENCE:目标格 (${target.x},${target.y},${target.z}) 同层的 (${refAt.x},${refAt.y},${refAt.z}) 不是实心参照方块；脚下两格没有可点的侧面，换站位或改用 descend_to/place_cell`, attemptedFaces: [] };
     }
-    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    const item = preferredItem(b.inventory.items(), itemNames);
     if (!item) return { ok: false, reason: 'NO_ITEM', attemptedFaces: tried };
     const epoch = this.actionEpoch;
     const ownsControls = () => epoch === this.actionEpoch && b === this.bot;
@@ -2051,7 +2060,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     await this.interactionReady();
     check();
     const b = this.bot;
-    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    const item = preferredItem(b.inventory.items(), itemNames);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     const target = this.vec(pos);
     const cur = b.blockAt(target);
@@ -4315,7 +4324,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 脚下这格有火把、花、树苗、铁轨、按钮这类没碰撞但也不会被顶掉的东西：服务器不让往里放方块。
     // 可替换口径与放置/规划共用 isReplaceable（原版 #minecraft:replaceable）。
     if (here && !isReplaceable(here.name) && here.name !== 'snow') return { ok: false, reason: `BLOCKED:${here.name}` };
-    const item = b.inventory.items().find((i: any) => itemNames.includes(i.name));
+    const item = preferredItem(b.inventory.items(), itemNames);
     if (!item) return { ok: false, reason: 'NO_ITEM' };
     await this.afterAction(() => b.equip(item, 'hand'), check);
     b.clearControlStates();
