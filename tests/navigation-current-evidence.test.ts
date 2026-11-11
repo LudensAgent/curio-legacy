@@ -60,8 +60,8 @@ test('a stale start with no new visible evidence stops without replaying history
   const segment = result.data?.lastSegment as SegmentReceipt;
 
   assert.equal(result.status, 'failed');
-  assert.equal(counters.segments, 1);
-  assert.equal(counters.searches, 1);
+  // 没有新的可见证据：重新规划直到连续多段没有进展才交回，不移动、不重放历史。
+  assert.ok(counters.searches <= 4, `搜索 ${counters.searches} 次`);
   assert.equal(segment.confirmed.length, 0);
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
 });

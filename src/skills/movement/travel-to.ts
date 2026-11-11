@@ -229,7 +229,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const maxSteps = Math.min(HARD_MAX_STEPS, Math.max(16, Math.ceil(direct * MAX_DETOUR_FACTOR) + DETOUR_SLACK));
     const nested = validateSkill(navigateTo, {
       to: goal,
-      allowed: ['walk', 'step', 'drop'],
+      allowed: ['walk', 'step', 'drop', 'jump'],
       historical: true,
       maxSteps,
       maxStepsPerSegment: Math.min(32, maxSteps),

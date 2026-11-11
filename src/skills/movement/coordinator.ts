@@ -95,7 +95,7 @@ export type SwimLegReceipt = {
 };
 
 /** 一次调用最多绕向前沿点的次数；绕不了就按真实原因交回。 */
-const MAX_DETOURS = 4;
+const MAX_DETOURS = 8;
 /** 一次调用最多代为游泳的段数；每段仍受原期限约束。 */
 const MAX_SWIM_LEGS = 8;
 
@@ -551,11 +551,16 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           : -progressOf(session, p, 0).along;
         // 已经站在目标列上（只是脚高等精确条件达不到）：绕路不会让目标变得可达。
         if (remainingOf(after.pos) < 1) return 'none';
+        // 精确连续脚位只能从起点格点搜到：绕到别的连续位置后就再也解析不了这个目标。
+        if (session.intent.kind === 'navigate' && session.intent.targetKind === 'feet' && session.intent.arrival === undefined) return 'none';
+        const here0 = remainingOf(after.pos);
         const here = cellText(after.pos);
         const frontier = segment.search.boundaries
           .filter((boundary) => boundary.status === 'UNKNOWN' || boundary.status === 'STALE')
           .map((boundary) => boundary.from)
-          .filter((from) => cellText(from) !== here && !triedFrontiers.has(cellText(from)) && withinCorridor(from))
+          // 只往侧面或前方绕：离目标不比现在更远（0.5 格容差），不往回走。
+          .filter((from) => cellText(from) !== here && !triedFrontiers.has(cellText(from)) && withinCorridor(from)
+            && remainingOf(from) <= here0 + 0.5)
           .sort((a, b) => Math.hypot(a.x - after.pos.x, a.z - after.pos.z) + remainingOf(a)
             - (Math.hypot(b.x - after.pos.x, b.z - after.pos.z) + remainingOf(b)))[0];
         if (frontier === undefined) return 'none';
@@ -777,7 +782,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           const detoured = await tryDetour();
           if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
-          stop = stopOf('UNKNOWN_BOUNDARY', '同一 session 已在这个站位观察过相关证据；没有新的相关证据时不重复观察/搜索', {
+          // 周边感知一直在刷新：不因“这里观察过”就停，继续重新规划；连续多段没有进展才交回。
+          if (session.progress.stagnationSegments < Math.min(request.maxNoProgressSegments, session.budget.maxNoProgressSegments)) {
+            session.phase = 'replanning';
+            continue;
+          }
+          stop = stopOf('UNKNOWN_BOUNDARY', `连续 ${session.progress.stagnationSegments} 段没有进展，前方仍是未知边界`, {
             boundaries: boundary === undefined ? [] : [boundary],
           });
           break;
@@ -861,7 +871,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           const detoured = await tryDetour();
           if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
-          stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', {
+          // 相关格没变不代表别处没有新证据（周边感知一直在写）：继续重新规划，连续多段没有进展才交回。
+          if (session.progress.stagnationSegments < Math.min(request.maxNoProgressSegments, session.budget.maxNoProgressSegments)) {
+            session.phase = 'replanning';
+            continue;
+          }
+          stop = stopOf('UNKNOWN_BOUNDARY', `连续 ${session.progress.stagnationSegments} 段没有进展，前缀端点观察后边界仍是未知`, {
             boundaries: boundary === undefined ? [] : [boundary],
           });
           break;

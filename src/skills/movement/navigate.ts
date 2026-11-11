@@ -84,17 +84,37 @@ function segmentCompat(
 
 /**
  * 执行 Agent 已选定的 3D 目的地。公开入口与 advance 共享同一个 Coordinator；
- * 默认 maxSegments=1，保持“一次调用执行一条路线或当前证据前缀”的既有行为。
+ * 预算省略时按到目标的距离给出（见 defaultBudgetFor），一次调用可多段推进。
  * 不挖、不放、不搭、不换目标；UNKNOWN/STALE 不可执行，边界观察只做有限相关格。
  */
+/** 连续几段既没有位移也没有新进展才交回 Agent。 */
+export const DEFAULT_NO_PROGRESS_SEGMENTS = 4;
+
+/**
+ * 没有显式给预算时，按到目标的直线距离给：步数约每格 3 步余量、分段约每 8 格一段，搜索约每格一次，
+ * 观察约每 4 格一次。这些上限只防失控，不截断正常的长途委托；显式给出的值原样生效。
+ */
+function defaultBudgetFor(from: Vec3Like | undefined, to: Vec3Like) {
+  const direct = from === undefined ? 16 : Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+  // 精确连续脚位只能从起点格点搜到，走过一段后就解析不了：保持单段。
+  const exactFeet = targetKindOf(to) === 'feet';
+  return {
+    maxSteps: Math.min(1024, Math.max(16, Math.ceil(direct * 3) + 8)),
+    maxSegments: exactFeet ? 1 : Math.min(64, Math.max(4, Math.ceil(direct / 8))),
+    maxSearches: Math.min(128, 16 + Math.ceil(direct)),
+    maxObservations: Math.min(64, 8 + Math.ceil(direct / 4)),
+    maxObservedCells: Math.min(4096, 512 + Math.ceil(direct) * 16),
+  };
+}
+
 export const navigateTo: Skill<NavigateArgs> = {
   name: 'navigate_to',
-  description: '按你指定的目的地和允许的 walk/step/drop/jump/ladder 执行 3D 路线；jump 与 ladder 默认关闭，必须显式列入 allowed。宿主用已记录体素做有界搜索（当前证据优先，可用历史体素作候选），并按每段连续脚位执行、实测核实；不挖、不放、不搭、不换目标，遇阻挡、落点不可见或历史路线失效就停下报事实。目标写法决定语义：整数 x/z 表示走到那一格（完成条件是脚在格内且脚高在 0.01 格容差内）；分数 x/z 表示精确连续脚位（完成条件是身体中心水平 0.12 / 垂直 0.05 格内），不会用工整格心或附近格顶替。没有完整路线时，若当前证据确认了一段可达前缀，会沿该前缀自动走到边界（最多 maxSteps 段）再停下；只走当前证据 OPEN 的段，不进入 UNKNOWN/STALE 格，不声称到达。默认 maxSegments=1（单段/单前缀）；显式提高后由 Coordinator 分段推进，每段从实测位置重新派生、验证，原目标不变；回执带 sessionId，未完成时可原样续接（目标/允许模式/目标类型改变必须新建）。回执带原目的地、可达前缀端点、UNKNOWN/STALE/BLOCKED 边界（位置/方向/状态/原因）、搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）与未驻留 Section、额外观察是否可能解决、是否需要显式动作或其他移动能力。不自动挖；清障由你显式 mine_cell 后再观察/规划。',
-  argsDoc: '{"to":{"x":整数或分数,"y":脚高,"z":整数或分数},"allowed"?":["walk","step","drop","jump","ladder"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false,"maxSegments"?1,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"maxNodes"?,"maxEdges"?,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收（水平 0.12 / 垂直 0.05 格），不会自动改写成格心；historical 默认 true（当前证据没路时用历史体素候选，结果标 historical 并逐段当前证据复验）；没有完整路线时会自动执行当前证据确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限（默认 16），maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），maxSegments 默认 1，只有显式提高才多段协调；sessionId 只用于续接同一冻结目标/目标类型；不自动施工，不自动切换游泳/船/攀爬。',
+  description: '按你指定的目的地和允许的 walk/step/drop/jump/ladder 执行 3D 路线；jump 与 ladder 默认关闭，必须显式列入 allowed。宿主用已记录体素做有界搜索（当前证据优先，可用历史体素作候选），并按每段连续脚位执行、实测核实；不挖、不放、不搭、不换目标，遇阻挡、落点不可见或历史路线失效就停下报事实。目标写法决定语义：整数 x/z 表示走到那一格（完成条件是脚在格内且脚高在 0.01 格容差内）；分数 x/z 表示精确连续脚位（完成条件是身体中心水平 0.12 / 垂直 0.05 格内），不会用工整格心或附近格顶替。没有完整路线时，若当前证据确认了一段可达前缀，会沿该前缀自动走到边界（最多 maxSteps 段）再停下；只走当前证据 OPEN 的段，不进入 UNKNOWN/STALE 格，不声称到达。预算省略时按距离多段推进（约每 8 格一段），每段从实测位置重新派生、验证，原目标不变；只要还在推进就不停，停下前会先绕向未探索的前沿点；回执带 sessionId，未完成时可原样续接（目标/允许模式/目标类型改变必须新建）。回执带原目的地、可达前缀端点、UNKNOWN/STALE/BLOCKED 边界（位置/方向/状态/原因）、搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）与未驻留 Section、额外观察是否可能解决、是否需要显式动作或其他移动能力。不自动挖；清障由你显式 mine_cell 后再观察/规划。',
+  argsDoc: '{"to":{"x":整数或分数,"y":脚高,"z":整数或分数},"allowed"?":["walk","step","drop","jump","ladder"],"historical"?true,"maxSteps"?（默认按距离约每格 3 步，最多 1024）,"allowUnknownCorridor"?false,"maxSegments"?（默认按距离约每 8 格一段）,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"maxNodes"?,"maxEdges"?,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收（水平 0.12 / 垂直 0.05 格），不会自动改写成格心；historical 默认 true（当前证据没路时用历史体素候选，结果标 historical 并逐段当前证据复验）；没有完整路线时会自动执行当前证据确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限，maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），预算省略时按到目标的直线距离给出，只防失控、不截断正常长途；sessionId 只用于续接同一冻结目标/目标类型；不自动施工，不自动切换游泳/船/攀爬。',
   timeoutMs: 30000,
   movement: true,
   outcomeBoundary: true,
-  validate(raw) {
+  validate(raw, adapter) {
     const a = obj(raw), to = point(a.to);
     if (!to) return { ok: false, error: 'to 需要 {x,y,z} 站立脚位；箱子/门请改用旁边的站立格' };
     const allowedRaw = a.allowed === undefined ? DEFAULT_KINDS : a.allowed;
@@ -131,7 +151,9 @@ export const navigateTo: Skill<NavigateArgs> = {
     if (a.deadlineMs !== undefined && (typeof a.deadlineMs !== 'number' || !Number.isFinite(a.deadlineMs) || a.deadlineMs <= 0)) {
       return { ok: false, error: 'deadlineMs 必须是正的绝对 epoch 毫秒' };
     }
-    const maxSteps = (a.maxSteps as number | undefined) ?? 16;
+    const defaults = defaultBudgetFor(adapter?.state().pos, to);
+    const maxSteps = (a.maxSteps as number | undefined) ?? defaults.maxSteps;
+    const maxSegments = (a.maxSegments as number | undefined) ?? defaults.maxSegments;
     return {
       ok: true,
       args: {
@@ -142,13 +164,13 @@ export const navigateTo: Skill<NavigateArgs> = {
         historical: a.historical !== false,
         maxSteps,
         allowUnknownCorridor: a.allowUnknownCorridor === true,
-        maxSegments: (a.maxSegments as number | undefined) ?? 1,
-        maxStepsPerSegment: (a.maxStepsPerSegment as number | undefined) ?? maxSteps,
-        maxTransitions: (a.maxTransitions as number | undefined) ?? maxSteps * ((a.maxSegments as number | undefined) ?? 1),
-        maxSearches: (a.maxSearches as number | undefined) ?? 6,
-        maxObservations: (a.maxObservations as number | undefined) ?? 2,
-        maxObservedCells: (a.maxObservedCells as number | undefined) ?? 64,
-        maxNoProgressSegments: (a.maxNoProgressSegments as number | undefined) ?? 2,
+        maxSegments,
+        maxStepsPerSegment: (a.maxStepsPerSegment as number | undefined) ?? Math.min(32, maxSteps),
+        maxTransitions: (a.maxTransitions as number | undefined) ?? Math.min(1024, maxSteps * maxSegments),
+        maxSearches: (a.maxSearches as number | undefined) ?? defaults.maxSearches,
+        maxObservations: (a.maxObservations as number | undefined) ?? defaults.maxObservations,
+        maxObservedCells: (a.maxObservedCells as number | undefined) ?? defaults.maxObservedCells,
+        maxNoProgressSegments: (a.maxNoProgressSegments as number | undefined) ?? DEFAULT_NO_PROGRESS_SEGMENTS,
         ...(a.maxNodes === undefined ? {} : { maxNodes: a.maxNodes as number }),
         ...(a.maxEdges === undefined ? {} : { maxEdges: a.maxEdges as number }),
         ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
@@ -173,8 +195,9 @@ export const navigateTo: Skill<NavigateArgs> = {
     const startChunks = ctx.memory.visitedChunkCount;
     const voxel = spatial.session.voxel;
     const startObservedCells = voxel.checkpointFullCounts().observedCells;
-    const maxSteps = args.maxSteps ?? 16;
-    const maxSegments = args.maxSegments ?? 1;
+    const defaults = defaultBudgetFor(state.pos, args.to);
+    const maxSteps = args.maxSteps ?? defaults.maxSteps;
+    const maxSegments = args.maxSegments ?? defaults.maxSegments;
     // validate 会冻结 targetKind；直接调用 run 的旧入口在这里按原目标补一次（只在这个边界）。
     const targetKind = args.targetKind ?? targetKindOf(args.to);
     const outcome = await runMovementCoordinator(ctx, {
@@ -182,13 +205,13 @@ export const navigateTo: Skill<NavigateArgs> = {
       ...(args.rolling ? { rolling: true } : {}),
       ...(args.swim ? { swim: true } : {}),
       maxSegments,
-      maxStepsPerSegment: args.maxStepsPerSegment ?? maxSteps,
-      maxTransitions: args.maxTransitions ?? maxSteps * maxSegments,
+      maxStepsPerSegment: args.maxStepsPerSegment ?? Math.min(32, maxSteps),
+      maxTransitions: args.maxTransitions ?? Math.min(1024, maxSteps * maxSegments),
       invocationMaxTransitions: maxSteps,
-      maxSearches: args.maxSearches ?? 6,
-      maxObservations: args.maxObservations ?? 2,
-      maxObservedCells: args.maxObservedCells ?? 64,
-      maxNoProgressSegments: args.maxNoProgressSegments ?? 2,
+      maxSearches: args.maxSearches ?? defaults.maxSearches,
+      maxObservations: args.maxObservations ?? defaults.maxObservations,
+      maxObservedCells: args.maxObservedCells ?? defaults.maxObservedCells,
+      maxNoProgressSegments: args.maxNoProgressSegments ?? DEFAULT_NO_PROGRESS_SEGMENTS,
       ...(args.maxNodes === undefined && args.maxEdges === undefined
         ? {}
         : { searchLimits: { ...(args.maxNodes === undefined ? {} : { maxNodes: args.maxNodes }), ...(args.maxEdges === undefined ? {} : { maxEdges: args.maxEdges }) } }),

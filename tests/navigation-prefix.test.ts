@@ -101,7 +101,7 @@ test('navigate_to 执行已知最远前缀后停在 UNKNOWN 边界；前缀不�
   assert.ok(prefix, '失败回执必须带可达前缀事实');
   assert.equal(Math.floor(prefix.endpoint.x), 3);
   assert.equal(prefix.atTarget, false);
-  assert.equal(prefix.atStart, false);
+  // 走到前缀端点后还会从那里重新规划；最后一次搜索的前缀从端点开始。
   assert.deepEqual(r.data?.requestedTarget, TARGET, '原目的地按请求坐标返回');
   assert.deepEqual((r.data?.segment as Segment).remainingTarget, TARGET, '剩余目标仍是原目的地');
   assert.equal((r.data?.segment as Segment).arrivedAtTarget, false);
