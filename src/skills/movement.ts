@@ -34,7 +34,7 @@ type SightRef = { kind: 'block'; pos: Vec3Like } | { kind: 'entity'; id: number;
 const entityIdOf = (ref?: SightRef) => ref?.kind === 'entity' ? ref.id : undefined;
 
 /** target 是否已在视野/近期记忆中：方块（log、iron_ore…）或实体（cow、sheep…）；可写 "cow|sheep" 或类别 "animal" */
-export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string } = {}): { what: string; dist: number; key: string; pos?: Vec3Like; ref?: SightRef } | null {
+export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string; currentViewOnly?: boolean } = {}): { what: string; dist: number; key: string; pos?: Vec3Like; ref?: SightRef } | null {
   const here = ctx.adapter.state().pos;
   const sector = options.direction ? DIRS[options.direction] : null;
   const inDirection = (pos: Vec3Like) => !sector || Math.abs(Math.atan2(Math.sin(yawOfDir(pos.x - here.x, pos.z - here.z) - yawOfDir(...sector)),
@@ -44,7 +44,10 @@ export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: 
     for (const t of wanted) {
       const names = ctx.adapter.resolveBlockNames(t).filter(Boolean);
       if (names.length) {
-        const candidates = ctx.senses.knownBlocks(names, 96).filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
+        const frame = options.visibleOnly ? ctx.senses.currentBlockCandidates?.(names) : undefined;
+        const known = options.currentViewOnly && frame !== undefined ? [] : ctx.senses.knownBlocks(names, 96);
+        const matches = frame?.length ? [...frame, ...known] : known;
+        const candidates = matches.filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
         const hits = options.visibleOnly ? Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
           ctx.senses.observeBlocks?.(candidates.slice(index * 32, (index + 1) * 32).map((b) => b.pos)) ?? []).flat() : candidates;
         const hit = hits.find((b) => names.includes(b.name));

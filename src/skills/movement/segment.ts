@@ -9,13 +9,14 @@ import {
   acquireRouteResidency, releaseRouteResidency, routeDependencySections, sectionsForCells,
   type RouteResidency, type RouteResidencyFailure,
 } from '../../spatial/skill-residency.ts';
-import type { LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
+import { DEFAULT_LAND_SEARCH_MAX_EDGES, DEFAULT_LAND_SEARCH_MAX_NODES, type LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
 import { feetCell } from '../../perception/local.ts';
 import { codeFromError, isAbort, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult } from '../types.ts';
 import { anchorOf, cellReached, feetReached, goalReached } from './goal.ts';
 import type { NavigationGoal } from './goal.ts';
 import type { PrimitiveProblemKind } from './receipt.ts';
 import { descendTo } from './descend.ts';
+import { boundaryProbeCells } from './observation.ts';
 import type { MoveMode } from './session.ts';
 
 /**
@@ -26,6 +27,7 @@ import type { MoveMode } from './session.ts';
 
 export type SegmentOutcome =
   | 'reached_waypoint'
+  | 'sighting'
   | 'partial_prefix'
   | 'unknown_boundary'
   | 'blocked'
@@ -49,6 +51,10 @@ export type SegmentRequest = {
   goalMetric?: '3d' | 'horizontal';
   /** 方向委托的冻结总距离。只给计划端点已到这条线的地面身体动作增加终点条件。 */
   minimumAlong?: number;
+  /** 从已验证路线的预计尾点继续同一委托；只会同时规划一个后续窗口。 */
+  nextWindow?: (tail: Vec3Like) => NavigationGoal;
+  /** 已确认一步后的当前可见命中，由委托定义具体观察对象。 */
+  checkSighting?: () => string | undefined;
   allowed: MoveMode[];
   historical: boolean;
   /** 本段最多执行多少个已确认 transition。 */
@@ -88,6 +94,7 @@ export interface SegmentReceipt {
   /** 对应 search 的真实终态，包括历史候选的预算耗尽。 */
   searchStatus: LandSearchStatus;
   searchReason: string;
+  historicalSearch?: Pick<LandSearchResult, 'status' | 'budget' | 'stats'>;
   evidenceMode: 'current' | 'historical';
   searches: number;
   planned: LandSearchTransition[];
@@ -260,14 +267,17 @@ function emptySearch(goal: NavigationGoal, status: LandSearchStatus, detail: str
  * manual 模式下，搜索/执行期间实际依赖的 Section 由内层持有 lease；本包装器
  * 保证所有返回路径都释放，不让 pin 泄漏到会话账本。
  */
+type SegmentExecution = { handedOver: boolean; finishPreview?: () => Promise<number> };
+
 export async function runNavigationSegment(ctx: SkillCtx, request: SegmentRequest): Promise<SegmentReceipt> {
   const leases: RouteResidency[] = [];
-  const execution = { handedOver: false };
+  const execution: SegmentExecution = { handedOver: false };
   let result: SegmentReceipt | undefined;
   try {
     result = await runNavigationSegmentInner(ctx, request, leases, execution);
     return result;
   } finally {
+    const finishedSearches = execution.finishPreview?.();
     if (execution.handedOver) {
       const remaining = request.deadline - Date.now();
       let error: unknown = null;
@@ -309,13 +319,17 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
         }
       }
     }
+    if (finishedSearches !== undefined) {
+      const count = await finishedSearches;
+      if (result !== undefined) result.searches = count;
+    }
     const spatial = ctx.spatial;
     if (spatial !== undefined) for (const residency of leases) releaseRouteResidency(spatial, residency);
   }
 }
 
 async function runNavigationSegmentInner(
-  ctx: SkillCtx, request: SegmentRequest, leases: RouteResidency[], execution: { handedOver: boolean },
+  ctx: SkillCtx, request: SegmentRequest, leases: RouteResidency[], execution: SegmentExecution,
 ): Promise<SegmentReceipt> {
   const spatial = ctx.spatial;
   const state = ctx.adapter.state();
@@ -352,13 +366,17 @@ async function runNavigationSegmentInner(
   // 不再用固定 1500ms 截断长路线搜索。预算耗尽时仍由同一个 deadline 停止。
   const searchWindow = () => ({ deadlineMs: request.deadline, maxSearchMs: Math.max(1, request.deadline - Date.now()) });
   let searches = 0;
+  let nodesRead = 0, edgesRead = 0;
   // 这份判断同时决定是否加载更远的冷页、是否改查历史路线。范围目标可能在前缀阻挡之前就已可达。
-  const currentPrefix = (result: LandSearchResult) => {
+  const currentPrefix = (result: LandSearchResult, goal = request.goal) => {
     const prefix = result.evidenceMode === 'current' ? result.prefix : undefined;
-    const reachesArrival = request.goal.arrival !== undefined
-      && prefix?.transitions.some(transition => goalReached(request.goal, transition.to, true)) === true;
+    const reachesArrival = goal.arrival !== undefined
+      && prefix?.transitions.some(transition => goalReached(goal, transition.to, true)) === true;
+    // 范围导航可从已知前缀端点观察绕路。远端一条出边碰墙，不会使到端点的 OPEN 路段失效。
+    const approachBlocker = goal.arrival !== undefined && result.status === 'INSUFFICIENT_EVIDENCE'
+      && prefix?.knownBlockerAhead?.status === 'BLOCKED';
     const usable = prefix !== undefined && prefix.transitions.length > 0
-      && (prefix.knownBlockerAhead === undefined || reachesArrival);
+      && (prefix.knownBlockerAhead === undefined || reachesArrival || approachBlocker);
     return { usable, reachesArrival };
   };
   /**
@@ -366,9 +384,22 @@ async function runNavigationSegmentInner(
    * Section 报告为 unavailableSections；这里显式 prepare 后重试同一搜索。
    * 每次重试都是真实搜索，计入 searches；加载失败原样保留为回执事实。
    */
-  const search = async (searchRequest: Parameters<typeof searchLandRouteAsync>[1]): Promise<LandSearchResult> => {
-    let result = await searchLandRouteAsync(voxel, searchRequest);
+  const runSearch = async (searchRequest: Parameters<typeof searchLandRouteAsync>[1]) => {
+    // 范围导航的 current / remembered 共用两次默认搜索的总工作量。当前搜索提前
+    // 结束时，历史绕路可使用余量；调用者显式指定的单次上限仍逐次原样执行。
+    const share = request.goal.arrival !== undefined && searchRequest.evidenceMode === 'remembered';
+    const result = await searchLandRouteAsync(voxel, {
+      ...searchRequest,
+      ...(share && searchRequest.maxNodes === undefined ? { maxNodes: DEFAULT_LAND_SEARCH_MAX_NODES + Math.max(0, DEFAULT_LAND_SEARCH_MAX_NODES - nodesRead) } : {}),
+      ...(share && searchRequest.maxEdges === undefined ? { maxEdges: DEFAULT_LAND_SEARCH_MAX_EDGES + Math.max(0, DEFAULT_LAND_SEARCH_MAX_EDGES - edgesRead) } : {}),
+    });
     searches += 1;
+    nodesRead += result.stats.nodesReached;
+    edgesRead += result.stats.edgesEvaluated;
+    return result;
+  };
+  const search = async (searchRequest: Parameters<typeof searchLandRouteAsync>[1]): Promise<LandSearchResult> => {
+    let result = await runSearch(searchRequest);
     if (!manual) return result;
     for (let round = 0; round < MAX_RESIDENCY_ROUNDS; round += 1) {
       if (result.unavailableSections.length === 0 || !RESIDENCY_RETRYABLE.has(result.status)
@@ -382,8 +413,7 @@ async function runNavigationSegmentInner(
         break;
       }
       leases.push(residency);
-      result = await searchLandRouteAsync(voxel, searchRequest);
-      searches += 1;
+      result = await runSearch(searchRequest);
     }
     return result;
   };
@@ -398,7 +428,17 @@ async function runNavigationSegmentInner(
     };
   }
   request.onPhase?.('searching');
-  const strict = await search({ ...base, ...searchWindow() });
+  // 方向委托先检查身体当前所在的直线。允许横向绕行的宽度不参与这次直行探测；
+  // 只有已知阻挡才需要搜索整个授权走廊。证据不全时先走直行前缀并观察前方。
+  const heading = request.goalMetric === 'horizontal' ? request.corridor : undefined;
+  let straight = heading !== undefined && heading.maxLateral > 0 && lateralOf(start) <= corridorLimit;
+  const line = straight && heading !== undefined ? { ...heading, origin: start, maxLateral: 0 } : undefined;
+  let strict = await search({ ...base, ...(line === undefined ? {} : { corridor: line }), ...searchWindow() });
+  if (straight && (strict.prefix?.knownBlockerAhead !== undefined || strict.status === 'NO_PATH_IN_MEMORY')
+    && searches < request.searchBudget && Date.now() < request.deadline && !ctx.signal.aborted) {
+    straight = false;
+    strict = await search({ ...base, ...searchWindow() });
+  }
   if (strict.status === 'CANCELLED') {
     return cancelledReceipt(strict, request, start, searches);
   }
@@ -423,12 +463,14 @@ async function runNavigationSegmentInner(
   // 范围委托可以在阻挡之前完成：这里只判断当前已验证前缀是否包含合法候选，
   // 不把计划位置当成身体到达；执行时仍逐步当前复验并按实测站稳位置收工。
   const { usable: currentPrefixUsable, reachesArrival: prefixReachesArrival } = currentPrefix(strict);
-  if (chosen === null && !currentPrefixUsable && request.historical && request.searchBudget - searches > 0) {
+  const partialToWall = request.goal.arrival !== undefined && strict.prefix?.knownBlockerAhead !== undefined && !prefixReachesArrival;
+  if (chosen === null && (!currentPrefixUsable || partialToWall) && !straight && request.historical && request.searchBudget - searches > 0) {
     historical = await search({ ...base, evidenceMode: 'remembered', ...searchWindow() });
     if (historical.status === 'CANCELLED') return cancelledReceipt(historical, request, start, searches);
     if (historical.status === 'FOUND') chosen = historical;
   }
-  const boundarySummary = summarizeBoundaries(strict.boundaries);
+  let boundarySummary = summarizeBoundaries(strict.boundaries);
+  const historicalAttempt = historical === null ? {} : { historicalSearch: { status: historical.status, budget: historical.budget, stats: historical.stats } };
 
   // 1×1 平台/柱顶没有普通 A* 路线：格目标、明确允许 drop 且目标就在相邻列时，直接尝试一次 descend_to。
   // 连续精确脚位不走这条格心化回退，避免把附近格冒充原目标。
@@ -570,7 +612,7 @@ async function runNavigationSegmentInner(
   // 其余 BLOCKED/UNSUPPORTED 前缀交回端点 + blocker，不自动靠近阻挡。
   const reachable = strict.prefix;
   const blockerAhead = reachable?.knownBlockerAhead;
-  if (chosen === null && (reachable === undefined || reachable.transitions.length === 0 || (blockerAhead !== undefined && !prefixReachesArrival))) {
+  if (chosen === null && !currentPrefixUsable) {
     // 历史几何搜索的预算耗尽是真实终态，不能被 strict 的“证据不足”覆盖成普通未知边界。
     const historicalBudget = blockerAhead === undefined && chosen === null && historical?.status === 'BUDGET_EXHAUSTED'
       ? historical : null;
@@ -582,7 +624,7 @@ async function runNavigationSegmentInner(
     const outcome: SegmentOutcome = residencyFailure !== null ? 'residency_not_ready'
       : blockerAhead?.status === 'BLOCKED' ? 'blocked'
         : blockerAhead?.status === 'UNSUPPORTED' ? 'unsupported'
-          : strict.corridorLimited === true ? 'corridor_exhausted'
+          : !straight && strict.corridorLimited === true ? 'corridor_exhausted'
             : historicalBudget !== null ? 'search_budget'
               : outcomeOfStatus(strict.status);
     const blockedBoundary = blockerAhead ?? boundaryAfter(strict.boundaries, reachable?.endpoint ?? state.pos, anchorOf(request.goal));
@@ -598,7 +640,7 @@ async function runNavigationSegmentInner(
       : `；驻留加载失败（${residencyFailure.reason}）：${residencyFailure.message}`;
     return {
       waypoint, outcome, stopCode: residencyFailure !== null ? 'residency_gap' : blockerAhead === undefined ? 'no_route' : 'blocker', measuredStart: start, measuredEnd: start,
-      chosen: null, search: historicalBudget ?? strict,
+      chosen: null, search: historicalBudget ?? strict, ...historicalAttempt,
       searchStatus: (historicalBudget ?? strict).status, searchReason: (historicalBudget ?? strict).reason,
       evidenceMode: 'current', searches,
       planned: reachable?.transitions ?? [], confirmed: [], remaining: reachable?.transitions ?? [],
@@ -613,7 +655,7 @@ async function runNavigationSegmentInner(
         ? `导航所需的 ${residencyFailure.sections.length} 个 Section 未能加载/驻留（${residencyFailure.reason}）：${residencyFailure.message}；没有把冷页失败当成无路或未知，未执行未复验的动作`
         : `${blockerAhead !== undefined
           ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
-          : strict.corridorLimited === true
+          : !straight && strict.corridorLimited === true
             ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
             : historicalBudget !== null
               ? `历史体素搜索预算耗尽（${historicalBudget.budget ?? 'unknown'}）：${historicalBudget.reason}`
@@ -621,9 +663,9 @@ async function runNavigationSegmentInner(
     };
   }
 
-  const prefixOnly = chosen === null;
-  const route = chosen ?? strict;
-  const planned = chosen === null ? (reachable?.transitions ?? []) : chosen.transitions;
+  let route = chosen ?? strict;
+  let tailGoal = request.goal;
+  const planned = [...(chosen === null ? reachable?.transitions ?? [] : chosen.transitions)];
   const disallowed = planned.find((transition) => !request.allowed.includes(transition.kind));
   if (disallowed !== undefined) {
     return {
@@ -638,7 +680,7 @@ async function runNavigationSegmentInner(
   }
   request.onPhase?.('executing');
   const transitions = planned.slice(0, request.maxTransitions);
-  const truncated = transitions.length < planned.length;
+  let truncated = transitions.length < planned.length;
   const confirmed: TransitionReceipt[] = [];
   let pathLength = 0;
   let last: AgentState = state;
@@ -646,8 +688,8 @@ async function runNavigationSegmentInner(
   const receipt = (outcome: SegmentOutcome, extra: Partial<SegmentReceipt> = {}): SegmentReceipt => {
     const end = { ...ctx.adapter.state().pos };
     return {
-      waypoint, outcome, measuredStart: start, measuredEnd: end,
-      chosen, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+      waypoint: { ...tailGoal.requested }, outcome, measuredStart: start, measuredEnd: end,
+      chosen, search: strict, searchStatus: strict.status, searchReason: strict.reason, ...historicalAttempt,
       evidenceMode: route.evidenceMode, searches,
       planned, confirmed, remaining: planned.slice(executed), pathLength,
       arrived: false, directDrop: false, boundarySummary,
@@ -664,9 +706,8 @@ async function runNavigationSegmentInner(
   // manual 下先保护本次真正会读的 Section：搜索与执行之间可能发生周期 checkpoint，
   // 未 pin 的页面会被保存后换出，逐步复验随后只能看到 UNKNOWN。依赖只来自已选
   // 路线和真实 drop/ladder 跨度，不预取目标走廊。
-  if (manual && transitions.length > 0) {
-    const actualStart = { ...ctx.adapter.state().pos };
-    const verticalCells = transitions.flatMap((transition) => {
+  const pinTransitions = async (feet: Vec3Like, edges: LandSearchTransition[], signal: AbortSignal) => {
+    const verticalCells = edges.flatMap((transition) => {
       const span = Math.round(transition.from.y - transition.to.y);
       if (transition.kind !== 'ladder' && !(transition.kind === 'drop' && span > 1)) return [];
       return Array.from({ length: Math.abs(span) + 1 }, (_, index) => ({
@@ -676,15 +717,20 @@ async function runNavigationSegmentInner(
       }));
     });
     const sections = [
-      ...routeDependencySections(voxel, scope, actualStart, transitions.map((transition) => transition.to)),
+      ...routeDependencySections(voxel, scope, feet, edges.map((transition) => transition.to)),
       ...sectionsForCells(scope, [
-        ...transitions.flatMap((transition) => [transition.from, transition.to]),
+        ...edges.flatMap((transition) => [transition.from, transition.to]),
         ...verticalCells,
       ]),
     ];
     const residency = await acquireRouteResidency(spatial, sections, {
-      signal: ctx.signal, deadline: request.deadline,
+      signal, deadline: request.deadline,
     });
+    if (residency.status === 'ready') leases.push(residency);
+    return residency;
+  };
+  if (manual && transitions.length > 0) {
+    const residency = await pinTransitions(ctx.adapter.state().pos, transitions, ctx.signal);
     if (residency.status !== 'ready') {
       return receipt('residency_not_ready', {
         stopCode: 'residency_gap',
@@ -693,7 +739,6 @@ async function runNavigationSegmentInner(
         unavailableSections: residency.sections,
       });
     }
-    leases.push(residency);
   }
   const cancelledHere = (index: number, transition: LandSearchTransition, from: Vec3Like): SegmentReceipt => {
     const stoppedState = ctx.adapter.state();
@@ -768,7 +813,102 @@ async function runNavigationSegmentInner(
     });
   };
 
+  // 后续规划始终从已知路线尾点出发，当前身体继续执行逐步复验过的前缀。
+  // 只有新窗口的当前 OPEN 链会被追加；走到尾点时仍没有后续证据则先按原端点停稳。
+  const attemptedTails = new Map<string, number>();
+  let preview: Promise<void> | undefined;
+  let previewAbort: AbortController | undefined, stopWatching: (() => void) | undefined;
+  let previewClosed = false, physicalIndex = 0;
+  const previewEnd: { result?: LandSearchResult; goal?: NavigationGoal; residency?: RouteResidencyFailure; error?: string; newEvidence?: () => boolean } = {};
+  if (request.nextWindow !== undefined) execution.finishPreview = async () => {
+    previewClosed = true;
+    stopWatching?.();
+    previewAbort?.abort();
+    await preview;
+    return searches;
+  };
+  const startPreview = (index: number) => {
+    const nextWindow = request.nextWindow;
+    if (nextWindow === undefined || previewClosed || preview !== undefined || previewEnd.error !== undefined
+      || transitions.length - index > 3 || transitions.length >= request.maxTransitions
+      || searches >= request.searchBudget || Date.now() >= request.deadline || ctx.signal.aborted) return;
+    const tail = transitions[transitions.length - 1]!.to;
+    if (meetsDistance(request, tail) || request.goalMetric !== 'horizontal' && goalReached(request.goal, tail, true)) return;
+    const key = `${tail.x},${tail.y},${tail.z}`;
+    const attempts = attemptedTails.get(key) ?? 0;
+    if (attempts > 0 && (attempts !== 1 || previewEnd.newEvidence?.() !== true)) return;
+    stopWatching?.(); stopWatching = undefined;
+    delete previewEnd.newEvidence; delete previewEnd.result; delete previewEnd.goal;
+    attemptedTails.set(key, attempts + 1);
+    const abort = new AbortController();
+    previewAbort = abort;
+    const signal = AbortSignal.any([ctx.signal, abort.signal]);
+    // 放到微任务中启动，让本次身体动作先取得控制。前瞻只读当前证据，不用历史候选授权接续。
+    const task = Promise.resolve().then(async () => {
+      if (signal.aborted || Date.now() >= request.deadline) return;
+      const goal = nextWindow({ ...tail });
+      const result = await runSearch({ ...base, goal, body: { ...base.body, feet: { ...tail } }, signal,
+        ...(heading === undefined ? {} : { corridor: { ...heading, origin: { ...tail }, maxLateral: 0 } }), ...searchWindow() });
+      if (signal.aborted) return;
+      const extension = result.status === 'FOUND' ? result.transitions
+        : currentPrefix(result, goal).usable ? result.prefix!.transitions : [];
+      const edges = extension.slice(0, request.maxTransitions - transitions.length);
+      if (edges.length > 0 && manual) {
+        const residency = await pinTransitions(tail, edges, signal);
+        if (signal.aborted) return;
+        if (residency.status !== 'ready') previewEnd.residency = residency;
+      }
+      if (edges.length === 0 || previewEnd.residency !== undefined) {
+        previewEnd.result = result;
+        previewEnd.goal = goal;
+        // 初看无路时，身体可能还有两三步才到前沿。只监听这条出边实际涉及的格；
+        // 新鲜度恢复/内容改变时允许同一尾点再查一次，无关观察与同内容刷新都不重播。
+        const boundary = result.prefix?.knownBlockerAhead ?? boundaryAfter(result.boundaries, tail, anchorOf(goal));
+        if (attempts === 0 && previewEnd.residency === undefined && boundary !== undefined
+          && (result.status === 'INSUFFICIENT_EVIDENCE' || result.status === 'NO_PATH_IN_MEMORY')) {
+          const revision = (point: Vec3Like) => {
+            const cell = voxel.cellAt(scope.dim, point.x, point.y, point.z);
+            return cell.observed && cell.evidence.freshness === 'FRESH' && cell.evidence.validUntil >= Date.now()
+              && cell.evidence.observation.sessionId === scope.sessionId && cell.evidence.observation.stateComplete ? cell.evidence.revision : undefined;
+          };
+          const related = boundaryProbeCells(boundary, 32, heading === undefined ? undefined : { ...heading, origin: tail, maxLateral: 0 }).cells;
+          const watched = related.map(point => ({ point, before: revision(point) }));
+          const keyOf = (p: Vec3Like) => `${p.x},${p.y},${p.z}`;
+          const keys = new Set(related.map(keyOf));
+          previewEnd.newEvidence = () => watched.some(({ point, before }) => {
+            const current = revision(point);
+            return current !== undefined && current !== before;
+          });
+          let queued = false;
+          stopWatching = voxel.subscribeChanges(report => {
+            if (!queued && report.sections.some(section => section.cells.some(cell => keys.has(keyOf(cell.pos))))) {
+              queued = true;
+              queueMicrotask(() => { queued = false; startPreview(physicalIndex); });
+            }
+          });
+        }
+        return;
+      }
+      strict = result;
+      route = result;
+      chosen = result.status === 'FOUND' ? result : null;
+      tailGoal = goal;
+      boundarySummary = summarizeBoundaries(result.boundaries);
+      planned.push(...extension);
+      transitions.push(...edges);
+      truncated = edges.length < extension.length;
+    }).catch((cause: unknown) => {
+      if (!signal.aborted) previewEnd.error = cause instanceof Error ? cause.message : String(cause);
+    }).finally(() => {
+      preview = undefined;
+      if (!previewClosed && previewEnd.newEvidence?.()) startPreview(physicalIndex);
+    });
+    preview = task;
+  };
+
   for (const [index, transition] of transitions.entries()) {
+    physicalIndex = index;
+    if (ctx.signal.aborted) return cancelledHere(index, transition, ctx.adapter.state().pos);
     if (Date.now() >= request.deadline) {
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限耗尽：已执行 ${executed}/${planned.length} 段` });
     }
@@ -809,7 +949,9 @@ async function runNavigationSegmentInner(
     if (Date.now() >= request.deadline) {
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
     }
+    startPreview(index);
     let actionError: unknown = null;
+    let continuous = false;
     if (transition.kind === 'jump') {
       const remaining = request.deadline - Date.now();
       if (remaining < 1) {
@@ -877,13 +1019,13 @@ async function runNavigationSegmentInner(
       // 已证实的同向 walk/step/小落差链保留中间速度；转向、大落差、边界和末点仍停车。
       // <=0.6 的地面小落差仍由身体控制落边制动，真实落地到位后才交接。
       // 前视用下一段计划几何，交接时仍会以上方实测起点再次复验，不能跳过未知格。
-      const continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
+      continuous = ctx.adapter.settleMovement !== undefined && next !== undefined
         && !directionalFinish
         && [transition, next].every(edge => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 0.6)
         && (transition.kind !== 'drop' || drop <= 0.6)
         && transition.to.x - transition.from.x === next.to.x - next.from.x
         && transition.to.z - transition.from.z === next.to.z - next.from.z
-        && !goalReached(request.goal, transition.to, true)
+        && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
         && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
       try {
         execution.handedOver ||= continuous;
@@ -936,6 +1078,10 @@ async function runNavigationSegmentInner(
           }),
           measuredEnd: stopped,
         };
+      }
+      if (continuous && actionError instanceof Error && 'code' in actionError && actionError.code === 'CHECKPOINT_PASSED') {
+        return receipt('replan', { stopCode: 'checkpoint_passed', detail: actionError.message,
+          partialDisplacement: partial, stepIndex: index, transition, measuredEnd: stopped });
       }
       return {
         ...receipt('physical_failure', {
@@ -991,25 +1137,53 @@ async function runNavigationSegmentInner(
     }
     // 与既有导航回执一致：每确认一步就上报进度并让出事件循环。
     ctx.progress(executed / Math.max(1, planned.length), `segment ${executed}/${planned.length}`);
+    const sighting = request.checkSighting?.();
+    if (sighting !== undefined) return receipt('sighting', { stopCode: 'sighting', detail: sighting });
     if (directionalFinish) return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点达到冻结方向的 ${request.minimumAlong} 格距离` });
     if (request.goal.arrival !== undefined && goalReached(request.goal, arrived.pos, arrived.onGround)) {
       return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点满足原目标的到达范围` });
     }
+    // 下一窗口来不及在末步发出前完成时，这一步已经按完整停稳执行，可在这里等待有界搜索。
+    if (index + 1 === transitions.length && preview !== undefined) await preview;
   }
 
+  if (ctx.signal.aborted) return receipt('cancelled', { stopCode: 'cancelled', detail: '后续窗口规划或移动已取消，保留已确认位移' });
+  if (previewEnd.error !== undefined) {
+    return receipt('unsupported', { stopCode: 'search_failed', failureCode: 'ERROR', detail: `后续窗口搜索失败：${previewEnd.error}` });
+  }
+  if (previewEnd.result !== undefined && previewEnd.goal !== undefined) {
+    const next = previewEnd.result;
+    const facts = { search: next, searchStatus: next.status, searchReason: next.reason, boundarySummary: summarizeBoundaries(next.boundaries),
+      ...(next.budget === undefined ? {} : { budget: next.budget }), ...(next.unavailableSections.length ? { unavailableSections: next.unavailableSections } : {}) };
+    if (previewEnd.residency !== undefined) return receipt('residency_not_ready', { ...facts, stopCode: 'residency_gap',
+      unavailableSections: previewEnd.residency.sections, detail: `后续路线依赖未驻留：${previewEnd.residency.message}` });
+    const blocker = next.prefix?.knownBlockerAhead;
+    if (heading !== undefined && heading.maxLateral > 0 && (blocker !== undefined || next.status === 'NO_PATH_IN_MEMORY')) {
+      return receipt('replan', { ...facts, stopCode: 'straight_boundary', detail: '前方直线遇到阻挡，从实测停点重新检查已授权横向走廊' });
+    }
+    if (blocker?.status === 'BLOCKED') return receipt('blocked', { ...facts, blockerAhead: blocker, stopCode: 'blocker', detail: blocker.reason });
+    const boundary = boundaryAfter(next.boundaries, last.pos, anchorOf(previewEnd.goal));
+    return receipt(outcomeOfStatus(next.status), { ...facts, stopCode: 'window_boundary', detail: statusDetail(next),
+      ...(boundary === undefined ? {} : { boundary }) });
+  }
   if (truncated) {
     return receipt('partial_prefix', { stopCode: 'max_steps', detail: `分段上限 ${request.maxTransitions} 用尽，还剩 ${planned.length - executed} 段` });
   }
-  if (prefixOnly) {
+  if (chosen === null) {
     if (strict.prefix?.atTarget === true) {
       return receipt('reached_waypoint', { arrived: true, detail: `已走完当前证据前缀，实测终点就是解析目标 ${JSON.stringify(cell(strict.target))}` });
     }
-    const boundary = boundaryAfter(strict.boundaries, last.pos, anchorOf(request.goal));
+    const boundary = boundaryAfter(strict.boundaries, last.pos, anchorOf(tailGoal));
+    const tailBlocker = strict.prefix?.knownBlockerAhead;
+    if (tailBlocker?.status === 'BLOCKED' && request.goal.arrival !== undefined) {
+      return receipt('blocked', { stopCode: 'blocker', blockerAhead: tailBlocker,
+        detail: `已实际走完 ${executed} 段可通行前缀，端点的一条出边受阻（${tailBlocker.reason}）` });
+    }
     return receipt('unknown_boundary', {
       stopCode: 'prefix_boundary',
       detail: `已走完当前证据前缀 ${executed} 段，终点可通行性仍未知`,
       ...(boundary === undefined ? {} : { boundary }),
-      ...(reachable?.knownBlockerAhead === undefined ? {} : { blockerAhead: reachable.knownBlockerAhead }),
+      ...(tailBlocker === undefined ? {} : { blockerAhead: tailBlocker }),
     });
   }
   return receipt('reached_waypoint', {

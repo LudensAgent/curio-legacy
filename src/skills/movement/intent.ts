@@ -101,8 +101,9 @@ export function waypointOf(session: MovementSession, current: Vec3Like, maxSteps
   const { along } = project(session.frozenOrigin, session.bearing, current);
   const step = Math.max(1, Math.min(maxStepsPerSegment, intent.distance - along));
   const reach = Math.min(intent.distance, Math.max(0, along) + step);
-  const x = roundTo(session.frozenOrigin.x + session.bearing.x * reach, 0.5);
-  const z = roundTo(session.frozenOrigin.z + session.bearing.z * reach, 0.5);
+  // 总距离沿冻结方向计算；绕过障碍后可沿当前这一列继续，格内偏移不取整。
+  const x = session.bearing.x === 0 ? current.x : session.frozenOrigin.x + session.bearing.x * reach;
+  const z = session.bearing.z === 0 ? current.z : session.frozenOrigin.z + session.bearing.z * reach;
   return { x, y: footY?.(Math.floor(x), Math.floor(z), current.y) ?? current.y, z };
 }
 
@@ -113,4 +114,3 @@ export function summaryOf(intent: MovementIntent): string {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
-const roundTo = (n: number, step: number) => Math.round(n / step) * step;

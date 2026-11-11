@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import { lookAround } from '../src/skills/movement.ts';
 import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
+import { Vision } from '../src/perception/vision.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
 
@@ -27,16 +28,10 @@ test('方向探索保留距离，明确拒绝不支持的对角/施工能力与�
   assert.equal(exploreToward.validate({ direction: 'E', distance: 40, make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
 
-test('方向探索跨四个窗口沿冻结方向推进 64 格，扫描次数有界且不改变方向', async (t) => {
+test('方向探索跨四个规划窗口沿冻结方向推进 64 格，途中不为窗口停下扫视', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(80);
   t.after(() => ctx.memory.close());
-  const scanPositions: number[] = [];
-  t.mock.method(lookAround, 'run', async (scanCtx, args) => {
-    scanPositions.push(scanCtx.adapter.state().pos.x);
-    assert.equal(args.direction, 'E');
-    await scanCtx.adapter.look(Math.PI, -0.05);
-    return { status: 'succeeded', summary: '已扫视，当前面朝南' };
-  });
+  const scan = t.mock.method(lookAround, 'run', async () => { throw Error('走已知走廊无需扫视'); });
   const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, segment: 16 }, adapter));
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.planner, 'voxel_astar');
@@ -47,35 +42,92 @@ test('方向探索跨四个窗口沿冻结方向推进 64 格，扫描次数有�
   assert.deepEqual(adapter.pos, { x: 64.5, y: 64, z: 0.5 });
   assert.equal((result.data?.progress as { along: number }).along, 64);
   assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 64);
-  assert.deepEqual(scanPositions, [16.5, 32.5, 48.5], '只在仍需前进的三个窗口结束时扫描，抵达后直接返回');
+  assert.equal(scan.mock.callCount(), 0);
   assert.ok(adapter.actions.every((action) => !/^moveTo:(xz|near|advance)/.test(action)));
 });
 
-test('until 只根据段后本轮扫视停止，不将其报为走完全部距离', async (t) => {
+test('until 在行走中首次亲眼看到时停步；前视帧中的旧候选须重新可见', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(80);
   t.after(() => ctx.memory.close());
-  t.mock.method(lookAround, 'run', async () => ({ status: 'succeeded', summary: '本轮看见原木', data: { found: 'oak_log' } }));
+  const pos = { x: 13, y: 65, z: 0 };
+  adapter.blocks.push({ name: 'oak_log', pos });
+  const observe = ctx.senses.observeBlocks!;
+  const scan = t.mock.method(lookAround, 'run', async () => { throw Error('已看见目标不需要转头'); });
+  ctx.senses.currentBlockCandidates = () => [{ name: 'oak_log', pos }];
+  ctx.senses.knownBlocks = () => { throw Error('行走时不应遍历所有历史目标'); };
+  ctx.senses.observeBlocks = positions => adapter.pos.x >= 7.5 ? observe(positions) : [];
   const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, segment: 16, until: 'log' }, adapter));
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
-  assert.ok(adapter.pos.x < 64);
+  assert.equal(scan.mock.callCount(), 0);
+  assert.equal(adapter.pos.x, 7.5, '第七步即可看到，不能继续走到16步前瞻末端');
+  assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 7);
+  assert.deepEqual(result.data?.foundRef, { kind: 'block', pos });
+  assert.equal(result.data?.source, 'current_vision');
+  assert.equal(result.data?.arrived, false);
   assert.equal((result.data?.intent as { distance: number }).distance, 64);
 });
 
-test('带 until 的最后一个窗口仍在终点扫描本轮目标', async (t) => {
+test('带 until 在达到距离时仍检查当前视野，听声或背后的目标不会提前触发', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(20);
   t.after(() => ctx.memory.close());
-  const scan = t.mock.method(lookAround, 'run', async (_ctx, args) => {
-    assert.equal(args.for, 'log');
-    assert.deepEqual(adapter.pos, { x: 16.5, y: 64, z: 0.5 });
-    return { status: 'succeeded', summary: '本轮看见原木', data: { found: 'oak_log' } };
-  });
-  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 16, segment: 16, until: 'log' }, adapter));
-  assert.equal(scan.mock.callCount(), 1);
+  const scan = t.mock.method(lookAround, 'run', async () => { throw Error('达到冻结距离时不为扫描转头'); });
+  ctx.senses.perceivedEntities = () => [
+    { id: 17, name: 'cow', kind: 'passive', pos: { x: -2, y: 64, z: 0 }, dist: 6, perception: 'seen' },
+    { id: 23, name: 'cow', kind: 'passive', pos: { x: 19, y: 64, z: 0 }, dist: 3, perception: adapter.pos.x >= 16.5 ? 'seen' : 'heard' },
+  ];
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 16, segment: 16, until: 'cow' }, adapter));
+  assert.equal(scan.mock.callCount(), 0);
   assert.equal(result.status, 'succeeded', result.summary);
   assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
-  assert.deepEqual(result.data?.sighting, { found: 'oak_log' });
+  assert.deepEqual(result.data?.foundRef, { kind: 'entity', id: 23, name: 'cow' });
+  assert.equal(result.data?.foundEntityId, 23);
   assert.equal((result.data?.progress as { along: number }).along, 16);
+});
+
+test('当前已看见 until 时直接按视野收工；读已完成会话不伪造本轮目击', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(0);
+  t.after(() => ctx.memory.close());
+  ctx.senses.perceivedEntities = () => [{ id: 37, name: 'cow', kind: 'passive', pos: { x: 4, y: 64, z: 0 }, dist: 4, perception: 'seen' }];
+  const first = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, until: 'cow' }, adapter));
+  assert.equal(first.data?.stopReason, 'UNTIL_SEEN');
+  assert.equal(first.data?.foundEntityId, 37);
+  ctx.senses.perceivedEntities = () => [];
+  const resumed = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, until: 'cow', sessionId: first.data?.sessionId }, adapter));
+  assert.equal(resumed.status, 'succeeded');
+  assert.equal(resumed.data?.sighting, undefined);
+  assert.equal(resumed.data?.found, undefined);
+  assert.deepEqual(adapter.actions, []);
+});
+
+test('前方真实射线看到普通方块时也可作为 until，不要求它已进资源记忆', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(20);
+  t.after(() => ctx.memory.close());
+  const pos = { x: 4, y: 65, z: 0 };
+  adapter.blocks.push({ name: 'red_wool', pos });
+  const senses = new Vision(adapter);
+  senses.scan();
+  assert.equal(senses.seenAt(pos), 'red_wool');
+  assert.deepEqual(senses.knownBlocks(['red_wool'], 96), []);
+  const result = await exploreToward.run({ ...ctx, senses }, argsOf({ direction: 'E', distance: 16, until: 'red_wool' }, adapter));
+  assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
+  assert.deepEqual(result.data?.foundRef, { kind: 'block', pos });
+  assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
+});
+
+test('途中看见目标时仍要释放控制并确认停稳，超时不能报成功', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(32);
+  t.after(() => ctx.memory.close());
+  const settle = t.mock.fn(async () => { throw Error('TIMEOUT: no stop confirmation'); });
+  Object.assign(adapter, { settleMovement: settle });
+  ctx.senses.perceivedEntities = () => adapter.pos.x < 3.5 ? []
+    : [{ id: 32, name: 'cow', kind: 'passive', pos: { x: 8, y: 64, z: 0 }, dist: 4, perception: 'seen' }];
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 32, until: 'cow' }, adapter));
+  assert.equal(settle.mock.callCount(), 1);
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'TIMEOUT');
+  assert.equal((result.data?.stop as { reason: string }).reason, 'TIMEOUT');
+  assert.equal(adapter.pos.x, 3.5);
 });
 
 test('已做定向观察的短前沿不再追加广角扫描', async (t) => {

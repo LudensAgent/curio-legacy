@@ -181,7 +181,7 @@ function yawTo(dx: number, dz: number): number {
 
 export async function observeBoundary(
   ctx: SkillCtx,
-  opts: { boundary: LandSearchBoundary; maxCells: number; corridor?: Corridor; allowDrop?: boolean },
+  opts: { boundary: LandSearchBoundary; maxCells: number; corridor?: Corridor; allowDrop?: boolean; canProceed?: () => boolean },
 ): Promise<ObservationReceipt> {
   const spatial = ctx.spatial;
   const state = ctx.adapter.state();
@@ -230,7 +230,7 @@ export async function observeBoundary(
   // 看见邻近的新鲜格不代表补齐了边界：对仍未知/过期的相关格最多定向一次。
   // cells 是整数方块格；不能给 boundary.to 的连续脚位再加半格当作观察目标。
   const target = cells.find(needsObservation);
-  if (target !== undefined) {
+  if (target !== undefined && !opts.canProceed?.()) {
     const eye = ctx.adapter.eye();
     if (eye !== null) {
       const dx = target.x + 0.5 - eye.x, dy = target.y + 0.5 - eye.y, dz = target.z + 0.5 - eye.z;

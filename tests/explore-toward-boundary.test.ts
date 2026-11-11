@@ -6,7 +6,7 @@ import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { exploreToward } from '../src/skills/movement/explore-toward.ts';
 import { advance } from '../src/skills/movement/index.ts';
 import { lookAround } from '../src/skills/movement.ts';
-import { clearMovementSessions } from '../src/skills/movement/session.ts';
+import { activeMovementSession, clearMovementSessions } from '../src/skills/movement/session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -57,6 +57,33 @@ function setup(map: VoxelMap) {
   const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
   return { adapter, ctx };
 }
+
+test('先沿当前方向走到可见前沿，不为远处目标提前改走侧路', async (t) => {
+  const map = knownCorridor(7);
+  // 侧路完整通到目标格，直行的下一格尚未看到。横向授权很宽，也应先在东向前沿看。
+  for (let x = 8; x <= 16; x++) for (const z of (x === 16 ? [0, 1] : [1])) {
+    fill(map, 'minecraft:grass_block', [{ x, y: 63, z }]);
+    fill(map, 'minecraft:air', [64, 65].map(y => ({ x, y, z })));
+  }
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const views: Vec3Like[] = [];
+  ctx.senses.observeBlocks = () => { views.push({ ...adapter.pos }); return []; };
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 16, maxLateralDrift: 16 }, adapter));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal((result.data?.stop as { reason: string }).reason, 'UNKNOWN_BOUNDARY');
+  assert.deepEqual(adapter.pos, { x: 7.5, y: 64, z: 0.5 });
+  assert.ok(views.length > 0 && views.every(pos => pos.x === 7.5 && pos.z === 0.5));
+});
+
+test('偏心起步可显式禁止侧移，路点不会因半格舍入跳进邻列', async (t) => {
+  const { adapter, ctx } = setup(knownCorridor(18));
+  t.after(() => ctx.memory.close());
+  adapter.pos = { x: 0.5, y: 64, z: 0.85 };
+  const result = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 16, maxLateralDrift: 0 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(adapter.pos, { x: 16.5, y: 64, z: 0.85 });
+});
 
 const argsOf = (raw: unknown, adapter: FakeAdapter) => {
   const result = exploreToward.validate(raw, adapter);
@@ -173,7 +200,9 @@ test('前沿观察没有相关新证据时停止，不重复观察或无限重�
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
   let observations = 0;
+  let searchesBeforeObservation: number | undefined;
   ctx.senses.observeBlocks = () => {
+    searchesBeforeObservation ??= activeMovementSession({ worldId: WORLD, dim: DIM, sessionId: SESSION })?.counters.searches;
     observations += 1;
     return [];
   };
@@ -186,6 +215,7 @@ test('前沿观察没有相关新证据时停止，不重复观察或无限重�
   assert.equal((result.data?.lastObservation as { relatedChanged: boolean }).relatedChanged, false);
   assert.ok(observations >= 1 && observations <= 2, `一次定向观察最多包含一次转头重看，实际 ${observations} 次`);
   assert.equal((result.data?.counters as { observations: number }).observations, 1, 'session 只记一次定向观察，不重复');
-  assert.equal((result.data?.counters as { searches: number }).searches, 1, '没有相关变化就不得重搜');
+  assert.ok(searchesBeforeObservation === 1 || searchesBeforeObservation === 2, '前沿观察前最多有起点搜索和一次行进中的前瞻');
+  assert.equal((result.data?.counters as { searches: number }).searches, searchesBeforeObservation, '观察没有相关变化就不得重搜');
   assert.ok(Math.floor(adapter.pos.x) <= 3, `只走到已知前缀（实际 x=${adapter.pos.x}）`);
 });

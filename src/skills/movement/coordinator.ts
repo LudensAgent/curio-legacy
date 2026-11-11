@@ -56,6 +56,9 @@ export interface CoordinatorRequest {
   /** 本次 invocation 最多执行几段（temporary；不是 session 预算）。 */
   maxSegments: number;
   maxStepsPerSegment: number;
+  /** 边走边规划时，这个窗口用于前瞻；真实移动仍受原分段总量、步数和期限约束。 */
+  rolling?: boolean;
+  checkSighting?: () => string | undefined;
   /** 新建 session 的累计 transition 预算；续接时沿用原 session 预算。 */
   maxTransitions: number;
   /** 本次 invocation 最多确认多少 transition，同时受剩余累计预算限制。 */
@@ -156,7 +159,7 @@ function continuationOf(session: MovementSession) {
     canContinue,
     ...(canContinue ? { sessionId: session.id } : {}),
     requires: canContinue
-      ? reason === 'BLOCKED' ? ['清障/改变意图后重新调用；原目标不变时用同一 sessionId']
+      ? reason === 'BLOCKED' ? ['已记录受阻的出边；附近可见证据或站位变化后，同一目标可用原 sessionId 复核']
         : reason === 'UNKNOWN_BOUNDARY' ? ['观察相关边界或靠近后重新调用；原目标不变时用同一 sessionId']
           : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
             : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
@@ -316,6 +319,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     session.phase = 'executing';
     let executedSegments = 0;
     while (executedSegments < request.maxSegments) {
+      if (ctx.signal.aborted) {
+        stop = stopOf('CANCELLED', '父任务取消；保留已确认的位移');
+        break;
+      }
       const state = ctx.adapter.state();
       if (state.worldId !== session.scope.worldId || state.dim !== session.scope.dim || state.sessionId !== session.scope.sessionId) {
         stop = stopOf('SCOPE_CHANGED', `world/dimension/adapter session 已变化（${JSON.stringify(scope)} → ${state.worldId}/${state.dim}/${state.sessionId}）；旧 session 不跨 scope 续接`);
@@ -334,6 +341,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         onGround: state.onGround, inWater: state.inWater,
       };
       session.progress = progressOf(session, state.pos, Date.now());
+      const seen = request.checkSighting?.();
+      if (seen !== undefined) { stop = stopOf('UNTIL_SEEN', seen); break; }
       const close = closeReasonOf(
         session, state.pos, Date.now(), state.onGround,
         airborneLadderGoal(ctx, session.intent),
@@ -356,36 +365,31 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       const remainingCumulative = session.budget.maxTransitions - session.counters.confirmedTransitions;
       const perSegment = Math.max(1, Math.min(
-        request.maxStepsPerSegment,
+        request.maxStepsPerSegment * (request.rolling ? request.maxSegments - executedSegments : 1),
         request.invocationMaxTransitions - invocationTransitions,
         remainingCumulative,
       ));
       // 路点脚高取该列已观测的站立面（下坡/上坡时不再沿用当前脚高）；没观测过才用当前脚高。
       const voxel = spatial.session.voxel;
-      const waypoint = waypointOf(session, state.pos, request.maxStepsPerSegment,
-        (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
-      // advance 的路点是候选格列（x/z 可能是半格），navigate 使用冻结的 targetKind。
-      let goal: NavigationGoal = session.intent.kind === 'advance'
-        ? cellGoal({ x: waypoint.x, z: waypoint.z }, waypoint.y, waypoint)
-        : goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
-      // 格目标的格内偏移取实测起点，可能让中继路点落在当前站位同一投影上（例如漂移后
-      // 分数偏移变化）；此时把中继格沿冻结方向推进一格，保证推进请求仍能前进。
-      const bearing = session.bearing;
-      if (session.intent.kind === 'advance' && bearing !== undefined) {
-        const along = (point: Vec3Like) =>
-          (point.x - session.frozenOrigin.x) * bearing.x
-          + (point.z - session.frozenOrigin.z) * bearing.z;
-        if (goal.kind === 'cell' && along(stanceFor(goal, state.pos)) <= along(state.pos) + 1e-9) {
-          goal = cellGoal(
-            { x: goal.cell.x + Math.round(bearing.x), z: goal.cell.z + Math.round(bearing.z) },
-            goal.footY,
-            waypoint,
-          );
+      const goalAt = (pos: Vec3Like): NavigationGoal => {
+        if (session.intent.kind === 'navigate') return goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
+        const waypoint = waypointOf(session, pos, request.maxStepsPerSegment,
+          (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
+        const goal = cellGoal(waypoint, waypoint.y, waypoint);
+        const bearing = session.bearing;
+        if (bearing !== undefined && goal.kind === 'cell') {
+          const stance = stanceFor(goal, pos);
+          if ((stance.x - pos.x) * bearing.x + (stance.z - pos.z) * bearing.z <= 1e-9) {
+            return cellGoal({ x: goal.cell.x + bearing.x, z: goal.cell.z + bearing.z }, waypoint.y, waypoint);
+          }
         }
-      }
+        return goal;
+      };
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
-        goal,
+        goal: goalAt(state.pos),
+        ...(request.rolling ? { nextWindow: goalAt } : {}),
+        ...(request.checkSighting === undefined ? {} : { checkSighting: request.checkSighting }),
         ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const, minimumAlong: session.intent.distance } : {}),
         allowed: session.intent.allowed,
         historical: session.intent.historical,
@@ -439,6 +443,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       if (segment.stopCode === 'settlement_failed') {
         stop = stopOf(segment.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'PHYSICAL_FAILURE',
           segment.detail ?? '已松开运动键，但未确认身体停稳；保留实测位置');
+        break;
+      }
+      if (segment.outcome === 'sighting') {
+        stop = stopOf('UNTIL_SEEN', segment.detail ?? '当前视野已看见委托目标');
         break;
       }
       // 段内的实测位置已经达到冻结意图时，先按实测收工；剩余边界只说明“再往后未知”，
@@ -509,7 +517,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         // 不把“正前方有阻挡”直接当成整条走廊无路。观察预算与去重沿用同一 session。
         const blockedBoundary = blockerBoundaryOf(segment);
         const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary, after.pos);
-        const canObserveSides = session.intent.kind === 'advance' && session.intent.maxLateralDrift > 0
+        const canObserveSides = (session.intent.kind === 'advance' ? session.intent.maxLateralDrift > 0
+          : session.intent.arrival !== undefined && segment.searchStatus === 'INSUFFICIENT_EVIDENCE')
           && blockedBoundary !== undefined && boundaryKey !== undefined
           && session.counters.observations < session.budget.maxObservations
           && session.counters.newObservedCells < session.budget.maxObservedCells
@@ -520,6 +529,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           try {
             observation = await observeBoundary(ctx, {
               boundary: blockedBoundary!,
+              allowDrop: session.intent.allowed.includes('drop'),
               maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
               ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
             });
@@ -568,16 +578,18 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         // 感知在走前缀期间仍会更新地图。旧搜索边界已可通时，不能要求本次
         // observe 再产生一次变化；只复验当前脚边这条边，OPEN 才从实测位置重搜。
-        if (boundary !== undefined && feetReached(boundary.from, after.pos, after.onGround)) {
+        const canProceed = () => {
+          if (boundary === undefined || !feetReached(boundary.from, after.pos, after.onGround)) return false;
           const check = verifyLandRoute(voxel, {
             ...scope, body: { feet: { ...after.pos }, width: 0.6, height: 1.8, pose: 'standing' },
             rules: walkLandRules, measuredStart: after.pos,
           }, [{ kind: boundary.kind, from: boundary.from, to: boundary.to,
             drop: Math.max(0, boundary.from.y - boundary.to.y) }], Date.now());
-          if (check.transitions[0]?.status === 'OPEN') {
-            session.phase = 'replanning';
-            continue;
-          }
+          return check.transitions[0]?.status === 'OPEN';
+        };
+        if (canProceed()) {
+          session.phase = 'replanning';
+          continue;
         }
         const boundaryKey = boundary === undefined ? undefined : boundaryKeyOf(boundary, after.pos);
         const boundaryDone = boundaryKey !== undefined && session.observedBoundaries?.includes(boundaryKey) === true;
@@ -636,6 +648,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
             && session.counters.newObservedCells < session.budget.maxObservedCells) {
             boundaryReceipt = await observeBoundary(ctx, {
               boundary,
+              canProceed,
+              allowDrop: session.intent.allowed.includes('drop'),
               maxCells: session.budget.maxObservedCells - session.counters.newObservedCells,
               ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
             });
@@ -676,6 +690,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         session.updatedAt = Date.now();
         // 段内已先走到证据前缀端点，观察就是在新站位朝边界做的；没有相关变化时从同一站位重搜不会有新结果。
+        if (ctx.signal.aborted) { stop = stopOf('CANCELLED', '前沿观察时父任务取消'); break; }
+        if (Date.now() >= deadline) { stop = stopOf('TIMEOUT', '前沿观察到达原期限'); break; }
+        const boundarySighting = request.checkSighting?.();
+        if (boundarySighting !== undefined) { stop = stopOf('UNTIL_SEEN', boundarySighting); break; }
         if (!observation.relatedChanged) {
           stop = stopOf('UNKNOWN_BOUNDARY', '在前缀端点观察后相关边界证据没有变化，不重复搜索同一未知边界', {
             boundaries: boundary === undefined ? [] : [boundary],
@@ -749,10 +767,10 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
     }),
     ...stateFacts(session),
     continuation: continuationOf(session),
+    position: { ...session.measured.current },
     ...(last === undefined ? {} : {
       executed: session.counters.confirmedTransitions,
       confirmedSegments: session.counters.confirmedTransitions,
-      position: { ...session.measured.current },
       evidenceMode: last.evidenceMode,
       searchStatus: last.searchStatus,
       searchReason: last.searchReason,

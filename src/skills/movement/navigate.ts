@@ -11,6 +11,7 @@ type NavigateArgs = {
   targetKind?: NavigationTargetKind;
   /** 内部已验证委托的验收条件；公开 navigate_to 保持精确目标语义。 */
   arrival?: NavigationArrival;
+  rolling?: boolean;
   allowed: MoveMode[];
   historical: boolean;
   maxSteps: number;
@@ -169,6 +170,7 @@ export const navigateTo: Skill<NavigateArgs> = {
     const targetKind = args.targetKind ?? targetKindOf(args.to);
     const outcome = await runMovementCoordinator(ctx, {
       intent: { kind: 'navigate', to: { ...args.to }, targetKind, ...(args.arrival === undefined ? {} : { arrival: { ...args.arrival } }), allowed: args.allowed, historical: args.historical !== false },
+      ...(args.rolling ? { rolling: true } : {}),
       maxSegments,
       maxStepsPerSegment: args.maxStepsPerSegment ?? maxSteps,
       maxTransitions: args.maxTransitions ?? maxSteps * maxSegments,

@@ -195,15 +195,13 @@ test('分段内新增的已观测格来自 VoxelMap 实测，可算新覆盖', a
   assert.equal(segment.progress.reason, 'new_observation');
 });
 
-test('提示词用有界分段探索，不再把长按 press_keys 当移动方式', () => {
+test('提示词用边走边看的方向探索，不再把长按 press_keys 当移动方式', () => {
   const source = readFileSync(new URL('../src/mind/prompt.ts', import.meta.url), 'utf8');
   const choose = source.slice(source.indexOf('const CHOOSE = '), source.indexOf('const PRINCIPLES = '));
   assert.ok(choose.length > 0, 'CHOOSE 段落存在');
   assert.equal(/press_keys/.test(choose), false, '选动作不再推荐 press_keys 旅行');
-  assert.match(choose, /有界分段/);
-  assert.match(choose, /每段结束[^；\n]*再决定下一段/);
+  assert.match(choose, /explore_toward 朝你选的方向边走边看/);
+  assert.match(choose, /停止后按实测位置和观测决定是否续走/);
   assert.match(choose, /进入新区块[^；\n]*不等于已看清/);
-  assert.match(choose, /没有新观测、没有进入新区块、也没到达选定站位的移动不算探索进展/);
-  assert.match(source, /不缩短原目标/);
   assert.match(source, /只有新观测、新区块或到达选定站位才算探索进展，单纯位移不算/);
 });

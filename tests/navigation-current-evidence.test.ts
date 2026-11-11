@@ -66,6 +66,17 @@ test('a stale start with no new visible evidence stops without replaying history
   assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
 });
 
+test('当前视野已经补齐下一步时，不因邻列仍旧而转头', async (t) => {
+  const { adapter, ctx, observe } = setup();
+  t.after(() => ctx.memory.close());
+  let looks = 0;
+  t.mock.method(adapter, 'look', async () => { looks++; });
+  ctx.senses.observeBlocks = positions => positions.filter(p => p.z === 0 && p.y >= 63 && p.y <= 65).map(p => observe(p));
+  const result = await navigateTo.run(ctx, args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(looks, 0);
+});
+
 test('cancellation during stale evidence refresh prevents any later movement', async (t) => {
   const { adapter, ctx, observe, controller } = setup();
   t.after(() => ctx.memory.close());

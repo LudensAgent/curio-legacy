@@ -59,6 +59,8 @@ export interface LandingOption {
 export interface Senses {
   perceivedEntities(radius: number): EntityInfo[];
   knownBlocks(names: string[], maxDist: number): BlockHit[];
+  /** Candidate surfaces hit in the latest visual frame; recheck visibility before reporting a sighting. */
+  currentBlockCandidates?(names: string[]): Pick<BlockHit, 'name' | 'pos'>[];
   /** Fresh visible state only; occluded, unloaded and out-of-view targets are absent. */
   observeBlocks?(positions: Vec3Like[]): BlockObservation[];
   /** Bounded landing geometry from freshly visible surfaces, never hidden map queries. */

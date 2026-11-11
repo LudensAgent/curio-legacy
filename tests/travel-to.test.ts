@@ -12,6 +12,36 @@ const argsOf = (raw: unknown, adapter = new FakeAdapter()) => {
   return result.args;
 };
 
+test('远端一条边碰墙时，走到已证实前缀端点再观察可通侧路', async (t) => {
+  const { adapter, map, ctx } = voxelNavigationFixture(6);
+  t.after(() => ctx.memory.close());
+  let sequence = 10000;
+  const wallX = 7;
+  const observe = (pos: { x: number; y: number; z: number }) => {
+    const name = pos.y < 64 || (pos.x === wallX && pos.z === 0 && pos.y <= 65) ? 'minecraft:stone' : 'minecraft:air';
+    const observedAt = Date.now();
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt, sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name, properties: {} }, pos });
+    return { pos, name, properties: {}, stateComplete: true, worldId: adapter.worldId,
+      sessionId: adapter.sessionId, dimension: adapter.dim, observationId: sequence, observedAt, source: 'vision' as const };
+  };
+  for (let x = wallX; x <= 18; x++) for (const z of [0, 1]) for (const y of [63, 64, 65, 66]) {
+    if (x !== wallX || z === 0) observe({ x, y, z });
+  }
+  const views: number[] = [];
+  ctx.senses.observeBlocks = (positions) => {
+    views.push(adapter.pos.x);
+    return positions.filter(p => p.x === wallX && p.z === 1).map(observe);
+  };
+  const target = { x: 18, y: 64, z: 0 };
+  const result = await travelTo.run(ctx, argsOf({ to: target, range: 2 }, adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(views.length > 0 && views.every(x => x >= 6), '只有在墙边才实测可见侧路');
+  assert.deepEqual(result.data?.requestedTarget, target);
+  assert.ok(Math.hypot(Math.floor(adapter.pos.x) - 18, Math.floor(adapter.pos.z)) <= 2);
+});
+
 test('travel_to 只接受公开参数，未知键无论值都拒绝，目标字段也须符合当前形状', () => {
   const adapter = new FakeAdapter();
   for (const option of ['allowDig', 'allowPlace', 'allowTower', 'allowSwim', 'allowHazard', 'sprint']) {

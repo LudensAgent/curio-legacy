@@ -244,6 +244,7 @@ export const travelTo: Skill<TravelToArgs> = {
       ctx.progress(0, `委托 VoxelMap A* 走向 ${label}`);
       moved = await runSkill(ctx, navigateTo, {
         ...nested.args,
+        rolling: true,
         arrival: { radius: args.range, metric: requestedY ? '3d' : 'horizontal' },
       });
     } catch (error) {
