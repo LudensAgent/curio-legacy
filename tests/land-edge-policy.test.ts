@@ -23,9 +23,15 @@ const edgeAt = (to: { x: number; y: number; z: number }, overrides: Partial<Land
   kind: 'walk', from: at(0, 64, 0), to, baseCost: 1, hazards: [], evidenceMode: 'current', ...overrides,
 });
 
-/** Bounded fake reader: a policy that over-reads fails instead of silently passing. */
-function fakeReader(entries: readonly CellEntry[] = [], maxReads = 64) {
-  const cells = new Map(entries.map(([x, y, z, cell]) => [key(x, y, z), cell]));
+/**
+ * Bounded fake reader: a policy that over-reads fails instead of silently passing.
+ * Unless an entry overrides it, the cell under each destination's feet centre (`supports`) is recorded stone.
+ */
+function fakeReader(entries: readonly CellEntry[] = [], maxReads = 64, supports: readonly { x: number; y: number; z: number }[] = DEFAULT_SUPPORTS) {
+  const cells = new Map([
+    ...supports.map((to) => [key(Math.floor(to.x), Math.round(to.y) - 1, Math.floor(to.z)), recorded('stone')] as const),
+    ...entries.map(([x, y, z, cell]) => [key(x, y, z), cell] as const),
+  ]);
   const reads: { x: number; y: number; z: number }[] = [];
   const read: LandSearchPolicyRead = {
     cell(x, y, z) {
@@ -49,6 +55,7 @@ const rejectionReason = (decision: LandSearchPolicyDecision): string => {
 
 const DANGEROUS = ['lava', 'fire', 'soul_fire', 'magma_block', 'campfire', 'soul_campfire', 'cactus', 'sweet_berry_bush', 'powder_snow', 'cobweb', 'pointed_dripstone'] as const;
 const HORIZONTAL = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+const DEFAULT_SUPPORTS = [at(0.5, 64, 0.5), at(-0.3, 63.95, -2.2)];
 
 test('danger set: bare and minecraft: names only, no unrelated matches', () => {
   for (const name of DANGEROUS) {
@@ -218,4 +225,33 @@ test('permitted edge stays within the per-edge read bound (swept body, support a
   ].sort();
   const read = new Set(reader.reads.map(({ x, y, z }) => key(x, y, z)));
   assert.ok(expected.every((cell) => read.has(cell)), '落点脚/头/支撑与岩浆邻格都被读取');
+});
+
+test('桥头擦边：落点只靠邻列擦边支撑时拒绝；脚底中心那列有支撑才允许', () => {
+  // 复现：桥面圆石到 x=94 为止，路线保留起点偏移走到 x=95.29，身体只压住 x=94 那列 0.01 格。
+  const to = at(95.29, 70, -39.55);
+  const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
+  const edgeOnly = fakeReader([[94, 69, -40, recorded('cobblestone')]], 64, []);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, edgeOnly.read)), /feet centre at \(95,69,-40\)/);
+  const centred = fakeReader([[95, 69, -40, recorded('cobblestone')]], 64, []);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centred.read)), 0);
+  const unknownBelow = fakeReader([], 64, []);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, unknownBelow.read)), /no recorded support/);
+  // 分数脚高（站在下半砖上）：支撑就是脚所在那一格。
+  const slab = fakeReader([[95, 69, -40, { kind: 'recorded', state: { name: 'stone_slab', properties: { type: 'bottom' } }, stateComplete: true }]], 64, []);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(95.5, 69.5, -39.5), { from: at(94.5, 69.5, -39.5) }), slab.read)), 0);
+});
+
+test('跨缺口跳跃：超出原地起跳能力的宽缺口不规划；落空会掉进火/岩浆的缺口不规划', () => {
+  // 复现：从 (-73.39,69) 水平跳 3 格到 (-70.39,69)，缺口下方 3 格是火。
+  const wide = edgeAt(at(-70.39, 69, -18.55), { kind: 'jump', from: at(-73.39, 69, -18.55) });
+  const supports = [at(-70.39, 69, -18.55), at(-71.5, 69, -18.5)];
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(wide, fakeReader([], 64, supports).read)), /without a run-up/);
+  const gap = edgeAt(at(-71.5, 69, -18.5), { kind: 'jump', from: at(-73.5, 69, -18.5) });
+  const overFire = fakeReader([
+    [-73, 68, -19, recorded('minecraft:air')], [-73, 67, -19, recorded('minecraft:air')], [-73, 66, -19, recorded('fire')],
+  ], 128, supports);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(gap, overFire.read)), /miss would land in recorded fire at \(-73,66,-19\)/);
+  const overFloor = fakeReader([[-73, 68, -19, recorded('minecraft:air')], [-73, 67, -19, recorded('netherrack')], [-73, 66, -19, recorded('fire')]], 128, supports);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(gap, overFloor.read)), 0, '缺口下先碰到实心地面，落空也落在地面上');
 });

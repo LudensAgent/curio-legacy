@@ -4,6 +4,7 @@ import type {
   LandSearchPolicyEdge,
   LandSearchPolicyRead,
 } from 'curio-minecraft-3d-memory/navigation';
+import { supportTop } from '../perception/geometry.ts';
 
 /**
  * Host-owned admission/cost policy for geometrically OPEN land-search edges.
@@ -65,9 +66,37 @@ const recordedName = (read: LandSearchPolicyRead, x: number, y: number, z: numbe
  * 委托显式允许涉水（swim:true）时，接受身体接触水的地面边；淹没、水流与气泡柱仍拒绝。
  * 其余危险格、岩浆加价规则与默认策略完全相同。
  */
+/**
+ * 水平跳跃的执行能力：身体控制原地起跳、不助跑不疾跑，只能稳定跨过 1 格宽的缺口（水平 2 格）。
+ * 更宽的缺口执行必然落空掉进缺口，属于程序能力限制，不规划。
+ */
+export const MAX_GAP_JUMP_HORIZONTAL = 2;
+/** 跳跃落空时会落进缺口：往下看这么多格，先碰到危险格就不规划这次跳跃。 */
+const GAP_FALL_LOOKDOWN = 8;
+
 const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: boolean): LandSearchEdgePolicy => ({
   version,
   evaluate(edge: LandSearchPolicyEdge, read: LandSearchPolicyRead): LandSearchPolicyDecision {
+    if (edge.kind === 'jump') {
+      const horizontal = Math.hypot(edge.to.x - edge.from.x, edge.to.z - edge.from.z);
+      if (horizontal > MAX_GAP_JUMP_HORIZONTAL + 0.01) {
+        return { allow: false, reason: `host body control jumps from standing without a run-up and cannot clear a ${horizontal.toFixed(1)}-block horizontal gap jump (limit ${MAX_GAP_JUMP_HORIZONTAL})` };
+      }
+      // 缺口下方：起点列与落点列之间被跨过的列，从脚下一层往下找第一个非空格；是危险格就拒绝。
+      const fromCol = { x: Math.floor(edge.from.x), z: Math.floor(edge.from.z) }, toCol = { x: Math.floor(edge.to.x), z: Math.floor(edge.to.z) };
+      const steps = Math.max(Math.abs(toCol.x - fromCol.x), Math.abs(toCol.z - fromCol.z));
+      for (let i = 1; i < steps; i++) {
+        const gx = fromCol.x + Math.sign(toCol.x - fromCol.x) * i, gz = fromCol.z + Math.sign(toCol.z - fromCol.z) * i;
+        for (let dy = 1; dy <= GAP_FALL_LOOKDOWN; dy++) {
+          const name = recordedName(read, gx, Math.round(edge.from.y) - dy, gz);
+          if (name === null) break;
+          if (isDangerousBlock(name)) {
+            return { allow: false, reason: `host policy rejects a gap jump whose miss would land in recorded ${name} at (${gx},${Math.round(edge.from.y) - dy},${gz})` };
+          }
+          if (supportTop(name.replace(/^minecraft:/, '')) !== null || isWaterBlock(name)) break;
+        }
+      }
+    }
     const nonFall = [...new Set(edge.hazards
       .filter((hazard) => !allowedHazards.has(hazard.kind))
       .map((hazard) => hazard.kind))];
@@ -103,6 +132,16 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
         return { allow: false, reason: `host policy rejects recorded dangerous block ${support} at the destination support cell` };
       }
     }
+    // 落点脚底中心所在那一列必须自己有已记录的支撑：只靠邻列擦边（身体压住 0.01 格）几何上站得住，
+    // 但身体连续行走时多滑一点就离开支撑掉下去（桥头、崖边）。站在水里（涉水/落水）不要求。
+    if (edge.kind !== 'ladder' && !(feet !== null && isWaterBlock(feet))) {
+      // 脚高接近整数：支撑是下面那格；分数脚高（半砖、雪层）：支撑就在脚所在那格。
+      const supportY = Math.abs(edge.to.y - Math.round(edge.to.y)) <= 0.05 ? Math.round(edge.to.y) - 1 : Math.floor(edge.to.y);
+      const cell = read.cell(x, supportY, z);
+      if (cell.kind !== 'recorded' || supportTop(cell.state.name.replace(/^minecraft:/, ''), cell.state.properties) === null) {
+        return { allow: false, reason: `host policy rejects a stance supported only by a neighbouring column's edge: no recorded support under the feet centre at (${x},${supportY},${z})` };
+      }
+    }
     // 旁边的岩浆会流动、也可能被碰到：脚部、头部与脚下一层的岩浆邻格都加价，规划更愿意离远一点。
     const lavaNeighbors = HORIZONTAL.reduce((count, [dx, dz]) => count
       + [y + 1, y, y - 1].filter((height) => {
@@ -113,5 +152,5 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
   },
 });
 
-export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.fall-only.dry.lava-neighbor-3.v3', new Set(['fall']), false);
-export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.fall-wade.lava-neighbor-3.v3', new Set(['fall', 'water_contact']), true);
+export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support.gap-jump-2.fall-only.dry.lava-neighbor-3.v5', new Set(['fall']), false);
+export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support.gap-jump-2.fall-wade.lava-neighbor-3.v5', new Set(['fall', 'water_contact']), true);
