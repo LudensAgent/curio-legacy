@@ -53,6 +53,25 @@ test('后台分片扫描与同步扫描在同一视点得到同一帧', async ()
   assert.deepEqual([...vision.frame!.cats], sliced, '同一视点下两种扫描方式的画面分类一致');
 });
 
+test('后台分片扫描在慢查询下让出事件循环', async () => {
+  const adapter = new FakeAdapter();
+  const original = adapter.blockOptics.bind(adapter);
+  let lookups = 0;
+  adapter.blockOptics = (x: number, y: number, z: number) => {
+    lookups += 1;
+    const until = performance.now() + 0.25;
+    while (performance.now() < until) { /* simulate a costly world read */ }
+    return original(x, y, z);
+  };
+  const vision = new Vision(adapter, { range: 8, hFov: 120, vFov: 96, cols: 24, rows: 12, hearRadius: 10, bandCols: 0, bandRows: 0 });
+  let ticks = 0;
+  const timer = setInterval(() => { ticks += 1; }, 1);
+  await vision.scanAsync();
+  clearInterval(timer);
+  assert.ok(lookups > 0);
+  assert.ok(ticks > 0, `分片扫描应让出事件循环（查询 ${lookups} 次，计时器 ${ticks} 次）`);
+});
+
 test('地下的矿看不见；背后的树看不见，环顾一圈后才知道', async () => {
   const { adapter, vision } = setup();
   adapter.blocks.push({ name: 'diamond_ore', pos: { x: 6, y: 58, z: 0 } }); // 埋在地下
