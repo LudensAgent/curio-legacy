@@ -4393,8 +4393,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const names = (Object.keys(keys) as (keyof DriveKeys)[]).filter((k) => keys[k]);
     const face = () => {
       const target = opts.faceEntity !== undefined ? b.entities[opts.faceEntity] : null;
-      const p = target?.isValid ? target.position.offset(0, (target.height ?? 1.6) * 0.85, 0) : opts.facePoint ? this.vec(opts.facePoint) : null;
-      if (p) { try { b.lookAt(p, true); } catch { /* ignore */ } }
+      if (target?.isValid) { try { b.lookAt(target.position.offset(0, (target.height ?? 1.6) * 0.85, 0), true); } catch { /* ignore */ } return; }
+      // 朝一个点走：移动只取决于水平朝向，平视转身；贴近该点时水平方向不稳定，不再转（否则原地来回晃、抬头看天）。
+      const p = opts.facePoint, at = b.entity.position;
+      if (!p || Math.hypot(p.x - at.x, p.z - at.z) < 0.3) return;
+      try { b.look(Math.atan2(-(p.x - at.x), -(p.z - at.z)), 0, true); } catch { /* ignore */ }
     };
     // 身体本能：不迈进岩浆和火，不从三格以上的高处一脚踩空
     const danger = (): DriveResult['stopped'] | null => {

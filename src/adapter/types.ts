@@ -415,7 +415,7 @@ export interface UseItemOptions {
 /** 直接操纵身体时按住的键 */
 export interface DriveKeys { forward?: boolean; back?: boolean; left?: boolean; right?: boolean; jump?: boolean; sprint?: boolean; sneak?: boolean }
 export interface DriveOptions {
-  /** 一边走一边一直盯着这个实体（打架时走位）或这个点 */
+  /** 一边走一边一直盯着这个实体（打架时走位）；或水平朝向这个点、平视（贴近该点 0.3 格内不再转身） */
   faceEntity?: number; facePoint?: Vec3Like;
   /** 默认 true：前面是岩浆/火、或者一脚下去会摔三格以上就停下（身体本能，不是打法） */
   guard?: boolean;

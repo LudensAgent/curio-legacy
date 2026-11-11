@@ -31,7 +31,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
-- api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒 50–1000 的整数, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；时长超出 50–1000 会报参数错误（press_keys 的 50–10000 是另一个入口的上限，两者不共用）；
+- api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒 50–1000 的整数, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face（实体：直视；坐标点：只水平朝向它、平视，贴近 0.3 格内不再转身） → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；时长超出 50–1000 会报参数错误（press_keys 的 50–10000 是另一个入口的上限，两者不共用）；
   前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；{unsafe:true} 关掉这个保护
 - api.attack(实体id) 朝它挥一下（4 格内才打得到）→ {ok, sinceLastMs 距上次挥了多久}；挥得太勤伤害很低：剑约 625ms、斧约 1000ms、空手 250ms 才恢复满
 - api.equip(物品名或null, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet", {sourceSlot}?) 指定现有槽位可区分同名物品；null 清空该装备位。api.act("inspect_inventory",{}) 查看槽位、附魔、名称和NBT｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
