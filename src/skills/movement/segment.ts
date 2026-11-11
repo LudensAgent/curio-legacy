@@ -26,6 +26,18 @@ import type { MoveMode } from './session.ts';
  * 不把格心化动作冒充为精确 transition。不换目标、不施工、不做观察后重搜。
  */
 
+/**
+ * 往上一级（step）被起步处头顶挡住时说清楚：起跳时头会顶到起步格上方第三格，两格高的巷道里上不去台阶。
+ * 只解释已判定的阻挡，不替 Agent 选择挖开、垫高或绕行。
+ */
+export function ceilingNote(blocker: { transition?: { kind: string; from: Vec3Like; to: Vec3Like }; reason?: string }): string {
+  const t = blocker.transition, m = blocker.reason?.match(/collision with (\S+) at \((-?\d+), (-?\d+), (-?\d+)\)/);
+  if (!t || t.kind !== 'step' || !m) return '';
+  const cell = { x: Number(m[2]), y: Number(m[3]), z: Number(m[4]) };
+  if (cell.y !== Math.floor(t.from.y + 0.05) + 2) return '';
+  return `：这一步要往上一级，起跳时头顶会碰到起步处上方第三格 (${cell.x},${cell.y},${cell.z}) 的 ${m[1]}——两格高的巷道里上不去台阶，挖开这一格或另找路才能过`;
+}
+
 export type SegmentOutcome =
   | 'reached_waypoint'
   | 'sighting'
@@ -666,7 +678,7 @@ async function runNavigationSegmentInner(
       detail: residencyFailure !== null
         ? `导航所需的 ${residencyFailure.sections.length} 个 Section 未能加载/驻留（${residencyFailure.reason}）：${residencyFailure.message}；没有把冷页失败当成无路或未知，未执行未复验的动作`
         : `${blockerAhead !== undefined
-          ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}`
+          ? `朝目标方向的边界已是 ${blockerAhead.status}${blockerAhead.reason === undefined ? '' : `（${blockerAhead.reason}）`}${ceilingNote(blockerAhead)}`
           : !straight && strict.corridorLimited === true
             ? `授权横向走廊（±${request.corridor?.maxLateral ?? 0} 格）内没有 walk/step/drop 路线；外侧绕行未授权`
             : historicalBudget !== null

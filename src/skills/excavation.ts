@@ -344,8 +344,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const adjustedDrops: { requestedFoot: number; landingFoot: number; drop: number; block: string; blockCell: Vec3Like }[] = [];
   /** 按 Agent 显式 fill 授权补上的支撑格；材料会真实消耗。 */
   const fillFacts: { at: Vec3Like; item: string }[] = [];
+  // 多落下的地方是单向的：沿原路回来要一次上 2 格以上，走路一跳上不去（垫方块或挖台阶才行）。如实说出位置。
   const dropNote = () => adjustedDrops.length
-    ? `（其中 ${adjustedDrops.length} 处按实际楼面多下降 ${adjustedDrops.reduce((n, d) => n + d.drop, 0)} 格）`
+    ? `（其中 ${adjustedDrops.length} 处按实际楼面多下降 ${adjustedDrops.reduce((n, d) => n + d.drop, 0)} 格；沿原路往回走时，这些地方要一次上 ${adjustedDrops.map((d) => d.drop + 1).join('/')} 格，走路跳不上去：${adjustedDrops.slice(0, 4).map((d) => `落到脚高 ${d.landingFoot}`).join('、')}）`
     : '';
   const fillNote = () => filled
     ? `（按 fill 补了 ${filled} 处支撑：${fillFacts.map((f) => `${f.item} 在 (${f.at.x},${f.at.y},${f.at.z})`).join('、')}）`
