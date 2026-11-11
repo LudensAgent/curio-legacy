@@ -174,8 +174,9 @@ test('legacy map targets are registered actions', () => {
 
 test('survival hunt fallback recommends registered expedition with its real arguments', () => {
   const source = readSource('src/skills/survival.ts');
-  const advice = '可以 expedition {"direction":"N|NE|E|SE|S|SW|W|NW"} 换个方向走远点（100–600 格；至少带 3 个熟食';
-  assert.ok(source.includes(advice), '没有猎物时推荐的 expedition 要带真实参数与门槛');
+  const advice = '可以 expedition {"direction":"N|NE|E|SE|S|SW|W|NW"} 换个方向走远点（100–600 格）';
+  assert.ok(source.includes(advice), '没有猎物时推荐的 expedition 要带真实参数');
+  assert.equal(source.includes('至少带 3 个熟食'), false, 'expedition 已不设食物门槛，提示不能再承诺 MISSING_MATERIALS');
   assert.equal(source.includes('explore 换个地方'), false, 'survival.ts 不应再推荐未注册的 explore');
   assert.ok(Object.hasOwn(SKILLS, 'expedition'));
   assert.equal(Object.hasOwn(SKILLS, 'explore'), false, 'explore 未注册时本断言才成立；若 C-CLEAN-01 后注册，需同步');

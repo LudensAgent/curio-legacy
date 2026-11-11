@@ -8,6 +8,7 @@ import { interactiveName } from '../perception/vision.ts';
 import { glanceAt } from './observation.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { FUELS } from '../methods/fuel.ts';
+import { FOOD_VALUE } from './food.ts';
 
 // ===================================================================== 冶炼
 export const SMELTABLE: Record<string, string> = {
@@ -564,15 +565,15 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
     const s0 = adapter.state();
-    const food = s0.inventory.filter((i) => /cooked_|bread|baked_potato|apple|carrot/.test(i.name)).reduce((n, i) => n + i.count, 0);
-    if (food < 3) return fail('MISSING_MATERIALS', `食物只有 ${food} 个，远征至少带 3 个熟食`);
+    // 带多少吃的由 Agent 定：这里只把出发时的食物如实写进回执，不设门槛。
+    const food = s0.inventory.filter((i) => FOOD_VALUE[i.name]).reduce((n, i) => n + i.count, 0);
     const [dx, dz] = DIRS[args.direction];
     const start = s0.pos;
     const targets = args.find ? [...new Set(adapter.resolveBlockNames(args.find))] : [];
     // 搜索覆盖度随结果一起返回：只说明“这段路线两侧扫过”，不能升级成“世界其它地方没有”。
     const coverage = {
       target: args.find ?? null, dimension: s0.dim, start: { ...s0.pos }, end: { ...s0.pos },
-      travelled: 0, scanRadius: targets.length ? EXPEDITION_SCAN_RADIUS : 0,
+      travelled: 0, scanRadius: targets.length ? EXPEDITION_SCAN_RADIUS : 0, foodAtStart: food,
       scans: 0, mode: 'known_sightings_along_route' as const, unknownBeyond: true as const,
       found: null as null | { name: string; pos: Vec3Like; dist: number },
     };
@@ -628,12 +629,14 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
       await sleep(50, signal);
     }
     const newChunks = memory.visitedChunkCount - chunks0;
+    const foodNow = adapter.state().inventory.filter((i) => FOOD_VALUE[i.name]).reduce((n, i) => n + i.count, 0);
+    const foodText = `；食物 出发时 ${food} 个、现在 ${foodNow} 个`;
     if (targets.length) {
-      const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${blocked ? '（中途受阻）' : ''}`;
+      const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${blocked ? '（中途受阻）' : ''}${foodText}`;
       const data = { travelled, found: null, coverage, direction: args.direction, ...(blocked ? { blocked: true } : {}) };
       return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', msg, data);
     }
-    const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标`;
+    const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标${foodText}`;
     return travelled >= args.distance * 0.5 ? ok(msg, { travelled }) : fail('PATH_NOT_FOUND', `${msg}（中途受阻）`);
   },
 };
