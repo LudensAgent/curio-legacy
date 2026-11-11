@@ -23,6 +23,14 @@ export interface KnowSkill {
   mode?: SkillMode;
 }
 
+/** One index line before rendering: recovery skills are grouped for the prompt. */
+interface SkillIndexEntry {
+  skill: KnowSkill;
+  status: string[];
+  recovery: boolean;
+  first: string;
+}
+
 const NAME = /^[a-z][a-z0-9-]{1,40}$/;
 export const BUILTIN_SKILLS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../skills');
 const BEHAVIOR_BLOCK = /```behavior\s*\n([\s\S]*?)\n```/;
@@ -172,6 +180,36 @@ export class SkillBook {
   }
   /** 提示词里的索引：每份一行，只留名字、能否直接用和一句用途；完整说明与失败细节按需用 skill 查询。 */
   index(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): string[] {
+    return this.indexEntries(skip, executionError, autoNote).map((entry) => this.indexLine(entry));
+  }
+
+  /**
+   * 提示词专用索引：可执行的恢复类技能只列名字/状态，并按“动作失败时先试”合并成一行。
+   * 这类技能由行为引擎在失败时自动接手，不需要在每一念里重复它们的整句触发描述；
+   * 完整正文仍可用 {"kind":"skill","name":"…"} 查询。
+   */
+  indexForPrompt(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): string[] {
+    const entries = this.indexEntries(skip, executionError, autoNote);
+    const lines = entries.filter((entry) => !entry.recovery).map((entry) => this.indexLine(entry));
+    const recovery = entries.filter((entry) => entry.recovery);
+    if (recovery.length > 0) {
+      const statuses = recovery.map((entry) => {
+        const status = entry.status.join('；').replace(/·?动作失败时先试/g, '');
+        return status === '可执行' ? '' : status;
+      });
+      const uniform = statuses.every((status) => status === statuses[0]) ? statuses[0] : null;
+      const names = recovery.map((entry, index) => {
+        const suffix = uniform === null && statuses[index] ? `（${statuses[index]}）` : '';
+        return `${entry.skill.name}${entry.skill.source === 'self' ? '（自写）' : ''}${suffix}`;
+      });
+      // 方括号内的摘要保留在 glance 模式；名字只在完整模式下展开。
+      const summary = uniform ? `${recovery.length} 个${uniform ? `，${uniform}` : ''}` : `${recovery.length} 个`;
+      lines.push(`动作失败时先试［${summary}；详情用 {"kind":"skill","name":"…"} 查］${names.join('、')}`);
+    }
+    return lines;
+  }
+
+  private indexEntries(skip?: (name: string) => boolean, executionError?: (name: string, trial: boolean) => string | null, autoNote?: (name: string) => string | null): SkillIndexEntry[] {
     return this.list().filter((s) => !skip?.(s.name)).map((s) => {
       const candidate = this.candidates.get(s.name);
       const status: string[] = [];
@@ -191,8 +229,13 @@ export class SkillBook {
       }
       // 说明只留第一句：整句太长会占掉索引，完整内容按需读
       const first = s.description.replace(/\s+/g, ' ').split(/[。；;]/)[0];
-      return `${s.name}${s.source === 'self' ? '（自写）' : ''}：［${status.join('；')}］${first.length > 40 ? `${first.slice(0, 40)}…` : first}`;
+      return { skill: s, status, recovery: s.mode === 'recover' || candidate?.mode === 'recover', first };
     });
+  }
+
+  private indexLine(entry: SkillIndexEntry): string {
+    const first = entry.first.length > 40 ? `${entry.first.slice(0, 40)}…` : entry.first;
+    return `${entry.skill.name}${entry.skill.source === 'self' ? '（自写）' : ''}：［${entry.status.join('；')}］${first}`;
   }
 
   /** 写一份自己的技能（或修订自己写过的）；不能改内置技能。behavior 是已经校验过的触发条件和步骤 */

@@ -24,6 +24,19 @@ export function clipFeedback(text: string, max = 320): string {
   return `${text.slice(0, head)}…${text.slice(-tail)}`;
 }
 
+/**
+ * 失败回执末尾的“可选：…”是当时的换法清单。同一动作反复失败时，把它逐条再放进
+ * 每一念的 recent_action_failures 会让同一个动作名反复占据注意力；提示词只保留
+ * 失败原因，完整回执仍保留在当段活动记录里，需要时可重查。
+ */
+export function withoutRemediation(text: string): string {
+  return text
+    .replace(/；可选：[\s\S]*$/, '')
+    .replace(/；若都不是[\s\S]*$/, '')
+    .replace(/；脚下超过 1 格落差[\s\S]*$/, '')
+    .replace(/；由你决定[\s\S]*$/, '');
+}
+
 export const inventoryOf = (s: Pick<AgentState, 'inventory'>): Record<string, number> => {
   const out: Record<string, number> = {};
   for (const i of s.inventory) out[i.name] = (out[i.name] ?? 0) + i.count;

@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -1073,14 +1073,14 @@ export class Mind {
         delete resume.suspendedAt;
         this.resumeCheck = resume.id;
         this.requestThink(outcome === 'stuck'
-          ? `绕路去做的「${a.what}」卡住了：${summary}。原来放下的「${resume.what}」还要接着做吗？`
-          : `绕路去做的「${a.what}」已收工：${summary}。${away} 现实秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
+          ? `绕路去做的「${a.what}」卡住了：${withoutRemediation(summary)}。原来放下的「${resume.what}」还要接着做吗？`
+          : `绕路去做的「${a.what}」已收工：${withoutRemediation(summary)}。${away} 现实秒前放下的「${resume.what}」（${resume.why || '没写原因'}）还要接着做吗？这段时间里它的前提可能已经变了`, 'deliberate');
         return;
       }
     }
     if (outcome === 'unmet') {
       // 无进展闸门已经安排了更强的重想；不再用普通收工反馈覆盖它。
-      if (!this.progressGate) this.requestThink(unmet?.reason ?? `「${a.what}」收工条件未满足：${summary}`,
+      if (!this.progressGate) this.requestThink(unmet?.reason ?? `「${a.what}」收工条件未满足：${withoutRemediation(summary)}`,
         unmet?.known && !this.needsBigPicture() && this.attention.highest() < URGENT ? 'glance' : 'deliberate');
     }
     if (outcome === 'stuck') {
@@ -1096,7 +1096,7 @@ export class Mind {
       this.lastStuckAttempt = failed?.failureCode ? { step: { skill: failed.skill, args: failed.args }, code: failed.failureCode,
         summary: failed.summary, pos: { ...state.pos }, worldId: state.worldId, sessionId: state.sessionId, dim: state.dim, at: Date.now() } : null;
       const urgent = this.attention.highest() >= URGENT || state.hp <= 12 || state.inWater || state.inLava;
-      if (!this.progressGate) this.requestThink(`「${a.what}」卡住了：${summary}${repeated ? `；刚才相同动作也失败：${previous!.summary}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
+      if (!this.progressGate) this.requestThink(`「${a.what}」卡住了：${withoutRemediation(summary)}${repeated ? `；刚才相同动作也失败：${withoutRemediation(previous!.summary)}` : ''}${a.ifStuck ? `；之前想过卡住时：${a.ifStuck}` : ''}`, repeated && !urgent ? 'glance' : 'deliberate');
     }
   }
 
@@ -1705,7 +1705,7 @@ export class Mind {
       progress: this.d.progress?.() ?? null,
       gameMessages: this.recentGameMessages(),
       // 收起、停用的技能不进目录（翻技能书、回想时还看得到）：目录越长越难挑，还拖累缓存
-      skills: this.safe(() => this.d.thinker.skillBook?.index((n) => !!this.d.behaviors?.hidden(n),
+      skills: this.safe(() => this.d.thinker.skillBook?.indexForPrompt((n) => !!this.d.behaviors?.hidden(n),
         this.d.behaviors ? (name, trial) => this.d.behaviors!.executionError(name, trial) : undefined,
         this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
@@ -1725,9 +1725,10 @@ export class Mind {
       toolFact: toolFact?.text ?? null,
       repeatedFailures: [...this.failuresByTarget].filter(([key, f]) => f.n >= 2 && !nearbyFailKeys.has(key))
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
-      recentActionFailures: nearbyFailures.map((f) => {
+      recentActionFailures: nearbyFailures.map((f, index, list) => {
         const repeats = this.failuresByTarget.get(targetKeyOf(f.step))?.n ?? 0;
-        return { skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: f.summary,
+        // 最新的那条保留完整回执（含一次换法清单）；更早的只留失败原因，避免同一动作名每念重复。
+        return { skill: f.step.skill, args: f.step.args ?? {}, failure_code: f.code, summary: index === list.length - 1 ? f.summary : withoutRemediation(f.summary),
           position: f.pos, observed_at: new Date(f.at).toISOString(), ...(repeats >= 2 ? { repeats } : {}),
           ...(f.scope ? { scope: f.scope } : {}), ...(f.implication ? { implication: f.implication } : {}) };
       }),

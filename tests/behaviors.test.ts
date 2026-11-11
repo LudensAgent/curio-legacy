@@ -185,6 +185,22 @@ test('样本技能读取：恢复类、调用类与写技能说明可用，引�
   assert.match(engine.overview().join('\n'), /step-up-when-blocked.*恢复条件没有可调用的动作 wander/);
 });
 
+test('提示词索引把恢复类技能合并成一行，且不展开它们的描述', () => {
+  const book = new SkillBook(null, tmp());
+  assert.ok(book.write('ready-action', '一个可执行动作', '正文', { steps: [{ skill: 'look_around', args: {} }] }).ok);
+  assert.ok(book.write('dig-recover', 'mine_cell 因邻格未知停下时，先看清再挖', '正文',
+    { when: { after_failure: { skill: 'mine_cell' } }, steps: [{ skill: 'look_around', args: {} }] }).ok);
+
+  const promptIndex = book.indexForPrompt();
+  const group = promptIndex.find((line) => line.startsWith('动作失败时先试'));
+  assert.ok(group?.includes('dig-recover'), '恢复技能在分组行里');
+  assert.ok(!group?.includes('先看清再挖'), '恢复技能不在索引里展开描述');
+  assert.ok(!promptIndex.some((line) => line.startsWith('dig-recover')), '恢复技能不再单独占一行');
+  assert.ok(promptIndex.some((line) => line.startsWith('ready-action') && line.includes('一个可执行动作')));
+
+  assert.ok(book.index().some((line) => line.startsWith('dig-recover')), '常规 index 的契约保持不变');
+});
+
 test('技能目录按行为引擎状态区分文字、可执行、候选和无效定义', () => {
   const book = new SkillBook(null, tmp());
   const engine = new BehaviorEngine(book, new FakeAdapter(), null, new EventBus(), noSenses);

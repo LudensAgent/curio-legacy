@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { afterStep, beginStep, clipFeedback, createActivity, describeActivity, nextStep } from '../src/mind/activity.ts';
+import { afterStep, beginStep, clipFeedback, createActivity, describeActivity, nextStep, withoutRemediation } from '../src/mind/activity.ts';
 import type { Condition } from '../src/projects/types.ts';
 import { relativeCellAction } from '../src/skills/stance.ts';
 import { fail, ok } from '../src/skills/types.ts';
@@ -356,6 +356,22 @@ test('clipFeedback 在极小上限下也不超过上限', () => {
     const out = clipFeedback('abcdefghijklmnopqrstuvwxyz', max);
     assert.ok(out.length <= max, `max=${max} 得到 ${out.length} 字：${out}`);
   }
+});
+
+test('withoutRemediation 去掉失败回执末尾的换法清单，保留失败原因', () => {
+  assert.equal(
+    withoutRemediation('目标格 (1,2,3) 没有可站立面；这是 2 格高差，move_step 不处理；可选：assess_landings 选落点后 descend_to；excavate_run stairs 朝 east 开下行阶梯（由你决定）'),
+    '目标格 (1,2,3) 没有可站立面；这是 2 格高差，move_step 不处理',
+  );
+  assert.equal(
+    withoutRemediation('2 格内没有可见落点；先 assess_landings 看清，或用 move_step 靠近；脚下超过 1 格落差可用 excavate_run/mine_cell 开台阶，或 place_support 补一级（由你决定）'),
+    '2 格内没有可见落点；先 assess_landings 看清，或用 move_step 靠近',
+  );
+  assert.equal(
+    withoutRemediation('选择的落点当前不可见；若都不是 adjacent/clear，先 move_step 靠近（由你决定）'),
+    '选择的落点当前不可见',
+  );
+  assert.equal(withoutRemediation('没有附加建议'), '没有附加建议');
 });
 
 test('长失败反馈保留可执行尾部，短反馈保持原文', () => {

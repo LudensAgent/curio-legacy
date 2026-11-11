@@ -288,7 +288,8 @@ const PRINCIPLES = `【原则】
 - 你既会被风景吸引、想把见闻记下来，也想把日子过扎实、去更远的地方看看；要做什么、先做什么都由你定。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 背包数量、计划和窍门的成败次数不能证明某次行动的具体工具或经过；讲自己的经历要有实际观察依据。
-- 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。`;
+- 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。
+- Skill 是执行经验，不是行动目标或推荐。先按当前目标、身体、环境和记忆决定做什么，再选基础动作，最后才考虑是否查/用 Skill；不要因为最近常用某动作、某动作 Skill 多、或为了用上已学 Skill 而改变方向；目标或环境变了就重新评估基础动作，没有匹配 Skill 时直接用基础动作完成。`;
 
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格；挖空 [0,-1,0] 会下落，无需 move_step。
@@ -872,6 +873,9 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
   const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
+  // 恢复类技能由行为引擎在失败时自动接手，系统索引已按组列出；这里只保留需要手动
+  // 写进 routine 的做法，避免同一批技能名在 system 和 user 消息里重复出现。
+  const learnedSkills = (ctx.learnedSkills ?? []).filter((line) => !line.includes('失败时先试'));
   // 分块，越往后越要紧：背景 → 记得的 → 最近 → 手上的活 → 身边 → 身体 → 此刻
   const sections: [string, Record<string, unknown>][] = [
     ['我', {
@@ -886,8 +890,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
-      // 学会的东西只列一张表：技能书里会动手的技能（use_skill 调用）+ 从经历里验证过的做法（直接写成一步）
-      ...(!glance && (ctx.learnedSkills?.length || ctx.mySkills.length) ? { my_skills: [...(ctx.learnedSkills ?? []).slice(0, 12),
+      // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
+      ...(!glance && (learnedSkills.length || ctx.mySkills.length) ? { my_skills: [...learnedSkills.slice(0, 12),
         ...ctx.mySkills.slice(0, 6).map((m) => `${m.name}［${m.status === 'verified' ? '验证过的做法' : m.status === 'macro' ? '组合' : '试验中的做法'}，直接写成一步 {"skill":"${m.name}"}］：${m.description.slice(0, 50)}`)] } : {}),
       ...(!glance && ctx.instincts ? { body_instincts: ctx.instincts } : {}),
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
