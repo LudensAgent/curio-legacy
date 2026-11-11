@@ -133,3 +133,40 @@ test('往看不见的岩体里挖：授权 dig 时路线穿过墙后未知格，
   assert.ok(plan.at(-1)!.to.x >= 8, `路线延伸进未知岩体：${JSON.stringify(plan.at(-1))}`);
   assert.equal(await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 12.5, y: 64, z: 0.5 }, { place: { item: 'netherrack' }, maxEdits: 16 }, any), null);
 });
+
+test('岩浆湖边：开路不规划落点旁边是岩浆的站位（move_step 会拒绝），改走不邻岩浆的格', async () => {
+  const w = world();
+  // 3 格宽的岩石地面 z=-1..1，x=0..8；z=-2 一排是岩浆（湖边）。x=4 整排是墙，z=0/1 的墙另外加厚到 x=5：
+  // 只看挖的格数，挖紧挨岩浆的 z=-1 最省；但那里落点旁边是岩浆，move_step 会拒绝。
+  for (let x = -1; x <= 9; x++) for (let z = -2; z <= 2; z++) {
+    w.put(x, 63, z, z === -2 ? 'lava' : 'netherrack');
+    for (const y of [64, 65]) w.put(x, y, z, z === -2 ? 'lava' : z === 2 || x === -1 ? 'netherrack' : 'air');
+    w.put(x, 66, z, 'netherrack');
+  }
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) w.put(4, y, z, 'netherrack');
+  for (const z of [0, 1]) for (const y of [64, 65]) w.put(5, y, z, 'netherrack');
+  // 墙格本身旁边不是岩浆（可以挖），但墙两侧 z=-1 的落脚点紧挨岩浆。
+  for (const y of [63, 64, 65]) w.put(4, y, -2, 'netherrack');
+  const plan = await planMakeWay(w.map, D, { x: 0, y: 64, z: 1 }, { x: 8.5, y: 64, z: 0.5 }, { dig: {}, maxEdits: 16 }, any);
+  assert.ok(plan !== null);
+  const nearLava = (c: { x: number; z: number }) => c.z === -1;
+  assert.ok(plan.every((s) => !nearLava(s.to)), `不站紧挨岩浆的 z=-1 一排：${JSON.stringify(plan.map((s) => s.to))}`);
+});
+
+test('岩浆湖：授权 place 时在湖面上逐格补支撑搭桥过去；只授权 dig 时过不去', async () => {
+  const w = world();
+  // 岸 x=0..1，湖 x=2..6（y=63 是岩浆面），对岸 x=7..9；脚高 y=64。
+  for (let x = -1; x <= 9; x++) for (let z = -2; z <= 2; z++) {
+    const lake = x >= 2 && x <= 6;
+    w.put(x, 63, z, lake ? 'lava' : 'netherrack');
+    w.put(x, 62, z, lake ? 'lava' : 'netherrack');
+    for (const y of [64, 65, 66]) w.put(x, y, z, 'air');
+  }
+  const target = { x: 8.5, y: 64, z: 0.5 };
+  const plan = await planMakeWay(w.map, D, { x: 1, y: 64, z: 0 }, target, { place: { item: 'netherrack' }, maxEdits: 16 }, any);
+  assert.ok(plan !== null);
+  assert.deepEqual(plan.filter((s) => s.place).map((s) => s.place!.x), [2, 3, 4, 5, 6], '湖面每格补一块');
+  // 只授权 dig：可以从湖两侧看不见的岩体里挖过去，但绝不站到岩浆上方。
+  const digOnly = await planMakeWay(w.map, D, { x: 1, y: 64, z: 0 }, target, { dig: {}, maxEdits: 16 }, any);
+  assert.ok(digOnly === null || digOnly.every((s) => !(s.to.x >= 2 && s.to.x <= 6 && Math.abs(s.to.z) <= 2)), JSON.stringify(digOnly?.map((s) => s.to)));
+});

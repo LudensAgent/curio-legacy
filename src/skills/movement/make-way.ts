@@ -87,7 +87,8 @@ export async function planMakeWay(
   const freeing = (c: Cell): Cell[] | null => {
     if (opts.place === undefined) return null;
     const here = look(c.x, c.y, c.z);
-    if (here.kind === 'unknown' || here.kind === 'liquid' || here.kind === 'standable') return null;
+    // 岩浆、水在原版里可被方块替换：往液体格里放一块就是在湖面上搭桥。
+    if (here.kind === 'unknown' || here.kind === 'standable') return null;
     if (here.name === 'air' || here.name === 'cave_air' || here.name === 'void_air' || isReplaceable(here.name)) return [];
     return here.kind === 'clear' && opts.dig !== undefined && !UNDIGGABLE.test(here.name) ? [c] : null;
   };
@@ -120,7 +121,9 @@ export async function planMakeWay(
       {
         const to = { x: nx, y, z: nz };
         const feet = clearing(to), head = clearing({ ...to, y: y + 1 });
-        if (feet !== null && head !== null && look(nx, y - 1, nz).kind !== 'danger') {
+        // 脚下是危险格（岩浆、火…）时不站上去；授权了 place 且它可被替换（岩浆、火）就先补一块再走。
+        const under = look(nx, y - 1, nz);
+        if (feet !== null && head !== null && (under.kind !== 'danger' || (opts.place !== undefined && isReplaceable(under.name)))) {
           const dig = [...feet, ...head];
           if (supported(to)) candidates.push({ step: { kind: 'move', to, dig }, cost: COST.move + dig.length * COST.dig + unsure([...dig, { x: nx, y: y - 1, z: nz }]) });
           else {
@@ -163,6 +166,11 @@ export async function planMakeWay(
       if (Math.abs(to.x - start.x) > MAX_RADIUS || Math.abs(to.z - start.z) > MAX_RADIUS || Math.abs(to.y - start.y) > MAX_RISE) continue;
       if (!allowed(to)) continue;
       if (look(to.x, to.y, to.z).kind === 'danger' || look(to.x, to.y + 1, to.z).kind === 'danger') continue;
+      // 与 move_step 的危险检查同口径：落点身体两格的水平邻格或头顶是已记录的岩浆（可能流入）时，它默认不迈；
+      // 规划时就避开，不规划一条执行时注定被拒的路线。
+      const flowIn = [to.y, to.y + 1].some((y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => look(to.x + dx!, y, to.z + dz!).name === 'lava'))
+        || look(to.x, to.y + 2, to.z).name === 'lava';
+      if (flowIn) continue;
       const g = node.g + cost;
       const key = keyOf(to);
       if ((best.get(key) ?? Infinity) <= g) continue;
