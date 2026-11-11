@@ -484,7 +484,7 @@ test('真实 SQLite：常规周期保存独立于宿主最终关停，重开恢�
         assert.equal(cell.evidence.observation.state.name, 'minecraft:emerald_block');
         assert.equal(cell.evidence.observation.observedAt, observedAt);
         assert.equal(cell.evidence.observation.sessionId, sessionId);
-        assert.equal(cell.evidence.freshness, 'STALE');
+        assert.equal(cell.evidence.freshness, 'FRESH', '重开不使证据老化，恢复保存时的 freshness');
       }
     } finally {
       const closed = await reopened.close();

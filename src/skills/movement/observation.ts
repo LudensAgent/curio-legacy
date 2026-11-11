@@ -1,3 +1,4 @@
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../../adapter/types.ts';
 import { standingContactCells, supportTop } from '../../perception/geometry.ts';
@@ -169,10 +170,10 @@ export function boundaryProbeCells(
 }
 
 /** 内容变化或过期证据恢复才是新依据；仍有效的同内容刷新不触发重复搜索。 */
-function signatureOf(voxel: VoxelMap, dim: string, cell: Vec3Like, now: number): string {
+function signatureOf(voxel: VoxelMap, dim: string, cell: Vec3Like): string {
   const view = voxel.cellAt(dim, cell.x, cell.y, cell.z);
   if (!view.observed) return 'unknown';
-  return `${view.evidence.revision}:${view.evidence.freshness}:${view.evidence.validUntil >= now}:${view.evidence.observation.sessionId}`;
+  return `${view.evidence.revision}:${view.evidence.freshness}`;
 }
 
 function yawTo(dx: number, dz: number): number {
@@ -191,11 +192,9 @@ export async function observeBoundary(
   const eligibleLandings = landingOptions.filter((option) =>
     (corridor === undefined || withinCorridor(option.target, corridor))
     && option.clearance !== 'blocked' && option.corridor !== 'blocked').slice(0, 4);
-  const now = Date.now();
   const needsObservation = (cell: Vec3Like) => {
     const view = voxel?.cellAt(state.dim, cell.x, cell.y, cell.z);
-    return !view?.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < now
-      || view.evidence.observation.sessionId !== state.sessionId || !view.evidence.observation.stateComplete;
+    return !view?.observed || evidenceStale(view.evidence) || !view.evidence.observation.stateComplete;
   };
   // walk/step 委托只需要当前高度附近的支撑；给 drop 的深层探测留在允许下落的委托内。
   const column = opts.boundary.supportColumn;
@@ -203,7 +202,7 @@ export async function observeBoundary(
     ? { ...opts.boundary, supportColumn: { ...column, minY: Math.max(column.minY, Math.floor(opts.boundary.from.y) - 1) } }
     : opts.boundary;
   const { cells, landingCells } = boundaryProbeCells(probe, Math.max(0, Math.min(PROBE_LIMIT, opts.maxCells)), corridor, eligibleLandings, needsObservation);
-  const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell, now)]));
+  const before = new Map(cells.map((cell) => [keyOf(cell), voxel === undefined ? 'unknown' : signatureOf(voxel, state.dim, cell)]));
   const base = {
     boundary: opts.boundary, cells, attempted: false, observed: 0, newObservedCells: 0,
     relatedCells: [] as Vec3Like[], relatedChanged: false, turned: false,
@@ -240,7 +239,7 @@ export async function observeBoundary(
     }
   }
 
-  const relatedCells = cells.filter((cell) => signatureOf(voxel, state.dim, cell, now) !== before.get(keyOf(cell)));
+  const relatedCells = cells.filter((cell) => signatureOf(voxel, state.dim, cell) !== before.get(keyOf(cell)));
   return {
     ...base,
     attempted: true,

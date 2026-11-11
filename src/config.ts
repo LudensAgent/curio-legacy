@@ -91,13 +91,9 @@ if (!Number.isFinite(voxelBatchMb) || voxelBatchMb <= 0 || voxelBatchMb > snapsh
   throw new Error(`SPATIAL_VOXEL_BATCH_MB 必须是 (0,${snapshotMaxMb}] 内的数字，收到：${voxelBatchMb}`);
 }
 const voxelBatchMaxBytes = Math.round(voxelBatchMb * 1024 * 1024);
-// 体素证据的当前可通行新鲜度上限。库默认 60s；Agent 的一次认真思考可能就要 20–30s，
-// 60s 会在 plan_route 前把刚看过的格子标成 STALE。这里按感知节奏放宽到 5 分钟；
-// 不是记忆过期：历史格子仍保留，超过窗口只是不能冒充当前 OPEN 证据。
-const voxelValidityMs = num('SPATIAL_VOXEL_VALIDITY_MS', 300_000);
-if (!Number.isFinite(voxelValidityMs) || voxelValidityMs < 1_000 || voxelValidityMs > 86_400_000) {
-  throw new Error(`SPATIAL_VOXEL_VALIDITY_MS 必须是 [1000,86400000] 内的毫秒数，收到：${voxelValidityMs}`);
-}
+// 体素只记空间事实，不按时间过期：库要求有限窗口，这里给约 100 年，等同不过期。
+// 方块变化由感知重写同一格覆盖，不靠计时判断“还算不算数”。
+const voxelValidityMs = 100 * 365 * 86_400_000;
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
@@ -208,7 +204,7 @@ export const config = {
     /** 单次 checkpoint 的体素 dirty 批次上限；默认 16MiB，可用 SPATIAL_VOXEL_BATCH_MB 调整。 */
     voxelBatchMb,
     voxelBatchMaxBytes,
-    /** 体素证据作为“当前可通行”证据的新鲜度上限；默认 5 分钟，可用 SPATIAL_VOXEL_VALIDITY_MS 调整。 */
+    /** 体素证据有效期：等同不过期（库要求有限值）；不可配置。 */
     voxelValidityWindowMs: voxelValidityMs,
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */

@@ -368,7 +368,8 @@ test('approach_visible 在证据未观察时返回 UNKNOWN，不把未知当可�
 
 test('approach_visible 区分 STALE 与 UNKNOWN，并保留边界计数', async (t) => {
   const map = flatMap();
-  map.markStale(DIM, 'expired');
+  // 只有自身动作效果未确认（pending_effect）才是陈旧；时间与会话不使证据老化。
+  for (const pos of [...airCells(5), ...floorCells(5)]) map.invalidatePendingEffect(DIM, pos);
   const { adapter, ctx } = setup(map);
   adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
   const before = { ...adapter.pos };
@@ -725,7 +726,8 @@ test('approach_visible 接受 VoxelMap 里已观察、当前不在视野内的�
 
 test('approach_visible 用历史体素候选路线，但过期当前证据在动作前阻止执行', async (t) => {
   const map = chestMap(5);
-  map.markStale(DIM, 'expired');
+  // 自身动作效果未确认的格子是陈旧当前证据；历史体素仍保留原观测内容。
+  for (const pos of [...airCells(5, [-2, -1, 0, 1]), ...floorCells(5, [-2, -1, 0, 1])]) map.invalidatePendingEffect(DIM, pos);
   const { adapter, ctx } = setup(map);
   adapter.blocks.push({ name: 'chest', pos: { x: 2, y: 64, z: 0 } });
   const before = { ...adapter.pos };

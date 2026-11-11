@@ -1,0 +1,14 @@
+{
+  "package": {
+    "name": "curio-minecraft-3d-memory",
+    "version": "0.11.7"
+  },
+  "sourceHEAD": "a6854d9815e992704479324a387368ee0ebcc276",
+  "artifactSHA256": "190c31d75db81744dece2a1ee05a2efa05e6355eed6d0b71c728d63d6bf1f99d",
+  "npmIntegrity": "sha512-TIFK5kAK6JuxwUJdITaAi23vrn47DnffOO+1zIk1V+9diMrQtZjGXyto6zR0/HpF4R6H2c9f8jWSwNKqls3Yig==",
+  "sourceBinding": {
+    "clean": true,
+    "note": "Built from a clean worktree of sourceHEAD with an empty dist directory; unrelated working-tree changes and old compiled files are excluded.",
+    "head": "a6854d9815e992704479324a387368ee0ebcc276"
+  }
+}

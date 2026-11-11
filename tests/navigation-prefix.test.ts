@@ -240,7 +240,7 @@ test('搜索在节点/边预算停止但当前前缀 atTarget=true 时，执行�
 
 test('plan_route 历史候选回执的 boundarySummary 只汇总同源 boundaries，当前前缀单独命名', async (t) => {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
-  const now = Date.now(), old = now - 120_000;
+  const now = Date.now();
   const air: { x: number; y: number; z: number }[] = [];
   const floor: { x: number; y: number; z: number }[] = [];
   const walls: { x: number; y: number; z: number }[] = [];
@@ -252,12 +252,13 @@ test('plan_route 历史候选回执的 boundarySummary 只汇总同源 boundarie
   for (let y = 63; y <= 66; y++) walls.push({ x: -1, y, z: 0 });
   fillAt(map, 'minecraft:air', air, now);
   fillAt(map, 'minecraft:stone', [...floor, ...walls], now);
-  // x=4..5 是一条已过期观测的实心墙：strict 看到 STALE（证据不足），
+  // x=4..5 是一条自身动作效果未确认（pending_effect）的实心墙：strict 看到 STALE（证据不足），
   // historical 升级后看到 BLOCKED（历史几何无路）。
   const staleWall: { x: number; y: number; z: number }[] = [];
   // 覆盖库在该列评估的完整支撑范围（脚高 64, maxDrop 4 → y 59..65）；否则会先报 UNKNOWN。
   for (let x = 4; x <= 5; x++) for (let y = 59; y <= 66; y++) staleWall.push({ x, y, z: 0 });
-  fillAt(map, 'minecraft:stone', staleWall, old);
+  fillAt(map, 'minecraft:stone', staleWall, now);
+  for (const pos of staleWall) map.invalidatePendingEffect(DIM, pos);
 
   const { ctx } = setup(map);
   t.after(() => ctx.memory.close());
@@ -272,7 +273,7 @@ test('plan_route 历史候选回执的 boundarySummary 只汇总同源 boundarie
   assert.equal(summary.observationMayResolve, false);
   const currentBoundaries = r.data?.currentBoundaries as { status: string }[];
   const currentSummary = r.data?.currentBoundarySummary as BoundarySummary;
-  assert.ok((currentSummary.counts.STALE ?? 0) > 0, '当前证据的过期边界单独命名');
+  assert.ok((currentSummary.counts.STALE ?? 0) > 0, '当前证据的陈旧边界单独命名');
   assert.equal(currentSummary.total, currentBoundaries.length);
   const currentPrefix = r.data?.currentPrefix as PrefixFacts | undefined;
   assert.equal(Math.floor(currentPrefix?.endpoint.x ?? -1), 3, '当前证据可达前缀保留');

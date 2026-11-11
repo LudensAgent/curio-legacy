@@ -3,7 +3,7 @@
  *
  * 真实 SQLite + 真实 manual `SharedSpatialSession` + 真实导航搜索/保存链路；
  * 身体用 FakeAdapter。覆盖：首次冷读 512 格、热缓存再次访问、中途 checkpoint
- * 后继续、跨冷区往返、相关体素变化后的重新规划。
+ * 后继续、跨冷区往返、相关体素变化后沿已记住侧路的重新规划。
  *
  * 只测量事实：每次调用的搜索次数、执行段数、工作集累计加载/命中/淘汰、加载
  * 字节与耗时、保存 ACK 延迟、停留字节、事件循环最大滞后和内存。数字写入
@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { test } from 'node:test';
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import { openSpatialSession } from 'curio-minecraft-3d-memory/storage/sqlite';
 import type { BlockObservation, Vec3Like } from '../src/adapter/types.ts';
 import { SharedSpatialSession } from '../src/spatial/shared-session.ts';
@@ -59,7 +60,7 @@ function observationFor(adapter: FakeAdapter, pos: Vec3Like, id: number, observe
   };
 }
 
-/** 一条 x=-1..X_MAX+1 的走廊；支撑 y=63，身体 y=64/65。 */
+/** 一条 x=-1..X_MAX+1 的走廊；支撑 y=63，身体 y=64/65。体素证据不随时间老化，旧观测仍是当前证据。 */
 async function seedCorridor(dbPath: string): Promise<void> {
   const session = await openSpatialSession({ databasePath: dbPath, worldId: WORLD });
   const adapter = new FakeAdapter();
@@ -278,7 +279,8 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
     assert.equal(coldAgain.resultStatus, 'succeeded', `再次跨冷区应到达：${coldAgain.stopReasons.join(',')}`);
     assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [X_MAX, 64, 0], '再次跨冷区须满足原目标脚格');
 
-    // 中央通道出现两格高的墙。先只看见中线，再开放两侧的定向观察。
+    // 中央通道出现两格高的墙，只看见中线。两侧早先的观测不随时间老化，仍是当前证据：
+    // 重新规划应沿已知侧路绕过新墙，而不是要求重新观察侧路。
     const changed = { x: X_MAX - 4, y: 64, z: 0 };
     const wall = [changed, { ...changed, y: 65 }];
     adapter.blocks.push(...wall.map((pos) => ({ name: 'stone', pos })));
@@ -292,34 +294,25 @@ test('manual cold/warm 512-cell navigation and cache accounting', { timeout: 600
         const x = Math.floor(to.x), y = Math.floor(to.y), z = Math.floor(to.z);
         const confirmed = [-1, 0, 1].every(dy => {
           const view = voxel.cellAt(DIM, x, y + dy, z);
-          return view.observed && view.evidence.freshness === 'FRESH' && view.evidence.validUntil >= Date.now()
-            && view.evidence.observation.sessionId === SESSION && view.evidence.observation.stateComplete
-            && view.evidence.observation.state.name === (dy === -1 ? 'grass_block' : 'air');
+          return view.observed && !evidenceStale(view.evidence) && view.evidence.observation.stateComplete
+            && view.evidence.observation.state.name.replace(/^minecraft:/, '') === (dy === -1 ? 'grass_block' : 'air');
         });
         steps.push({ x, y, z, confirmed });
       }
       return move(to, opts);
     };
-    const blocked = await navigateLeg('after-voxel-change-hidden-sides', shared, adapter, target, {
+    const replan = await navigateLeg('after-voxel-change-remembered-sides', shared, adapter, target, {
       maxCalls: 8, centerLaneOnly: true,
     });
-    assert.equal(blocked.stopReasons.at(-1), 'UNKNOWN_BOUNDARY', `侧路未知时应停止：${blocked.stopReasons.join(',')}`);
-    assert.notEqual(blocked.resultStatus, 'succeeded', '新增阻挡后不能虚报到达');
-    assert.equal(Math.floor(adapter.pos.x), changed.x + 1, '沿已知中线走到墙前，实测脚格留在新增石块东侧');
-    assert.deepEqual([adapter.pos.y, Math.floor(adapter.pos.z)], [64, 0], '未观察的侧路不能成为执行绕行');
-    assert.ok(steps.every(step => step.confirmed && step.x > changed.x && step.y === 64 && step.z === 0));
-
-    steps.length = 0;
-    const replan = await navigateLeg('after-voxel-change-visible-sides', shared, adapter, target, { maxCalls: 8 });
     assert.equal(replan.resultStatus, 'succeeded', replan.stopReasons.join(','));
     assert.deepEqual([Math.floor(adapter.pos.x), adapter.pos.y, Math.floor(adapter.pos.z)], [target.x, target.y, target.z]);
-    assert.ok(steps.some(step => step.x === changed.x && step.z !== 0), '绕过墙所在列必须实际走过侧路');
+    assert.ok(steps.some(step => step.x === changed.x && step.z !== 0), '绕过墙所在列必须实际走过已记住的侧路');
     assert.ok(steps.every(step => step.confirmed && step.y === 64 && (step.x !== changed.x || step.z !== 0)),
       '每一步都必须有当前支撑和净空，并且不能穿墙');
 
     const summary = {
       finalX: Math.floor(adapter.pos.x),
-      legs: [cold, warmReturn, coldAgain, blocked, replan],
+      legs: [cold, warmReturn, coldAgain, replan],
       memory: process.memoryUsage(),
     };
     console.log(`CACHE_BENCH ${JSON.stringify(summary)}`);

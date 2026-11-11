@@ -110,7 +110,7 @@ test('runtime observe → bounded save → eviction → reload → restart keeps
     assert.equal(shutdown.error, null);
     assert.equal(shutdown.close?.completed, true);
 
-    // 真实重启：manual 不预载；按需 prepare 后读回原始状态与时间，freshness 保持 STALE。
+    // 真实重启：manual 不预载；按需 prepare 后读回原始状态与时间；重启不使证据老化，freshness 保持保存时的 FRESH。
     const reopened = await SharedSpatialSession.open({
       worldId: WORLD,
       databasePath: dbPath,
@@ -126,7 +126,7 @@ test('runtime observe → bounded save → eviction → reload → restart keeps
           const cell = reopened.session.voxel.cellAt(DIM, cx * 16 + 2, 1, 5);
           assert.equal(cell.observed, true, `Section ${cx} 应可读回`);
           if (cell.observed) {
-            assert.equal(cell.evidence.freshness, 'STALE', '重启后的旧证据不能伪装成 FRESH');
+            assert.equal(cell.evidence.freshness, 'FRESH', '重启不使证据老化，恢复保存时的 freshness');
             assert.equal(cell.evidence.observation.state.name, 'minecraft:air');
             assert.ok(cell.evidence.observation.observedAt >= OBSERVED_AT, '原始观测时间必须保留');
           }

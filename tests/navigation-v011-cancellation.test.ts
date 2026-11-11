@@ -70,8 +70,8 @@ function ctxFor(adapter: FakeAdapter, map: VoxelMap) {
 }
 
 /**
- * 0..5 列只有过期证据（当前搜索看不见），6..22 列是当前证据。
- * remembered 搜索能跨过过期桥接段找到 22 段候选；当前证据搜索在起点就被 STALE
+ * 0..5 列的证据因自身动作效果未确认而陈旧（pending_effect，当前搜索看不见），6..22 列是当前证据。
+ * remembered 搜索能跨过陈旧桥接段找到 22 段候选；当前证据搜索在起点就被 STALE
  * 挡住，因此只能走历史体素候选 + 当前证据复验这条路。
  */
 function rememberedRouteMap() {
@@ -84,10 +84,9 @@ function rememberedRouteMap() {
     floor.push(at(x, 63, 0));
   }
   const stale = (pos: Vec3Like) => pos.x <= 5;
-  observe(map, 'minecraft:air', air.filter(stale), now - 120_000);
-  observe(map, 'minecraft:stone', floor.filter(stale), now - 120_000);
-  observe(map, 'minecraft:air', air.filter((pos) => !stale(pos)), now);
-  observe(map, 'minecraft:stone', floor.filter((pos) => !stale(pos)), now);
+  observe(map, 'minecraft:air', air, now);
+  observe(map, 'minecraft:stone', floor, now);
+  for (const pos of [...air, ...floor].filter(stale)) map.invalidatePendingEffect(DIM, pos);
   return map;
 }
 

@@ -138,7 +138,8 @@ test('navigate_to cell 目标保留 0.01 脚高容差：同列 Y=64.03 与实测
 
 test('navigate_to 起点证据过期时先观察，不扫描不能立即执行的历史候选', async (t) => {
   const map = flatMap();
-  map.markStale(DIM, 'expired');
+  // 自身动作效果未确认（pending_effect）才是陈旧当前证据；时间与会话不使证据老化。
+  for (let x = -1; x <= 5; x++) for (let y = 63; y <= 66; y++) for (let z = -1; z <= 1; z++) map.invalidatePendingEffect(DIM, { x, y, z });
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
   const r = await navigateTo.run(ctx, {

@@ -1,3 +1,4 @@
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import { FEET_ARRIVAL_TOLERANCE, type AgentState, type Vec3Like } from '../../adapter/types.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
 import {
@@ -464,7 +465,7 @@ async function runNavigationSegmentInner(
       chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
       evidenceMode: 'current', searches, planned: [], confirmed: [], remaining: [], pathLength: 0,
       arrived: false, directDrop: false, boundarySummary: summarizeBoundaries(strict.boundaries), boundary: localStale,
-      stopCode: 'current_geometry', detail: '当前站位的局部边界证据已过期；先观察恢复当前证据，没有扫描历史候选或执行移动',
+      stopCode: 'current_geometry', detail: '当前站位的局部证据待重新确认（自身动作的效果未确认或观测互相矛盾）；先观察恢复当前证据，没有扫描历史候选或执行移动',
     };
   }
   let chosen: LandSearchResult | null = strict.status === 'FOUND' ? strict : null;
@@ -883,8 +884,7 @@ async function runNavigationSegmentInner(
           && (result.status === 'INSUFFICIENT_EVIDENCE' || result.status === 'NO_PATH_IN_MEMORY')) {
           const revision = (point: Vec3Like) => {
             const cell = voxel.cellAt(scope.dim, point.x, point.y, point.z);
-            return cell.observed && cell.evidence.freshness === 'FRESH' && cell.evidence.validUntil >= Date.now()
-              && cell.evidence.observation.sessionId === scope.sessionId && cell.evidence.observation.stateComplete ? cell.evidence.revision : undefined;
+            return cell.observed && !evidenceStale(cell.evidence) && cell.evidence.observation.stateComplete ? cell.evidence.revision : undefined;
           };
           const related = boundaryProbeCells(boundary, 32, heading === undefined ? undefined : { ...heading, origin: tail, maxLateral: 0 }).cells;
           const watched = related.map(point => ({ point, before: revision(point) }));

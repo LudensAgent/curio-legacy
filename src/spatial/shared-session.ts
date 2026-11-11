@@ -616,8 +616,7 @@ export class SharedSpatialSession {
     const revoked = sessionChanged || dimChanged ? this.revokeCurrent() : null;
     let report = this.session.voxel.beginSession(scope.sessionId);
     if (dimChanged) {
-      const stale = this.staleReport(prev!.dim);
-      report = { sections: [...report.sections, ...(stale.status === 'written' ? stale.report.sections : [])] };
+      this.lifecycleBoundary();
     }
     this.scope = scope;
     this.admitted = true;
@@ -636,8 +635,8 @@ export class SharedSpatialSession {
     this.invalidatePending('interrupt');
     const revoked = this.revokeCurrent();
     this.admitted = false;
-    const stale = this.scope === null ? null : this.staleReport(this.scope.dim);
-    const report = stale?.status === 'written' ? stale.report : { sections: [] };
+    this.lifecycleBoundary();
+    const report: ChangeReport = { sections: [] };
     this.deliverLifecycle(report, revoked);
     if (revoked !== null && revoked.failure !== null) throw revoked.failure.error;
     return report;
@@ -766,8 +765,8 @@ export class SharedSpatialSession {
     const revoked = paused ? this.revokeCurrent() : null;
     if (paused) this.invalidatePending('pause');
     this.pausedFlag = paused;
-    const stale = this.scope === null ? null : this.staleReport(this.scope.dim);
-    const report = stale?.status === 'written' ? stale.report : { sections: [] };
+    this.lifecycleBoundary();
+    const report: ChangeReport = { sections: [] };
     this.deliverLifecycle(report, revoked);
     if (revoked !== null && revoked.failure !== null) throw revoked.failure.error;
     return report;
@@ -1720,23 +1719,11 @@ export class SharedSpatialSession {
   }
 
   /**
-   * 生命周期 markStale 的唯一入口：beginSession（换维）/interrupt/setPaused 都走这里。
-   * 能力 false 时不调用库，返回结构化 rejected 并记录 `lastCapabilityRejection()`；
-   * 调用方不得把空报告当成已应用的 STALE。
+   * 生命周期边界（换维/断开/死亡/暂停恢复）：不再把整维度标成 STALE——体素只记空间事实，
+   * 回来后由感知重写身边格覆盖变化。只把计数加一，让视觉立即重写身边已写过的格。
    */
-  private staleReport(dim: string): SharedSpatialWriteResult {
-    if (!this.allowed('memory', 'markStale')) {
-      this.recordCapabilityRejection('markStale');
-      return {
-        status: 'rejected',
-        reason: {
-          kind: 'capability_unavailable', method: 'markStale',
-          detail: 'library reports memory.markStale=false; the lifecycle STALE boundary was not applied',
-        },
-      };
-    }
+  private lifecycleBoundary() {
     this.staleCount++;
-    return { status: 'written', report: this.session.voxel.markStale(dim, 'observation_gap'), deliveryError: null };
   }
 
   /** 每���按启动时记录的那份报告读取能力位（测试可替换同一对象来模拟库答复）。 */

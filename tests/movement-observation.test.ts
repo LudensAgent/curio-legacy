@@ -104,7 +104,12 @@ test('a four-block drop spanning two axes refreshes its stale sweep cells within
     // Only the trailing column supports the starting stance; the overlapping
     // column is clear for the full drop to the lower platform.
     const solid = y <= 59 || x === -1 && y === 63;
-    observe(pos, Date.now() - (stale.has(key(pos)) ? 61_000 : 1000), solid ? 'minecraft:stone' : 'minecraft:air');
+    observe(pos, Date.now() - 1000, solid ? 'minecraft:stone' : 'minecraft:air');
+  }
+  // Staleness comes only from an own action's unconfirmed effect, not from age.
+  for (const cell of stale) {
+    const [x, y, z] = cell.split(',').map(Number);
+    map.invalidatePendingEffect(adapter.dim, { x: x!, y: y!, z: z! });
   }
   const check = () => verifyLandRoute(map, {
     worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
@@ -131,11 +136,9 @@ test('seeing fresh nearby cells still turns once toward the unresolved boundary 
   t.after(() => ctx.memory.close());
   const cells = boundaryProbeCells(boundary).cells;
   cells.forEach((cell) => observe(cell, Date.now() - 1000));
-  map.markStale(adapter.dim, 'observation_gap');
-  // Interruption restoration requires observations strictly after its timestamp.
-  await new Promise((resolve) => setTimeout(resolve, 2));
+  // Only the cell whose own-action effect is unconfirmed is stale.
   const stale = cells[1]!;
-  cells.filter((cell) => key(cell) !== key(stale)).forEach((cell) => observe(cell));
+  map.invalidatePendingEffect(adapter.dim, stale);
   let reads = 0;
   const looks: { yaw: number; pitch: number }[] = [];
   t.mock.method(adapter, 'look', async (yaw: number, pitch: number) => { looks.push({ yaw, pitch }); });
@@ -156,16 +159,18 @@ test('seeing fresh nearby cells still turns once toward the unresolved boundary 
   assert.deepEqual(result.relatedCells, [stale]);
 });
 
-test('refreshing expired unchanged evidence enables replanning without a content revision', async (t) => {
-  const { map, ctx, observe } = setup();
+test('refreshing pending-effect evidence with unchanged content enables replanning', async (t) => {
+  const { adapter, map, ctx, observe } = setup();
   t.after(() => ctx.memory.close());
   const cells = boundaryProbeCells(boundary).cells;
   cells.forEach((cell) => observe(cell));
   const expired = { x: -505, y: 104, z: -293 };
-  // Use a separate never-written cell so its original observation can be old.
+  // A separate cell whose old observation is aged but still current; only the
+  // pending effect of an own action makes it stale.
   const expiredBoundary = { ...boundary, to: { x: -510.58, y: 104.9375, z: -292.56 } };
   expired.x = Math.floor(expiredBoundary.to.x);
   observe(expired, Date.now() - 61_000);
+  map.invalidatePendingEffect(adapter.dim, expired);
   const before = map.cellAt('overworld', expired.x, expired.y, expired.z);
   assert.ok(before.observed);
   ctx.senses.observeBlocks = () => [observe(expired)];
@@ -173,8 +178,9 @@ test('refreshing expired unchanged evidence enables replanning without a content
   const result = await observeBoundary(ctx, { boundary: expiredBoundary, maxCells: 32 });
   const after = map.cellAt('overworld', expired.x, expired.y, expired.z);
   assert.ok(after.observed);
-  assert.equal(after.evidence.revision, before.evidence.revision);
-  assert.equal(result.relatedChanged, true, 'expired-to-current is new usable evidence');
+  assert.equal(after.evidence.observation.state.name, before.evidence.observation.state.name, 'content unchanged');
+  assert.equal(after.evidence.freshness, 'FRESH');
+  assert.equal(result.relatedChanged, true, 'pending-effect-to-current is new usable evidence');
   assert.ok(result.relatedCells.some((cell) => key(cell) === key(expired)));
 });
 

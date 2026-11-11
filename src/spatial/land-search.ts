@@ -97,7 +97,7 @@ export interface LandSearchRequest {
   /** 方向推进只约束目标列；精确目的地默认保留 3D 脚高。 */
   goalMetric?: '3d' | 'horizontal';
   rules: LandRules;
-  /** current 只认当前证据；remembered 用过期几何做候选，绝不冒充当前 OPEN。 */
+  /** current 只认当前证据（不含待重新确认的格）；remembered 连待确认的几何也用来做候选，绝不冒充当前 OPEN。 */
   evidenceMode?: 'current' | 'remembered';
   /** 委托显式允许涉水：接受身体接触水的地面边（不含淹没、水流、气泡柱）。 */
   wade?: boolean;
@@ -297,7 +297,7 @@ function sweptDangerAt(map: VoxelMap, dim: string, from: Vec3Like, to: Vec3Like)
 /**
  * 一列里真实可站立面的脚高。不是按整数层猜，而是读已观察方块的碰撞顶面，
  * 包括 0.5 半砖、0.875 雪层、箱子/台阶顶面；0 < drop < 1 也保留。
- * 严格模式跳过过期/旧会话/状态不完整的证据；历史模式允许过期证据但用它推导。
+ * 严格模式跳过待重新确认/状态不完整的证据；历史模式允许待确认证据但用它推导。体素不按时间或会话过期。
  */
 function standableSurfaces(
   map: VoxelMap, dim: string,

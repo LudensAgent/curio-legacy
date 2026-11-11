@@ -203,7 +203,11 @@ test('连续路线下一步证据失效后，回执采样实际制动终点而�
   t.mock.method(adapter, 'moveTo', async (target, opts) => {
     assert.equal(opts.settleAtTarget, false);
     await original(target, opts);
-    map.markStale(adapter.dim, 'observation_gap');
+    // 下一段起的证据因自身动作效果未确认而陈旧（pending_effect）；时间与会话不使证据老化。
+    const fx = Math.floor(from.x), fz = Math.floor(from.z);
+    for (let x = fx + 2; x <= fx + 8; x++) for (let z = fz - 1; z <= fz + 1; z++) for (let y = 60; y <= 68; y++) {
+      map.invalidatePendingEffect(adapter.dim, { x, y, z });
+    }
   });
   const result = await runNavigationSegment(ctx, {
     goal: feetGoal({ ...from, x: from.x + 6 }), allowed: ['walk', 'step'], historical: false,

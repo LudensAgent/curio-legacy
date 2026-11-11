@@ -25,16 +25,21 @@ let observedClock = 0;
 type Cell = { x: number; y: number; z: number };
 type BoundarySummary = { total: number; counts: Record<string, number>; observationMayResolve: boolean; needsExplicitActionOrOtherRoute: boolean };
 
-function observe(map: VoxelMap, name: string, cells: Cell[], observedAt?: number) {
+function observe(map: VoxelMap, name: string, cells: Cell[]) {
   for (const pos of cells) {
     sequence += 1;
-    const at = observedAt ?? (observedClock = Math.max(Date.now(), observedClock + 1));
+    const at = observedClock = Math.max(Date.now(), observedClock + 1);
     map.observe({
       worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: at, sequence,
       source: 'vision', evidence: 'seen', stateComplete: true,
       state: { name, properties: {} }, pos,
     });
   }
+}
+
+/** 证据只因自身动作效果未确认（pending_effect）而陈旧；时间与会话不使证据老化。 */
+function pendingEffect(map: VoxelMap, cells: Cell[]) {
+  for (const pos of cells) map.invalidatePendingEffect(DIM, pos);
 }
 
 /** x=0..xMax 的已观测单格宽走廊；其余方向没有证据。 */
@@ -115,10 +120,10 @@ test('UNKNOWN/STALE/BLOCKED/UNSUPPORTED 在导航回执里可区分，且不改�
     {
       name: 'STALE', status: 'STALE', map: () => {
         const map = knownCorridor(3);
-        const old = Date.now() - 120_000;
-        // 只把前方列观测成旧证据；当前证据不足，不是已观测阻挡。
-        observe(map, 'minecraft:air', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }], old);
-        observe(map, 'minecraft:stone', [{ x: 4, y: 63, z: 0 }], old);
+        // 只让前方列的证据进入陈旧（自身动作效果未确认）；当前证据不足，不是已观测阻挡。
+        observe(map, 'minecraft:air', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }]);
+        observe(map, 'minecraft:stone', [{ x: 4, y: 63, z: 0 }]);
+        pendingEffect(map, [63, 64, 65].map((y) => ({ x: 4, y, z: 0 })));
         return map;
       },
     },
@@ -214,12 +219,12 @@ test('STALE 刷新证据后重新规划；BLOCKED/UNSUPPORTED 在证据不变时
     assert.ok((progress.data?.executed as number) > 0, '刷新证据后应沿新证据前进');
     assert.ok(Math.floor(adapter.pos.x) >= 4, '身体实际进入旧缺口后的位置');
   }
-  // STALE：刷新过期列后重新规划到目标。
+  // STALE：刷新陈旧列后重新规划到目标。
   {
     const map = knownCorridor(3);
-    const old = Date.now() - 120_000;
-    observe(map, 'minecraft:air', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }], old);
-    observe(map, 'minecraft:stone', [{ x: 4, y: 63, z: 0 }], old);
+    observe(map, 'minecraft:air', [{ x: 4, y: 64, z: 0 }, { x: 4, y: 65, z: 0 }]);
+    observe(map, 'minecraft:stone', [{ x: 4, y: 63, z: 0 }]);
+    pendingEffect(map, [63, 64, 65].map((y) => ({ x: 4, y, z: 0 })));
     const { adapter, ctx } = setup(map);
     t.after(() => ctx.memory.close());
     const stale = await navigateTo.run(ctx, navArgs());

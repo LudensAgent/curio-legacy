@@ -1,3 +1,4 @@
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { Vec3Like } from '../../adapter/types.ts';
 import { shortId } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
@@ -39,9 +40,7 @@ function airborneLadderGoal(ctx: SkillCtx, intent: MovementIntent): boolean {
     if (live !== null) return isClimbableBlockName(live);
     const view = voxel.cellAt(dim, pos.x, y, pos.z);
     return view.observed
-      && view.evidence.freshness === 'FRESH'
-      && view.evidence.validUntil >= now
-      && view.evidence.observation.sessionId === state.sessionId
+      && !evidenceStale(view.evidence)
       && view.evidence.observation.stateComplete
       && isClimbableBlockName(view.evidence.observation.state.name);
   };
@@ -438,19 +437,20 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       ));
       // 路点脚高取该列已观测的站立面（下坡/上坡时不再沿用当前脚高）；没观测过才用当前脚高。
       const voxel = spatial.session.voxel;
+      const frontier = session.intent.kind !== 'advance' || session.bearing === undefined ? null : await farthestFrontier(voxel, scope.dim, {
+        origin: session.frozenOrigin, bearing: session.bearing,
+        maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance,
+      }, state.pos, (cell) => triedFrontiers.has(cellText(cell)));
+      if (ctx.signal.aborted) { stop = stopOf('CANCELLED', '规划前沿时父任务取消'); break; }
+      const frontierGoal = frontier === null ? undefined : cellText(frontier);
       const goalAt = (pos: Vec3Like): NavigationGoal => {
         if (session.intent.kind === 'navigate') return goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
-        // 方向探索就是去一个目的地：已记录体素里沿方向最远、可站立且紧挨未知的前沿；寻路负责怎么走过去。
-        // 没有前沿（前方全已知或全未知）时，按冻结方向取前方路点。
-        const frontier = session.bearing === undefined ? null : farthestFrontier(voxel, scope.dim, {
-          origin: session.frozenOrigin, bearing: session.bearing,
-          maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance,
-        }, pos, (cell) => triedFrontiers.has(cellText(cell)));
-        if (frontier !== null) {
-          frontierGoal = cellText(frontier);
-          return cellGoal({ x: Math.floor(frontier.x), z: Math.floor(frontier.z) }, frontier.y, frontier);
-        }
-        frontierGoal = undefined;
+        // 方向探索就是去一个目的地：已记录体素里沿方向最远、可站立且紧挨未知的前沿（本轮规划前算好）；
+        // 寻路负责怎么走过去。没有前沿（前方全已知或全未知）时，按冻结方向取前方路点。
+        // 预览窗口的尾点已到达或越过这个前沿时，前沿不再是前方目的地，按方向取路点。
+        const ahead = frontier !== null && session.bearing !== undefined
+          && (frontier.x - pos.x) * session.bearing.x + (frontier.z - pos.z) * session.bearing.z >= 1;
+        if (ahead) return cellGoal({ x: Math.floor(frontier.x), z: Math.floor(frontier.z) }, frontier.y, frontier);
         const waypoint = waypointOf(session, pos, request.maxStepsPerSegment,
           (x, z, aroundY) => observedFootY(voxel, scope.dim, x, z, aroundY, 24, 8));
         const goal = cellGoal(waypoint, waypoint.y, waypoint);
@@ -463,7 +463,6 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         return goal;
       };
-      let frontierGoal: string | undefined;
       const chunksBefore = ctx.memory.visitedChunkCount;
       const segment = await runNavigationSegment(ctx, {
         goal: goalAt(state.pos),
@@ -795,8 +794,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
             const supportCell = { x: Math.floor(after.pos.x), y: Math.floor(after.pos.y) - 1, z: Math.floor(after.pos.z) };
             const supportView = voxel.cellAt(scope.dim, supportCell.x, supportCell.y, supportCell.z);
             needCurrent = !(supportView.observed
-              && supportView.evidence.freshness === 'FRESH'
-              && supportView.evidence.validUntil >= Date.now()
+              && !evidenceStale(supportView.evidence)
               && supportView.evidence.observation.stateComplete);
           }
         }

@@ -574,15 +574,15 @@ test('方向探索直接以已记录体素里沿方向最远的前沿为目的�
   assert.ok(Math.floor(adapter.pos.x) >= 59, `走到远处前沿（实测 x=${adapter.pos.x.toFixed(2)}）：${result.summary}`);
 });
 
-test('farthestFrontier：在走廊内找沿方向最远、可站立且紧挨未知的格；试过的跳过；前方全已封闭时没有前沿', (t) => {
+test('farthestFrontier：在走廊内找沿方向最远、可站立且紧挨未知的格；试过的跳过；前方全已封闭时没有前沿', async (t) => {
   const map = corridor(60, -1, [-1, 2]);
   const at = { origin: { x: 0.5, y: 64, z: 0.5 }, bearing: { x: 1, z: 0 }, maxLateral: 4, maxAlong: 200 };
-  const far = farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, () => false);
+  const far = await farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, () => false);
   assert.deepEqual(far && { x: Math.floor(far.x), y: far.y }, { x: 60, y: 64 }, '远超 16 格的已知通道尽头');
-  const next = farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, (cell) => Math.floor(cell.x) === 60);
+  const next = await farthestFrontier(map, DIM, at, { x: 0.5, y: 64, z: 0.5 }, (cell) => Math.floor(cell.x) === 60);
   assert.ok(next !== null && Math.floor(next.x) < 60, '试过的前沿跳过，换下一个');
   t.diagnostic(`next=${JSON.stringify(next)}`);
   const closed = corridor(8, -1, [-1, 1]);
   fill(closed, 'minecraft:netherrack', [-2, -1, 0, 1, 2].flatMap((z) => [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x: z === -2 || z === 2 || x === 9 || x === -1 ? x : 99, y, z })))));
-  assert.equal(farthestFrontier(closed, DIM, { ...at, maxLateral: 1 }, { x: 0.5, y: 64, z: 0.5 }, () => false), null, '前方被已知的墙围死：没有前沿');
+  assert.equal(await farthestFrontier(closed, DIM, { ...at, maxLateral: 1 }, { x: 0.5, y: 64, z: 0.5 }, () => false), null, '前方被已知的墙围死：没有前沿');
 });

@@ -24,15 +24,12 @@ test('manual navigation walks the resident prefix before loading the next saved 
   });
   spatial.beginSession({ worldId, dim, sessionId });
   let id = 0;
-  const observe = async (start: number) => {
-    const observedAt = Date.now();
-    spatial.observe(Array.from({ length: 32 - start }, (_, offset) => [63, 64, 65].map(y => ({
-      worldId, dimension: dim, sessionId, observationId: ++id, observedAt, source: 'vision' as const,
-      pos: { x: start + offset, y, z: 0 }, name: y === 63 ? 'stone' : 'air', properties: {}, stateComplete: true,
-    }))).flat());
-    await spatial.drainObservations({ deadline: Date.now() + 5000 });
-  };
-  await observe(0);
+  const observedAt = Date.now();
+  spatial.observe(Array.from({ length: 32 }, (_, x) => [63, 64, 65].map(y => ({
+    worldId, dimension: dim, sessionId, observationId: ++id, observedAt, source: 'vision' as const,
+    pos: { x, y, z: 0 }, name: y === 63 ? 'stone' : 'air', properties: {}, stateComplete: true,
+  }))).flat());
+  await spatial.drainObservations({ deadline: Date.now() + 5000 });
   await spatial.checkpoint();
   const nextPage = [3, 4].map(sy => ({ worldId, dim, cx: 1, cz: 0, sy }));
   assert.equal(spatial.session.unloadSections(nextPage).unloaded.length, 2);
@@ -48,12 +45,11 @@ test('manual navigation walks the resident prefix before loading the next saved 
   assert.equal(prefix.searches, 1, 'fresh, resident steps can execute on the first search');
   assert.ok(nextPage.every(key => spatial.session.sectionResidency(key).residency === 'not_resident'));
 
-  const boundary = await runNavigationSegment(ctx, request);
-  assert.ok(boundary.searches >= 2, 'at the frontier the missing saved pages must be loaded and searched');
-  assert.ok(nextPage.every(key => spatial.session.sectionResidency(key).residency === 'resident'));
-  assert.equal(boundary.confirmed.length, 0, 'loaded historical evidence still needs a current observation');
-  await observe(16);
   const arrived = await runNavigationSegment(ctx, request);
+  assert.ok(arrived.searches >= 2, 'at the frontier the missing saved pages must be loaded and searched');
+  assert.ok(nextPage.every(key => spatial.session.sectionResidency(key).residency === 'resident'));
+  // Saved evidence does not age through save/unload/reload: the loaded pages are current.
+  assert.equal(arrived.confirmed.length, 16, arrived.detail);
   assert.equal(arrived.arrived, true, arrived.detail);
   assert.deepEqual(arrived.measuredEnd, request.goal.requested);
   assert.equal(spatial.workingSetStats().pinnedLeases, 0);

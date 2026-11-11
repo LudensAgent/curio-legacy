@@ -1,3 +1,4 @@
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import { walkLandRules } from '../../adapter/land-rules.ts';
 import type { EntityInfo, Vec3Like } from '../../adapter/types.ts';
 import { bodyCells, footSurfaceY, supportTop, type StateAt } from '../../perception/geometry.ts';
@@ -495,8 +496,7 @@ export const approachVisible: Skill<Args> = {
       const view = voxel.cellAt(state.dim, Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
       if (!view.observed) return null;
       const evidence = view.evidence;
-      if (evidence.freshness !== 'FRESH' || evidence.validUntil < Date.now() || !evidence.observation.stateComplete
-        || evidence.observation.sessionId !== state.sessionId) return null;
+      if (evidenceStale(evidence) || !evidence.observation.stateComplete) return null;
       // geometry.ts 的 block 名表不带命名空间；VoxelMap 允许 'minecraft:' 前缀，必须归一。
       return { name: stem(evidence.observation.state.name), properties: evidence.observation.state.properties ?? {} };
     };
@@ -855,7 +855,7 @@ export const approachVisible: Skill<Args> = {
     }
     const staleInMap = (p: Vec3Like): boolean => {
       const view = voxel.cellAt(state.dim, p.x, p.y, p.z);
-      return !view.observed || view.evidence.freshness !== 'FRESH' || view.evidence.validUntil < Date.now();
+      return !view.observed || evidenceStale(view.evidence);
     };
     const observationPositions = [...observationCells.values()];
     // 只请求仍然缺证据的格；1b 已经补过的目标/站位不再重复观察。

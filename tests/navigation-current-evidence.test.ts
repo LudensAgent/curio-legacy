@@ -7,14 +7,14 @@ import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
-function setup() {
+function setup(pendingEffect = true) {
   const adapter = new FakeAdapter();
   adapter.pos = { x: 0.5, y: 64, z: 0.5 };
   const voxel = new VoxelMap(adapter.worldId, { validityWindowMs: 60_000 });
   let sequence = 0;
-  const observe = (pos: { x: number; y: number; z: number }, observedAt = Date.now()) => {
+  const observe = (pos: { x: number; y: number; z: number }, observedAt = Date.now(), sessionId = adapter.sessionId) => {
     const name = pos.y < 64 ? 'minecraft:stone' : 'minecraft:air';
-    voxel.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+    voxel.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId,
       observedAt, sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
       state: { name, properties: {} }, pos });
     return { pos, name, properties: {}, stateComplete: true, worldId: adapter.worldId,
@@ -23,7 +23,14 @@ function setup() {
   };
   Array.from({ length: 5 }, (_, x) => x - 1).forEach((x) =>
     Array.from({ length: 3 }, (_, z) => z - 1).forEach((z) =>
-      [63, 64, 65, 66].forEach((y) => observe({ x, y, z }, Date.now() - 61_000))));
+      [63, 64, 65, 66].forEach((y) => {
+        // 旧会话、早已超过旧有效期的观测仍是当前证据；
+        // 起点陈旧只来自自身动作效果未确认（pending_effect）。
+        observe({ x, y, z }, Date.now() - 86_400_000, 'earlier-session');
+        if (pendingEffect) voxel.invalidatePendingEffect(adapter.dim, { x, y, z });
+      })));
+  // 重启后开启本次会话：旧会话证据不因换会话而失效。
+  voxel.beginSession(adapter.sessionId);
   const controller = new AbortController();
   const ctx = { ...makeCtx(adapter), signal: controller.signal,
     spatial: { worldId: adapter.worldId, session: { voxel } } as unknown as SharedSpatialSession };
@@ -48,6 +55,21 @@ test('a stale start refreshes current evidence before historical search without 
   assert.equal(counters.observations, 1);
   assert.equal(segment.confirmed.length, 1, 'evidence refresh leaves the requested body window available');
   assert.equal(Math.floor(adapter.pos.x), 1);
+});
+
+test('aged evidence from an earlier session is current: the start moves without observing', async (t) => {
+  const { adapter, ctx } = setup(false);
+  t.after(() => ctx.memory.close());
+  ctx.senses.observeBlocks = () => { assert.fail('aged unchanged evidence needs no refresh'); };
+
+  const result = await navigateTo.run(ctx, args);
+  const counters = result.data?.counters as { searches: number; observations: number };
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.equal(result.data?.evidenceMode, 'current');
+  assert.equal(counters.searches, 1);
+  assert.equal(counters.observations, 0);
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 });
 });
 
 test('a stale start with no new visible evidence stops without replaying history or moving', async (t) => {

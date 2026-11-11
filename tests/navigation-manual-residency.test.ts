@@ -77,7 +77,7 @@ async function withManualSession(
   }
 }
 
-test('manual 导航在保存后换出的地图上加载页面并找到历史候选；下一步重新加载', { timeout: 60_000 }, async () => {
+test('manual 导航在保存后换出的地图上加载页面并沿当前证据前进；下一步重新加载', { timeout: 60_000 }, async () => {
   await withManualSession(async (shared, adapter) => {
     shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
     shared.observe(corridor(32, Date.now()));
@@ -109,14 +109,13 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
       };
     };
 
-    // 起点页已换出。导航按需加载，重新加载的页是 STALE；到达仍需当前观察。
-    // 再独立查询同一批已加载页面，以确认保存的几何仍能提供历史候选。
+    // 起点页已换出。导航按需加载；重新加载的证据不因保存/换出而老化，仍是当前证据，
+    // 所以本段直接沿当前证据前进（受每次委托的 maxSteps 限制）。
     const first = await run();
     assert.notEqual(first.stop, 'NO_PATH', `未驻留页面被当成无路：${first.result.summary}`);
-    assert.equal(first.stop, 'UNKNOWN_BOUNDARY');
-    assert.equal(first.planned, 0, '旧起点先补当前证据，不能先移动');
+    assert.ok(first.planned > 0, `重新加载的当前证据应能直接规划：${first.result.summary}`);
     assert.equal(first.evidenceMode, 'current');
-    assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
+    assert.ok(adapter.pos.x > 1, `应沿重新加载的证据实际前进：${JSON.stringify(adapter.pos)}`);
     assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', '导航应已加载所需页面');
     assert.equal(shared.workingSetStats().pinnedLeases, 0, '本段结束后不得遗留 pin lease');
     const remembered = await searchLandRouteAsync(shared.session.voxel, {
@@ -125,21 +124,24 @@ test('manual 导航在保存后换出的地图上加载页面并找到历史候�
       goal: cellGoal(base.to, base.to.y, base.to), allowed: ['walk'], rules: walkLandRules,
       evidenceMode: 'remembered', maxDrop: 4,
     });
-    assert.equal(remembered.status, 'FOUND', '已加载页面仍提供历史候选');
-    assert.equal(remembered.transitions.length, 32);
-    assert.equal(first.continuation?.canContinue, true, `导航应可续接：${first.result.summary}`);
-    assert.ok(first.continuation?.sessionId !== undefined);
+    assert.equal(remembered.status, 'FOUND', '已加载页面仍提供历史几何');
+    assert.equal(remembered.transitions.length, base.to.x - Math.floor(adapter.pos.x));
+    if (first.result.status !== 'succeeded') {
+      assert.equal(first.continuation?.canContinue, true, `导航应可续接：${first.result.summary}`);
+      assert.ok(first.continuation?.sessionId !== undefined);
+    }
 
-    // 第二份委托前真实保存并显式换出；导航必须重新加载，而不是复用已不驻留的页面。
+    // 第二份委托前真实保存并显式换出当前所在页；导航必须重新加载，而不是复用已不驻留的页面。
     await shared.checkpoint();
-    shared.session.unloadSections([START_KEY]);
-    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'not_resident');
-    const second = await run(first.continuation.sessionId);
+    const hereKey = { ...START_KEY, cx: Math.floor(Math.floor(adapter.pos.x) / 16) };
+    shared.session.unloadSections([hereKey]);
+    assert.equal(shared.session.sectionResidency(hereKey).residency, 'not_resident');
+    const before = adapter.pos.x;
+    const second = await run(first.result.status === 'succeeded' ? undefined : first.continuation?.sessionId);
     assert.notEqual(second.stop, 'NO_PATH', `换出后再次把未驻留当成无路：${second.result.summary}`);
-    assert.equal(second.stop, 'UNKNOWN_BOUNDARY');
-    assert.equal(second.planned, 0);
-    assert.deepEqual(adapter.pos, { x: 0.5, y: 64, z: 0.5 });
-    assert.equal(shared.session.sectionResidency(START_KEY).residency, 'resident', '第二次委托应重新加载所需页面');
+    assert.ok(second.planned > 0, second.result.summary);
+    assert.ok(adapter.pos.x > before, '重新加载后继续前进');
+    assert.equal(shared.session.sectionResidency(hereKey).residency, 'resident', '第二次委托应重新加载所需页面');
     assert.equal(shared.workingSetStats().pinnedLeases, 0);
   });
 });

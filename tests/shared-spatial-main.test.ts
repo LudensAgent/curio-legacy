@@ -322,7 +322,7 @@ episodic.stop();
   assert.deepEqual(JSON.parse(fs.readFileSync(probeEvidence, 'utf8')), { installed: true, flush: 1, start: 1 });
 });
 
-test('真实会话关停：worker 自然退出，重开数据库仍读到最终事实及其 STALE 证据', async () => {
+test('真实会话关停：worker 自然退出，重开数据库仍读到最终事实', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-shared-spatial-'));
   const dbPath = path.join(dir, 'spatial.sqlite').replaceAll('\\', '/');
   const observedAt = 1_700_000_123_456;
@@ -383,7 +383,7 @@ process.stdout.write(JSON.stringify({
   assert.equal(parsed.diagnostics.primarySaveError, null);
   assert.equal(parsed.diagnostics.checkpoint.worldId, 'shared-spatial-worker-exit');
   assert.ok(parsed.reports.observed > 0, '真实观察应写入');
-  assert.ok(parsed.reports.staled > 0, '中断应把证据标记为 STALE');
+  assert.equal(parsed.reports.staled, 0, '生命周期中断不再把证据标成 STALE');
 
   const { openSpatialSession } = await import('curio-minecraft-3d-memory/storage/sqlite');
   const reopened = await openSpatialSession({ worldId: 'shared-spatial-worker-exit', databasePath: dbPath, timeoutMs: 5000 });
@@ -394,8 +394,7 @@ process.stdout.write(JSON.stringify({
     if (cell.observed) {
       assert.equal(cell.evidence.observation.state.name, 'minecraft:diamond_ore');
       assert.equal(cell.evidence.observation.observedAt, observedAt);
-      assert.equal(cell.evidence.freshness, 'STALE');
-      assert.equal(cell.evidence.staleReason, 'observation_gap');
+      assert.equal(cell.evidence.staleReason, undefined, '中断不再标 STALE（这里用库默认有效期重开，新鲜度按库口径另算）');
     }
   } catch (err) {
     readbackError = err;

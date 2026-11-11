@@ -70,13 +70,13 @@ test('显式配置缺失或模式无效时报错，默认无 .env 仍可本地�
   assert.equal(config.dashboard.port, 3001);
 });
 
-test('空间体素证据有效期默认 5 分钟，可用 SPATIAL_VOXEL_VALIDITY_MS 覆盖', async (t) => {
+test('体素证据不按时间过期，SPATIAL_VOXEL_VALIDITY_MS 不再生效', async (t) => {
   project(t);
   const defaults = await loadConfig();
-  assert.equal(defaults.config.spatial.voxelValidityWindowMs, 300_000);
+  assert.ok(defaults.config.spatial.voxelValidityWindowMs > 50 * 365 * 86_400_000);
   process.env.SPATIAL_VOXEL_VALIDITY_MS = '90000';
   const overridden = await loadConfig();
-  assert.equal(overridden.config.spatial.voxelValidityWindowMs, 90_000);
+  assert.equal(overridden.config.spatial.voxelValidityWindowMs, defaults.config.spatial.voxelValidityWindowMs);
 });
 
 test('空间观测格额度默认 410 万，可用 SPATIAL_MAX_OBSERVED_CELLS 覆盖', async (t) => {

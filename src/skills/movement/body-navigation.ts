@@ -1,3 +1,4 @@
+import { evidenceStale } from 'curio-minecraft-3d-memory';
 import { walkCollisionProvider } from '../../adapter/walk-collision.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
 import type { MoveOpts, MoveTarget, NavigationDelegate, Vec3Like } from '../../adapter/types.ts';
@@ -125,15 +126,14 @@ function xzCandidates(ctx: SkillCtx, target: { x: number; z: number; range: numb
   return byRank(out);
 }
 
-/** 只读共享 VoxelMap 的新鲜、完整、同会话观测；未观测/过期/不完整都返回 null（不是空气）。 */
+/** 只读共享 VoxelMap 中不待重新确认、状态完整的观测；未观测/待确认/不完整都返回 null（不是空气）。 */
 function observedState(ctx: SkillCtx, pos: Vec3Like): { name: string; properties: Record<string, string> } | null {
   const voxel = voxelOf(ctx);
   const state = ctx.adapter.state();
   const view = voxel.cellAt(state.dim, pos.x, pos.y, pos.z);
   if (!view.observed) return null;
   const evidence = view.evidence;
-  if (evidence.freshness !== 'FRESH' || evidence.validUntil < Date.now()
-    || evidence.observation.sessionId !== state.sessionId || !evidence.observation.stateComplete) return null;
+  if (evidenceStale(evidence) || !evidence.observation.stateComplete) return null;
   return evidence.observation.state as { name: string; properties: Record<string, string> };
 }
 

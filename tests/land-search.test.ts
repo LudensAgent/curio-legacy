@@ -26,6 +26,11 @@ function fillBox(map: VoxelMap, name: string, min: { x: number; y: number; z: nu
   fill(map, name, cells);
 }
 
+/** 让已观察格进入真实陈旧：自身动作效果未确认（pending_effect）。时间、会话与生命周期不使证据老化。 */
+function invalidateBox(map: VoxelMap, min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }) {
+  for (let x = min.x; x <= max.x; x++) for (let y = min.y; y <= max.y; y++) for (let z = min.z; z <= max.z; z++) map.invalidatePendingEffect(DIM, at(x, y, z));
+}
+
 function body(feet: { x: number; y: number; z: number }) {
   return { feet, width: 0.6, height: 1.8, pose: 'standing' as const };
 }
@@ -213,7 +218,7 @@ test('历史候选：remembered 给出候选路线并附当前证据逐段复验
   fill(map, 'minecraft:stone', [at(0, -1, 0), at(1, -1, 0), at(2, -1, 0), at(3, -1, 0)]);
   const feet = at(0.5, 0, 0.5);
   const goal = goalOf(at(3, 0, 0));
-  map.markStale(DIM, 'expired');
+  invalidateBox(map, at(-1, -1, -1), at(3, 2, 1));
   const strict = searchLandRoute(map, request(feet, goal), 2000);
   assert.equal(strict.status, 'INSUFFICIENT_EVIDENCE');
   assert.equal(strict.transitions.length, 0);
@@ -238,6 +243,8 @@ test('当前证据复验：证据被标陈旧后不再 OPEN；危险方块以 BL
   const result = searchLandRoute(map, request(feet, goal), 2000);
   assert.equal(result.status, 'FOUND');
   map.markStale(DIM, 'observation_gap');
+  assert.equal(verifyLandRoute(map, request(feet, goal), result.transitions, 2000).verdict, 'OPEN', '观察间隙不使证据老化');
+  invalidateBox(map, at(-1, -1, -1), at(3, 2, 1));
   const verification = verifyLandRoute(map, request(feet, goal), result.transitions, 2000);
   assert.equal(verification.verdict, 'STALE');
   assert.equal(verification.openPrefix, 0);

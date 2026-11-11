@@ -87,7 +87,7 @@ test('observeLocalStance 把当前站位写成新鲜的本地重扫证据', asyn
     assert.equal(support.evidence.observation.source, 'local_rescan');
     assert.equal(support.evidence.observation.evidence, 'seen');
     assert.equal(support.evidence.observation.observedAt, observedAt);
-    assert.equal(support.evidence.validUntil - observedAt, 300_000, '宿主默认 5 分钟，而不是库默认 60 秒');
+    assert.ok(support.evidence.validUntil - observedAt > 50 * 365 * 86_400_000, '体素不按时间过期');
   } finally {
     try { result = await svc.shutdown(); } catch { /* 保留 fixture 供检查 */ }
     cleanup(dir, result);
@@ -188,9 +188,9 @@ test('attachment replacement, pause, and same-session dimension change cancel; i
     );
     t = 20;
     svc.setPaused(false);
-    // 空 map 上的暂停/恢复也记录边界：暂停期间取得的迟到证据被拒绝。
+    // 体素不按时间过期：暂停期间取得、恢复后才到的观测照常写入。
     svc.observe([block({ pos: { x: 9, y: 0, z: 0 }, observedAt: 15, observationId: 90 })]);
-    assert.equal(svc.session.voxel.cellAt('overworld', 9, 0, 0).observed, false);
+    assert.equal(svc.session.voxel.cellAt('overworld', 9, 0, 0).observed, true, '体素不按时间过期：边界前取得的观测照常写入');
 
     const dReports: ChangeReport[] = [];
     svc.attach({ receiver: (r) => dReports.push(r), cancel: () => { cancels.push('d'); } });
@@ -203,7 +203,7 @@ test('attachment replacement, pause, and same-session dimension change cancel; i
     t = 40;
     svc.beginSession({ worldId: WORLD, dim: 'the_nether', sessionId: 's1' });
     assert.deepEqual(cancels, ['a', 'b', 'd']);
-    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'STALE');
+    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'FRESH', '生命周期不再标 STALE');
 
     // 未就绪维度是显式失败，不改变可信作用域。
     assert.throws(
@@ -235,14 +235,14 @@ test('attachment replacement, pause, and same-session dimension change cancel; i
     t = 70;
     svc.observe([block({ pos: { x: 2, y: 0, z: 0 }, observedAt: 70, observationId: 6, dimension: 'the_nether' })]);
     assert.equal(svc.session.voxel.cellAt('the_nether', 2, 0, 0).observed, false);
-    assert.equal(freshness(svc, 'the_nether', 0, 0, 0), 'STALE');
+    assert.equal(freshness(svc, 'the_nether', 0, 0, 0), 'FRESH', '生命周期不再标 STALE');
 
     // 只有可信 ready beginSession 才恢复准入；重看 A 不刷新邻格 B。
     t = 80;
     svc.beginSession({ worldId: WORLD, dim: 'the_nether', sessionId: 's1' });
     svc.observe([block({ pos: { x: 0, y: 0, z: 0 }, observedAt: 80, observationId: 7, dimension: 'the_nether' })]);
     assert.equal(freshness(svc, 'the_nether', 0, 0, 0), 'FRESH');
-    assert.equal(freshness(svc, 'the_nether', 1, 0, 0), 'STALE');
+    assert.equal(freshness(svc, 'the_nether', 1, 0, 0), 'FRESH', '生命周期不再标 STALE');
 
     svc.observe([block({ pos: { x: 2, y: 0, z: 0 }, observedAt: 80, observationId: 8, dimension: 'the_nether' })]);
     assert.equal(freshness(svc, 'the_nether', 2, 0, 0), 'FRESH');
@@ -325,10 +325,10 @@ test('pause/resume with zero observations records interruption boundaries that r
     t = 200;
     svc.setPaused(false);
 
-    // 暂停期间取得的迟到证据（observedAt=150 <= 200）对未知格同样被拒绝。
+    // 暂停期间取得、恢复后才到的观测（observedAt=150）照常写入。
     svc.observe([block({ pos: { x: 6, y: 0, z: 6 }, observedAt: 150, observationId: 3, sessionId: 's1' })]);
-    assert.equal(svc.session.voxel.cellAt('overworld', 6, 0, 6).observed, false);
-    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'STALE');
+    assert.equal(svc.session.voxel.cellAt('overworld', 6, 0, 6).observed, true, '体素不按时间过期：边界前取得的观测照常写入');
+    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'FRESH', '生命周期不再标 STALE');
 
     // 恢复后的新证据被接受，且原始时间戳不被改写。
     t = 300;
@@ -355,7 +355,7 @@ test('pause/resume with zero observations records interruption boundaries that r
   cleanup(dir, result);
 });
 
-test('final checkpoint persists a unique last fact and a clean close; reopen restores it STALE', async () => {
+test('final checkpoint persists a unique last fact and a clean close; reopen restores it as current evidence', async () => {
   const { svc, dir, dbPath } = await openShared();
   let result: ShutdownResult | null = null;
   let failed = false;
@@ -412,7 +412,8 @@ test('final checkpoint persists a unique last fact and a clean close; reopen res
     const cell = reopened.session.voxel.cellAt('overworld', 7, 8, 9);
     assert.equal(cell.observed, true);
     if (cell.observed) {
-      assert.equal(cell.evidence.freshness, 'STALE');
+      // 重开不使证据老化：恢复保存时的 freshness，仍是可用的当前证据。
+      assert.equal(cell.evidence.freshness, 'FRESH');
       assert.equal(cell.evidence.observation.state.name, 'minecraft:oak_door');
       assert.equal(cell.evidence.observation.state.properties.open, 'true');
       assert.equal(cell.evidence.observation.state.properties.half, 'upper');
@@ -657,7 +658,7 @@ test('a cancel callback fault is surfaced after gating and retained through shut
 
     // 生命周期调用者必须在执行 stale/gating 之后看到取消失败，而不是静默成功。
     assert.throws(() => svc.interrupt(), (err) => err === cancelSentinel);
-    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'STALE');
+    assert.equal(freshness(svc, 'overworld', 0, 0, 0), 'FRESH', '生命周期不再标 STALE');
     svc.observe([block({ pos: { x: 1, y: 0, z: 0 }, observedAt: 1, observationId: 2 })]);
     assert.equal(svc.session.voxel.cellAt('overworld', 1, 0, 0).observed, false); // interrupt 后仍挂起
 
