@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -553,6 +553,7 @@ export class Mind {
     if (!resting && gapOk && reconsider) return this.think('注意到了一些事', 'glance');
     // 最后一步仍在执行、结果未知：可以提前想下一段，不把它当成已经完成。
     if (!this.queuedNext && this.nearEndAskedFor !== this.activity.id && current?.planId === this.activity.id
+      && !SKILLS[current.skill]?.outcomeBoundary
       && remainingSteps(this.activity) === 0 && Date.now() - current.startedAt >= Mind.NEAR_END_AFTER_MS) {
       this.nearEndAskedFor = this.activity.id;
       return this.think(Mind.NEAR_END_REASON, 'glance');
@@ -1270,6 +1271,8 @@ export class Mind {
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
+        const excavation = partialExcavation(o.task, o.result, a.stepStart?.pos, this.d.adapter.state().pos);
+        if (excavation) { this.finishActivity('stuck', excavation); return; }
         // 嵌套技能（use_skill 等）内的部分爬升没有可靠续跑状态：把部分完成事实交回 Agent，不整段重播。
         const climbed = o.result.data?.climbed;
         if (o.task.skill !== 'pillar_one' && typeof climbed === 'number' && climbed > 0) {
@@ -1335,7 +1338,7 @@ export class Mind {
     const state = this.d.adapter.state();
     const verdict = afterStep(a, step, result, durationMs, state, percept);
     // 身体自己应变不了：先试学会的恢复办法（模型以前从类似的卡住里总结出来的），试过还不行才叫脑子
-    if (verdict.kind === 'stuck' && !verdict.exhausted && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
+    if (verdict.kind === 'stuck' && !verdict.requiresDecision && result.status === 'failed' && step.skill !== 'use_skill' && this.d.behaviors) {
       const tried = new Set(a.adaptations.filter((x) => x.startsWith('skill:')).map((x) => x.slice(6)));
       const skipped = a.adaptations.filter((x) => x.startsWith('skip:')).length;
       const b = tried.size - skipped < 2 ? this.safe(() => this.d.behaviors!.recoveryFor({ skill: step.skill, code: result.failureCode }, tried), null) : null;

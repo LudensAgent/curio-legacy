@@ -546,7 +546,20 @@ const NEEDS_THOUGHT = new Set(['MISSING_MATERIALS', 'WOULD_WASTE', 'NO_CRAFTING_
 export type StepVerdict =
   | { kind: 'continue'; adapted?: string }
   | { kind: 'done'; met: boolean; why: string }
-  | { kind: 'stuck'; why: string; /** 额度耗尽，直接终止自动推进，不再插入学得恢复或重放原动作 */ exhausted?: boolean };
+  | { kind: 'stuck'; why: string; /** 同一委托不能自动重放，包括先用学得的恢复动作再重放。 */ requiresDecision?: true };
+
+/** 开挖步数从调用时的脚位起算。部分施工或起点换格后，原参数将授权一条新的完整施工线。 */
+export function partialExcavation(step: Pick<Step, 'skill'>, result: SkillResult, start: AgentState['pos'] | undefined, end: AgentState['pos']) {
+  if (step.skill !== 'excavate_run') return null;
+  const data = result.data;
+  const moved = start && (Math.floor(start.x) !== Math.floor(end.x) || Math.floor(start.y) !== Math.floor(end.y)
+    || Math.floor(start.z) !== Math.floor(end.z));
+  const worked = [data?.completedSteps, data?.excavatedBlocks, data?.filledBlocks].some(count => typeof count === 'number' && count > 0);
+  if (!moved && !worked) return null;
+  const work = typeof data?.completedSteps === 'number' && typeof data.requestedSteps === 'number'
+    ? `已确认 ${data.completedSteps}/${data.requestedSteps} 步；` : '';
+  return `${clipFeedback(result.summary, 200)}；${work}当前脚位 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})。原施工没有续跑状态，是否从此处开新段由你决定`;
+}
 
 /**
  * 一个动作结束后，处理同一动作的短暂失败；需要改变目标或增加探索时交给心智。
@@ -614,7 +627,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
       a.effects ??= { placements: [], removed: 0, moved: false };
       if (effect?.kind === 'block_placed') a.effects.placements.push(`${step.skill}${where ? `@${where}` : ''}`);
       else if (effect?.kind === 'support_formed') a.effects.placements.push(`${step.skill}支撑${where ? `@${where}` : ''}`);
-      else if (effect?.kind === 'block_removed') a.effects.removed += 1;
+      else if (effect?.kind === 'block_removed' && result.data?.noop !== true) a.effects.removed += 1;
       if (effect?.kind === 'movement' || movementChanged) a.effects.moved = true;
     }
     // 真实挖掘、放置或跨格移动是执行进展，不能沿用之前的空挖计数。
@@ -717,6 +730,8 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const code = result.failureCode ?? 'ERROR';
   // 自动插步只能是已选动作契约里明确包含的执行辅助；挖、放、耗材和改目标默认交回事实。
   const data = result.data as Record<string, any> | undefined;
+  const unfinishedExcavation = partialExcavation(step, result, a.stepStart?.pos, state.pos);
+  if (unfinishedExcavation) return { kind: 'stuck', why: unfinishedExcavation, requiresDecision: true };
   if (a.failures >= 5) return { kind: 'stuck', why: `这段活已经失败 ${a.failures} 次了（最近：${clipFeedback(result.summary, 200)}）` };
   // move_step 的“同一目标列、只错脚高”是确定性但可原地修正的 BAD_ARGS；
   // 先留给下面的同格改写，不用 BAD_ARGS 的通用停点把可执行的修正也挡掉。
@@ -886,10 +901,12 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   if (data?.portalReason === 'PORTAL_TRANSITION_TIMEOUT' && portalInsideMs >= 1000) {
     return { kind: 'stuck', why: `${clipFeedback(result.summary)}；这次失败没有新的身体事实可复验，自动续跑不再原样重放，交回心智` };
   }
-  // 显式移动辅助（travel_to / explore_toward）内部已有偏转跳、分段与停止判定，请求又是冻结的
-  // （目标/方向/起点不变）：原样重放只会得到同一停止原因，落水时还会白耗氧气。交回心智按回执决定。
+  // 冻结目标交回心智，由它按实际停止原因和可用会话决定是否续接。
   if (step.skill === 'travel_to' || step.skill === 'explore_toward') {
-    return { kind: 'stuck', why: `${clipFeedback(result.summary)}；${step.skill} 内部已重试过，原样重放会得到同一结果，交回心智` };
+    const continuation = data?.continuation;
+    const resume = continuation?.canContinue === true && typeof continuation.sessionId === 'string'
+      ? `；原委托可用 sessionId="${continuation.sessionId}" 续接` : '';
+    return { kind: 'stuck', why: `${clipFeedback(result.summary)}${resume}` };
   }
   if (RETRYABLE.has(code)
     && !a.adaptations.includes(retryMark) && retries < autoRetryLimit(code, data) && (retries > 0 || physicallyMoved)) {

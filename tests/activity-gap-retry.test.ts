@@ -24,6 +24,34 @@ test('52ms→7ms：有界开挖的确定性预检失败，不因身体或视角�
   assert.ok(!activity.adaptations.some((item) => item.startsWith('retry:')), '不做第二次相同缺口调用');
 });
 
+test('相对开挖途中失败不会从新的脚位再授权整段步数', () => {
+  const { adapter, activity } = activityOf([{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 6 } }]);
+  activity.stepStart = { pos: { x: -489.4, y: 96, z: -296.49 } };
+  const step = nextStep(activity)!;
+  adapter.pos = { x: -485.58, y: 92, z: -296.49 };
+  const verdict = afterStep(activity, step, fail('EFFECT_NOT_CONFIRMED', '实测下落超过授权 1 格', {
+    completedSteps: 3, requestedSteps: 6, excavatedBlocks: 2,
+  }), 4000, adapter.state());
+  assert.equal(verdict.kind, 'stuck');
+  assert.match(verdict.why, /3\/6/);
+  assert.match(verdict.why, /实测下落超过授权/);
+  assert.equal(nextStep(activity), null);
+});
+
+test('沿空通道清脚头并迈步只记录位移，确实挖开方块才计数', () => {
+  const mining = { skill: 'mine_cell', args: { at: [1, 0, 0], facing: 'E' } };
+  const { activity, adapter } = activityOf([mining, mining, { skill: 'move_step' }, mining]);
+  for (const data of [
+    { was: 'air', noop: true, effect: { kind: 'block_removed', confirmed: true } },
+    { was: 'air', noop: true, effect: { kind: 'block_removed', confirmed: true } },
+    { movement: { changed: true }, effect: { kind: 'movement', confirmed: true } },
+  ]) afterStep(activity, nextStep(activity)!, ok('已确认', data), 10, adapter.state());
+  assert.equal(activity.effects?.moved, true);
+  assert.equal(activity.effects?.removed, 0);
+  afterStep(activity, nextStep(activity)!, ok('挖开石头', { was: 'stone', effect: { kind: 'block_removed', confirmed: true } }), 10, adapter.state());
+  assert.equal(activity.effects?.removed, 1);
+});
+
 test('surface 只浮起、未触地时，inWater=false 的收工条件不能算完成', () => {
   const { adapter, activity } = activityOf([{ skill: 'swim_path', args: { mode: 'surface' } }], 1, { type: 'self_state', field: 'inWater', equals: false });
   adapter.inWater = false;
@@ -395,14 +423,18 @@ test('其它技能数据里的 transition 不会被当成穿门失败', () => {
   assert.equal(verdict.kind, 'continue', '没有 portalReason 的 transition 不触发穿门规则');
 });
 
-test('explore_toward / travel_to 失败后不自动原样重放：冻结请求只会得到同一停止原因', () => {
+test('explore_toward / travel_to 未到达保留停止原因和可续接会话，不推测下次结果', () => {
   for (const skill of ['explore_toward', 'travel_to']) {
     const { adapter, activity } = activityOf([{ skill, args: { direction: 'S', distance: 96 } }]);
     const step = nextStep(activity)!;
     activity.stepStart = { pos: { x: 0.5, y: 64, z: -90 } }; // 身体确实走了很远
-    const verdict = afterStep(activity, step, fail('STUCK', '往 S 探索停下：连续 2 段几乎没挪动', { stopReason: 'NO_ALONG_PROGRESS' }), 40000, adapter.state());
+    const verdict = afterStep(activity, step, fail('NOT_FOUND', '实测沿 S 走了 13 格，前方边界仍缺证据', {
+      stop: { reason: 'UNKNOWN_BOUNDARY' }, continuation: { canContinue: true, sessionId: 'move_partial' },
+    }), 40000, adapter.state());
     assert.equal(verdict.kind, 'stuck', skill);
-    assert.match(verdict.why, /内部已重试过/);
+    assert.match(verdict.why, /实测沿 S 走了 13 格/);
+    assert.match(verdict.why, /move_partial/);
+    assert.doesNotMatch(verdict.why, /内部已重试过|原样重放会得到同一结果/);
     assert.equal(activity.adaptations.filter((item) => item.startsWith('retry:')).length, 0);
   }
 });

@@ -523,6 +523,48 @@ test('最后一步运行一段时间后提前想下一段，结果未知时不�
   assert.deepEqual(w.arbiter.info()?.args, { n: 2 });
 });
 
+test('冻结方向仍在推进时等真实回执再计划下一段，显式新指令仍可改意', async (t) => {
+  const w = fixture(t);
+  t.mock.method(SKILLS.explore_toward, 'run', SKILLS.mind_step.run);
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: {
+    what: '朝东探索 50 格', steps: [{ skill: 'explore_toward', args: { direction: 'E', distance: 50 } }],
+  } });
+  const running = w.arbiter.current!;
+  assert.equal(running.skill, 'explore_toward');
+  w.adapter.pos.x += 13.57;
+  running.startedAt = Date.now() - Mind.NEAR_END_AFTER_MS;
+  await w.tick();
+  assert.equal(w.pending.length, 1, '走了 13.57 格时，定时器不能触发以最后一步已完成为前提的接续');
+  assert.equal(w.arbiter.info()?.id, running.id);
+  w.mind.suggest('!去做别的事');
+  await w.tick();
+  assert.equal(w.pending.length, 2);
+  await w.reply(1, { decision: 'new', activity: { what: '照新指令改意', steps: [step(2)] }, operator: { status: 'doing' } });
+  assert.equal(w.arbiter.info()?.skill, 'mind_step');
+  assert.equal(w.mind.activity?.what, '照新指令改意');
+});
+
+for (const stop of ['身体失败', '反射打断']) test(`部分开挖后${stop}，交回实际脚位，不从新位置恢复整段施工`, async (t) => {
+  const w = fixture(t);
+  t.mock.method(SKILLS.excavate_run, 'run', SKILLS.mind_step.run);
+  const recovery = t.mock.fn(() => null);
+  Reflect.get(w.mind, 'd').behaviors = { recoveryFor: recovery };
+  await w.tick();
+  await w.reply(0, { decision: 'new', activity: { what: '朝东开六级阶梯', steps: [
+    { skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 6 } },
+  ] } });
+  assert.equal(w.arbiter.info()?.skill, 'excavate_run');
+  w.adapter.pos = { x: w.adapter.pos.x + 3, y: w.adapter.pos.y - 4, z: w.adapter.pos.z };
+  if (stop === '身体失败') await w.finish(fail('EFFECT_NOT_CONFIRMED', '实测下落超过授权 1 格', { completedSteps: 3, requestedSteps: 6 }));
+  else { w.arbiter.cancel('反射打断', undefined, 'reflex'); await flush(); }
+  await w.tick();
+  assert.equal(w.mind.activity, null);
+  assert.equal(recovery.mock.callCount(), 0);
+  assert.equal(w.bus.recent().filter(e => e.type === 'task_start' && e.data?.skill === 'excavate_run').length, 1);
+  assert.match(w.self.history(1)[0]?.summary ?? '', /当前脚位/);
+});
+
 test('刚开始动作时普通掉落物暂存，不单独触发瞥一眼', async (t) => {
   const w = fixture(t);
   await w.tick();
