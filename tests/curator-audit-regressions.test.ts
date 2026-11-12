@@ -6,6 +6,7 @@ import { test, type TestContext } from 'node:test';
 import { SkillCurator } from '../src/codeskills/curator.ts';
 import { compileCheck } from '../src/codeskills/sandbox.ts';
 import { EventBus } from '../src/events.ts';
+import { KnowledgeBase } from '../src/knowledge/library.ts';
 import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
 import type { ChatMessage } from '../src/planner/llm.ts';
@@ -61,6 +62,7 @@ test('整理输入保留长代码完整契约，并提供步骤技能的验收�
   }
   assert.deepEqual(input.skills.find((entry) => entry.name === 'step-contract')?.steps, steps);
   assert.match(messages[0].content, /通过编译不证明玩法正确/);
+  assert.doesNotMatch(messages[0].content, /notes 里的 knowledge/, '没有知识库时提示词保持原样');
 });
 
 test('同轮合并加优先级只产生一份完整候选，替代关系跟随该版本验收', async (t) => {
@@ -135,4 +137,22 @@ test('整理回复绑定输入版本，不覆盖模型等待期间的显式修�
   assert.match((await curator.check(Date.now(), { force: true }))!, /忽略过期结果/);
   assert.equal(w.engine.get('merge-a', true)?.code, newer.code);
   assert.equal(w.engine.get('merge-a', true)?.version, 2);
+});
+
+test('文字记录带着按内容检索到的相关资料进入整理，不传整库目录', (t) => {
+  const w = setup(t);
+  assert.ok(w.book.write('nether-fortress-note', '在下界找要塞', '沿着一个方向找下界要塞，没写清区域和间距。').ok);
+  const curator = new SkillCurator(plannerOf([{ ok: true }]), w.engine, w.book, w.bus, {}, undefined, null, new KnowledgeBase('1.20.1'));
+  t.after(() => curator.stop());
+  const messages = curator.messages();
+  const input = JSON.parse(messages[1].content) as { notes: { name: string; knowledge?: { id: string; section?: string; excerpt: string }[] }[]; knowledge_reference?: { edition: string; version: string; evidence: string } };
+  const note = input.notes.find((entry) => entry.name === 'nether-fortress-note')!;
+  assert.equal(note.knowledge?.[0]?.id, 'blazes-and-fortresses');
+  assert.equal(note.knowledge?.[0]?.section, 'generation');
+  assert.match(note.knowledge![0]!.excerpt, /432×432/);
+  assert.ok(!('catalog' in note) && !('documents' in note), '不塞整库目录');
+  assert.match(messages[0].content, /外部参考，不是现场事实/);
+  assert.match(messages[0].content, /与资料矛盾、记录措辞像只来自一次经历、或没有适用条件的文字策略/);
+  assert.match(messages[0].content, /单条记录要改写也可以 merge，from 只写它自己/);
+  assert.deepEqual(input.knowledge_reference, { edition: 'java', version: '1.20.1', evidence: 'reference_not_current_state' });
 });

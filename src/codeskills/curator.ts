@@ -1,4 +1,5 @@
 import type { EventBus } from '../events.ts';
+import type { KnowledgeBase } from '../knowledge/library.ts';
 import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
 import { isEmergency, type Behavior, type BehaviorEngine } from '../mind/behaviors.ts';
 import type { LedgerView } from '../mind/ledger.ts';
@@ -138,7 +139,8 @@ export class SkillCurator {
   evidenceStep = 15;
 
   constructor(private planner: Pick<Planner, 'complete' | 'autonomous' | 'noteInvalid'>, private engine: BehaviorEngine, private book: SkillBook | null,
-    private bus: EventBus, opts: Partial<CuratorOptions> = {}, private gameClock = new ObservedGameClock(), private lifetimeFile: string | null = null) {
+    private bus: EventBus, opts: Partial<CuratorOptions> = {}, private gameClock = new ObservedGameClock(), private lifetimeFile: string | null = null,
+    private knowledge: KnowledgeBase | null = null) {
     this.opts = { ...DEFAULT_CURATOR, ...opts };
     if (lifetimeFile && fs.existsSync(lifetimeFile)) {
       try {
@@ -453,14 +455,24 @@ export class SkillCurator {
     this.noteSeen = new Map();
     const notes = this.notes().map((entry) => {
       this.noteSeen.set(entry.name, noteFingerprint(entry));
+      // 按记录内容检索相关资料，只带能引用章节的摘录；不传整库目录，也不把资料当成已验证。
+      // 名字和说明是主题，正文只取开头，避免长正文把检索词稀释掉。
+      const query = `${entry.name.replace(/-/g, ' ')} ${entry.description} ${entry.body.slice(0, 80)}`.slice(0, 160);
+      const found = this.knowledge && query ? this.knowledge.query({ query, limit: 2 }) : null;
+      const matches = found?.action === 'search'
+        ? found.matches.filter((match) => match.kind !== 'control' && match.section !== undefined)
+        : [];
       return { name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
-        retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name) };
+        retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name),
+        ...(found?.action === 'error' ? { knowledge_error: found.message } : {}),
+        ...(matches.length ? { knowledge: matches.map(({ id, title, section, sectionTitle, excerpt }) => ({ id, title, section, sectionTitle, excerpt })) } : {}) };
     });
     const system = `你在整理 Minecraft 机器人 Muses 自己写的技能及文字记录。像人整理笔记一样：
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - skills 提供完整执行契约，code 未截断。code_validation 是对完整源码的编译检查，error:null 表示通过，不能凭展示片段或猜测代码截断认定语法损坏；通过编译不证明玩法正确，仍需实际验收证据。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
+${this.knowledge ? `- notes 里的 knowledge 是按该记录内容检索到的相关资料摘录（文档#章节，外部参考，不是现场事实；knowledge_reference 给出资料版本；knowledge_error 表示检索失败，不代表没有资料）。与资料矛盾、记录措辞像只来自一次经历、或没有适用条件的文字策略，应当降级成更窄或注明条件的写法、改写或 retire（target:note）；单条记录要改写也可以 merge，from 只写它自己、skill 写修订后的完整内容。不要因为查到资料就把它当成已验证，也不要要求每条记录都引用资料。` : ''}
 - 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。文字来源按替代收起（subsumed_by）时，只有 merge 确实成功写进目标后才算替代成立；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。来源或目标在合并后又改了内容，旧合并关系也不再授权收起，需重新合并或改用不带 subsumed_by 的独立 retire。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，必须沿用其中一个 from 名字，不要起 merged/unified/consolidated 这类新名）。合并时保留各自真正管用的部分（看 uses 的成败）。
 - 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。aftermath 是这份技能当前版本最近几次事后观测（died 是否死亡、lost 从触发到判断净掉的血、still 触发处境还在/解除/未知），只是事实，成败已按 uses 记下，不要拿它再定一次成败；aftermath_other_versions 是别的版本观测到的，不能当成当前版本的经历。${postDeath ? `
@@ -486,7 +498,9 @@ export class SkillCurator {
 - 没有要整理的就输出 {"ok":true}。不要为了整理而整理。
 技能格式和写法与原来相同（when / steps 或 code / priority / cooldown_s / args / overrides）；合并出来的步骤或代码技能都要带 verify（判定：做完以后看一眼世界确认真的做成了，只能用 api.state/blockAt/region/entities/drops/nearestLand，return true 算成、return "原因" 算没成）；合并/重写改变执行内容后，必须重新复核 verify，不能直接沿用旧判定，判定不能写成恒真（至少要调用一次 api.* 观察世界）。同轮合并并调整优先级时，优先级会合入这份候选，形成一次完整修订。
 只输出一个 JSON 对象：{"merge":[{"from":["a","b"],"skill":{…}}],"priority":[{"name":"…","priority":1-90}],"retire":[{"name":"…","target":"candidate|skill|note","version":1,"why":"…","subsumed_by":"被并入的技能名（按替代收起时才写）"}],"restore":[{"name":"文字记录名","why":"恢复理由"}],"improve":[{"name":"…","why":"…"}],"rollback":[{"name":"…","to":1,"why":"…"}]}（用不到的键省略；文字记录不写 version）或 {"ok":true}`;
-    return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills, notes }) }];
+    const anyKnowledge = notes.some((entry) => 'knowledge' in entry || 'knowledge_error' in entry);
+    return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify({ skills, notes,
+      ...(anyKnowledge && this.knowledge ? { knowledge_reference: { edition: 'java', version: this.knowledge.version, evidence: 'reference_not_current_state' } } : {}) }) }];
   }
 
   private safe<T>(fn: () => T, fallback: T): T { try { return fn(); } catch { return fallback; } }

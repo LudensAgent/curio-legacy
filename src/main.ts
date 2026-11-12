@@ -398,7 +398,8 @@ ledger.start();
 /** 技能多了定期整理：收起长期用不上的，后台合并说同一件事的、调整谁先上 */
 const skillClock = new ObservedGameClock(path.join(config.dataDir, 'skill-game-clock.json'));
 if (skillClock.loadError) bus.publish('skill_clock_unknown', 'P2', `技能游戏时间记录无法读取，从新观察开始：${skillClock.loadError}`);
-const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus, {}, skillClock, path.join(config.dataDir, 'skill-lifetimes.json'));
+const knowledge = new KnowledgeBase(config.mc.version);
+const curator = new SkillCurator(coderPlanner, behaviors, skillBook, bus, {}, skillClock, path.join(config.dataDir, 'skill-lifetimes.json'), knowledge);
 curator.ledger = ledger;
 curator.dim = () => adapter.state().dim;
 curator.observation = () => ({ state: adapter.state(), paused: arbiter.paused });
@@ -428,7 +429,7 @@ try {
 const selfModel = new SelfModel(path.join(config.dataDir, 'mind.json'), config.mind.traits);
 const mind = new Mind({
   adapter, arbiter, perception, memory, bus, self: selfModel, persona: config.persona,
-  thinker: Object.assign(new Thinker(planner, adapter, memory, bus, skillBook, new KnowledgeBase(config.mc.version)), { ledger }),
+  thinker: Object.assign(new Thinker(planner, adapter, memory, bus, skillBook, knowledge), { ledger }),
   behaviors,
   ledger,
   excursions: new ExcursionLog(path.join(config.dataDir, 'excursions.json')),
