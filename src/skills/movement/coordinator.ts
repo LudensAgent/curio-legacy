@@ -1161,7 +1161,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       return { x: here.x + bearing.x * ahead, y: here.y, z: here.z + bearing.z * ahead };
     })();
     const start = { x: Math.floor(here.x), y: Math.floor(here.y + 0.05), z: Math.floor(here.z) };
-    const steps = await planMakeWay(voxel, scope.dim, start, target, makeWay, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
+    // 普通搜索已经失败，这里也接受“不改方块、但确实走到目标附近”的纯移动路线；
+    // 否则会把一条真实存在的通路丢掉，误报“找不到路线”。
+    const steps = await planMakeWay(voxel, scope.dim, start, target, { ...makeWay, allowPlainRoute: true }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
       { signal: ctx.signal, deadlineMs: deadline });
     if (steps === null && ctx.signal.aborted) { stop = stopOf('CANCELLED', '开路规划时父任务取消'); break; }
     if (steps === null && Date.now() >= deadline) { stop = stopOf('TIMEOUT', '开路规划到达原期限'); break; }

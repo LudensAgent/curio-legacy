@@ -7,7 +7,17 @@ import { isDangerousBlock, isWaterBlock } from '../../spatial/land-edge-policy.t
  * 开路授权：普通路线走不通时，允许在已记录体素上规划“挖开/补支撑/原地垫高”的路线（类似 pathfinder 的
  * canDig/scaffolding）。只在显式授权时启用；挖用 tool（缺省用当前手持），放用 item（必填，或 "any"）。
  */
-export type MakeWayOptions = { dig?: { tool?: string }; place?: { item: string }; maxEdits: number };
+export type MakeWayOptions = {
+  dig?: { tool?: string };
+  place?: { item: string };
+  maxEdits: number;
+  /**
+   * 协调器在普通搜索已失败后调用时置 true：若搜索找到一条不改方块、但确实
+   * 走到目标附近的完整路线，也返回它。默认 false，保持“开路只返回施工计划”
+   * 的单元语义。
+   */
+  allowPlainRoute?: boolean;
+};
 
 type Cell = { x: number; y: number; z: number };
 /** 一步开路：先挖 dig 中的格、再在 place 补支撑（或 pillar 原地垫高），然后站到 to。 */
@@ -218,7 +228,12 @@ export async function planMakeWay(
   const steps: MakeWayStep[] = [];
   for (let n: Node | null = closest; n !== null && n.step !== null; n = n.parent) steps.push(n.step);
   steps.reverse();
-  return steps.some((step) => step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') ? steps : null;
+  // 含挖/放/垫高的部分路线照旧返回。“不改动方块、只走过去”的路线默认丢弃，
+  // 保持“开路=施工计划”的语义；协调器在普通搜索已失败后传入 allowPlainRoute，
+  // 此时若这条纯移动路线真的走到目标附近（h<=1）就返回它——普通搜索可能因为
+  // 边界/证据/预算停在别处，而这里从实测位置找到了完整通路。
+  const hasEdits = steps.some((step) => step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar');
+  return hasEdits || (opts.allowPlainRoute === true && h(closest.cell) <= 1) ? steps : null;
 }
 
 /** 默认与上限：一次调用最多为开路改动这么多格（挖开 + 放置合计）。 */

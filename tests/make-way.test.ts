@@ -210,3 +210,11 @@ test('岩浆湖：授权 place 时在湖面上逐格补支撑搭桥过去；只�
   const digOnly = await planMakeWay(w.map, D, { x: 1, y: 64, z: 0 }, target, { dig: {}, maxEdits: 16 }, any);
   assert.ok(digOnly === null || digOnly.every((s) => !(s.to.x >= 2 && s.to.x <= 6 && Math.abs(s.to.z) <= 2)), JSON.stringify(digOnly?.map((s) => s.to)));
 });
+
+test('普通路线失败后，搜索到一条不改方块、只走过去的更近路线也要返回', async () => {
+  const w = corridor(8);
+  const plan = await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 8.5, y: 64, z: 0.5 }, { dig: {}, place: { item: 'cobblestone' }, maxEdits: 16, allowPlainRoute: true }, any);
+  assert.ok(plan !== null, '只走过去的路线不能因为“没有挖/放”被丢掉');
+  assert.ok(plan.every((step) => step.dig.length === 0 && step.place === undefined && step.kind !== 'pillar'));
+  assert.ok(plan.at(-1)!.to.x >= 7, `应当真的走近目标，实际 ${JSON.stringify(plan.at(-1))}`);
+});
