@@ -52,10 +52,14 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   if (!skip.has('know_how')) for (const k of src.self.data.knowHow) {
     const trust = (k.wins + 1) / (k.wins + k.losses + 2);
     const applied = k.applications?.length
-      ? `，应用${k.applications.filter((a) => a.outcome === 'done' && a.completion !== 'condition').length}成/${k.applications.filter((a) => a.outcome === 'stuck').length}败`
+      ? `，应用${k.applications.filter((a) => a.outcome === 'done' && a.completion !== 'condition' && a.completion !== 'attempt').length}成/${k.applications.filter((a) => a.outcome === 'stuck').length}败`
       : '';
+    const counter = k.counterexamples?.length
+      ? `，反例${k.counterexamples.length}条${k.counterexamples.at(-1)?.reason ? `（最近 ${k.counterexamples.at(-1)!.reason}）` : ''}`
+      : '';
+    const limits = k.limits?.length ? `，边界：${k.limits.slice(0, 2).join('；')}` : '';
     const source = k.source === 'observed' ? '亲眼观察' : k.source === 'experiment' ? '实验' : '反思';
-    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}）`, ref: k.id, source: `know_how:${k.id}` }, score(k.text, k.tags) * (0.6 + trust), k.updatedAt);
+    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}${counter}${limits}）`, ref: k.id, source: `know_how:${k.id}` }, score(k.text, k.tags) * (0.6 + trust), k.updatedAt);
   }
   if (!skip.has('lesson')) {
     // addLesson 以 know_how:<id> 存的副本只是主窍门通道的镜像；主条目被合并/改写/删除后，
@@ -72,9 +76,11 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   }
   if (!skip.has('skill')) {
     for (const s of src.book?.list() ?? []) {
-      // 想起的是候选（还没验收成稳定版）时，把它从“知识标签”变成“现在就用”：催它当场 trial，别只记着「归它管」。
+      // 候选只是候选：展示用途与验证状态，是否试用、何时试用由 Agent 判断，不催当场调用。
       const candidate = src.book?.candidate(s.name);
-      const trial = candidate ? '（候选未启用：眼下正是它管的事，直接用 use_skill {trial:true} 调它试，别手写）' : '';
+      const trial = candidate
+        ? `（候选，尚未验收；用途与触发条件见 {"kind":"skill","name":"${s.name}"}，是否试用由你决定）`
+        : '';
       push({ kind: 'skill', text: `${s.name}：${s.description}${trial}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
     }
     for (const s of src.extraSkills ?? []) push({ kind: 'skill', text: s.text, ref: s.name }, score(s.text));

@@ -572,7 +572,17 @@ export class SelfModel {
       const applied = explicit && r.applying === k.id && r.applyingText !== undefined && cleanLesson(k.text) === cleanLesson(r.applyingText);
       if (!applied && (explicit || !(k.signature && k.signature === r.signature))) continue;
       if (applied) k.applications = [...(k.applications ?? []), { at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}), summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}) }].slice(-8);
-      if (r.outcome === 'done' && r.completion !== 'condition') k.wins++; else if (r.outcome === 'stuck') k.losses++;
+      // 有界尝试（attempt）不算成功；只在原地/附近的搜索活动成功了，也不能证明“走远找资源”的策略正确。
+      const localOnlySearch = r.exploration?.searchIntent === true && r.exploration.localOnly === true;
+      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch) k.wins++;
+      else if (r.outcome === 'stuck') k.losses++;
+      if (applied && r.outcome === 'stuck') {
+        k.counterexamples = [...(k.counterexamples ?? []), {
+          at: r.at, activityId: r.id, outcome: r.outcome,
+          reason: r.stop?.reason ?? r.failure?.code ?? 'stuck', summary: r.summary.slice(0, 160),
+          ...(r.failure?.pos ? { pos: { ...r.failure.pos } } : r.navigation?.destination ? { pos: { ...r.navigation.destination } } : {}),
+        }].slice(-8);
+      }
       k.updatedAt = Date.now();
     }
     this.touch();
@@ -610,6 +620,7 @@ export class SelfModel {
       const changed = cleanLesson(same.text) !== t;
       same.text = t;
       // 新的说法不能继承旧结论的成功证据或应用证据，尤其是失败后猜出的替代办法。
+      // 反例与适用边界是历史事实，换措辞也不能洗掉；留不留由 Agent 决定。
       if (changed) { same.wins = 0; same.losses = 0; same.unverified = opts.outcome !== 'done'; same.signature = undefined; same.applications = undefined; }
       same.updatedAt = Date.now();
       if (opts.outcome === 'done') { same.wins++; same.unverified = false; }
@@ -641,9 +652,11 @@ export class SelfModel {
     return this.data.knowHow.map((h) => {
       const rel = overlap(keywords(h.text), k) + h.tags.filter((t) => k.has(t)).length * 2 + (kind && h.kind === kind ? 2 : 0);
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
-      // 未验证结论统一降权；成败只通过 trust 影响排序。签名或应用记录的存在不代表支持证据，
-      // updatedAt 也包含失败/中止，不能用“最近更新”加分。相关失败仍可召回供反思，不自动删除或改判。
-      return { h, score: rel * (0.5 + trust) * (h.unverified ? 0.25 : 1) };
+      // 最近一次明确应用失败、且反例多于成功证据：默认注入时降权，避免刚失败的做法立刻满屏召回；
+      // 历史仍可按需查。未验证结论也统一降权；updatedAt 包含失败/中止，不能给它加分。
+      const lastApplied = h.applications?.at(-1);
+      const contested = lastApplied?.outcome === 'stuck' && (h.counterexamples?.length ?? 0) > h.wins;
+      return { h, score: rel * (0.5 + trust) * (h.unverified ? 0.25 : 1) * (contested ? 0.5 : 1) };
     }).filter((e) => e.score > 0.6).sort((a, b) => b.score - a.score).slice(0, n).map((e) => e.h);
   }
 
@@ -756,6 +769,9 @@ export class SelfModel {
       const [keep, ...rest] = parts;
       // 回想可能添加了新的结论：旧做法的成败不能证明改写后的整句话。
       const unchanged = parts.every((k) => cleanLesson(k.text) === cleanLesson(m.text) && k.signature === keep.signature);
+      // 反例和适用边界是历史事实：合并/改写只让结论重新验证，不删除这些证据。
+      const counterexamples = parts.flatMap((k) => k.counterexamples ?? []).sort((a, b) => a.at - b.at).slice(-8);
+      const limits = [...new Set(parts.flatMap((k) => k.limits ?? []))].slice(0, 12);
       // 措辞变了：新说法从零计，旧说法（含被并入的几条）累计的成败记到 prior 里。
       if (!unchanged) keep.prior = {
         wins: parts.reduce((n, k) => n + k.wins + (k.prior?.wins ?? 0), 0),
@@ -773,6 +789,8 @@ export class SelfModel {
       // 未验证状态只由各条自身的结论状态传播；应用成功会加 wins，但不能借此变成已验证。
       keep.unverified = unchanged ? parts.every((k) => k.unverified === true) : true;
       keep.applications = unchanged ? parts.flatMap((k) => k.applications ?? []).sort((a, b) => a.at - b.at).slice(-8) : undefined;
+      keep.counterexamples = counterexamples;
+      keep.limits = limits;
       if (!unchanged) { keep.signature = undefined; keep.source = 'reflection'; }
       keep.tags = [...new Set(parts.flatMap((k) => k.tags))].slice(0, 12);
       keep.updatedAt = Date.now();

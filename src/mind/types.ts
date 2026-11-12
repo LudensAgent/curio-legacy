@@ -244,6 +244,10 @@ export interface KnowHow {
   unverified?: boolean;
   /** 后续活动显式声明 applying:<id> 时留下的应用证据；只供复核，不由程序自动宣告结论正确。 */
   applications?: { at: number; activityId: string; outcome: ActivityOutcome; completion?: ActivityRecord['completion']; summary: string; failure?: ActivityRecord['failure'] }[];
+  /** 明确应用后失败/受阻的反例：改写/合并时保留，不能靠换措辞洗掉。 */
+  counterexamples?: { at: number; activityId?: string; outcome: ActivityOutcome; reason: string; summary: string; pos?: { x: number; y: number; z: number } }[];
+  /** 已确认的适用边界或尚未验证的部分（自由文字，由 Agent 写；程序不自动推断）。 */
+  limits?: string[];
   createdAt: number;
   updatedAt: number;
   source: 'reflection' | 'experiment' | 'observed';

@@ -899,8 +899,10 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       know_how: knowHow.map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true, source: k.source,
         ...(k.prior ? { before_rewrite: `改写前的说法累计 ${k.prior.wins} 胜 ${k.prior.losses} 负（改写过 ${k.prior.revisions} 次）` } : {}),
         ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
-        ...(k.applications?.length ? { applications: k.applications.reduce((n, a) => ({ count: n.count + 1, done: n.done + Number(a.outcome === 'done' && a.completion !== 'condition'), stuck: n.stuck + Number(a.outcome === 'stuck') }), { count: 0, done: 0, stuck: 0 }) } : {}) })),
-      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
+        ...(k.applications?.length ? { applications: k.applications.reduce((n, a) => ({ count: n.count + 1, done: n.done + Number(a.outcome === 'done' && a.completion !== 'condition' && a.completion !== 'attempt'), stuck: n.stuck + Number(a.outcome === 'stuck') }), { count: 0, done: 0, stuck: 0 }) } : {}),
+        ...(k.counterexamples?.length ? { counterexamples: { count: k.counterexamples.length, last: `${k.counterexamples.at(-1)!.reason}：${k.counterexamples.at(-1)!.summary.slice(0, 80)}` } } : {}),
+        ...(k.limits?.length ? { limits: k.limits.slice(0, 4) } : {}) })),
+      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
