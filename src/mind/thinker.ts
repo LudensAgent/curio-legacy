@@ -569,24 +569,24 @@ export class Thinker {
    */
   async reflect(self: SelfModel, persona: string, signal: AbortSignal, strategy: string[] = []): Promise<Consolidation | null> {
     if (!this.planner.autonomous) return null;
-    // 反思只带与当前目标/最近经历相关的知识摘录（最多 3 条），不把整个知识库塞进提示词。
-    const knowledgeQuery = [
-      ...self.agenda().map((entry) => entry.text).slice(0, 3),
-      ...self.history(6).map((entry) => entry.what),
-    ].filter(Boolean).join(' ').slice(0, 300);
-    const base = this.knowledge;
-    const found = base && knowledgeQuery ? base.query({ query: knowledgeQuery, limit: 3 }) : null;
-    // 操作手册讲接口，不是世界机制；反思要的是游戏事实，只留机制/教程类摘录。
-    const matches = found && 'matches' in found ? found.matches.filter((match) => match.kind !== 'control') : [];
-    const knowledge = matches.length ? {
-      query: knowledgeQuery,
-      matches: matches.map((match) => ({
-        id: match.id, title: match.title,
-        ...(match.section === undefined ? {} : { section: match.section }),
-        ...(match.sectionTitle === undefined ? {} : { sectionTitle: match.sectionTitle }),
-        excerpt: match.excerpt,
-      })),
-    } : null;
+    // 反思只带与当前目标/议程（没有时退回最近经历）相关的知识摘录，最多 3 条，不把整个知识库塞进提示词。
+    // 以当前目标和议程为主：把多段经历拼成搜索词会稀释中文关键词，真实知识库里反而一条都命中不了。
+    const goals = [self.plan()?.goal, ...self.agenda().map((entry) => entry.text)].filter((text): text is string => !!text);
+    const knowledgeQuery = (goals.length ? goals.slice(0, 2) : self.history(3).map((entry) => entry.what)).join(' ').slice(0, 120);
+    const library = this.knowledge;
+    const search = library && knowledgeQuery ? library.query({ query: knowledgeQuery, limit: 3 }) : null;
+    const found = search?.action === 'search' ? search : null;
+    // 只收有具体章节的命中：章节摘录可引用；没有章节的文档摘要只是标题串，不是事实。
+    const matches = found?.matches.filter((match) => match.kind !== 'control' && match.section !== undefined) ?? [];
+    const knowledge = library
+      ? search?.action === 'error'
+        ? { query: knowledgeQuery, edition: 'java' as const, version: library.version, evidence: 'reference_not_current_state' as const, matches, error: search.message }
+        : found
+          ? { query: knowledgeQuery, edition: found.edition, version: found.version, evidence: found.evidence, matches }
+          : null
+      : null;
+    // 成功的检索也留下记录：没有命中同样是一次真实结果，不能和“没查”混在一起。
+    if (knowledge) this.bus.publish('knowledge_query', 'P3', `回想时查知识：${knowledgeQuery.slice(0, 60)}（${matches.length} 条相关章节）`, { matches: matches.length, source: 'reflection' });
     const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? [], strategy, this.memory, knowledge);
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'mind:回想', tier: 'full', signal, attempt });

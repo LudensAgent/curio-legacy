@@ -9,12 +9,21 @@ import { buildMindMessages, buildReflectionMessages } from '../src/mind/prompt.t
 import { RECALL_LABEL, recallLocal } from '../src/mind/recall.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import { Thinker } from '../src/mind/thinker.ts';
-import type { KnowledgeBase } from '../src/knowledge/library.ts';
+import { KnowledgeBase } from '../src/knowledge/library.ts';
+import type { ChatMessage } from '../src/planner/llm.ts';
 import type { Planner } from '../src/planner/planner.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import type { ActivityRecord } from '../src/mind/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
+
+class RecordingKnowledge extends KnowledgeBase {
+  limit?: number;
+  override query(raw: unknown, maxBytes?: number) {
+    this.limit = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { limit?: number }).limit : undefined;
+    return super.query(raw, maxBytes);
+  }
+}
 
 const record = (patch: Partial<ActivityRecord> & Pick<ActivityRecord, 'id' | 'outcome' | 'summary'>): ActivityRecord => ({
   what: '在矿道里找路', kind: 'explore', durationSec: 30, gained: {}, lost: {}, at: Date.now(), signature: 'travel_to', failures: 0, ...patch,
@@ -310,38 +319,77 @@ test('改写或合并换了措辞：新说法从零计，旧说法的成败累�
   assert.match(user.content, /"before_rewrite":\{"wins":1,"losses":15,"revisions":2/);
 });
 
-test('反思只带按当前目标/经历检索到的知识摘录，不塞整库目录', async () => {
+test('反思按当前议程检索真实知识库，只带可引用的章节摘录', async () => {
   const memory = new WorldMemory(null), self = new SelfModel(null);
   self.addAgenda('在下界找要塞', 'goal', 'today');
   self.record(record({ id: 'r1', outcome: 'stuck', summary: '走了很久没看到要塞', what: '朝一个方向找下界要塞' }));
-  const calls: unknown[] = [];
-  const knowledge = {
-    query(args: unknown) {
-      calls.push(args);
-      return { action: 'search', query: (args as { query: string }).query,
-        matches: [{ id: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', excerpt: '要塞按 432×432 区域生成' }] };
-    },
-  } as unknown as KnowledgeBase;
-  let sent: { role: string; content: string }[] = [];
-  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: { role: string; content: string }[]) {
+  let sent: ChatMessage[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
     sent = messages;
     return { text: '{}', latencyMs: 1 };
   } } as unknown as Planner;
+  const knowledge = new RecordingKnowledge('1.20.1');
   const thinker = new Thinker(planner, new FakeAdapter(), memory, new EventBus(), null, knowledge);
   await thinker.reflect(self, 'P', new AbortController().signal);
-  const query = '在下界找要塞 朝一个方向找下界要塞';
-  assert.deepEqual(calls, [{ query, limit: 3 }], '检索词来自议程与最近经历，并限制返回条数');
-  assert.match(sent[0].content, /按当前目标\/经历检索出的相关文档\/章节摘录，不是全库目录/, '反思规则注明知识是按相关性摘取的');
+  assert.equal(knowledge.limit, 3, '反思检索最多取 3 条');
+  assert.match(sent[0].content, /按当前目标\/经历检索出的相关文档\/章节摘录/, '反思规则注明知识是按相关性摘取的');
   const payload = JSON.parse(sent[1].content.split('\n')[0]);
-  assert.equal(payload.knowledge.query, query);
-  assert.deepEqual(payload.knowledge.matches, [{ id: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', excerpt: '要塞按 432×432 区域生成' }]);
-  assert.ok(!('documents' in payload.knowledge) && !('catalog' in payload.knowledge), '只带检索结果，不带整库目录');
+  assert.equal(payload.knowledge.query, '在下界找要塞', '检索词以当前议程为主，避免被多段历史稀释');
+  assert.equal(payload.knowledge.edition, 'java');
+  assert.equal(payload.knowledge.version, '1.20.1');
+  assert.equal(payload.knowledge.evidence, 'reference_not_current_state');
+  assert.equal(payload.knowledge.matches[0].id, 'blazes-and-fortresses');
+  assert.equal(payload.knowledge.matches[0].section, 'generation', '注入的是有具体章节、可引用的摘录');
+  assert.match(payload.knowledge.matches[0].excerpt, /432×432/);
+  assert.ok(payload.knowledge.matches.every((match: { kind: string; section?: string }) => match.kind !== 'control' && match.section), '只带非操作手册的可引用章节');
+  assert.ok(payload.knowledge.matches.length <= 3);
   memory.close();
 });
 
-test('没有检索到相关事实时反思输入不出现知识字段', () => {
+test('反思检索词优先主目标，其次议程；没有目标时退回最近经历', async () => {
   const memory = new WorldMemory(null), self = new SelfModel(null);
-  const payload = JSON.parse(buildReflectionMessages(self, 'P', [], [], memory, { query: '找要塞', matches: [] })[1].content.split('\n')[0]);
+  self.addAgenda('收集烈焰棒', 'idea', 'today');
+  self.setPlan('在下界找要塞', ['找到要塞'], [null]);
+  let sent: ChatMessage[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
+    sent = messages;
+    return { text: '{}', latencyMs: 1 };
+  } } as unknown as Planner;
+  await new Thinker(planner, new FakeAdapter(), memory, new EventBus(), null, new KnowledgeBase('1.20.1')).reflect(self, 'P', new AbortController().signal);
+  assert.equal(JSON.parse(sent[1].content.split('\n')[0]).knowledge.query, '在下界找要塞 收集烈焰棒', '主目标排在议程前面');
+  memory.close();
+
+  const memory2 = new WorldMemory(null), self2 = new SelfModel(null);
+  self2.record(record({ id: 'h1', outcome: 'stuck', summary: '走了很久没看到要塞', what: '朝一个方向找下界要塞' }));
+  let sent2: ChatMessage[] = [];
+  const planner2 = { autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
+    sent2 = messages;
+    return { text: '{}', latencyMs: 1 };
+  } } as unknown as Planner;
+  await new Thinker(planner2, new FakeAdapter(), memory2, new EventBus(), null, new KnowledgeBase('1.20.1')).reflect(self2, 'P', new AbortController().signal);
+  assert.equal(JSON.parse(sent2[1].content.split('\n')[0]).knowledge.query, '朝一个方向找下界要塞', '没有目标和议程时退回最近经历');
+  memory2.close();
+});
+
+test('反思查过但没有相关章节时仍留下空结果，不伪装成没查', async () => {
+  const memory = new WorldMemory(null), self = new SelfModel(null);
+  self.addAgenda('zzzz qqqq', 'goal', 'today');
+  let sent: ChatMessage[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
+    sent = messages;
+    return { text: '{}', latencyMs: 1 };
+  } } as unknown as Planner;
+  const thinker = new Thinker(planner, new FakeAdapter(), memory, new EventBus(), null, new KnowledgeBase('1.20.1'));
+  await thinker.reflect(self, 'P', new AbortController().signal);
+  const payload = JSON.parse(sent[1].content.split('\n')[0]);
+  assert.equal(payload.knowledge.query, 'zzzz qqqq');
+  assert.deepEqual(payload.knowledge.matches, []);
+  memory.close();
+});
+
+test('没有检索知识时反思输入不出现知识字段', () => {
+  const memory = new WorldMemory(null), self = new SelfModel(null);
+  const payload = JSON.parse(buildReflectionMessages(self, 'P', [], [], memory)[1].content.split('\n')[0]);
   assert.equal('knowledge' in payload, false);
   memory.close();
 });

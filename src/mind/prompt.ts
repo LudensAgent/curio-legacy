@@ -20,6 +20,7 @@ import { cleanLesson, moodWords, PLAN_REVISION_MIN, type KnowledgeFact, type Pla
 import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
+import type { KnowledgeMatch } from '../knowledge/library.ts';
 
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { describeCurrentTrip, describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
@@ -1026,8 +1027,14 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
 export interface ReflectionKnowledge {
   /** 触发检索的目标/经历摘要（不是整库目录）。 */
   query: string;
-  /** 按相关性检索出的文档/章节摘录；只放这些，不塞整个知识库。 */
-  matches: { id: string; title: string; section?: string; sectionTitle?: string; excerpt: string }[];
+  /** 资料版本与“外部参考、非现场事实”的来源标记，引用时一并保留。 */
+  edition: 'java';
+  version: string;
+  evidence: 'reference_not_current_state';
+  /** 按相关性检索出的章节摘录；只放这些，不塞整个知识库。为空表示查过但没有相关章节。 */
+  matches: KnowledgeMatch[];
+  /** 检索失败的原因（不是“没查”）；失败时不要据此编造事实。 */
+  error?: string;
 }
 
 export function buildReflectionMessages(self: SelfModel, persona: string, mySkills: string[] = [], strategy: string[] = [], memory?: WorldMemory, knowledge?: ReflectionKnowledge | null): ChatMessage[] {
@@ -1045,7 +1052,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
 - 整理后窍门总数最好不超过 25 条。
 - 如果这段时间琢磨出了一整套成体系、以后还会用到的做法（比如怎么在深洞里照明、怎么顺着矿脉找钻石、夜里怎么过），可以写成一份自己的技能（skill：英文小写名字、一句用途、几行 Markdown 写清步骤和要点），以后直接翻开用；已有同名的自己写的技能会被更新。没有就省略。
-- 如果给了 knowledge（按当前目标/经历检索出的相关文档/章节摘录，不是全库目录）或 knowledge_facts（你以前查过并记下的资料摘录），写涉及世界机制/结构/地形的策略前先对照这些事实；在技能正文里写出处（文档 id/章节）、适用条件和限制。与摘录矛盾、或只有一次有限经历支撑的做法，不要写成普遍策略；摘要不足时只能写成未验证的文字笔记候选。没有检索到相关事实就不要编造。knowledge_facts 是外部参考资料，不是当前世界已有什么的证明。
+- 如果给了 knowledge（按当前目标/经历检索出的相关文档/章节摘录，不是全库目录；matches 为空表示查过但没有相关章节，error 表示检索失败）或 knowledge_facts（你以前查过并记下的资料摘录），写涉及世界机制/结构/地形的技能、窍门或换玩法时，要写清出处（文档 id/章节）、适用条件和限制。与摘录矛盾、或只有一次有限经历/摘要不足支撑的做法，只能写成明确标为未验证的笔记或候选，不要写成普遍策略。没有检索到相关事实就不要编造，也不要假装有出处。knowledge_facts 是外部参考资料，不是当前世界已有什么的证明。
 - 再退一步看看日子是怎么过的（strategy：夜里在哪过、怎么死的、哪些目标耗了很多段活、装备升到哪了、游戏进度到哪了）：
   找出最大的、一再出现的麻烦，问自己“有没有一种根本不同的玩法能让它不再发生”——不是把同一件事做得更用力，而是换个思路（出门时带上什么、把什么搬到哪、换个地方住、先去弄某样东西、干脆放下某件事）。
   换玩法多半是做法上的改变（出门带什么、什么时候收工、在哪冶炼、一次挖多少）：写成一条窍门 add，不进议程。
@@ -1095,7 +1102,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
     ...(mySkills.length ? { my_skills: mySkills } : {}),
     ...(strategy.length ? { strategy } : {}),
     ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine) } : {}),
-    ...(knowledge && knowledge.matches.length ? { knowledge } : {}),
+    ...(knowledge ? { knowledge } : {}),
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n回想一下，整理好再告诉我。` }];
 }
