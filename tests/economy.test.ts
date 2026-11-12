@@ -1,6 +1,8 @@
 import { expedition, storeItems } from '../src/skills/economy.ts';
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
+import { VoxelMap } from 'curio-minecraft-3d-memory';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { Arbiter, type TaskOutcome } from '../src/arbiter/arbiter.ts';
 import { habitName, learnCandidates, signatureOf } from '../src/brain/habits.ts';
 import { EventBus } from '../src/events.ts';
@@ -8,7 +10,9 @@ import { WorldMemory } from '../src/memory/store.ts';
 import type { Percept } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { ruleProposal } from '../src/planner/plan.ts';
+import { clearMovementSessions } from '../src/skills/movement/session.ts';
 import { pickVariant, resolveItemAlias } from '../src/skills/work.ts';
+import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
 
@@ -30,6 +34,47 @@ const P = (over: Partial<Percept> = {}): Percept => ({
   exploration: { visitedChunks: 3, noveltyByDir: { N: 0.5, NE: 0.5, E: 1, SE: 0.5, S: 0.5, SW: 0.5, W: 0.5, NW: 0.5 }, base: null },
   ...over,
 });
+
+const WORLD = 'fake-world', DIM = 'overworld', SESSION = 'fake-session';
+let sequence = 0;
+
+function fillMap(map: VoxelMap, name: string, cells: Vec3Like[]) {
+  for (const pos of cells) {
+    sequence += 1;
+    map.observe({
+      worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now(), sequence,
+      source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name, properties: {} }, pos,
+    });
+  }
+}
+
+/** 一条沿 +X 的已观测走廊：z∈[-1,1]，y=63 地面、y=64..66 空气。 */
+function expeditionCorridor(maxX: number) {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [], ground: Vec3Like[] = [];
+  for (let x = -1; x <= maxX; x++) for (let z = -1; z <= 1; z++) {
+    for (let y = 64; y <= 66; y++) air.push({ x, y, z });
+    ground.push({ x, y: 63, z });
+  }
+  fillMap(map, 'minecraft:air', air);
+  fillMap(map, 'minecraft:grass_block', ground);
+  return map;
+}
+
+function fakeSpatial(map: VoxelMap) {
+  return {
+    worldId: WORLD,
+    session: { voxel: map, history: { worldId: WORLD, getFragment: () => null, fragments: () => ({ items: [], total: 0 }) } },
+    closing: false, paused: false, observationAdmitted: true,
+    capabilities: () => ({
+      owner: 'host_composed', contract: 'memory-host-contract/2',
+      library: {}, host: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
+      effective: { execute: { walk: true, groundedArrival: true, invalidation: true, cancellation: true } },
+      overclaims: [],
+    }),
+  } as unknown as SharedSpatialSession;
+}
 
 
 test('近处矿点看不到不等于消失：gather 失败，保留尚未重新确认的历史线索', async (t) => {
@@ -241,6 +286,100 @@ test('expedition 带 find 走完没看到：只说路线两侧未知，不断言
   assert.equal(coverage?.unknownBeyond, true);
   assert.ok((coverage?.scans ?? 0) > 0);
   assert.ok(a.pos.x > 90, '走完指定距离才下结论');
+});
+
+/** 一条 x∈[-1,140] 的已观测走廊，在 x=6 处用两格石墙封死；授权 dig 时必须挖穿。 */
+async function sealedWallExpedition(t: TestContext, maxEdits: number, secondWall = false) {
+  clearMovementSessions();
+  const map = expeditionCorridor(140);
+  // 墙的观测要晚于走廊，避免同一毫秒内同格内容矛盾。
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const wall = [...[64, 65].map((y) => ({ x: 6, y, z: 0 })), ...(secondWall ? [64, 65].map((y) => ({ x: 60, y, z: 0 })) : [])];
+  fillMap(map, 'minecraft:stone', wall);
+  // 两侧与头顶封死，绕不过去，只能挖穿墙。
+  const xs = Array.from({ length: 142 }, (_, i) => i - 1);
+  fillMap(map, 'minecraft:stone', xs.flatMap((x) => [-1, 1].flatMap((z) => [63, 64, 65, 66].map((y) => ({ x, y, z })))));
+  fillMap(map, 'minecraft:stone', xs.map((x) => ({ x, y: 66, z: 0 })));
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+  for (const pos of wall) adapter.blocks.push({ name: 'stone', pos });
+  // 真实会话会把挖过的格标成“动作效果待确认”；这里由挖掘钩子直接同步体素，代替视觉刷新。
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  const realDig = adapter.dig.bind(adapter);
+  adapter.dig = async (pos, signal) => {
+    const r = await realDig(pos, signal);
+    if (r.ok) fillMap(map, 'minecraft:air', [pos]);
+    return r;
+  };
+  const validated = expedition.validate({ direction: 'E', distance: 100, dig: true, maxEdits }, adapter);
+  assert.ok(validated.ok);
+  const r = await expedition.run(ctx, validated.args);
+  const edits = (r.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
+  const coverage = r.data?.coverage as { start: Vec3Like; end: Vec3Like; travelled: number } | undefined;
+  return { r, adapter, edits, coverage };
+}
+
+test('expedition 授权 dig：单跳被墙挡住时按已记录体素挖开继续，edits 与 coverage 反映实测进展', async (t) => {
+  const { r, adapter, edits, coverage } = await sealedWallExpedition(t, 8);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(Math.floor(adapter.pos.x) > 6, `挖穿墙继续前进（实测 x=${adapter.pos.x}）`);
+  assert.deepEqual(edits.map((e) => `${e.kind}@${e.pos.x},${e.pos.y},${e.pos.z}`).sort(), ['dig@6,64,0', 'dig@6,65,0']);
+  assert.ok(coverage);
+  assert.deepEqual(coverage.start, { x: 0.5, y: 64, z: 0.5 });
+  assert.ok(coverage.end.x > 6, `coverage.end 是实测终点：${JSON.stringify(coverage.end)}`);
+  assert.ok(coverage.travelled >= 90, `coverage.travelled=${coverage.travelled}`);
+});
+
+test('expedition 施工额度用完后仍继续走普通路线，不把额度耗尽当成方向受阻', async (t) => {
+  const { r, adapter, edits, coverage } = await sealedWallExpedition(t, 2);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(Math.floor(adapter.pos.x) > 6, `挖穿墙后继续走（实测 x=${adapter.pos.x}）`);
+  assert.equal(edits.length, 2, '两处挖开用尽额度');
+  assert.ok(coverage);
+  assert.ok(coverage.travelled >= 90, `额度用完后普通路线仍推进到 ${coverage.travelled} 格`);
+  assert.equal((r.data as { stopReason?: string } | undefined)?.stopReason, undefined);
+});
+
+test('expedition 施工额度用完后遇到新墙：停下并报预算耗尽，不说成没有授权', async (t) => {
+  const { r, edits } = await sealedWallExpedition(t, 2, true);
+  assert.equal(edits.length, 2);
+  const data = r.data as { stopReason?: string; lastHopFailure?: string } | undefined;
+  assert.equal(data?.stopReason, 'MAKE_WAY_BUDGET_EXHAUSTED');
+  assert.ok(data?.lastHopFailure);
+  assert.doesNotMatch(r.summary, /没有授权 dig\/place/);
+  assert.match(r.summary, /最后一次向前单跳没有通过/);
+});
+
+test('expedition place 参数经 make-way 校验进入 args；maxEdits 必须和 dig/place 一起授权', () => {
+  const adapter = new FakeAdapter();
+  const placed = expedition.validate({ direction: 'E', distance: 100, place: 'netherrack', maxEdits: 8 }, adapter);
+  assert.ok(placed.ok);
+  assert.equal(placed.args.place, 'netherrack');
+  assert.equal(placed.args.maxEdits, 8);
+  const noAuth = expedition.validate({ direction: 'E', distance: 100, maxEdits: 8 }, adapter);
+  assert.equal(noAuth.ok, false);
+  if (!noAuth.ok) assert.match(noAuth.error, /maxEdits/);
+});
+
+test('expedition 授权 dig 但没有共享空间 VoxelMap：明确失败，不静默忽略授权也不移动', async (t) => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(adapter);
+  t.after(() => ctx.memory.close());
+  const validated = expedition.validate({ direction: 'E', distance: 100, dig: true }, adapter);
+  assert.ok(validated.ok);
+  const r = await expedition.run(ctx, validated.args);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.failureCode, 'BAD_ARGS');
+  assert.match(r.summary, /没有共享空间 VoxelMap/);
+  assert.equal(adapter.actions.length, 0, '没有静默改走普通移动');
+  const coverage = r.data?.coverage as { start: Vec3Like; end: Vec3Like; travelled: number } | undefined;
+  assert.ok(coverage);
+  assert.deepEqual(coverage.start, { x: 0.5, y: 64, z: 0.5 });
+  assert.deepEqual(coverage.end, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(coverage.travelled, 0);
 });
 
 test('take_items 未指定 target 时，把看见的容器和可复制 target 写进摘要', async (t) => {

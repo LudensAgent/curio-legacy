@@ -2,13 +2,15 @@ import { chestHint } from './chest-hint.ts';
 import { chestLocation, describeChest, describeRecall, isContainerLandmark } from '../memory/chest-memory.ts';
 import type { GuiContainerObservation, InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
-import { shortId, sleep } from '../util.ts';
+import { shortId, sleep, throwIfAborted } from '../util.ts';
 import { findStation, forgetStationAt, rememberStation } from './stations.ts';
 import { interactiveName } from '../perception/vision.ts';
 import { glanceAt } from './observation.ts';
 import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from './types.ts';
 import { FUELS } from '../methods/fuel.ts';
 import { FOOD_VALUE } from './food.ts';
+import { runMovementCoordinator, type MakeWayEdit } from './movement/coordinator.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DEFAULT_EDITS, MAKE_WAY_DOC, makeWayArgs, makeWayRequest, parseMakeWay } from './movement/make-way.ts';
 
 // ===================================================================== 冶炼
 export const SMELTABLE: Record<string, string> = {
@@ -544,10 +546,10 @@ export const farm: Skill<{ crop: string; size: number }> = {
 // ===================================================================== 远征
 /** 远征找方块时沿路线两侧检查的范围（格）；结果只覆盖这个范围，不据此断言世界其它地方没有。 */
 const EXPEDITION_SCAN_RADIUS = 32;
-export const expedition: Skill<{ direction: string; distance: number; find?: string; torches?: boolean; eat_below?: number }> = {
+export const expedition: Skill<{ direction: string; distance: number; find?: string; torches?: boolean; eat_below?: number; dig?: true | string; place?: string; maxEdits?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；可选 find 指定要找的方块，边走边查路线两侧约 32 格，找到就停并报坐标，走完没看到只说明这段路线附近没有（更远处/遮挡后未知，不是“世界上没有”）。路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 navigate_to 沿路标走',
-  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "find"?: "要沿路找的方块（如 log、oak_log、crimson_stem）", "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）}',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；可选 find 指定要找的方块，边走边查路线两侧约 32 格，找到就停并报坐标，走完没看到只说明这段路线附近没有（更远处/遮挡后未知，不是“世界上没有”）。路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 navigate_to 沿路标走。' + MAKE_WAY_DOC + '；dig/place 需要共享空间 VoxelMap，缺失时直接报错且不移动。',
+  argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "find"?: "要沿路找的方块（如 log、oak_log、crimson_stem）", "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）,' + MAKE_WAY_ARGS_DOC + '}',
   timeoutMs: 900000,
   movement: true,
   validate(raw, adapter) {
@@ -560,7 +562,9 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
       if (!wanted || !adapter.resolveBlockNames(wanted).length) return { ok: false, error: `未知方块：${wanted || '（空）'}` };
       find = wanted;
     }
-    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240), ...(find ? { find } : {}), ...(a.torches === true ? { torches: true } : {}), ...(a.eat_below !== undefined ? { eat_below: clampInt(a.eat_below, 2, 19, 12) } : {}) } };
+    const makeWay = parseMakeWay(a);
+    if (!makeWay.ok) return makeWay;
+    return { ok: true, args: { direction: d, distance: clampInt(a.distance, 100, 600, 240), ...(find ? { find } : {}), ...(a.torches === true ? { torches: true } : {}), ...(a.eat_below !== undefined ? { eat_below: clampInt(a.eat_below, 2, 19, 12) } : {}), ...makeWayArgs(makeWay.value) } };
   },
   async run(ctx, args) {
     const { adapter, memory, signal } = ctx;
@@ -577,6 +581,16 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
       scans: 0, mode: 'known_sightings_along_route' as const, unknownBeyond: true as const,
       found: null as null | { name: string; pos: Vec3Like; dist: number },
     };
+    // 显式授权的开路参数：没有 dig/place 时保持原有 adapter.moveTo 单跳，不改变既有行为。
+    const making = args.dig !== undefined || args.place !== undefined;
+    const editBudget = args.maxEdits ?? MAKE_WAY_DEFAULT_EDITS;
+    // 已校验过一次的开路授权；每跳只换本次剩余额度，不再重复 parseMakeWay。
+    const makeWayBase = making ? makeWayRequest(args).makeWay : undefined;
+    const makeWayEdits: MakeWayEdit[] = [];
+    const resultData = (extra: Record<string, unknown>) => ({
+      ...extra, coverage,
+      ...(making ? { makeWay: { edits: makeWayEdits, editsUsed: makeWayEdits.length, maxEdits: editBudget } } : {}),
+    });
     const scan = () => {
       if (!targets.length) return null;
       ctx.senses.refresh();
@@ -585,60 +599,138 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
     };
     const discover = (hit: { name: string; pos: Vec3Like; dist: number }) => {
       coverage.found = { name: hit.name, pos: { ...hit.pos }, dist: hit.dist };
-      return ok(`远征向 ${args.direction} 走了 ${coverage.travelled} 格，在路线附近发现 ${hit.name} 于 (${hit.pos.x},${hit.pos.y},${hit.pos.z})（约 ${hit.dist} 格外）；已停在发现处，去不去挖由你决定`, {
-        travelled: coverage.travelled, found: { ...coverage.found }, coverage, direction: args.direction,
-      });
+      return ok(`远征向 ${args.direction} 走了 ${coverage.travelled} 格，在路线附近发现 ${hit.name} 于 (${hit.pos.x},${hit.pos.y},${hit.pos.z})（约 ${hit.dist} 格外）；已停在发现处，去不去挖由你决定`, resultData({
+        travelled: coverage.travelled, found: { ...coverage.found }, direction: args.direction,
+      }));
     };
+    // 开路只在有共享空间体素时能做：没有地图却接受 dig/place 等于静默忽略授权，必须明确交回。
+    if (making && ctx.spatial?.session?.voxel === undefined) {
+      return fail('BAD_ARGS', `远征请求了 ${args.dig !== undefined ? 'dig' : ''}${args.dig !== undefined && args.place !== undefined ? '/' : ''}${args.place !== undefined ? 'place' : ''}，但当前没有共享空间 VoxelMap，无法按已记录体素代为开路；没有移动。去掉 dig/place 可继续普通移动，或等共享空间接好后重试`, resultData({ travelled: 0, found: null, direction: args.direction, noSharedMap: true }));
+    }
     if (targets.length) {
       const atStart = scan();
       if (atStart) return discover(atStart);
     }
     let travelled = 0, waypoints = 0, failures = 0, blocked = false;
+    let lastHopFailure: string | undefined, stopReason: string | undefined, terminalFailure: string | undefined;
     const chunks0 = memory.visitedChunkCount;
+    // 单跳：没有 dig/place 时就是原来的 xz 移动；授权开路时交给同一个协调器，
+    // 用 navigate 意图走向这一跳的终点，普通路线走不通才按 make-way 挖开/补支撑。
+    const hopOnce = async (x: number, z: number): Promise<{ failure?: string; stopReason?: string; terminal?: string }> => {
+      if (!making) {
+        try {
+          await adapter.moveTo({ kind: 'xz', x, z, range: 6 }, { signal, timeoutMs: 60000 });
+          return {};
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          return { failure: (e as Error).message };
+        }
+      }
+      // 施工额度用完后仍可继续走普通路线；只是不再授权新的挖/放。
+      const remaining = editBudget - makeWayEdits.length;
+      const hopDeadline = Math.min(ctx.deadline, Date.now() + 60000);
+      const outcome = await runMovementCoordinator({ ...ctx, deadline: hopDeadline }, {
+        intent: {
+          kind: 'navigate',
+          to: { x: Math.floor(x), y: Math.floor(adapter.state().pos.y), z: Math.floor(z) },
+          targetKind: 'cell', arrival: { radius: 6, metric: 'horizontal' },
+          allowed: ['walk', 'step', 'drop', 'jump'], historical: true,
+        },
+        rolling: true,
+        maxSegments: 4, maxStepsPerSegment: 32,
+        maxTransitions: 256, invocationMaxTransitions: 96,
+        maxSearches: 32, maxObservations: 16, maxObservedCells: 1024, maxNoProgressSegments: 4,
+        allowUnknownCorridor: false,
+        ...(makeWayBase === undefined ? {} : { makeWay: { ...makeWayBase, maxEdits: Math.max(0, remaining) } }),
+        makeWayAvailable: true,
+      });
+      // 连接/维度/忙碌这类前置失败不是局部阻挡，不能再用普通 moveTo 绕行重试。
+      if (!outcome.ok) return { failure: outcome.summary, terminal: outcome.failureCode };
+      if (outcome.makeWay !== undefined) makeWayEdits.push(...outcome.makeWay.edits);
+      // 取消/挂起必须照原样向上抛，不能把“身体被借走”算成这一跳的局部阻挡。
+      if (outcome.status === 'cancelled') { throwIfAborted(signal); return { failure: `这一跳被取消：${outcome.summary}` }; }
+      if (outcome.status === 'succeeded') return {};
+      // 施工额度在协调器内部耗尽：立即停下交回，不再用普通 moveTo 绕行重试。
+      return {
+        failure: outcome.summary,
+        ...(outcome.stop.reason === 'MAKE_WAY_BUDGET_EXHAUSTED' ? { stopReason: 'MAKE_WAY_BUDGET_EXHAUSTED' } : {}),
+      };
+    };
     while (travelled < args.distance && Date.now() < ctx.deadline - 5000) {
       // 有目标时缩短单跳，保证每次扫描的 32 格范围有重叠，不会从两跳之间漏过去。
       const hop = Math.min(targets.length ? 24 : 48, args.distance - travelled);
       const p = adapter.state().pos;
-      try {
-        await adapter.moveTo({ kind: 'xz', x: p.x + dx * hop, z: p.z + dz * hop, range: 6 }, { signal, timeoutMs: 60000 });
-        failures = 0;
-      } catch (e) {
-        if (isAbort(e)) throw e;
-        if (++failures >= 3) { blocked = true; break; }
-        // 绕一下：斜着走一段
-        const side = failures % 2 ? 1 : -1;
-        await adapter.moveTo({ kind: 'xz', x: p.x - dz * side * 16, z: p.z + dx * side * 16, range: 4 }, { signal, timeoutMs: 20000 }).catch((er) => { if (isAbort(er)) throw er; });
-      }
-      const now = adapter.state();
-      travelled = Math.round(Math.hypot(now.pos.x - start.x, now.pos.z - start.z));
+      const before = travelled;
+      const attempt = await hopOnce(p.x + dx * hop, p.z + dz * hop);
+      const afterHop = adapter.state();
+      travelled = Math.round(Math.hypot(afterHop.pos.x - start.x, afterHop.pos.z - start.z));
       coverage.travelled = travelled;
-      coverage.end = { ...now.pos };
+      coverage.end = { ...afterHop.pos };
+      if (attempt.terminal !== undefined) { lastHopFailure = attempt.failure; terminalFailure = attempt.terminal; blocked = true; stopReason = attempt.terminal; break; }
+      let settled = afterHop;
+      if (travelled > before) {
+        // 只要实测前进了，这一跳即使没到目标也不算失败；下一跳从新位置重规划。
+        failures = 0;
+        lastHopFailure = attempt.failure;
+      } else if (attempt.failure === undefined && travelled >= args.distance - 6) {
+        // 协调器到达半径内的最后一小段：不再斜走绕行，直接收工报告实测位置。
+        lastHopFailure = undefined;
+        break;
+      } else {
+        lastHopFailure = attempt.failure ?? `这一跳结束时实测位置没有向前推进（${before} → ${travelled} 格）`;
+        // 施工额度耗尽且没有推进：停下交回；如果已经推进，下一跳可以走普通路线继续。
+        if (attempt.stopReason !== undefined) { blocked = true; stopReason = attempt.stopReason; break; }
+        if (++failures >= 3) { blocked = true; stopReason = attempt.failure !== undefined ? 'BLOCKED' : 'NO_PROGRESS'; break; }
+        // 绕一下：斜着走一段（沿用原来的成败交替方向）
+        const side = failures % 2 === 0 ? 1 : -1;
+        await adapter.moveTo({ kind: 'xz', x: p.x - dz * side * 16, z: p.z + dx * side * 16, range: 4 }, { signal, timeoutMs: 20000 }).catch((er) => { if (isAbort(er)) throw er; });
+        settled = adapter.state();
+        travelled = Math.round(Math.hypot(settled.pos.x - start.x, settled.pos.z - start.z));
+        coverage.travelled = travelled;
+        coverage.end = { ...settled.pos };
+      }
       const hit = scan();
       if (hit) return discover(hit);
       if (travelled >= (waypoints + 1) * 64) {
         waypoints++;
-        memory.addLandmark('waypoint', `路标 ${args.direction}-${waypoints}`, now.dim, now.pos, 8);
-        if (args.torches && now.inventory.some((i) => i.name === 'torch')) {
-          const x = Math.floor(now.pos.x), y = Math.floor(now.pos.y), z = Math.floor(now.pos.z);
+        memory.addLandmark('waypoint', `路标 ${args.direction}-${waypoints}`, settled.dim, settled.pos, 8);
+        if (args.torches && settled.inventory.some((i) => i.name === 'torch')) {
+          const x = Math.floor(settled.pos.x), y = Math.floor(settled.pos.y), z = Math.floor(settled.pos.z);
           await adapter.placeBlockAt({ x: x + 1, y, z }, ['torch'], signal).catch((er) => { if (isAbort(er)) throw er; });
         }
       }
-      if (args.eat_below && now.food <= args.eat_below && adapter.hasFood()) await adapter.eat(signal).catch((er) => { if (isAbort(er)) throw er; });
-      if (now.hp <= 8) { blocked = true; break; }
+      if (args.eat_below && settled.food <= args.eat_below && adapter.hasFood()) await adapter.eat(signal).catch((er) => { if (isAbort(er)) throw er; });
+      if (settled.hp <= 8) { blocked = true; stopReason = 'BLOCKED'; break; }
       ctx.progress(travelled / args.distance, `远征 ${args.direction}：${travelled}/${args.distance} 格，路标 ${waypoints}`);
       await sleep(50, signal);
     }
     const newChunks = memory.visitedChunkCount - chunks0;
     const foodNow = adapter.state().inventory.filter((i) => FOOD_VALUE[i.name]).reduce((n, i) => n + i.count, 0);
     const foodText = `；食物 出发时 ${food} 个、现在 ${foodNow} 个`;
+    // 停下的原因只说明这一跳/这段路线，不能说成整个方向不可通行。
+    const localFact = lastHopFailure === undefined ? ''
+      : terminalFailure !== undefined
+        ? `；这次远征因前置条件失败停下（${terminalFailure}）：${lastHopFailure}`
+        : `；最后一次向前单跳没有通过（局部阻挡/单跳失败，不代表整个 ${args.direction} 方向不可通行）：${lastHopFailure}`;
+    const stopLabel = terminalFailure !== undefined ? '（前置失败）' : blocked ? '（中途受阻）' : '';
+    const editText = making ? `；本次远征累计施工改动 ${makeWayEdits.length}/${editBudget}` : '';
+    const stopFacts = {
+      ...(blocked ? { blocked: true, stopReason: stopReason ?? 'BLOCKED' } : {}),
+      ...(terminalFailure === undefined ? {} : { terminalFailure }),
+      ...(lastHopFailure === undefined ? {} : { lastHopFailure }),
+    };
     if (targets.length) {
-      const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${blocked ? '（中途受阻）' : ''}${foodText}`;
-      const data = { travelled, found: null, coverage, direction: args.direction, ...(blocked ? { blocked: true, stopReason: 'BLOCKED' } : {}) };
-      return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', msg, data);
+      const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${stopLabel}${foodText}${editText}${localFact}`;
+      const data = resultData({ travelled, found: null, direction: args.direction, ...stopFacts });
+      return travelled >= args.distance * 0.5
+        ? ok(msg, data)
+        : fail('PATH_NOT_FOUND', `${msg}${blocked ? '' : `；这次只走到这里，不代表整个 ${args.direction} 方向不可通行`}`, data);
     }
-    const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标${foodText}`;
+    const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标${foodText}${editText}${localFact}`;
     // 没有 find 的远征也要带回起点/终点，供出行账记录实测推进；不改变远征行为。
-    const data = { travelled, coverage, direction: args.direction, ...(blocked ? { blocked: true, stopReason: 'BLOCKED' } : {}) };
-    return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', `${msg}（中途受阻）`, data);
+    const data = resultData({ travelled, direction: args.direction, ...stopFacts });
+    return travelled >= args.distance * 0.5
+      ? ok(msg, data)
+      : fail('PATH_NOT_FOUND', `${msg}${blocked ? '' : `（只走到这里，不代表整个 ${args.direction} 方向不可通行）`}`, data);
   },
 };
