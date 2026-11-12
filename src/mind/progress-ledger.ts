@@ -25,8 +25,6 @@ export type ProgressEntry = {
     repeatVisits: number;
     /** Bounded chunk keys already visited for this target. */
     regions: ProgressRegion[];
-    /** Last activity's end region: continuing from there is not a revisit. */
-    lastEndRegion?: ProgressRegion;
   };
   movement: {
     /** Sum of measured activity start→end horizontal displacement; not total route length. */
@@ -109,7 +107,7 @@ const emptyEntry = (input: ProgressInput): ProgressEntry => ({
   spatial: {
     newChunks: 0, visitedCells: 0, farthest: 0, farthestByDim: {},
     originByDim: { [input.dim]: { ...input.start } }, repeatVisits: 0,
-    regions: [regionOf(input.dim, input.start)], lastEndRegion: regionOf(input.dim, input.start),
+    regions: [regionOf(input.dim, input.start)],
   },
   movement: { pathLength: 0, netDisplacement: 0, activities: 0 },
   execution: { completed: 0, attempted: 0, blocked: 0, interrupted: 0, reasons: {} },
@@ -123,8 +121,9 @@ export function applyProgress(ledger: ProgressLedger, input: ProgressInput): Pro
   const previous = ledger.entries[input.targetId] ?? emptyEntry(input);
   const region = regionOf(input.dim, input.end);
   const startRegion = regionOf(input.dim, input.start);
-  // 接着上一段结束的位置继续不算重复到访；从别处走回旧区块才算。
-  const repeated = previous.spatial.regions.includes(region) && previous.spatial.lastEndRegion !== startRegion;
+  // 终点回到一个已到过的区块、且不是在本区块内原地活动，才算重复到访。
+  // 只看端点无法识别“同一段活动里绕回旧区块”，但跨活动的 A→B→A 会被记到。
+  const repeated = previous.spatial.regions.includes(region) && region !== startRegion;
   const regions = [...new Set([...previous.spatial.regions, startRegion, region])].slice(-512);
   const origin = previous.spatial.originByDim[input.dim] ?? { ...input.start };
   const farthest = Math.max(previous.spatial.farthestByDim[input.dim] ?? 0, flatDistance(origin, input.end), flatDistance(origin, input.start));
@@ -160,7 +159,7 @@ export function applyProgress(ledger: ProgressLedger, input: ProgressInput): Pro
       farthest: Math.max(previous.spatial.farthest, farthest),
       farthestByDim, originByDim: { ...previous.spatial.originByDim, [input.dim]: origin },
       repeatVisits: previous.spatial.repeatVisits + (repeated ? 1 : 0),
-      regions, lastEndRegion: region,
+      regions,
     },
     movement: {
       pathLength: previous.movement.pathLength + flatDistance(input.start, input.end),

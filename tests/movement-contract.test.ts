@@ -4,7 +4,7 @@ import type { LandSearchStatus } from '../src/spatial/land-search.ts';
 import type { SegmentOutcome } from '../src/skills/movement/segment.ts';
 import type { StopReason } from '../src/skills/movement/session.ts';
 import {
-  movementFailureOfError, movementFailureOfSearch, movementFailureOfSegment, movementFailureOfStop,
+  failureCodeOfMovement, movementFailureOfError, movementFailureOfSearch, movementFailureOfSegment, movementFailureOfStop,
 } from '../src/skills/movement/contract.ts';
 
 test('搜索终态映射：证据缺口、几何无路、预算、取消分开', () => {
@@ -94,4 +94,14 @@ test('身体控制错误只按已知形状分类，未知保持 UNKNOWN', () => 
   assert.equal(movementFailureOfError(new Error('PORTAL_CELL: 目标站位是下界传送门')), 'DELEGATION_RESTRICTION');
   assert.equal(movementFailureOfError(Object.assign(new Error('cancelled'), { name: 'AbortedError' })), 'CANCELLED');
   assert.equal(movementFailureOfError(new Error('something unexpected')), 'UNKNOWN');
+});
+
+test('真实回执边界用统一分类：预算、冲突、驻留不再各自折叠', () => {
+  const code = (reason: StopReason) => failureCodeOfMovement(movementFailureOfStop(reason)!);
+  assert.equal(code('BUDGET_EXHAUSTED'), 'TIMEOUT', '旧 FailureCode 只有 TIMEOUT 能表达预算；精确原因保留在 stop.failure');
+  assert.equal(code('CONFLICT'), 'PATH_NOT_FOUND');
+  assert.equal(code('RESIDENCY_NOT_READY'), 'PATH_NOT_FOUND');
+  assert.equal(code('PHYSICAL_FAILURE'), 'EFFECT_NOT_CONFIRMED');
+  assert.equal(code('SCOPE_CHANGED'), 'WRONG_DIMENSION');
+  assert.equal(failureCodeOfMovement('NO_PATH_EVIDENCE'), 'NOT_FOUND');
 });

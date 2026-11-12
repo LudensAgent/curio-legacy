@@ -114,6 +114,8 @@ export interface MovementProgress {
 
 export interface StopReceipt {
   reason: StopReason;
+  /** 统一错误分类；与 reason 同时出现在真实回执里，调用方不必自己猜。 */
+  failure?: import('./contract.ts').MovementFailure;
   at: number;
   detail: string;
   blocker?: unknown;

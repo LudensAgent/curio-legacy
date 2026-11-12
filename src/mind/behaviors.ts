@@ -360,6 +360,16 @@ export class BehaviorEngine {
 
   list(trial = false): Behavior[] { return [...(trial ? this.candidates : this.behaviors).values()].sort((a, b) => b.priority - a.priority || a.name.localeCompare(b.name)); }
   get(name: string, trial = false): Behavior | undefined { return trial ? this.candidates.get(name) : this.behaviors.get(name); }
+
+  /**
+   * 这个技能当前的 when 是否成立。没有 when 的手动/知识技能不拦；
+   * 自动展开全文前用它核对适用条件，避免只凭关键词就把正文塞进提示词。
+   */
+  conditionHolds(name: string, cur: TaskInfo | null): boolean {
+    const b = this.get(name) ?? this.get(name, true);
+    if (!b?.when) return true;
+    try { return evalPredicate(b.when, this.sense(cur)); } catch { return false; }
+  }
   statsOf(name: string): BehaviorStats | undefined { return this.stats[name]; }
   enabled(b: Behavior): boolean { return !b.candidate && !this.inactive(b.name); }
   candidateRetirement(name: string) {

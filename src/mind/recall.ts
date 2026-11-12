@@ -12,7 +12,12 @@ import { recallText } from '../memory/recollection.ts';
  * 不依赖外部服务：在日记、做过的事、窍门、游戏教训、技能书和记得的地方里，按关键词重叠 + 新近程度挑出最相关的几条。
  * 每次思考前自动想一遍（结果放进提示词）；模型也可以主动 {"kind":"recall","query":"…"} 再想。
  */
-export interface Recalled { kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note' | 'ledger'; text: string; score: number; ref?: string; at?: number; worldId?: string; dimension?: string; source?: string }
+export interface Recalled {
+  kind: 'experience' | 'diary' | 'know_how' | 'lesson' | 'skill' | 'place' | 'note' | 'ledger';
+  text: string; score: number; ref?: string; at?: number; worldId?: string; dimension?: string; source?: string;
+  /** 这条是因为当前目标、当前执行缺口，还是历史经历被想起。 */
+  match?: 'current_goal' | 'execution_gap' | 'historical';
+}
 
 export interface RecallSources { self: SelfModel; memory: WorldMemory; book?: SkillBook | null; extraSkills?: { name: string; text: string }[]; ledger?: LedgerView | null }
 
@@ -21,9 +26,19 @@ const ago = (at: number, now: number) => {
   return m < 1 ? '刚才' : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
 };
 
-export function recallLocal(query: string, src: RecallSources, opts: { n?: number; exclude?: Recalled['kind'][]; excludeRefs?: string[]; now?: number } = {}): Recalled[] {
+export function recallLocal(query: string, src: RecallSources, opts: {
+  n?: number; exclude?: Recalled['kind'][]; excludeRefs?: string[]; now?: number;
+  /** 当前目标与执行缺口的独立关键词：用于标注匹配来源，不改变主要相关度分数。 */
+  goal?: string; gap?: string;
+} = {}): Recalled[] {
   const q = keywords(query);
   if (!q.size) return [];
+  const goalKeys = keywords(opts.goal ?? ''), gapKeys = keywords(opts.gap ?? '');
+  const overlapCount = (a: Set<string>, b: Set<string>) => { let n = 0; for (const w of a) if (b.has(w)) n++; return n; };
+  const matchOf = (text: string): Recalled['match'] => {
+    const k = keywords(text);
+    return overlapCount(k, goalKeys) > 0 ? 'current_goal' : overlapCount(k, gapKeys) > 0 ? 'execution_gap' : 'historical';
+  };
   const now = opts.now ?? Date.now();
   const skip = new Set(opts.exclude ?? []);
   const out: Recalled[] = [];
@@ -40,7 +55,7 @@ export function recallLocal(query: string, src: RecallSources, opts: { n?: numbe
   const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => {
     if (r.ref && hide.has(r.ref)) return;
     const observedAt = ['know_how', 'lesson', 'diary'].includes(r.kind) || r.kind === 'note' && r.source !== 'note:fact' ? 0 : at || undefined;
-    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, text: r.kind === 'skill' ? r.text : recallText(r.text, src.memory, r.dimension, observedAt, now), score: base + fresh(at), ...(at ? { at } : {}) });
+    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, text: r.kind === 'skill' ? r.text : recallText(r.text, src.memory, r.dimension, observedAt, now), score: base + fresh(at), match: matchOf(r.text), ...(at ? { at } : {}) });
   };
 
   if (!skip.has('experience')) for (const r of src.self.history(60)) {

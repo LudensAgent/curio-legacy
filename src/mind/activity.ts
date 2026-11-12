@@ -264,6 +264,8 @@ function confirmedSegmentsOf(data: Record<string, unknown>): number {
 function adoptDestination(nav: NavigationProgress, target: NavPoint) {
   nav.destination = { ...target };
   nav.remaining = [{ ...target }];
+  // 目标坐标记下采用时的作用域；之后换维/换会话只更新执行 scope，不改写原目标所属维度。
+  nav.destinationScope = { worldId: nav.worldId, dim: nav.dim };
 }
 
 /** 已退役的 route handle 不再产生失效报告；只认回执顶层明确给出的失效原因。 */
@@ -947,14 +949,23 @@ const RESOURCE_WORDS = /木料|原木|木板|木棍|菌柄|木头|矿石|铁|煤
 const SEARCH_SKILLS = new Set(['look_around', 'gather', 'forage', 'hunt', 'fish', 'find_item', 'expedition']);
 const SEARCH_WORDS = /找|搜索|搜寻|探|扫|环顾|查看|look|search|explore|scout/i;
 
-/** 标题里常见的资源词到目标类别；只影响回执归因，不参与动作选择。 */
+/** 只有这些动作的参数是在“要拿到/找到某物”；放置、装备、使用物品的参数是耗材或持物。 */
+const ACQUISITION_ARGS: Readonly<Record<string, readonly ('item' | 'block' | 'find' | 'for' | 'name')[]>> = {
+  gather: ['item', 'block'], forage: ['item', 'block'], hunt: ['item', 'name'], fish: ['item'],
+  farm: ['item', 'block'], take_items: ['item'], craft: ['item'], smelt: ['item'],
+  find_item: ['item'], look_around: ['for'], expedition: ['find'], mine_cell: ['block'],
+};
+const ACQUISITION_SKILLS = new Set(Object.keys(ACQUISITION_ARGS));
+/** 只消耗/放置而不取得资源的动作：标题里的材料词是耗材，不是目标。 */
+const CONSUMING_SKILLS = new Set(['place_cell', 'place_support', 'pillar_one', 'equip', 'use_item', 'eat', 'store_items', 'drop_item', 'toss_item']);
+/** 标题里常见的资源词到目标类别；只在活动确有“取得/寻找”动作时使用。 */
 const TEXT_RESOURCE_TARGETS: readonly (readonly [RegExp, string])[] = [
   [/原木|木头|木料|菌柄|log|wood/i, 'log'], [/木板|plank/i, 'plank'], [/木棍|stick/i, 'stick'],
   [/铁|iron/i, 'iron'], [/煤|coal/i, 'coal'], [/钻石|diamond/i, 'diamond'], [/金|gold/i, 'gold'], [/铜|copper/i, 'copper'],
   [/圆石|cobblestone/i, 'cobblestone'], [/石头|stone/i, 'stone'],
 ];
 
-/** 活动明确点名要的资源；来自收工条件、步骤参数和标题里的资源词。 */
+/** 活动明确点名要的资源；只读取得/寻找类动作的参数，不把耗材或交互对象当目标。 */
 function resourceTargetsOf(a: Activity): string[] {
   const targets = new Set<string>();
   const add = (value: unknown) => {
@@ -964,11 +975,12 @@ function resourceTargetsOf(a: Activity): string[] {
   };
   if (a.doneWhen?.type === 'inventory_min') add(a.doneWhen.item);
   if (a.doneWhen?.type === 'exploration') add(a.doneWhen.find);
-  // 标题里点名的常见资源只转成类别目标；不替 Agent 补充它没说的东西。
-  for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
+  const acquires = a.steps.some((step) => ACQUISITION_SKILLS.has(step.skill));
+  // 标题里的资源词只在确有取得/寻找动作时才算目标；纯放置/消耗活动不补目标。
+  if (acquires) for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
   for (const step of a.steps) {
     const args = step.args as Record<string, unknown> | undefined;
-    for (const key of ['item', 'block', 'find', 'target', 'name', 'for'] as const) {
+    for (const key of ACQUISITION_ARGS[step.skill] ?? []) {
       const value = args?.[key];
       if (Array.isArray(value)) value.forEach(add);
       else add(value);
@@ -977,8 +989,9 @@ function resourceTargetsOf(a: Activity): string[] {
   return [...targets];
 }
 function resourceIntentOf(a: Activity, targets: readonly string[]): boolean {
+  const consumingOnly = a.steps.length > 0 && a.steps.every((step) => CONSUMING_SKILLS.has(step.skill));
   return targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill))
-    || RESOURCE_WORDS.test(a.what);
+    || !consumingOnly && RESOURCE_WORDS.test(a.what);
 }
 
 function searchIntentOf(a: Activity): boolean {
@@ -999,6 +1012,17 @@ export function planCoverageGap(a: Activity): string | null {
   });
   if (!travelIntent || changesPosition) return null;
   return '目标需要走到/换地方/扩大观察范围，但步骤里没有会实际移动身体的动作；只转头、观察或采集不会改变位置，不能当作远行或远处搜索';
+}
+
+/** 进展信号：取得点名目标、真正看见搜索目标、新区块、清单勾项或出行前沿。
+ *  背包里多了副产物（开路的下界岩等）不在这里算进展。 */
+export function progressSignals(record: {
+  resource?: { acquired?: boolean | null; intent?: boolean; located?: boolean; goalIncomplete?: boolean };
+  exploration?: { found?: readonly string[] };
+}, opts: { newChunks: boolean; planAdvanced: boolean; frontierAdvanced: boolean }) {
+  const acquiredTarget = record.resource?.acquired === true;
+  const observedTarget = (record.exploration?.found?.length ?? 0) > 0;
+  return { acquiredTarget, observedTarget, progressed: acquiredTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced };
 }
 
 /** 从每步执行回执的实测位置算覆盖；没有回执的位置不猜。 */
@@ -1114,6 +1138,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
     ...(a.outcomeId ? { outcomeId: a.outcomeId } : {}), ...(a.methodId ? { methodId: a.methodId } : {}),
     ...(a.navigation ? { navigation: {
       ...(a.navigation.destination ? { destination: { ...a.navigation.destination } } : {}),
+      ...(a.navigation.destinationScope ? { destinationScope: { ...a.navigation.destinationScope } } : {}),
       dim: a.navigation.dim, completedSegments: a.navigation.completedSegments,
       remaining: a.navigation.remaining.map((p) => ({ ...p })), phase: a.navigation.phase,
       ...(a.navigation.lastInvalidation ? { lastInvalidation: a.navigation.lastInvalidation.reason } : {}),
@@ -1199,7 +1224,8 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     running_step: `${running.skill} ${argsLabel({ skill: running.skill, args: running.args })}`,
     ...(a.navigation ? {
       confirmed_navigation_segments: a.navigation.completedSegments,
-      measured_pos: a.navigation.measured.pos,
+      // 当前站位取实时身体状态；navigation.measured 可能还停在派发起点。
+      measured_pos: { x: state.pos.x, y: state.pos.y, z: state.pos.z },
       remaining_targets: a.navigation.remaining.length,
     } : {}),
     partial_progress_recorded: true,

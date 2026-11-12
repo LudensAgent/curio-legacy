@@ -60,13 +60,15 @@ test('中断记录保留原导航目标/维度/已确认段，不保留可复用
   const a = walking();
   a.navigation = {
     delegationId: a.id, worldId: 'w', dim: 'overworld', measured: { pos: { x: 0.5, y: 64, z: -63.34 }, at: Date.now() },
-    destination: { x: 0, y: 64, z: -96 }, completedSegments: 2,
+    destination: { x: 0, y: 64, z: -96 }, destinationScope: { worldId: 'w', dim: 'overworld' },
+    completedSegments: 2,
     remaining: [{ x: 0, y: 64, z: -64 }, { x: 0, y: 64, z: -96 }],
     lastInvalidation: { at: Date.now(), reason: '死了' }, phase: 'failed', updatedAt: Date.now(),
   };
   const record = recordOf(a, 'interrupted', '死了', state());
   assert.equal(record.navigation?.dim, 'overworld');
   assert.deepEqual(record.navigation?.destination, { x: 0, y: 64, z: -96 });
+  assert.deepEqual(record.navigation?.destinationScope, { worldId: 'w', dim: 'overworld' }, '原目标作用域单独保存');
   assert.equal(record.navigation?.completedSegments, 2);
   assert.equal(record.navigation?.remaining.length, 2);
   assert.equal(record.navigation?.lastInvalidation, '死了');

@@ -40,7 +40,7 @@ test('换活动名/做法不清目标趋势：空间与最远点累计到同一�
 test('重复到访按区块累计，但副产物不会清空间趋势', () => {
   const first = applyProgress(emptyProgressLedger(), base({ gained: { netherrack: 6 }, targets: [] }));
   const second = applyProgress(first, base({
-    at: Date.parse('2026-01-01T00:20:00Z'), start: { x: 1.5, y: 64, z: 1.5 }, end: { x: 2.5, y: 64, z: 2.5 },
+    at: Date.parse('2026-01-01T00:20:00Z'), start: { x: 20.5, y: 64, z: 1.5 }, end: { x: 2.5, y: 64, z: 2.5 },
     summary: '又走回同一条旧巷', newChunks: 0, gained: { netherrack: 9 }, targets: [],
   }));
   const entry = second.entries.po_fort!;
@@ -89,4 +89,14 @@ test('提示词只投影当前目标摘要；详情留在按需查询的账本�
   assert.match(user.content, /net_displacement/);
   assert.doesNotMatch(user.content, /"regions"/, '摘要不展开逐区块历史');
   assert.ok(self.progressLedger(outcomeId)?.spatial.regions.length, '详情账本仍可按需查');
+});
+
+test('A→B→A 的往返按真实回程记重复到访，而不是只看连续前进', () => {
+  const at = (x: number) => ({ x, y: 64, z: 0.5 });
+  let ledger = applyProgress(emptyProgressLedger(), base({ targetId: 'po_lane', start: at(0.5), end: at(32.5), gained: {}, targets: [] }));
+  ledger = applyProgress(ledger, base({ targetId: 'po_lane', at: Date.parse('2026-01-01T00:10:00Z'), start: at(32.5), end: at(0.5), gained: {}, targets: [] }));
+  ledger = applyProgress(ledger, base({ targetId: 'po_lane', at: Date.parse('2026-01-01T00:20:00Z'), start: at(0.5), end: at(32.5), gained: {}, targets: [] }));
+  const entry = ledger.entries.po_lane!;
+  assert.equal(entry.spatial.repeatVisits, 2, '每次走回已到过的区块都记一次');
+  assert.equal(entry.movement.activities, 3);
 });

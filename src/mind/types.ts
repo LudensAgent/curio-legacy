@@ -67,6 +67,8 @@ export interface NavigationProgress {
   completedSegments: number;
   /** 当前计划的剩余目标；只保留这一条路线，不保留已走历史。 */
   remaining: { x: number; y: number; z: number }[];
+  /** 目标坐标所属作用域；与当前执行 scope 分开，换维后仍保留原目标维度。 */
+  destinationScope?: { worldId: string; dim: string };
   /** 父委托的期限快照，来自现有 beginStep/stepExpiry 账本；这里只读展示，不另设预算。 */
   parentDeadlineMs?: number;
   /** 最后确认经过的位置。 */
@@ -110,6 +112,8 @@ export interface Activity {
   /** 这段活推进的计划成果/做法（po_… / pm_…）；结束时把尝试与停因记到对应账上。 */
   outcomeId?: string;
   methodId?: string;
+  /** 开工时所属的主目标（议程 id）；计划换掉后不能把旧活动记到新计划上。 */
+  planAgendaId?: string;
   source: 'llm' | 'rule' | 'habit';
   monologue: string;
   startedAt: number;
@@ -198,14 +202,17 @@ export interface ActivityRecord {
   /** 最近一次采集回执的历史快照（不代表当前背包）；供活动结束后的最近记录与回想使用。 */
   collection?: CollectionRecord;
   /** 实测探索覆盖：位置来自每步回执，不来自活动标题。 */
-  exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean };
+  exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean; found: string[]; blocked: boolean };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
   /** 这段活关联的计划成果/做法（po_… / pm_…）；旧记录没有该字段时不猜。 */
   outcomeId?: string; methodId?: string;
   /** 导航委托中断时的目标/维度/已确认段快照；route handle 已作废，下一段必须从实测位置重规划。 */
   navigation?: {
-    destination?: { x: number; y: number; z: number }; dim: string; completedSegments: number;
+    destination?: { x: number; y: number; z: number };
+    /** 目标坐标所属的原始作用域；`dim` 是中断时身体所在的作用域，两者分开。 */
+    destinationScope?: { worldId: string; dim: string };
+    dim: string; completedSegments: number;
     remaining: { x: number; y: number; z: number }[]; phase: NavigationPhase; lastInvalidation?: string;
   };
   /** 这段活显式关联的窍门（k_…）；用于把后续实际应用交给对应经验的证据账。 */

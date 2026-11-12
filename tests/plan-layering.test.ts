@@ -93,3 +93,27 @@ test('尝试账只随明确关联的记录写入，且最多保留 40 条', () =
   assert.equal(after.methods!.find((m) => m.id === methodId)!.attempts, 45, '计数不因保留上限丢历史');
   assert.equal(after.methods!.find((m) => m.id === methodId)!.stopReasons.BUDGET, 45);
 });
+
+test('单独停用做法会生效；重新列入旧做法恢复 active 并保留尝试账', () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('找到下界要塞', ['找到下界要塞'], [null], { methods: [{ text: '沿北向开巷', outcome: 0 }] })!;
+  const id = plan.methods![0]!.id;
+  self.recordPlanAttempt({ methodId: id, outcomeId: plan.steps[0]!.id, whatHappened: '开了一段', whyStopped: 'BLOCKED' });
+  self.updatePlanMethods(undefined, [id]);
+  assert.equal(self.plan()!.methods!.find((m) => m.id === id)!.status, 'dropped');
+  self.updatePlanMethods([{ text: '沿北向开巷', outcome: 0 }]);
+  const restored = self.plan()!.methods!.find((m) => m.id === id)!;
+  assert.equal(restored.status, 'active', '重新列入就是重新启用');
+  assert.equal(restored.attempts, 1, '历史尝试不丢');
+});
+
+test('只改做法时 focus 指向别的主目标会被拒绝，不污染新计划', () => {
+  const self = new SelfModel(null);
+  const a = self.setPlan('找到下界要塞', ['找到下界要塞'], [null], { methods: [{ text: '沿北向开巷', outcome: 0 }] })!;
+  const other = self.addAgenda('备好食物', 'goal', 'today')!;
+  const { apply } = applyPlanHarness(self);
+  const d = apply({ focus: other.id, methods: [{ text: '去农田收麦子' }] });
+  assert.match(d.notes.join('；'), /只改做法时 focus 必须指向当前主目标/);
+  assert.equal(self.plan()!.agendaId, a.agendaId);
+  assert.deepEqual(self.plan()!.methods!.map((m) => m.text), ['沿北向开巷']);
+});

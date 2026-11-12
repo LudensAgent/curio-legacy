@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, progressSignals, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
 import { recallLocal } from './recall.ts';
@@ -213,7 +213,7 @@ export class Mind {
   private progressGate: { at: number; agendaId: string | null; signatures: string[]; activities: { what: string; outcome: string; summary: string }[] } | null = null;
   private progressGateRejects = 0;
   private lastProgressGateAt = 0;
-  private noProgressRuns: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[] = [];
+  private noProgressRuns: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string; dim?: string }[] = [];
   /** 最近一次局部动作/落点失败：它只否定这一步，不能单独证明整个来源或维度没有资源。 */
   private lastLocalFailure: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null = null;
   /** 最近一次被证据放行的换维：只记来源/目标/理由；目标未知时等实际换维后再补上。 */
@@ -942,6 +942,7 @@ export class Mind {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
     this.linkPlan(a);
+    a.planAgendaId = this.d.self.plan()?.agendaId;
     const appliedKnowHow = a.applying ? this.d.self.data.knowHow.find((k) => k.id === a.applying) : undefined;
     if (a.applying && !appliedKnowHow) {
       // 保留 Agent 明确写下的 id，但不设开工快照：记录时不能给任何窍门计数，也不能回退签名。
@@ -1031,7 +1032,10 @@ export class Mind {
       { pos: { ...state.pos }, outcome, skill: failed?.skill, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, summary, at: record.at }].slice(-256);
     this.d.self.record(record);
     // 计划账：这段活明确关联了成果/做法时，把实际结局与停因记到对应账上；归因仍由 Agent 判断。
-    if (a.outcomeId || a.methodId) {
+    const planForProgress = this.d.self.plan();
+    // 计划在活动期间被换掉时，旧活动的成果/做法不能写进新计划的账。
+    const planStillCurrent = a.planAgendaId === undefined || planForProgress?.agendaId === a.planAgendaId;
+    if (planStillCurrent && (a.outcomeId || a.methodId)) {
       this.d.self.recordPlanAttempt({
         outcomeId: a.outcomeId, methodId: a.methodId, where: { ...state.pos },
         whatHappened: `${a.what} → ${outcome}：${summary}`,
@@ -1039,13 +1043,14 @@ export class Mind {
       });
     }
     // 进展账本按目标累计，不按动作名/做法分桶：换方法、改活动标题都不会清零。
-    // 没有计划时也记到 unassigned，避免开发期探索事实丢失；提示词只显示当前目标的摘要。
+    // 没有计划或计划已换掉时记到 unassigned，避免把旧活动算到新目标上；提示词只显示当前目标的摘要。
     {
-      const planForProgress = this.d.self.plan();
-      const targetId = a.outcomeId && planForProgress?.steps.some((st) => st.id === a.outcomeId)
+      const targetId = planStillCurrent && a.outcomeId && planForProgress?.steps.some((st) => st.id === a.outcomeId)
         ? a.outcomeId
-        : planForProgress?.steps.find((st) => !st.done)?.id ?? planForProgress?.agendaId ?? 'unassigned';
-      const label = planForProgress?.steps.find((st) => st.id === targetId)?.text ?? planForProgress?.goal ?? '未关联计划';
+        : planStillCurrent ? planForProgress?.steps.find((st) => !st.done)?.id ?? planForProgress?.agendaId ?? 'unassigned' : 'unassigned';
+      const label = planStillCurrent
+        ? planForProgress?.steps.find((st) => st.id === targetId)?.text ?? planForProgress?.goal ?? '未关联计划'
+        : '未关联当前计划';
       this.d.self.recordProgress({
         targetId, label, at: record.at, dim: state.dim, start: a.startPos, end: state.pos,
         outcome, ...(record.completion ? { completion: record.completion } : {}),
@@ -1062,9 +1067,14 @@ export class Mind {
     // 物品、清单或新区块都没动：记一笔无进展。整条链只在这里观察，不替 Agent 判断原因。
     const planAfter = this.d.self.plan()?.progressAt;
     // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。
-    this.noteProgressOutcome(a, record, Object.keys(record.gained).length > 0
-      || this.d.memory.visitedChunkCount > chunksBefore || planAfter !== planBefore
-      || !!this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt));
+    // 进展不按“背包有没有变多”算：开路副产物（如下界岩）不清空间停滞。
+    // 只有点名目标真的取得、真正看见搜索目标、新区块/清单进展/出行前沿推进才算。
+    const signals = progressSignals(record, {
+      newChunks: this.d.memory.visitedChunkCount > chunksBefore,
+      planAdvanced: planAfter !== planBefore,
+      frontierAdvanced: !!this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt),
+    });
+    this.noteProgressOutcome(a, record, signals.progressed);
     this.lastRecord = record;
     this.finishedSinceReflect++;
     this.d.self.creditAgenda(a.agendaId);
@@ -1157,11 +1167,21 @@ export class Mind {
       this.lastRegionExpansion = { at: now, region: `${Math.floor(state.pos.x / 16)},${Math.floor(state.pos.z / 16)}`,
         chunks: this.d.memory.visitedChunkCount, dim: state.dim, worldId: state.worldId, sessionId: state.sessionId };
     }
-    if (!plan || a.agendaId !== plan.agendaId || progressed) {
+    const currentDim = state?.dim ?? '';
+    if (!plan || a.agendaId !== plan.agendaId) {
       this.noProgressRuns = [];
       this.progressGate = null;
       this.progressGateRejects = 0;
-      if (progressed) { this.lastLocalFailure = null; this.sourceSwitchRejects = 0; }
+      this.persistTaskFacts();
+      return;
+    }
+    if (progressed) {
+      // 只清当前维度的停滞；其他维度的旧账不能被这一次进展一起抹掉。
+      this.noProgressRuns = this.noProgressRuns.filter((run) => run.dim !== undefined && run.dim !== currentDim);
+      this.progressGate = null;
+      this.progressGateRejects = 0;
+      this.lastLocalFailure = null;
+      this.sourceSwitchRejects = 0;
       this.persistTaskFacts();
       return;
     }
@@ -1173,17 +1193,19 @@ export class Mind {
     const evidence = `${scope}|${this.d.memory.visitedChunkCount}|${plan.progressAt ?? 0}|${a.agendaId ?? ''}`;
     const sourceKey = `${gateSignatureOf(a.steps)}|${area}|${evidence}`;
     this.noProgressRuns = [...this.noProgressRuns.filter((run) => now - run.at < 30 * 60_000),
-      { at: now, signature: gateSignatureOf(a.steps), sourceKey, what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
+      { at: now, dim: currentDim, signature: gateSignatureOf(a.steps), sourceKey, what: a.what, outcome: record.outcome, summary: record.summary }].slice(-16);
     this.persistTaskFacts();
-    if (this.noProgressRuns.length < Mind.PROGRESS_GATE_ACTIVITIES) return;
+    // 停滞按维度独立累计；旧记录没有 dim 时无法归维，仍参与计数。
+    const relevant = this.noProgressRuns.filter((run) => run.dim === undefined || run.dim === currentDim);
+    if (relevant.length < Mind.PROGRESS_GATE_ACTIVITIES) return;
     if (this.progressGate || this.review || now < this.dangerUntil || this.order || this.userSuggestion) return;
     if (now - this.lastProgressGateAt < Mind.PROGRESS_GATE_COOLDOWN_MS) return;
-    const activities = this.noProgressRuns.slice(-Mind.PROGRESS_GATE_ACTIVITIES)
+    const activities = relevant.slice(-Mind.PROGRESS_GATE_ACTIVITIES)
       .map(({ what, outcome, summary }) => ({ what, outcome, summary: summary.slice(0, 120) }));
     this.progressGate = {
       at: now, agendaId: plan.agendaId,
       // 有 sourceKey 的按“做法+区域+证据版本”判重；旧记录才退回裸签名。
-      signatures: [...new Set(this.noProgressRuns.flatMap((run) => run.sourceKey ? [run.sourceKey] : [run.signature]))],
+      signatures: [...new Set(relevant.flatMap((run) => run.sourceKey ? [run.sourceKey] : [run.signature]))],
       activities,
     };
     this.lastProgressGateAt = now;
@@ -1328,8 +1350,9 @@ export class Mind {
     // 换掉/放下时正在跑的这一步没有完成：把已确认的段与剩余目标随结束事实一起留下，
     // 不把它算作完成，也不假装它还能自动续跑。
     const nav = running?.planId === a.id ? a.navigation : undefined;
+    const live = this.d.adapter.state().pos;
     const partial = running?.planId === a.id
-      ? `；取消时 ${running.skill} 尚未完成${nav ? `（已确认 ${nav.completedSegments} 个导航段${nav.remaining.length ? `、剩余 ${nav.remaining.length} 个目标点` : ''}，实测位置 ${nav.measured.pos.x.toFixed(1)},${nav.measured.pos.y.toFixed(1)},${nav.measured.pos.z.toFixed(1)}）` : ''}`
+      ? `；取消时 ${running.skill} 尚未完成${nav ? `（已确认 ${nav.completedSegments} 个导航段${nav.remaining.length ? `、剩余 ${nav.remaining.length} 个目标点` : ''}，当前实测位置 ${live.x.toFixed(1)},${live.y.toFixed(1)},${live.z.toFixed(1)}）` : ''}`
       : '';
     if (running?.planId === a.id) this.d.arbiter.cancel(why);
     this.finishActivity(outcome, partial ? `${why}${partial}` : why);
@@ -1695,15 +1718,22 @@ export class Mind {
     this.pruneFailures();
     // 按关键词想起相关的经历、教训和技能（像人看到眼前的事想起以前），拿得准的技能直接翻开
     const plan = this.d.self.plan();
-    const query = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? []), this.activity?.what, this.activity?.why,
-      this.lastRecord?.what, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '', this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
+    // 目标、执行缺口、历史经历分开取词：召回结果会标注是哪一类匹配，避免旧做法/旧失败借目标关键词混进来。
+    const goalQuery = [plan?.goal, ...(plan?.steps.filter((st) => !st.done).slice(0, 2).map((st) => st.text) ?? [])].filter(Boolean).join(' ');
+    const gapQuery = [this.activity?.what, this.activity?.why, this.lastRecord?.outcome === 'stuck' ? this.lastRecord.summary : '',
+      this.lastFailure?.summary, ...noticed.map((n) => n.what), reason].filter(Boolean).join(' ');
+    const query = [goalQuery, gapQuery, this.lastRecord?.what].filter(Boolean).join(' ');
     const book = this.d.thinker.skillBook;
     const ledger = this.d.ledger;
-    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger }, { n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id) }), []);
+    const recalled = this.safe(() => recallLocal(query, { self: this.d.self, memory: this.d.memory, book, ledger }, {
+      n: tier === 'glance' ? 3 : 6, exclude: ['know_how'], excludeRefs: this.d.self.history(5).map((r) => r.id), goal: goalQuery, gap: gapQuery,
+    }), []);
     const hindsightMemories = tier === 'deliberate' ? this.freshHindsightMemories() : null;
     if (tier === 'deliberate') void this.prefetchHindsight(query, percept, generation);
     let openedSkill: MindContext['openedSkill'];
-    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref);
+    // 自动展开正文前核对触发条件：只有关键词命中、条件不符时只留名字/用途，正文由 Agent 按需查。
+    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref && book?.get(r.ref)
+      && (!this.d.behaviors || this.d.behaviors.conditionHolds(r.ref, this.d.arbiter.info())));
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
       const k = book.get(top.ref!)!;
       this.skillOpenedAt.set(k.name, Date.now());
@@ -2179,6 +2209,12 @@ export class Mind {
     const cur = this.d.self.plan();
     // 只改做法：成果清单原样保留，不触发清单改写保护，也不重置停滞计时。
     if (!p.steps?.length && cur && (p.methods !== undefined || p.methodDrop?.length)) {
+      const focus = p.focus ?? p.goal;
+      // 只改做法不能顺带换主目标：归属写错会把旧做法记到新计划上。
+      if (focus && focus !== cur.agendaId && focus !== cur.goal) {
+        decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；要换主目标请同时写 steps`);
+        return this.applyPlanDone(decision);
+      }
       const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
       const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];
       this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });

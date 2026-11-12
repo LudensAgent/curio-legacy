@@ -13,6 +13,7 @@ import {
 import { DEFAULT_LAND_SEARCH_MAX_EDGES, DEFAULT_LAND_SEARCH_MAX_NODES, type LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
 import { feetCell } from '../../perception/local.ts';
 import { codeFromError, isAbort, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult } from '../types.ts';
+import { movementFailureOfSearch, movementFailureOfSegment, type MovementFailure } from './contract.ts';
 import { anchorOf, cellReached, feetReached, goalReached } from './goal.ts';
 import type { NavigationGoal } from './goal.ts';
 import type { PrimitiveProblemKind } from './receipt.ts';
@@ -100,6 +101,9 @@ export interface TransitionReceipt {
 export interface SegmentReceipt {
   waypoint: Vec3Like;
   outcome: SegmentOutcome;
+  /** 统一分类：段结局与搜索终态分开，真实回执直接带出去。 */
+  failure?: MovementFailure | null;
+  searchFailure?: MovementFailure | null;
   measuredStart: Vec3Like;
   measuredEnd: Vec3Like;
   /** 搜索实际选中的结果：当前证据完整路线 / 历史候选完整路线 / null（只有前缀）。 */
@@ -292,6 +296,17 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   let result: SegmentReceipt | undefined;
   try {
     result = await runNavigationSegmentInner(ctx, request, leases, execution);
+    result.failure = movementFailureOfSegment(result.outcome, {
+      ...(result.problemKind === undefined ? {} : { problemKind: result.problemKind }),
+      ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
+      ...(result.disallowed === undefined ? {} : { disallowed: true }),
+      ...(result.problemKind === 'UNSUPPORTED_ENVIRONMENT' ? { modeGap: true } : {}),
+    });
+    result.searchFailure = movementFailureOfSearch(result.searchStatus, {
+      ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
+      ...(result.unavailableSections?.length ? { unavailableSections: result.unavailableSections.length } : {}),
+      ...(request.corridor === undefined ? {} : { corridorLimited: result.outcome === 'corridor_exhausted' }),
+    });
     return result;
   } finally {
     const finishedSearches = execution.finishPreview?.();

@@ -250,14 +250,14 @@ test('回想保留窍门的来源和未验证状态；know_how 副本不再作�
   assert.doesNotMatch(inference.text, /亲历观察|已验证/);
   assert.ok(!first.some((r) => r.kind === 'lesson' && /在矿道里卡住/.test(r.text)), '主窍门的镜像副本不能换教训通道重复出现');
   const explicit = first.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`).join('\n');
-  assert.match(explicit, /\[教训\] 模型推断（来源\/验证状态未记录）：旧记录里的推断做法/);
+  assert.match(explicit, /\[教训[^\]]*\] 模型推断（来源\/验证状态未记录）：旧记录里的推断做法/);
 
   const bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const [, user] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
     activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', recalled: first });
-  assert.match(user.content, /\[教训\] 模型推断（来源\/验证状态未记录）：旧记录里的推断做法/);
-  assert.match(user.content, /\[教训\] 亲历观察：河对岸有露天铁矿/);
+  assert.match(user.content, /\[教训[^\]]*\] 模型推断（来源\/验证状态未记录）：旧记录里的推断做法/);
+  assert.match(user.content, /\[教训[^\]]*\] 亲历观察：河对岸有露天铁矿/);
 
   self.data.knowHow = [];
   const afterDrop = recallLocal(query, { self, memory }, { n: 10 });

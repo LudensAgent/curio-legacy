@@ -80,3 +80,26 @@ test('活动历史保留结构化停止原因与边界，不复制整段路线',
   assert.equal(record.stop?.detail, '搜索与复验不一致');
   assert.equal(record.stop?.boundaries?.length, 3, '边界只留少量，避免活动历史复制整段路线');
 });
+
+test('放置/装备的 item 是耗材或持物，不是采集目标', () => {
+  const a = createActivity({
+    what: '用圆石补支撑', why: '', kind: 'build', repeat: 1,
+    steps: [{ skill: 'place_support', args: { item: 'cobblestone' } }],
+  }, '', 'llm', state([{ name: 'cobblestone', count: 1 }]));
+  a.results.push({
+    skill: 'place_support', args: {}, status: 'succeeded', summary: '放了圆石', at: Date.now(), durationMs: 10,
+    pos: { x: 0.5, y: 64, z: 1.5 }, data: { placed: 'cobblestone', effect: { kind: 'support_formed', confirmed: true } },
+  });
+  const record = recordOf(a, 'done', '补好支撑', state());
+  assert.equal(record.lost.cobblestone, 1, '耗材照实记在 lost');
+  assert.equal(record.resource, undefined, '耗材不能被当成资源取得目标');
+});
+
+test('背包里多了开路副产物不算空间/目标进展', async () => {
+  const { progressSignals } = await import('../src/mind/activity.ts');
+  const side = progressSignals({ exploration: { found: [] } }, { newChunks: false, planAdvanced: false, frontierAdvanced: false });
+  assert.equal(side.progressed, false, '副产物不清空间停滞');
+  assert.equal(progressSignals({ exploration: { found: ['oak_log'] } }, { newChunks: false, planAdvanced: false, frontierAdvanced: false }).progressed, true, '看见目标算进展');
+  assert.equal(progressSignals({ exploration: { found: [] }, resource: { intent: true, acquired: true, located: true, goalIncomplete: false } }, { newChunks: false, planAdvanced: false, frontierAdvanced: false }).progressed, true, '取得点名目标算进展');
+  assert.equal(progressSignals({ exploration: { found: [] } }, { newChunks: true, planAdvanced: false, frontierAdvanced: false }).progressed, true, '新区块算进展');
+});

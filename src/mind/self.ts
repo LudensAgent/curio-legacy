@@ -26,6 +26,8 @@ interface SelfData {
   /** 上次回想的时间与当时的窍门数 */
   reflectedAt?: number;
   knowHowAtReflect?: number;
+  /** 自上次回想以来新增的明确反例：出现反例本身就该进入反思，而不只是等新窍门。 */
+  counterexamplesSinceReflect?: number;
   habits?: Habits;
   /** 主目标和它的待办清单（像 agent 的 todo 列表）：每段活都应该推进其中没勾掉的一项 */
   plan?: FocusPlan;
@@ -39,7 +41,7 @@ interface SelfData {
 }
 
 export interface TaskFacts {
-  noProgressRuns?: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string }[];
+  noProgressRuns?: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string; dim?: string }[];
   lastLocalFailure?: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null;
   /** 最近一次带证据放行的换维：只记来源/目标/理由与作用域，几何仍由共享空间库承担。 */
   lastSourceSwitch?: { at: number; from: string; to: string | null; reason: string; worldId: string; sessionId: string } | null;
@@ -438,16 +440,20 @@ export class SelfModel {
     outcomes: PlanOutcome[], dropped: string[] = []): PlanMethod[] {
     const now = Date.now();
     const previous = old ?? [];
+    // 只提交 method_drop 时也要真的停用；不能因为没有新列表就跳过。
+    if (incoming === undefined) {
+      return previous.map((m) => dropped.includes(m.id) ? { ...m, status: 'dropped' as const, updatedAt: now } : m);
+    }
     const byText = new Map(previous.map((m) => [m.text, m] as const));
-    const next = incoming === undefined ? previous
-      : incoming.flatMap((x) => {
-        const text = cleanPlanStep(x.text);
-        if (!text) return [];
-        const outcome = typeof x.outcome === 'number' ? outcomes[x.outcome] : undefined;
-        const prev = byText.get(text);
-        return [{ ...(prev ?? { id: shortId('pm_'), status: 'active' as const, attempts: 0, stopReasons: {}, addedAt: now }),
-          text, ...(outcome ? { outcomeId: outcome.id } : prev?.outcomeId ? { outcomeId: prev.outcomeId } : {}), updatedAt: now }];
-      }).slice(0, 8);
+    const next = incoming.flatMap((x) => {
+      const text = cleanPlanStep(x.text);
+      if (!text) return [];
+      const outcome = typeof x.outcome === 'number' ? outcomes[x.outcome] : undefined;
+      const prev = byText.get(text);
+      // 重新列入旧做法表示重新启用；历史尝试账保留。
+      return [{ ...(prev ?? { id: shortId('pm_'), attempts: 0, stopReasons: {}, addedAt: now }),
+        text, status: 'active' as const, ...(outcome ? { outcomeId: outcome.id } : prev?.outcomeId ? { outcomeId: prev.outcomeId } : {}), updatedAt: now }];
+    }).slice(0, 8);
     const seen = new Set(next.map((m) => m.id));
     // 新列表没再列出的旧做法先收起（paused），保留尝试账；明确 method_drop 的才标 dropped。
     // 不静默删除，也不让它继续以“启用中”出现在专注块里。
@@ -573,15 +579,20 @@ export class SelfModel {
       if (!applied && (explicit || !(k.signature && k.signature === r.signature))) continue;
       if (applied) k.applications = [...(k.applications ?? []), { at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}), summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}) }].slice(-8);
       // 有界尝试（attempt）不算成功；只在原地/附近的搜索活动成功了，也不能证明“走远找资源”的策略正确。
+      // 搜索意图的活动如果没有实际看见/拿到目标，哪怕走了十几格、挖了十几格，也只是“做了动作”，不是策略成功。
       const localOnlySearch = r.exploration?.searchIntent === true && r.exploration.localOnly === true;
-      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch) k.wins++;
+      const searchUnconfirmed = r.exploration?.searchIntent === true
+        && (r.exploration.found?.length ?? 0) === 0 && r.resource?.acquired !== true;
+      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch && !searchUnconfirmed) k.wins++;
       else if (r.outcome === 'stuck') k.losses++;
-      if (applied && r.outcome === 'stuck') {
+      if (applied && (r.outcome === 'stuck' || searchUnconfirmed)) {
         k.counterexamples = [...(k.counterexamples ?? []), {
           at: r.at, activityId: r.id, outcome: r.outcome,
-          reason: r.stop?.reason ?? r.failure?.code ?? 'stuck', summary: r.summary.slice(0, 160),
+          reason: r.stop?.reason ?? r.failure?.code ?? (searchUnconfirmed ? 'TARGET_NOT_FOUND' : 'stuck'),
+          summary: (searchUnconfirmed && r.outcome === 'done' ? `做了动作但没有确认目标：${r.summary}` : r.summary).slice(0, 160),
           ...(r.failure?.pos ? { pos: { ...r.failure.pos } } : r.navigation?.destination ? { pos: { ...r.navigation.destination } } : {}),
         }].slice(-8);
+        this.data.counterexamplesSinceReflect = (this.data.counterexamplesSinceReflect ?? 0) + 1;
       }
       k.updatedAt = Date.now();
     }
@@ -755,7 +766,8 @@ export class SelfModel {
   insights() { return this.data.insights ?? []; }
   /** 自上次回想以来攒了多少要整理的东西 */
   reflectionBacklog(): number {
-    return (this.data.insights?.length ?? 0) + Math.max(0, this.data.knowHow.length - (this.data.knowHowAtReflect ?? 0));
+    return (this.data.insights?.length ?? 0) + Math.max(0, this.data.knowHow.length - (this.data.knowHowAtReflect ?? 0))
+      + (this.data.counterexamplesSinceReflect ?? 0);
   }
   get reflectedAt() { return this.data.reflectedAt ?? 0; }
 
@@ -820,6 +832,7 @@ export class SelfModel {
     this.data.insights = [];
     this.data.reflectedAt = Date.now();
     this.data.knowHowAtReflect = this.data.knowHow.length;
+    this.data.counterexamplesSinceReflect = 0;
     this.touch();
     return { before, after: this.data.knowHow.length, keptGoals };
   }

@@ -1,5 +1,6 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import type { LandSearchStatus } from '../../spatial/land-search.ts';
+import type { FailureCode } from '../types.ts';
 import type { SegmentOutcome } from './segment.ts';
 import type { StopReason } from './session.ts';
 
@@ -129,6 +130,34 @@ const STOP_FAILURE: Record<StopReason, MovementFailure | null> = {
 /** Map a coordinator/session stop reason. Success reasons map to null. */
 export function movementFailureOfStop(reason: StopReason): MovementFailure | null {
   return STOP_FAILURE[reason];
+}
+
+/**
+ * Coarse FailureCode for the existing skill-result boundary. The precise
+ * MovementFailure stays in `stop.failure`; this mapping only keeps old callers
+ * working without inventing a second classification.
+ */
+const FAILURE_CODE: Record<MovementFailure, FailureCode> = {
+  NO_PATH_EVIDENCE: 'NOT_FOUND',
+  NO_PATH_GEOMETRY: 'PATH_NOT_FOUND',
+  DELEGATION_RESTRICTION: 'PATH_NOT_FOUND',
+  BODY_CAPABILITY: 'EFFECT_NOT_CONFIRMED',
+  BUDGET: 'TIMEOUT',
+  RESIDENCY: 'PATH_NOT_FOUND',
+  INVALIDATED: 'PATH_NOT_FOUND',
+  NO_PROGRESS: 'PATH_NOT_FOUND',
+  CANCELLED: 'TIMEOUT',
+  TIMEOUT: 'TIMEOUT',
+  CONFLICT: 'PATH_NOT_FOUND',
+  TARGET_UNRESOLVED: 'PATH_NOT_FOUND',
+  SCOPE_CHANGED: 'WRONG_DIMENSION',
+  INTENT_MISMATCH: 'BAD_ARGS',
+  SUPERSEDED: 'BAD_ARGS',
+  UNKNOWN: 'ERROR',
+};
+
+export function failureCodeOfMovement(failure: MovementFailure): FailureCode {
+  return FAILURE_CODE[failure];
 }
 
 /**

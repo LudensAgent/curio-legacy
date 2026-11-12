@@ -917,7 +917,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       branches: ctx.progress.branches.map((b) => ({ group: b.group, reached: `${b.done}/${b.total}`, ...(b.next.length ? { untouched: b.next } : {}) })),
     }] as [string, Record<string, unknown>]] : []),
     ...(ctx.recalled?.length || ctx.hindsightMemories?.length || ctx.openedSkill ? [['想起来的', {
-      ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}] ${r.text}`) } : {}),
+      ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}${r.match === 'current_goal' ? '·当前目标' : r.match === 'execution_gap' ? '·执行缺口' : '·历史'}] ${r.text}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term: ctx.hindsightMemories.map((m) => `[${m.kind === 'experience' ? '经历' : '推断'}·长期记忆] ${m.text}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term_note: '长期记忆是合并后的历史经历或推断，不等于当前现场事实；现场以【身边】【身体】为准。' } : {}),
       ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
@@ -998,7 +998,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 规则：
 - 只依据给出的窍门、成败次数（wins/losses）、来源（source）、应用证据（applications）、零碎想法（insights）和最近的经历（recent），不要编造没发生过的事。
 - 说的是同一件事的合并成一条（merge），措辞含糊或太长的改写（rewrite，120 字以内，写清“什么情况下、怎么做、会怎样”）。
-- 改写或合并时保留来源和适用条件（地形、方向、材料、授权、工具等）；一次有限情形的失败/成功只写成那次的具体情况，不要升级成普遍规则。unverified 且没有应用证据的条目仍只是暂定结论，没有新证据支持就不要当成已经成立的规律。
+- 改写或合并时保留来源和适用条件（地形、方向、材料、授权、工具等）；一次有限情形的失败/成功只写成那次的具体情况，不要升级成普遍规则。unverified 且没有应用证据的条目仍只是暂定结论，没有新证据支持就不要当成已经成立的规律。counterexamples 是明确应用后失败/受阻的反例，limits 是已写下的适用边界：改写或合并不能把它们洗掉；反例说明这条说法在哪里不成立。
 - 失败明显多于成功、或被后来的经历推翻的丢掉（drop）；只是一次性的流水账也丢掉。before_rewrite 是改写前旧说法累计的成败：改写只换措辞、做法没变时，这些失败仍是这个做法的记录。
 - 零碎想法里被最近经历证实的，才整理成新的窍门（add，最多 5 条）；没证实的就让它过去。
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
@@ -1016,6 +1016,10 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
       ...(k.prior ? { before_rewrite: { wins: k.prior.wins, losses: k.prior.losses, revisions: k.prior.revisions, last_text: k.prior.lastText } } : {}),
       unverified: k.unverified === true, source: k.source, ...(k.unverified === true && !k.signature && !(k.applications?.length) ? { evidence: 'none' } : {}),
       ...(k.kind ? { kind: k.kind } : {}), ...(k.tags.length ? { tags: k.tags } : {}),
+      ...(k.counterexamples?.length ? { counterexamples: k.counterexamples.slice(-5).map((c) => ({
+        at: new Date(c.at).toISOString(), reason: c.reason, summary: historical(c.summary, c.at), ...(c.outcome ? { outcome: c.outcome } : {}),
+      })) } : {}),
+      ...(k.limits?.length ? { limits: k.limits } : {}),
       ...(k.applications?.length ? { applications: k.applications.slice(-5).map((a) => ({ at: new Date(a.at).toISOString(), activity_id: a.activityId,
         outcome: a.completion === 'condition' ? 'condition_met' : a.outcome,
         ...(a.completion && a.completion !== 'condition' ? { completion: a.completion } : {}),

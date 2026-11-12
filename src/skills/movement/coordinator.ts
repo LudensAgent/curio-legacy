@@ -1,5 +1,7 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
+import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy } from '../../spatial/land-edge-policy.ts';
 import { shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
@@ -7,6 +9,7 @@ import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../spatial/land-search.ts';
 import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
 import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
+import { failureCodeOfMovement, movementFailureOfStop } from './contract.ts';
 import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
@@ -224,27 +227,10 @@ export type CoordinatorOutcome =
       makeWay?: { edits: MakeWayEdit[]; legs: MakeWayLegReceipt[] };
     };
 
-const STOP_FAILURE: Record<StopReason, FailureCode> = {
-  DISTANCE_MET: 'ERROR', REGION_ENTERED: 'ERROR', UNTIL_SEEN: 'ERROR', ARRIVED: 'ERROR',
-  UNKNOWN_BOUNDARY: 'NOT_FOUND',
-  BLOCKED: 'PATH_NOT_FOUND',
-  TARGET_UNRESOLVED: 'PATH_NOT_FOUND',
-  ROUTE_INVALIDATED: 'PATH_NOT_FOUND',
-  NO_PATH: 'PATH_NOT_FOUND',
-  RESIDENCY_NOT_READY: 'PATH_NOT_FOUND',
-  PHYSICAL_FAILURE: 'EFFECT_NOT_CONFIRMED',
-  ACTION_FAILURE: 'ERROR',
-  MODE_GAP: 'PATH_NOT_FOUND',
-  CONFLICT: 'PATH_NOT_FOUND',
-  NO_PROGRESS: 'PATH_NOT_FOUND',
-  LATERAL_DRIFT: 'PATH_NOT_FOUND',
-  DETOUR_TOO_LARGE: 'PATH_NOT_FOUND',
-  BUDGET_EXHAUSTED: 'TIMEOUT',
-  TIMEOUT: 'TIMEOUT',
-  CANCELLED: 'TIMEOUT',
-  SCOPE_CHANGED: 'WRONG_DIMENSION',
-  INTENT_MISMATCH: 'BAD_ARGS',
-  SUPERSEDED: 'BAD_ARGS',
+/** 真实回执边界统一用 contract 的分类；精确原因留在 stop.failure，这里只给旧 FailureCode 兼容值。 */
+const failureCodeOfStop = (reason: StopReason): FailureCode => {
+  const failure = movementFailureOfStop(reason);
+  return failure === null ? 'ERROR' : failureCodeOfMovement(failure);
 };
 
 const isSuccess = (reason: StopReason) => reason === 'DISTANCE_MET' || reason === 'REGION_ENTERED' || reason === 'UNTIL_SEEN' || reason === 'ARRIVED';
@@ -304,7 +290,8 @@ function continuationOf(session: MovementSession) {
 }
 
 function stopOf(reason: StopReason, detail: string, extra: Partial<StopReceipt> = {}): StopReceipt {
-  return { reason, at: Date.now(), detail, ...extra };
+  const failure = movementFailureOfStop(reason);
+  return { reason, at: Date.now(), detail, ...(failure === null ? {} : { failure }), ...extra };
 }
 
 /** advance 的横向授权走廊；navigate 意图没有。 */
@@ -336,10 +323,26 @@ function blockerBoundaryOf(segment: SegmentReceipt): LandSearchBoundary | undefi
   };
 }
 
-/** 边界去重键含观察者所在格：换了站位就是新的视角，允许再观察同一边界。 */
-function boundaryKeyOf(boundary: LandSearchBoundary, observer: Vec3Like): string {
+type CellViewLike = { observed: boolean; evidence?: { revision: number } };
+type VoxelLike = { cellAt(dim: string, x: number, y: number, z: number): CellViewLike };
+
+/** 这条边界相关格的内容证据版本：无关视觉刷新不改变它，相关格变化才改变。 */
+function boundaryEvidenceKeyOf(voxel: VoxelLike, dim: string, boundary: LandSearchBoundary): string {
+  const cells = [boundary.from, boundary.to].flatMap((p) => {
+    const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
+    return [{ x, y, z }, { x, y: y + 1, z }, { x, y: y - 1, z }];
+  });
+  return cells.map((c) => {
+    const view = voxel.cellAt(dim, c.x, c.y, c.z);
+    return `${c.x},${c.y},${c.z}=${view.observed ? view.evidence?.revision ?? '?' : '?'}`;
+  }).join(';');
+}
+
+/** 边界去重键含观察者所在格与相关格证据版本：换站位或相关格变化才是新的证据。 */
+function boundaryKeyOf(boundary: LandSearchBoundary, observer: Vec3Like, voxel?: VoxelLike, dim?: string): string {
   return `${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}|${boundary.status}`
-    + `@${Math.floor(observer.x)},${Math.floor(observer.y)},${Math.floor(observer.z)}`;
+    + `@${Math.floor(observer.x)},${Math.floor(observer.y)},${Math.floor(observer.z)}`
+    + (voxel !== undefined && dim !== undefined ? `|ev:${boundaryEvidenceKeyOf(voxel, dim, boundary)}` : '');
 }
 
 function renderSummary(session: MovementSession, stop: StopReceipt, segments: readonly SegmentReceipt[]): string {
@@ -360,7 +363,8 @@ function renderSummary(session: MovementSession, stop: StopReceipt, segments: re
     ? `；边界 ${stop.boundaries === undefined ? '证据不足' : JSON.stringify(stop.boundaries).slice(0, 160)}`
     : '';
   const modeNote = stop.modeGap === undefined ? '' : `；能力缺口 ${JSON.stringify(stop.modeGap)}`;
-  return `${intent}：${stop.detail}；${progress}；${path}${observationNote}${boundaryNote}${modeNote}`;
+  const failureNote = stop.failure === undefined ? '' : `；停止分类 ${stop.failure}`;
+  return `${intent}：${stop.detail}；${progress}；${path}${observationNote}${boundaryNote}${modeNote}${failureNote}`;
 }
 
 /**
@@ -403,7 +407,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
     if (session.phase === 'stopped' && session.stop !== undefined && !RESUMABLE_REASONS.has(session.stop.reason)) {
       return {
-        ok: false, failureCode: STOP_FAILURE[session.stop.reason],
+        ok: false, failureCode: failureCodeOfStop(session.stop.reason),
         summary: `该 session 已终止（${session.stop.reason}：${session.stop.detail}）；不能续接，请新建意图`,
         data: { ...stateFacts(session), reason: 'INTENT_MISMATCH' },
       };
@@ -659,7 +663,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       // 允许一次（边界复验可能带来新证据），第二次就交回原因和具体边界，不自动重播。
       // 若复验已判同一条边 OPEN 而搜索仍说证据不足，按 CONFLICT 交回；否则如实停在 UNKNOWN_BOUNDARY。
       if (!progressed && segment.searches > 0 && segment.outcome === 'unknown_boundary') {
-        const siteKey = `${cellText(after.pos)}|${segment.searchStatus}|${segment.boundary ? boundaryKeyOf(segment.boundary, after.pos) : segment.stopCode ?? ''}`;
+        const siteKey = `${cellText(after.pos)}|${segment.searchStatus}|${segment.boundary ? boundaryKeyOf(segment.boundary, after.pos, voxel, scope.dim) : segment.stopCode ?? ''}`;
         const count = (searchSawNewEvidence ? 0 : sameEvidenceSearches.get(siteKey) ?? 0) + 1;
         sameEvidenceSearches.set(siteKey, count);
         if (!searchSawNewEvidence && count > MAX_SAME_EVIDENCE_SEARCHES) {
@@ -841,7 +845,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         // 横向授权 >0 时，先观察阻挡两侧的必要空间；相关证据变化才允许重搜，
         // 不把“正前方有阻挡”直接当成整条走廊无路。观察预算与去重沿用同一 session。
         const blockedBoundary = blockerBoundaryOf(segment);
-        const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary, after.pos);
+        const boundaryKey = blockedBoundary === undefined ? undefined : boundaryKeyOf(blockedBoundary, after.pos, voxel, scope.dim);
         const canObserveSides = (session.intent.kind === 'advance' ? session.intent.maxLateralDrift > 0
           : session.intent.arrival !== undefined && segment.searchStatus === 'INSUFFICIENT_EVIDENCE')
           && blockedBoundary !== undefined && boundaryKey !== undefined
@@ -918,12 +922,34 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           // 窗口末端松键自然停下，身体只保证在边界起点所在格列；复验从实测位置出发。
           if (boundary === undefined || !after.onGround || Math.floor(after.pos.x) !== Math.floor(boundary.from.x)
             || Math.floor(after.pos.z) !== Math.floor(boundary.from.z) || Math.abs(after.pos.y - boundary.from.y) > 0.05) return false;
+          // 授权/走廊与搜索一致：被 allowed 或走廊排除的边不能因为复验 OPEN 就重搜。
+          if (!session.intent.allowed.includes(boundary.kind)) return false;
+          const corridor = corridorOf(session);
+          if (corridor !== undefined) {
+            const lateral = Math.abs((boundary.to.x - corridor.origin.x) * corridor.bearing.z - (boundary.to.z - corridor.origin.z) * corridor.bearing.x);
+            if (lateral > corridor.maxLateral + 0.01) return false;
+          }
           const check = verifyLandRoute(voxel, {
             ...scope, body: { feet: { ...after.pos }, width: 0.6, height: 1.8, pose: 'standing' },
-            rules: walkLandRules, measuredStart: after.pos,
+            rules: walkLandRules, measuredStart: after.pos, ...(request.swim === true ? { wade: true } : {}),
           }, [{ kind: boundary.kind, from: boundary.from, to: boundary.to,
             drop: Math.max(0, boundary.from.y - boundary.to.y) }], Date.now());
-          return check.transitions[0]?.status === 'OPEN';
+          if (check.transitions[0]?.status !== 'OPEN') return false;
+          // 搜索用宿主边缘策略判边；复验必须用同一策略。未知脚心支撑等情况下策略会要求观察，
+          // 这里不能把“几何 OPEN”直接当成可通行，否则会把需要观察的情况误判成搜索/复验冲突。
+          const edge: LandSearchPolicyEdge = {
+            kind: boundary.kind, from: { ...boundary.from }, to: { ...boundary.to }, baseCost: 1, hazards: [], evidenceMode: 'current',
+          };
+          const decision = (request.swim === true ? hostWadingEdgePolicy : hostLandEdgePolicy).evaluate(edge, {
+            cell(x, y, z) {
+              const view = voxel.cellAt(scope.dim, x, y, z);
+              if (!view.observed) return { kind: 'unknown' };
+              if (evidenceStale(view.evidence)) return { kind: 'unavailable' };
+              const observation = view.evidence.observation;
+              return { kind: 'recorded', state: { name: observation.state.name, properties: observation.state.properties }, stateComplete: observation.stateComplete };
+            },
+          });
+          return decision.allow;
         };
         if (canProceed()) {
           // 同一条边在最新证据下已 OPEN，但这次搜索仍说证据不足/无路：记录矛盾事实，
@@ -932,7 +958,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           session.phase = 'replanning';
           continue;
         }
-        const boundaryKey = boundary === undefined ? undefined : boundaryKeyOf(boundary, after.pos);
+        const boundaryKey = boundary === undefined ? undefined : boundaryKeyOf(boundary, after.pos, voxel, scope.dim);
         const boundaryDone = boundaryKey !== undefined && session.observedBoundaries?.includes(boundaryKey) === true;
         // 当前列回退只属于显式探索：空地图可能连前沿边界都定位不到，
         // 此时对当前身体所在列做一次有界观察（脚/头/支撑），让下一次搜索有起点证据。
@@ -1145,7 +1171,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   return {
     ok: true,
     status,
-    ...(status === 'failed' ? { failureCode: STOP_FAILURE[finalStop.reason] } : {}),
+    ...(status === 'failed' ? { failureCode: failureCodeOfStop(finalStop.reason) } : {}),
     summary: renderSummary(session, finalStop, segments) + (swimLegs.length === 0 ? ''
       : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`)
       + (request.makeWay === undefined && request.makeWayAvailable === true && MAKE_WAY_STOPS.has(finalStop.reason)
