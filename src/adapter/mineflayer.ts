@@ -1546,7 +1546,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         }
         return;
       }
-      // 连续路线中间点：在 physicsTick 内复验下一步；有效就保持运动键，
+      // 连续路线中间点：读取调用方在 tick 外预先复验的下一步结果；有效就保持运动键，
       // 由调用方紧接着的下一段身体控制接续，不经过“松键—异步返回—再按键”的间隙。
       if (handOff && !settleAtTarget && onCheckpoint?.(b.entity.position) === true) {
         // 只保留前进；跳跃/疾跑由下一段按自己的落点重新决定，避免跨点残留。

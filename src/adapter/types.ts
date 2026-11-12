@@ -230,8 +230,8 @@ export interface MoveOpts {
   keepControls?: boolean;
   /**
    * 连续路线中间点交接：在 physicsTick 内到达当前脚位时调用，参数是当时的实测位置。
-   * 返回 true 表示下一步已复验有效：本次控制不释放运动键，由调用方紧接着的下一段
-   * 身体控制接续；返回 false 或省略时按原逻辑制动。仅在 settleAtTarget 为 false 时有意义。
+   * 返回 true 表示调用方已经预先复验下一步有效：本次控制不释放运动键，由调用方紧接着的
+   * 下一段身体控制接续；返回 false 或省略时按原逻辑制动。仅在 settleAtTarget 为 false 时有意义。
    */
   onCheckpoint?: (measured: Vec3Like) => boolean;
 }

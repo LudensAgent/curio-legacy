@@ -43,12 +43,13 @@ function setup(
   };
   const frames: { speed: number; back: boolean }[] = [];
   let physicsTicks = 0;
+  let inPhysicsTick = false;
   const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
   const controlEvents = {
-    clears: 0, looks: 0, forwardOn: 0, forwardOff: 0, settleCalls: 0, settleForwardOff: 0,
+    clears: 0, looks: 0, forwardOn: 0, forwardOff: 0, settleCalls: 0, settleForwardOff: 0, checkpoints: 0,
     clearsByDispatch: [] as number[], looksByDispatch: [] as number[], forwardOnByDispatch: [] as number[], forwardOffByDispatch: [] as number[],
     forwardHeldAtDispatch: [] as boolean[], settleCallsByDispatch: [] as number[],
-    timeline: [] as ControlEvent[], tickGapsOver100: 0, maxTickGap: 0, currentDispatch: -1, lastDispatch: -1,
+    timeline: [] as ControlEvent[], tickGapsOver100: 0, maxTickGap: 0, tickCellQueries: 0, tickSectionQueries: 0, currentDispatch: -1, lastDispatch: -1,
   };
   const entity = {
     position: new Vec3(from.x, from.y, from.z), velocity: new Vec3(0, 0, 0), yaw: -Math.PI / 2, pitch: 0,
@@ -114,11 +115,13 @@ function setup(
     lastTickAt = now;
     physics.simulatePlayer(new PlayerState(bot, controls), world).apply(bot);
     physicsTicks++;
+    inPhysicsTick = true;
     bot.emit('physicsTick');
+    inPhysicsTick = false;
     frames.push({ speed: Math.hypot(entity.velocity.x, entity.velocity.z), back: controls.back === true });
   }, 50);
   timer.unref();
-  const dispatches: { continuous: boolean; frameStart: number }[] = [];
+  const dispatches: { continuous: boolean; frameStart: number; target: Vec3Like }[] = [];
   class PhysicsAdapter extends FakeAdapter {
     async settleMovement(opts: Pick<MoveOpts, 'signal' | 'timeoutMs'>) {
       controlEvents.settleCalls++;
@@ -142,7 +145,15 @@ function setup(
       controlEvents.settleCallsByDispatch[dispatch] = 0;
       controlEvents.currentDispatch = dispatch;
       controlEvents.timeline.push({ dispatch, kind: 'move-to', tick: physicsTicks });
-      dispatches.push({ continuous: opts.settleAtTarget === false, frameStart: frames.length });
+      dispatches.push({ continuous: opts.settleAtTarget === false, frameStart: frames.length, target: { x: target.x, y: target.y, z: target.z } });
+      const onCheckpoint = opts.onCheckpoint;
+      if (onCheckpoint !== undefined) {
+        opts.onCheckpoint = (measured: Vec3Like) => {
+          const held = onCheckpoint(measured);
+          if (held) controlEvents.checkpoints++;
+          return held;
+        };
+      }
       try {
         await driver.moveTo(target, opts);
       } finally {
@@ -155,6 +166,21 @@ function setup(
   const adapter = new PhysicsAdapter();
   adapter.pos = { ...from };
   const map = new VoxelMap(adapter.worldId, { validityWindowMs: 600_000 });
+  const cellAt = map.cellAt.bind(map);
+  map.cellAt = (dim, x, y, z) => {
+    if (inPhysicsTick) controlEvents.tickCellQueries++;
+    return cellAt(dim, x, y, z);
+  };
+  const sectionAt = map.sectionAt.bind(map);
+  map.sectionAt = (dim, x, y, z) => {
+    if (inPhysicsTick) controlEvents.tickSectionQueries++;
+    return sectionAt(dim, x, y, z);
+  };
+  const sectionRef = map.sectionRef.bind(map);
+  map.sectionRef = (dim, x, y, z) => {
+    if (inPhysicsTick) controlEvents.tickSectionQueries++;
+    return sectionRef(dim, x, y, z);
+  };
   let sequence = 0;
   for (let x = bounds.x0; x <= bounds.x1; x++) for (let z = bounds.z0; z <= bounds.z1; z++) for (let y = 58; y <= 68; y++) {
     const pos = { x, y, z };
@@ -204,6 +230,7 @@ function measureRun(
     forwardHeldAtDispatch: controlEvents.forwardHeldAtDispatch,
     settleCalls: controlEvents.settleCalls,
     settleForwardOff: controlEvents.settleForwardOff,
+    checkpoints: controlEvents.checkpoints,
     settleCallsByDispatch: controlEvents.settleCallsByDispatch,
     stableTicks: span.length,
     stopped,
@@ -212,6 +239,8 @@ function measureRun(
     avgSpeed: round(avgSpeed, 4),
     tickGapsOver100: controlEvents.tickGapsOver100,
     maxTickGap: round(controlEvents.maxTickGap, 1),
+    tickCellQueries: controlEvents.tickCellQueries,
+    tickSectionQueries: controlEvents.tickSectionQueries,
     searches,
     searchesPer100Transitions: searches === null ? null : per100(searches, transitions),
   };
@@ -286,6 +315,10 @@ test('真实物理：一格落差的下坡路线不停车、不后退', async (t
   assertStraightRunKeepsControls(dispatches, controlEvents);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
   assertContinuousHandoff(dispatches);
+  const dropIndex = dispatches.findIndex((dispatch) => dispatch.target.y === 63);
+  assert.ok(dropIndex >= 1, '找到一格落差的 transition');
+  assert.equal(controlEvents.forwardHeldAtDispatch[dropIndex], true, '落差 transition 接续前进键');
+  assert.equal(controlEvents.clearsByDispatch[dropIndex], 0, '落差 transition 不再清键');
   const { stopped, back } = middle(frames, dispatches);
   assert.equal(stopped, 0, '中间没有停车帧');
   assert.equal(back, 0, '中间没有后退修正');
@@ -343,6 +376,9 @@ test('连续控制：平地直路只在起步清一次控制键', async (t) => {
   assert.deepEqual(controlEvents.clearsByDispatch, [1, 0, 0, 0, 0, 0, 0, 0]);
   assert.equal(controlEvents.forwardOff, 1, '只有本段最终交接/停稳时松一次前进键');
   assert.equal(controlEvents.forwardOffByDispatch.at(-1), 1, '松开前进键归属末次派发');
+  assert.equal(controlEvents.checkpoints, 7, '8 个 transition 中有 7 次真实交接');
+  assert.equal(controlEvents.tickCellQueries, 0, 'physicsTick 内不做 cell 体素查询（下一步复验在 tick 外预计算）');
+  assert.equal(controlEvents.tickSectionQueries, 0, 'physicsTick 内不做 section 体素查询');
   const events = controlEvents.timeline;
   assert.deepEqual(events.slice(0, 4).map(({ dispatch, kind }) => ({ dispatch, kind })),
     [{ dispatch: 0, kind: 'move-to' }, { dispatch: 0, kind: 'look' }, { dispatch: 0, kind: 'clear' }, { dispatch: 0, kind: 'forward-on' }],
@@ -362,6 +398,9 @@ test('连续控制：平地 64 格直路只在分段起步清键', { timeout: 12
   assert.equal(controlEvents.clears, 2, '64 格直路只在两段起步各清一次');
   assert.deepEqual(controlEvents.clearsByDispatch.flatMap((count, index) => count === 0 ? [] : [index]), [0, 32], '两次清键分别落在两段起步，不在直行中间');
   assert.equal(controlEvents.forwardOn, 2);
+  assert.ok(controlEvents.checkpoints >= dispatches.length - 3, '直路的大部分 transition 都经过真实 checkpoint 交接');
+  assert.equal(controlEvents.tickCellQueries, 0, '64 个 transition 的 checkpoint 都不在 physicsTick 内查 cell');
+  assert.equal(controlEvents.tickSectionQueries, 0, '64 个 transition 的 checkpoint 都不在 physicsTick 内查 section');
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
   assertContinuousHandoff(dispatches);
 });

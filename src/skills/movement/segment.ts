@@ -1100,30 +1100,31 @@ async function runNavigationSegmentInner(
       // 不做前后点按修正；下一段从实测停点重新规划。
       const windowEnd = ctx.adapter.settleMovement !== undefined && next === undefined && !intentEnd
         && smallEdge(transition) && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
-      continuous = windowEnd || ctx.adapter.settleMovement !== undefined && next !== undefined
-        && !directionalFinish
-        && [transition, next].every(smallEdge)
-        && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical)
+      // 复用这一次下一步复验结果给 checkpoint，不在 tick 里重复查体素。
+      const nextOpen = ctx.adapter.settleMovement !== undefined && next !== undefined && !directionalFinish && smallEdge(next)
         && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
         && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
+      continuous = windowEnd || nextOpen && next !== undefined
+        && [transition, next].every(smallEdge)
+        && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
       // 原目标是一个格子时，最后一步只需站进这一格并停稳，不必对准计划里的连续点。
       cellFinish = next === undefined && !directionalFinish && request.goal.kind === 'cell' && smallEdge(transition)
         && goalReached(request.goal, transition.to, true);
       // 台阶与落差有腾空段，落点难精确命中：站进目标格列即交接，下一段从实测位置复验。
       passColumn = cellFinish || continuous && (sameHeading || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
-      // 连续路线的下一步在 physicsTick 到达本点时复验；有效就保持运动键，由紧接着的
-      // 下一段身体控制接续。只对同高行走/台阶启用；下落与终点仍按原逻辑制动。
+      // 连续路线的下一步已在 tick 外复验；到达本点时只读取这个结果，有效就保持运动键，
+      // 由紧接着的下一段身体控制接续。只对同向行走/台阶/一格落差启用；终点仍按原逻辑制动。
       let checkpointHeld = false;
-      const checkpoint = continuous && next !== undefined && !directionalFinish && sameHeading && !nextTurns
-        && (next.kind === 'walk' || next.kind === 'step')
-        ? (measured: Vec3Like) => {
-          const open = verifyLandRoute(voxel, { ...currentRequest, measuredStart: measured }, [next], Date.now()).transitions[0]?.status === 'OPEN';
-          if (open) {
-            checkpointHeld = true;
-            // 交接成功后适配器不再释放运动键；即使这次 moveTo 随后异常，段退出也必须统一释放。
-            holding = true;
-          }
-          return open;
+      // 在 physicsTick 之外复用 continuous 的下一步复验；tick 回调只返回这个结果，
+      // 不在逐帧路径里做体素查询。证据之后若变化，下一段执行前仍会用实测起点重新复验。
+      const checkpointEligible = continuous && nextOpen && next !== undefined && !directionalFinish
+        && sameHeading && !nextTurns && smallEdge(next);
+      const checkpoint = checkpointEligible
+        ? () => {
+          checkpointHeld = true;
+          // 交接成功后适配器不再释放运动键；即使这次 moveTo 随后异常，段退出也必须统一释放。
+          holding = true;
+          return true;
         }
         : undefined;
       try {
