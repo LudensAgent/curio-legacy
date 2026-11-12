@@ -140,7 +140,7 @@ export const navigateTo: Skill<NavigateArgs> = {
       return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
     }
     const ints: [string, number, number][] = [
-      ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 1024],
+      ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 64], ['maxTransitions', 1, 1024],
       ['maxSearches', 1, 128], ['maxObservations', 0, 64], ['maxObservedCells', 0, 4096],
       ['maxNoProgressSegments', 1, 8],
     ];
@@ -176,7 +176,7 @@ export const navigateTo: Skill<NavigateArgs> = {
         maxSteps,
         allowUnknownCorridor: a.allowUnknownCorridor === true,
         maxSegments,
-        maxStepsPerSegment: (a.maxStepsPerSegment as number | undefined) ?? Math.min(32, maxSteps),
+        maxStepsPerSegment: (a.maxStepsPerSegment as number | undefined) ?? Math.min(64, maxSteps),
         maxTransitions: (a.maxTransitions as number | undefined) ?? Math.min(1024, maxSteps * maxSegments),
         maxSearches: (a.maxSearches as number | undefined) ?? defaults.maxSearches,
         maxObservations: (a.maxObservations as number | undefined) ?? defaults.maxObservations,
@@ -218,7 +218,7 @@ export const navigateTo: Skill<NavigateArgs> = {
       ...(args.makeWay === undefined ? {} : { makeWay: args.makeWay }),
       ...(args.makeWayAvailable === true ? { makeWayAvailable: true } : {}),
       maxSegments,
-      maxStepsPerSegment: args.maxStepsPerSegment ?? Math.min(32, maxSteps),
+      maxStepsPerSegment: args.maxStepsPerSegment ?? Math.min(64, maxSteps),
       maxTransitions: args.maxTransitions ?? Math.min(1024, maxSteps * maxSegments),
       invocationMaxTransitions: maxSteps,
       maxSearches: args.maxSearches ?? defaults.maxSearches,

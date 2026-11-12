@@ -388,16 +388,17 @@ test('连续控制：平地直路只在起步清一次控制键', async (t) => {
   assert.deepEqual(tickOf('clear'), tickOf('forward-on'), '清键与重新按键落在同一物理帧，中间没有跨帧空档');
 });
 
-test('连续控制：平地 64 格直路只在分段起步清键', { timeout: 120_000 }, async (t) => {
+test('连续控制：平地 64 格直路只在起步清键', { timeout: 120_000 }, async (t) => {
   const { ctx, timer, frames, dispatches, controlEvents } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 70, z0: -3, z1: 3 });
   t.after(() => { clearInterval(timer); ctx.memory.close(); });
   const result = await navigateTo.run(ctx, { to: { x: 64, y: 64, z: 0 }, allowed: ['walk'], historical: false, maxSteps: 160, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'flat64', frames, dispatches, controlEvents, result);
   assertStraightRunKeepsControls(dispatches, controlEvents);
-  assert.equal(controlEvents.clears, 2, '64 格直路只在两段起步各清一次');
-  assert.deepEqual(controlEvents.clearsByDispatch.flatMap((count, index) => count === 0 ? [] : [index]), [0, 32], '两次清键分别落在两段起步，不在直行中间');
-  assert.equal(controlEvents.forwardOn, 2);
+  assert.equal(controlEvents.clears, 1, '64 格直路只在起步清一次');
+  assert.deepEqual(controlEvents.clearsByDispatch.flatMap((count, index) => count === 0 ? [] : [index]), [0], '清键落在起步，不在直行中间');
+  assert.equal(controlEvents.forwardOn, 1);
+  assert.equal(controlEvents.settleCalls, 0, '64 格直路不再有分段停稳');
   assert.ok(controlEvents.checkpoints >= dispatches.length - 3, '直路的大部分 transition 都经过真实 checkpoint 交接');
   assert.equal(controlEvents.tickCellQueries, 0, '64 个 transition 的 checkpoint 都不在 physicsTick 内查 cell');
   assert.equal(controlEvents.tickSectionQueries, 0, '64 个 transition 的 checkpoint 都不在 physicsTick 内查 section');
