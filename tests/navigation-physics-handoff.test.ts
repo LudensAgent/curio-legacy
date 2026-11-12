@@ -29,6 +29,7 @@ function setup(groundTop: (x: number, z: number) => number, from: Vec3Like, boun
     },
   };
   const controls: Record<string, boolean> = { forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false };
+  const controlEvents = { clears: 0, forwardOn: 0, forwardOff: 0 };
   const entity = {
     position: new Vec3(from.x, from.y, from.z), velocity: new Vec3(0, 0, 0), yaw: -Math.PI / 2, pitch: 0,
     onGround: true, isInWater: false, isInLava: false, isInWeb: false,
@@ -38,8 +39,17 @@ function setup(groundTop: (x: number, z: number) => number, from: Vec3Like, boun
     version: '1.20.1', entity, controls, jumpTicks: 0, jumpQueued: false, fireworkRocketDuration: 0,
     inventory: { slots: [] }, vehicle: null, game: { dimension: 'overworld' },
     blockAt: (pos: Vec3) => world.getBlock(pos),
-    setControlState(name: string, value: boolean) { controls[name] = value; },
-    clearControlStates() { Object.keys(controls).forEach((key) => { controls[key] = false; }); },
+    setControlState(name: string, value: boolean) {
+      if (name === 'forward') {
+        if (value && !controls.forward) controlEvents.forwardOn++;
+        if (!value && controls.forward) controlEvents.forwardOff++;
+      }
+      controls[name] = value;
+    },
+    clearControlStates() {
+      controlEvents.clears++;
+      Object.keys(controls).forEach((key) => { controls[key] = false; });
+    },
     async look(yaw: number, pitch: number) { entity.yaw = yaw; entity.pitch = pitch; },
   });
   const driver = new MineflayerAdapter(config, new EventBus());
@@ -81,7 +91,7 @@ function setup(groundTop: (x: number, z: number) => number, from: Vec3Like, boun
   const ctx = { ...makeCtx(adapter, { deadlineMs: 120_000 }), spatial: {
     worldId: adapter.worldId, session: { voxel: map }, closing: false,
   } as unknown as SharedSpatialSession };
-  return { ctx, timer, entity, frames, dispatches };
+  return { ctx, timer, entity, frames, dispatches, controlEvents };
 }
 
 /** 从第一步派发到末步派发之间：停住的帧数、按后退键的帧数。 */
@@ -150,4 +160,13 @@ test('真实物理：上台阶后紧接转弯，起跳惯性不越过转弯点',
   const { back } = middle(frames, dispatches);
   assert.equal(back, 0, '中间没有后退修正');
   assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [3, 65, 6]);
+});
+
+test('基线：平地连续路线的每次 transition 都会清一次控制键', async (t) => {
+  const { ctx, timer, dispatches, controlEvents } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 12, z0: -3, z1: 3 });
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const result = await navigateTo.run(ctx, { to: { x: 8, y: 64, z: 0 }, allowed: ['walk'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
+  assert.equal(result.status, 'succeeded', result.summary);
+  t.diagnostic(`dispatches=${dispatches.length} clears=${controlEvents.clears} forwardOn=${controlEvents.forwardOn} forwardOff=${controlEvents.forwardOff}`);
+  assert.ok(controlEvents.clears >= dispatches.length, '当前基线：每格 moveTo 都会 clearControlStates');
 });
