@@ -47,7 +47,7 @@ function setup(
   const controlEvents = {
     clears: 0, forwardOn: 0, forwardOff: 0, settleCalls: 0, settleForwardOff: 0,
     clearsByDispatch: [] as number[], forwardOnByDispatch: [] as number[], forwardOffByDispatch: [] as number[],
-    settleCallsByDispatch: [] as number[],
+    forwardHeldAtDispatch: [] as boolean[], settleCallsByDispatch: [] as number[],
     timeline: [] as ControlEvent[], tickGapsOver100: 0, maxTickGap: 0, currentDispatch: -1, lastDispatch: -1,
   };
   const entity = {
@@ -130,6 +130,7 @@ function setup(
       controlEvents.clearsByDispatch[dispatch] = 0;
       controlEvents.forwardOnByDispatch[dispatch] = 0;
       controlEvents.forwardOffByDispatch[dispatch] = 0;
+      controlEvents.forwardHeldAtDispatch[dispatch] = controls.forward === true;
       controlEvents.settleCallsByDispatch[dispatch] = 0;
       controlEvents.currentDispatch = dispatch;
       controlEvents.timeline.push({ dispatch, kind: 'move-to', tick: physicsTicks });
@@ -190,6 +191,7 @@ function measureRun(
     forwardOnByDispatch: controlEvents.forwardOnByDispatch,
     forwardOff: controlEvents.forwardOff,
     forwardOffByDispatch: controlEvents.forwardOffByDispatch,
+    forwardHeldAtDispatch: controlEvents.forwardHeldAtDispatch,
     settleCalls: controlEvents.settleCalls,
     settleForwardOff: controlEvents.settleForwardOff,
     settleCallsByDispatch: controlEvents.settleCallsByDispatch,
@@ -218,20 +220,18 @@ function logRun(
 }
 
 /**
- * 当前基线的固定断言：每一个 transition 都清一次控制键。
- * 纯步行/下落每个 transition 只按一次前进；上台阶的空中滑行会额外松、按一次，所以那类场景只要求
- * 每个 transition 至少按过一次，不把额外的滑行修正算成重复派发。
+ * 连续控制后的固定断言：直行段不再每个 transition 都清键。
+ * 转弯/台阶/下落仍可清键（方向或支撑变化），但每次清键都应重新按一次前进。
  */
-function assertEveryTransitionResets(
+function assertStraightRunKeepsControls(
   dispatches: { frameStart: number }[],
-  controlEvents: { clears: number; forwardOn: number; clearsByDispatch: number[]; forwardOnByDispatch: number[] },
-  options: { exactForwardPresses?: boolean } = {},
+  controlEvents: { clears: number; forwardOn: number; clearsByDispatch: number[]; forwardOnByDispatch: number[]; forwardHeldAtDispatch: boolean[] },
 ) {
-  assert.equal(controlEvents.clears, dispatches.length, '每个 transition 都清一次控制键');
-  assert.ok(controlEvents.clearsByDispatch.every((count) => count === 1), '没有 transition 重复清键');
-  if (options.exactForwardPresses !== false) assert.equal(controlEvents.forwardOn, dispatches.length, '每个 transition 都重新按下前进键');
-  else assert.ok(controlEvents.forwardOn >= dispatches.length, '每个 transition 都至少重新按下前进键');
-  assert.ok(controlEvents.forwardOnByDispatch.every((count) => count >= 1), '没有 transition 漏按前进键');
+  assert.ok(controlEvents.clears < dispatches.length, '直行段不再每个 transition 都清一次控制键');
+  assert.ok(controlEvents.forwardOn >= controlEvents.clears, '每次清键后重新按一次前进');
+  assert.ok(controlEvents.clearsByDispatch.every((count) => count <= 1), '同一 transition 不重复清键');
+  assert.ok(dispatches.every((_, index) => controlEvents.forwardHeldAtDispatch[index] === true || (controlEvents.forwardOnByDispatch[index] ?? 0) >= 1),
+    '每个 transition 开始时前进键已按住，或本段重新按下');
 }
 
 /** 连续路线除末步外都应带 settleAtTarget:false，由下一段接续。 */
@@ -239,11 +239,10 @@ function assertContinuousHandoff(dispatches: { continuous: boolean }[]) {
   assert.ok(dispatches.slice(0, -1).every((dispatch) => dispatch.continuous), '除末步外都按连续交接派发');
 }
 
-/** 每个 transition 都应在时间线上留下派发、清键和至少一次按键。 */
+/** 每个 transition 都应在时间线上留下派发。清键只发生在起步、转弯或支撑变化处。 */
 function assertTimelineCoversDispatches(timeline: ControlEvent[], dispatches: { frameStart: number }[]) {
-  assert.ok(dispatches.every((_, index) => ['move-to', 'clear', 'forward-on'].every((kind) =>
-    timeline.some((event) => event.dispatch === index && event.kind === kind))),
-  '每个 transition 都能在时间线上找到派发、清键与按键');
+  assert.ok(dispatches.every((_, index) => timeline.some((event) => event.dispatch === index && event.kind === 'move-to')),
+    '每个 transition 都能在时间线上找到派发');
 }
 
 test('真实物理：先斜向再直行的路线一路不停车、不后退', async (t) => {
@@ -266,7 +265,7 @@ test('真实物理：一格落差的下坡路线不停车、不后退', async (t
   const result = await navigateTo.run(ctx, { to: { x: 9, y: 63, z: 0 }, allowed: ['walk', 'drop'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'drop1', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents);
+  assertStraightRunKeepsControls(dispatches, controlEvents);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
   assertContinuousHandoff(dispatches);
   const { stopped, back } = middle(frames, dispatches);
@@ -281,7 +280,7 @@ test('真实物理：连续上台阶从格列远端起步也能跳上去，不�
   const result = await navigateTo.run(ctx, { to: { x: 9, y: 66, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'step2', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents, { exactForwardPresses: false });
+  assertStraightRunKeepsControls(dispatches, controlEvents);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
   assertContinuousHandoff(dispatches);
   const { stopped, back } = middle(frames, dispatches);
@@ -314,13 +313,16 @@ test('真实物理：上台阶后紧接转弯，起跳惯性不越过转弯点',
   assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [3, 65, 6]);
 });
 
-test('基线：平地连续路线的每个 transition 都清一次控制键', async (t) => {
+test('连续控制：平地直路只在起步清一次控制键', async (t) => {
   const { ctx, timer, frames, dispatches, controlEvents } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 12, z0: -3, z1: 3 });
   t.after(() => { clearInterval(timer); ctx.memory.close(); });
   const result = await navigateTo.run(ctx, { to: { x: 8, y: 64, z: 0 }, allowed: ['walk'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'flat8', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents);
+  assertStraightRunKeepsControls(dispatches, controlEvents);
+  assert.equal(controlEvents.clears, 1, '8 个 transition 只在起步清一次');
+  assert.equal(controlEvents.forwardOn, 1, '前进键只按一次，后续直接接续');
+  assert.deepEqual(controlEvents.clearsByDispatch, [1, 0, 0, 0, 0, 0, 0, 0]);
   assert.equal(controlEvents.forwardOff, 1, '只有本段最终交接/停稳时松一次前进键');
   assert.equal(controlEvents.forwardOffByDispatch.at(-1), 1, '松开前进键归属末次派发');
   const events = controlEvents.timeline;
@@ -332,18 +334,20 @@ test('基线：平地连续路线的每个 transition 都清一次控制键', as
   assert.deepEqual(tickOf('clear'), tickOf('forward-on'), '清键与重新按键落在同一物理帧，中间没有跨帧空档');
 });
 
-test('基线：平地 64 格直路，按 transition 统计清键/停车/搜索', { timeout: 120_000 }, async (t) => {
+test('连续控制：平地 64 格直路只在分段起步清键', { timeout: 120_000 }, async (t) => {
   const { ctx, timer, frames, dispatches, controlEvents } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 70, z0: -3, z1: 3 });
   t.after(() => { clearInterval(timer); ctx.memory.close(); });
   const result = await navigateTo.run(ctx, { to: { x: 64, y: 64, z: 0 }, allowed: ['walk'], historical: false, maxSteps: 160, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'flat64', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents);
+  assertStraightRunKeepsControls(dispatches, controlEvents);
+  assert.equal(controlEvents.clears, 2, '64 格直路只在两段起步各清一次');
+  assert.equal(controlEvents.forwardOn, 2);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
   assertContinuousHandoff(dispatches);
 });
 
-test('基线：三次转弯的窄走廊', { timeout: 120_000 }, async (t) => {
+test('连续控制：三次转弯的窄走廊不重规划、不停车', { timeout: 120_000 }, async (t) => {
   const corridor = (x: number, z: number) =>
     (x >= 0 && x <= 6 && z >= 0 && z <= 2)
     || (x >= 5 && x <= 7 && z >= -6 && z <= 2)
@@ -355,11 +359,15 @@ test('基线：三次转弯的窄走廊', { timeout: 120_000 }, async (t) => {
   const result = await navigateTo.run(ctx, { to: { x: 12, y: 64, z: -13 }, allowed: ['walk'], historical: false, maxSteps: 96, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'corridor3turns', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents);
+  assert.equal(result.data?.replanCount, undefined, `转弯前先松键减速，不因冲过转弯点重规划：${result.summary}`);
+  assertStraightRunKeepsControls(dispatches, controlEvents);
+  const { stopped, back } = middle(frames, dispatches);
+  assert.equal(stopped, 0, '转弯不产生停车帧');
+  assert.equal(back, 0, '转弯不做后退修正');
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
 });
 
-test('基线：下界地形代理（一格落差 + 转弯，netherrack）', { timeout: 60_000 }, async (t) => {
+test('连续控制：下界地形代理（落差 + 台阶 + 窄口转弯）', { timeout: 60_000 }, async (t) => {
   // 真实下界的通行条件需要另外用 Java 服务器验收；这里只用同高度/同转弯形状的合成地形测控制键节奏。
   const floor = (x: number) => x >= 4 && x < 8 ? 62 : 63;
   // 东向走廊 3 格宽；南向转弯只留 x=9 一格宽，模拟下界窄口。
@@ -370,6 +378,10 @@ test('基线：下界地形代理（一格落差 + 转弯，netherrack）', { ti
   const result = await navigateTo.run(ctx, { to: { x: 9, y: 64, z: 4 }, allowed: ['walk', 'step', 'drop'], historical: false, maxSteps: 32, allowUnknownCorridor: false });
   assert.equal(result.status, 'succeeded', result.summary);
   logRun(t, 'nether-proxy', frames, dispatches, controlEvents, result);
-  assertEveryTransitionResets(dispatches, controlEvents, { exactForwardPresses: false });
+  assert.equal(result.data?.replanCount, undefined, `落差/台阶/窄口转弯不重规划：${result.summary}`);
+  assertStraightRunKeepsControls(dispatches, controlEvents);
+  const { stopped, back } = middle(frames, dispatches);
+  assert.equal(stopped, 0, '落差/台阶/窄口转弯不停车');
+  assert.equal(back, 0);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
 });

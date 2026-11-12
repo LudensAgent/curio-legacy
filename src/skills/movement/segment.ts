@@ -962,10 +962,19 @@ async function runNavigationSegmentInner(
   };
 
   let holding = false;
+  let previousCheckpoint = false;
   try {
   for (const [index, transition] of transitions.entries()) {
     physicalIndex = index;
     if (ctx.signal.aborted) return cancelledHere(index, transition, ctx.adapter.state().pos);
+    const previous = transitions[index - 1];
+    // 上一段在 physicsTick 里复验下一步有效并保留了前进键；方向不变时下一段直接接续，
+    // 不再 clearControlStates 重新起步。转向仍按普通起步处理。
+    const keepControls = previousCheckpoint && previous !== undefined
+      && transition.to.x - transition.from.x === previous.to.x - previous.from.x
+      && transition.to.z - transition.from.z === previous.to.z - previous.from.z;
+    // 只有紧邻的上一段能交出控制键；jump/ladder/其它分支不会保留，下一段必须普通起步。
+    previousCheckpoint = false;
     if (Date.now() >= request.deadline) {
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限耗尽：已执行 ${executed}/${planned.length} 段` });
     }
@@ -1079,11 +1088,16 @@ async function runNavigationSegmentInner(
       }
       const next = transitions[index + 1];
       // 已证实的 walk/step/一格内落差链在中间点不停车（含转向、斜向）；多格下落、边界和末点仍停稳。
-      // 同向与落差只要求站进目标格列；转向仍进入 0.12 格脚位窗，让身体留在本格列内再转向。
+      // 同向与落差只要求站进目标格列；转弯仍进入 0.12 格脚位窗，让身体留在本格列内再转向。
       // 前视用下一段计划几何，交接时仍会以实测起点再次复验，不能跳过未知格。
       const sameHeading = next !== undefined
         && transition.to.x - transition.from.x === next.to.x - next.from.x
         && transition.to.z - transition.from.z === next.to.z - next.from.z;
+      const afterNext = transitions[index + 2];
+      // 下一段之后要转向：本段不再保留运动键，转弯段按普通起步清键/转向，不把直行速度带进转弯窗口。
+      const nextTurns = next !== undefined && afterNext !== undefined
+        && (next.to.x - next.from.x !== afterNext.to.x - afterNext.from.x
+          || next.to.z - next.from.z !== afterNext.to.z - afterNext.from.z);
       const smallEdge = (edge: LandSearchTransition) => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 1;
       const intentEnd = directionalFinish || request.goalMetric !== 'horizontal' && goalReached(request.goal, transition.to, true);
       // 计划窗口的末步不是委托终点：不必精确对准末点，站进目标格列后松键自然停下（由外层 settleMovement 确认），
@@ -1103,11 +1117,15 @@ async function runNavigationSegmentInner(
       passColumn = cellFinish || continuous && (sameHeading || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
       // 连续路线的下一步在 physicsTick 到达本点时复验；有效就保持运动键，由紧接着的
       // 下一段身体控制接续。只对同高行走/台阶启用；下落与终点仍按原逻辑制动。
-      const checkpoint = continuous && next !== undefined && !directionalFinish
+      let checkpointHeld = false;
+      const checkpoint = continuous && next !== undefined && !directionalFinish && sameHeading && !nextTurns
         && (next.kind === 'walk' || next.kind === 'step')
-        ? (measured: Vec3Like) => verifyLandRoute(voxel, { ...currentRequest, measuredStart: measured }, [next], Date.now()).transitions[0]?.status === 'OPEN'
+        ? (measured: Vec3Like) => {
+          const open = verifyLandRoute(voxel, { ...currentRequest, measuredStart: measured }, [next], Date.now()).transitions[0]?.status === 'OPEN';
+          if (open) checkpointHeld = true;
+          return open;
+        }
         : undefined;
-      if (checkpoint !== undefined) holding = true;
       try {
         execution.handedOver ||= continuous;
         await ctx.adapter.moveTo(
@@ -1119,6 +1137,7 @@ async function runNavigationSegmentInner(
             timeoutMs: Math.min(transition.kind === 'drop' && drop > 1 + FEET_ARRIVAL_TOLERANCE.vertical ? 6000 : 3000, Math.floor(remaining)),
             ...(continuous ? { settleAtTarget: false } : {}),
             ...(passColumn ? { passColumn: true } : {}),
+            ...(keepControls ? { keepControls: true } : {}),
             // 允许 drop 时，身体滑下边缘的实测落差按搜索同一上限（maxDrop 4）放行：落地后由执行偏差从实测位置重搜，
             // 不在半空判失败；未允许 drop 时仍只容一格。
             ...(request.allowed.includes('drop') ? { maxDropDown: Math.max(4, Math.ceil(drop)) }
@@ -1128,6 +1147,8 @@ async function runNavigationSegmentInner(
           },
         );
         execution.handedOver = continuous;
+        if (checkpointHeld) holding = true;
+        previousCheckpoint = checkpointHeld;
       } catch (error) {
         if (isAbort(error)) return cancelledHere(index, transition, current.pos);
         actionError = error;

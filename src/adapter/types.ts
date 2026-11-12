@@ -224,6 +224,11 @@ export interface MoveOpts {
    */
   passColumn?: boolean;
   /**
+   * 连续路线接续：上一段在 physicsTick 里复验通过并保留了前进键，且本段方向未变。
+   * 跳过重新转向和 clearControlStates，重新按下前进键；调用方必须已经在同一段内复验下一步。
+   */
+  keepControls?: boolean;
+  /**
    * 连续路线中间点交接：在 physicsTick 内到达当前脚位时调用，参数是当时的实测位置。
    * 返回 true 表示下一步已复验有效：本次控制不释放运动键，由调用方紧接着的下一段
    * 身体控制接续；返回 false 或省略时按原逻辑制动。仅在 settleAtTarget 为 false 时有意义。

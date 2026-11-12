@@ -1043,6 +1043,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         opts.maxDropDown,
         opts.settleAtTarget !== false,
         opts.passColumn === true,
+        opts.keepControls === true,
         opts.onCheckpoint,
       );
       const where = `(${b.entity.position.x.toFixed(2)},${b.entity.position.y.toFixed(2)},${b.entity.position.z.toFixed(2)})`;
@@ -1350,6 +1351,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     maxDropDown = 1,
     settleAtTarget = true,
     passColumn = false,
+    keepControls = false,
     onCheckpoint?: (measured: Vec3Like) => boolean,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
     const b = this.bot, e = b?.entity;
@@ -1440,8 +1442,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
     check();
     checkPosition();
-    if (typeof b.look === 'function') { try { b.look(heading, 0, true); } catch { /* ignore */ } }
-    b.clearControlStates();
+    // 上一段已复验并保留了前进键：方向没变时不再转向、清键，避免每个 transition
+    // 都把速度打断一次。调用方在交接前已用当前证据复验下一段。
+    if (!keepControls) {
+      if (typeof b.look === 'function') { try { b.look(heading, 0, true); } catch { /* ignore */ } }
+      b.clearControlStates();
+    }
     b.setControlState('forward', true);
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
     // 同脚高但超过相邻格的距离由调用方证实的水平 jump 消耗一次起跳。
