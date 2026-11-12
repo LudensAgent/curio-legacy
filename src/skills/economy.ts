@@ -271,7 +271,7 @@ function chestFailText(reason: string | undefined): string {
 
 export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; note?: string }> = {
   name: 'store_items',
-  description: '把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
+  description: '会自己走到已看见的容器旁（不必先 go_near，远处/没看见的先 navigate_to）。把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
   argsDoc: '{"items":["dirt:32","granite",…],"target"?:{x,y,z}|"容器地标ID","note"?:"放矿的"}；items也收 [{"name":"dirt","count":32}]；make 不会授权此工具选址造箱',
   timeoutMs: 90000,
   movement: true,
@@ -336,7 +336,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
 
 export const takeItems: Skill<{ item: string; count: number; target?: ContainerTarget }> = {
   name: 'take_items',
-  description: '从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
+  description: '会自己走到已看见的容器旁（不必先 go_near，远处/没看见的先 navigate_to）。从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
   argsDoc: '{"item":"<物品名>","count"?:1-64,"target"?:{x,y,z}|"容器地标ID"}；未指定target时只列线索，不执行存取',
   timeoutMs: 90000,
   movement: true,

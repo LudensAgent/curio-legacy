@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, navigationDisplacement, noteNavigationDispatch, noteNavigationResult, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, progressSignals, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, navigationDisplacement, noteNavigationDispatch, noteNavigationResult, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, prepProgressOf, progressSignals, recordOf, remainingSteps, signatureOf, storedItemsOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { suspendScopeSessions } from '../skills/movement/session.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
@@ -1125,10 +1125,13 @@ export class Mind {
     // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。
     // 进展不按“背包有没有变多”算：开路副产物（如下界岩）不清空间停滞。
     // 只有点名目标真的取得、真正看见搜索目标、新区块/清单进展/出行前沿推进才算。
+    // 准备类（腾空位、囤食物、修装备、存入容器）按开工到结束的实测差量算，不看活动标题。
     const signals = progressSignals(record, {
       newChunks: this.d.memory.visitedChunkCount > chunksBefore,
       planAdvanced: planAfter !== planBefore,
       frontierAdvanced: !!this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt),
+      ...prepProgressOf(a, state, { countFreedSlots: outcome !== 'interrupted' && state.alive }),
+      storedItems: storedItemsOf(a),
     });
     this.noteProgressOutcome(a, record, signals.progressed);
     this.lastRecord = record;
@@ -1275,10 +1278,10 @@ export class Mind {
     };
     this.lastProgressGateAt = now;
     const repeated = [...new Set(activities.map((entry) => entry.what))].slice(0, 4).join('；');
-    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点的变化：${repeated}`, {
+    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点/准备度（空槽、食物、耐久、存入）的变化：${repeated}`, {
       agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
     });
-    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块或出行最远点的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
+    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
   }
 
   /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */
@@ -1290,7 +1293,7 @@ export class Mind {
       no_progress_activities: gate.activities.length,
       recent: gate.activities.map((entry) => `${entry.what} → ${entry.outcome}：${entry.summary}`),
       repeated_signatures: gate.signatures.map((signature) => signature.length > 160 ? `${signature.slice(0, 159)}…` : signature),
-      measured: '进展只按物品、清单勾项、新区块和出行离入口最远点计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
+      measured: '进展按物品、清单勾项、新区块、出行离入口最远点，或准备度实测变化（空槽增加、食物点增加、护甲/镐耐久增加、存入容器的件数）计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
       available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；explore_toward 朝选定方向边走边看；travel_to 去记得的坐标；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点和出行记录见【记得的地方】。',
       rule: `上面列出的签名（同一做法+同一区域+同一证据版本）会被退回重新确认；连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次仍写同一做法就放行。也可以写 plan 改清单或主目标。`,
     };

@@ -110,6 +110,7 @@ test('prompt lists trips in this dimension and trips beyond a nearby portal, onl
   assert.ok(glance.current_trip, 'glance 能看到当前这一趟的覆盖账');
   assert.match(glance.current_trip.by_direction[0]!, /^E 10 格/);
   assert.match(glance.current_trip.recent_explores[0]!, /^E 请求 32 格，实测推进 10 格，还差 22 格，停（BLOCKED）/);
+  assert.equal(glance.current_trip.empty_slots, '10→10');
   assert.ok(glance.current_trip_note);
   memory.close();
 });
@@ -181,6 +182,7 @@ test('方向覆盖与最近探索：按方向记最远点，并记下请求距�
   const trip = describeCurrentTrip(leg);
   assert.equal(trip.dim, '下界');
   assert.equal(trip.online_min, 1, '按实际在线时长四舍五入，不强行抬到 1 分钟');
+  assert.equal(trip.empty_slots, '10→10');
 });
 
 test('成功不等于到达：提前停与走完请求距离用实测剩余区分', () => {
@@ -248,8 +250,10 @@ test('旧存档没有新增字段：方向覆盖为空，不渲染 undefined', (
   const coverage = describeCoverage(leg);
   assert.deepEqual(coverage, { by_direction: [], recent_explores: [] });
   const text = describeLeg(leg);
+  assert.match(text, /空槽 未知→未知/);
   assert.doesNotMatch(text, /undefined/);
   const trip = describeCurrentTrip(leg);
   assert.equal(trip.online_min, 0, '只观测 5 秒就不报 1 分钟');
+  assert.equal(trip.empty_slots, '未知→未知', '旧存档不补 0');
   assert.doesNotMatch(JSON.stringify(trip), /undefined/);
 });

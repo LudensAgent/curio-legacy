@@ -311,6 +311,8 @@ export function describeLeg(leg: Leg, opts: { now?: number; here?: Vec3Like; por
       : end.kind === 'dimension' ? `${ago(end.at, now)}从 ${at3(end.pos)} 去了${DIM_ZH[end.to] ?? end.to}`
         : `最后观测在 ${at3(end.pos)}，之后未观测${end.to ? `，再观测到时已在${DIM_ZH[end.to] ?? end.to}` : ''}（其间情况未知）`;
   const a = leg.start, b = leg.latest;
+  // 旧存档没有空槽：按未知显示，不补 0 假装观测过。
+  const slots = `、空槽 ${a.emptySlots ?? '未知'}→${b.emptySlots ?? '未知'}`;
   const eaten = Object.entries(leg.eaten);
   const eatenText = eaten.length
     ? `，吃掉 ${eaten.map(([k, v]) => `${k}×${v}`).join('、')}（+${eaten.reduce((n, [k, v]) => n + v * (FOOD_VALUE[k]?.points ?? 0), 0)}）` : '，没观测到吃东西';
@@ -321,7 +323,7 @@ export function describeLeg(leg: Leg, opts: { now?: number; here?: Vec3Like; por
     `身体站过的离入口最远处 ${at3(far)}，离入口 ${far.dist} 格${fromHere}`,
     ending,
     `饥饿值累计降 ${leg.hungerDrop} 点${eatenText}`,
-    `${end ? '出发→结束' : '出发→现在'}：背包食物 ${a.foodPoints}→${b.foodPoints} 饥饿点、镐 ${a.pickaxes}→${b.pickaxes} 把（耐久合计 ${a.pickaxeDurability}→${b.pickaxeDurability}）、身上护甲耐久 ${a.armor}→${b.armor}、土石类填充方块 ${a.blocks}→${b.blocks}、火把 ${a.torches}→${b.torches}`,
+    `${end ? '出发→结束' : '出发→现在'}：背包食物 ${a.foodPoints}→${b.foodPoints} 饥饿点${slots}、镐 ${a.pickaxes}→${b.pickaxes} 把（耐久合计 ${a.pickaxeDurability}→${b.pickaxeDurability}）、身上护甲耐久 ${a.armor}→${b.armor}、土石类填充方块 ${a.blocks}→${b.blocks}、火把 ${a.torches}→${b.torches}`,
   ].join('；');
 }
 
@@ -354,6 +356,7 @@ export function describeCurrentTrip(leg: Leg) {
     entry: at3(leg.entry.pos),
     farthest: `${leg.farthest.dist} 格 ${at3(leg.farthest)}`,
     ...describeCoverage(leg),
+    empty_slots: `${leg.start.emptySlots ?? '未知'}→${leg.latest.emptySlots ?? '未知'}`,
   };
 }
 

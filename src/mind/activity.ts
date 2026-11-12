@@ -3,6 +3,7 @@ import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
 import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { evaluateCondition, type ConditionPerception } from '../projects/conditions.ts';
+import { FOOD_VALUE } from '../skills/food.ts';
 import { SKILLS } from '../skills/index.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
@@ -54,6 +55,33 @@ export function diffInventory(before: Record<string, number>, after: Record<stri
     if (d > 0) gained[k] = d; else if (d < 0) lost[k] = -d;
   }
   return { gained, lost };
+}
+
+/** 1.20 的护甲槽；只算穿在身上的护甲耐久，和出行记录同口径。 */
+const ARMOR_SLOTS = new Set(['head', 'torso', 'legs', 'feet']);
+
+const foodPointsOf = (inventory: AgentState['inventory']) =>
+  inventory.reduce((n, i) => n + (FOOD_VALUE[i.name]?.points ?? 0) * i.count, 0);
+
+/** 背包里镐子的剩余耐久 + 身上护甲的剩余耐久；修理或替换会把总量抬上去。 */
+const gearDurabilityOf = (s: Pick<AgentState, 'inventory' | 'equipment'>) => {
+  const pickaxes = s.inventory.filter((i) => i.name.endsWith('_pickaxe'))
+    .reduce((n, i) => n + (i.durabilities?.length ? i.durabilities.reduce((a, b) => a + b, 0) : (i.durability?.left ?? 0)), 0);
+  const armor = (s.equipment ?? []).flatMap((e) => ARMOR_SLOTS.has(e.slot) && e.durabilityRemaining !== undefined ? [e.durabilityRemaining] : []);
+  return pickaxes + armor.reduce((n, left) => n + left, 0);
+};
+
+/**
+ * 开工时的准备度快照。和 startInventory 一样只用于结束时的实测差量，
+ * 不进提示词、不参与验收：准备类进展不能靠活动文字推断。
+ */
+type PrepStart = { emptySlots?: number; foodPoints: number; gearDurability: number };
+const prepStarts = new WeakMap<Activity, PrepStart>();
+
+/** store_items 回执里实际存入容器的件数；没有回执就是 0。 */
+export function storedItemsOf(a: Pick<Activity, 'results'>) {
+  return a.results.reduce((n, result) =>
+    n + (result.skill === 'store_items' && typeof result.data?.moved === 'number' ? result.data.moved : 0), 0);
 }
 
 /**
@@ -613,7 +641,7 @@ function movementDelegationOf(nav: NavigationProgress | undefined) {
 }
 
 export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'],
-  state: Pick<AgentState, 'inventory' | 'pos' | 'worldId' | 'dim'> & Partial<Pick<AgentState, 'hp' | 'food'>>): Activity {
+  state: Pick<AgentState, 'inventory' | 'pos' | 'worldId' | 'dim'> & Partial<Pick<AgentState, 'hp' | 'food' | 'emptySlots' | 'equipment'>>): Activity {
   const a: Activity = {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
@@ -629,8 +657,30 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
   };
+  prepStarts.set(a, {
+    ...(typeof state.emptySlots === 'number' ? { emptySlots: state.emptySlots } : {}),
+    foodPoints: foodPointsOf(state.inventory),
+    gearDurability: gearDurabilityOf(state),
+  });
   if (a.steps.some((step) => NAVIGATION_SKILLS.has(step.skill))) a.navigation = newNavigation(a, state);
   return a;
+}
+
+/**
+ * 活动结束时按开工快照和结束状态算准备类实测差量；没有开工快照的项返回 null。
+ * 死亡/中断时物品丢失也会空出槽位，不能算准备进展：由调用方传 countFreedSlots:false。
+ */
+export function prepProgressOf(
+  a: Activity,
+  state: Pick<AgentState, 'inventory' | 'emptySlots' | 'equipment'>,
+  opts: { countFreedSlots?: boolean } = {},
+) {
+  const start = prepStarts.get(a);
+  return {
+    freedSlots: opts.countFreedSlots === false || start?.emptySlots === undefined ? null : state.emptySlots - start.emptySlots,
+    foodPointsGained: start === undefined ? null : foodPointsOf(state.inventory) - start.foodPoints,
+    durabilityGained: start === undefined ? null : gearDurabilityOf(state) - start.gearDurability,
+  };
 }
 
 export function doneWhenMet(a: Activity, state: AgentState, percept?: Percept): boolean {
@@ -1186,15 +1236,25 @@ export function planCoverageGap(a: Activity): string | null {
 }
 
 /** 进展信号：取得点名目标、真正看见搜索目标、新区块、清单勾项或出行前沿。
- *  背包里多了副产物（开路的下界岩等）不在这里算进展。 */
+ *  背包里多了副产物（开路的下界岩等）不在这里算进展；准备类信号只认开工到结束的实测差量。 */
 export function progressSignals(record: {
   resource?: { acquired?: boolean | null; intent?: boolean; located?: boolean; goalIncomplete?: boolean };
   exploration?: { found?: readonly string[] };
-}, opts: { newChunks: boolean; planAdvanced: boolean; frontierAdvanced: boolean }) {
+}, opts: {
+  newChunks: boolean; planAdvanced: boolean; frontierAdvanced: boolean;
+  freedSlots?: number | null; foodPointsGained?: number | null; durabilityGained?: number | null; storedItems?: number | null;
+}) {
   const acquiredTarget = record.resource?.acquired === true && record.resource?.goalIncomplete !== true;
   const locatedTarget = record.resource?.located === true;
   const observedTarget = (record.exploration?.found?.length ?? 0) > 0;
-  return { acquiredTarget, locatedTarget, observedTarget, progressed: acquiredTarget || locatedTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced };
+  // 准备类实测：腾出空位、补充食物、修好/换好装备、真的存进容器。未测到的项按 0 处理，不算进展。
+  const freedSlot = (opts.freedSlots ?? 0) > 0;
+  const foodStocked = (opts.foodPointsGained ?? 0) > 0;
+  const gearRepaired = (opts.durabilityGained ?? 0) > 0;
+  const storedItem = (opts.storedItems ?? 0) > 0;
+  const prepared = freedSlot || foodStocked || gearRepaired || storedItem;
+  return { acquiredTarget, locatedTarget, observedTarget, freedSlot, foodStocked, gearRepaired, storedItem, prepared,
+    progressed: acquiredTarget || locatedTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced || prepared };
 }
 
 /** 从每步执行回执的实测位置算覆盖；没有回执的位置不猜。 */
