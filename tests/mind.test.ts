@@ -9,6 +9,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { afterStep, createActivity, nextStep, recordOf, remainingSteps, signatureOf } from '../src/mind/activity.ts';
 import { Attention } from '../src/mind/attention.ts';
 import { Mind } from '../src/mind/mind.ts';
+import { BehaviorEngine } from '../src/mind/behaviors.ts';
 import { buildMindMessages, buildReflectionMessages } from '../src/mind/prompt.ts';
 import { DEFAULT_MOOD, feel, moodWords, SelfModel } from '../src/mind/self.ts';
 import { embeddedQuery, parseDecision, Thinker } from '../src/mind/thinker.ts';
@@ -24,7 +25,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 6; i++) await setImmediate(); };
 
-function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('../src/knowledge/skillbook.ts').SkillBook } = {}) {
+function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('../src/knowledge/skillbook.ts').SkillBook; behaviors?: boolean } = {}) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
@@ -46,9 +47,10 @@ function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('..
       });
     } };
   const said: string[] = [];
-  const mind = new Mind({ adapter, arbiter, perception, memory, bus, self, persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, opts.book ?? null), say: (s) => said.push(s) });
+  const behaviors = opts.behaviors && opts.book ? new BehaviorEngine(opts.book, adapter, arbiter, bus, vision) : undefined;
+  const mind = new Mind({ adapter, arbiter, perception, memory, bus, self, persona: '你叫 Curio。', thinker: new Thinker(planner, adapter, memory, bus, opts.book ?? null), behaviors, say: (s) => said.push(s) });
   mind.start(1_000_000);
-  t.after(() => { mind.stop(); arbiter.cancel('test end'); memory.close(); if (previous) SKILLS.mind_step = previous; else delete SKILLS.mind_step; });
+  t.after(() => { mind.stop(); behaviors?.dispose(); arbiter.cancel('test end'); memory.close(); if (previous) SKILLS.mind_step = previous; else delete SKILLS.mind_step; });
   const reply = async (i: number, body: object) => { pending[i].resolve({ text: JSON.stringify(body), latencyMs: 1200 }); await flush(); };
   const tick = async () => { mind.tick(); await flush(); };
   const finish = async (r?: SkillResult) => { finishes.shift()!(r); await flush(); };
@@ -1983,4 +1985,46 @@ test('没有显式 outcome_id 的活动不归到第一个未完成清单项', as
   await w.finish(ok('走完 24 格'));
   assert.equal(w.self.progressLedger(firstOutcome), null, '没有明确关联就不能算到第一个未完成成果');
   assert.equal(w.self.progressLedger('unassigned')?.movement.activities, 1, '记到 unassigned');
+});
+
+test('纯文字技能和定义无效的技能能被想起，但不会自动翻开正文', async (t) => {
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { BUILTIN_SKILLS_DIR, SkillBook } = await import('../src/knowledge/skillbook.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-auto-open-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, dir);
+  assert.ok(book.write('observe-text', '观察脚下位置', '只观察当前脚下位置，不移动、不挖掘、不放置。').ok);
+  assert.ok(book.write('observe-broken', '观察脚下位置', '只观察当前脚下位置。', { steps: [{ skill: 'no-such-skill', args: {} }] }).ok);
+  const w = fixture(t, { book, behaviors: true });
+  const opened: string[] = [];
+  w.bus.on('event', (e: { type: string; data?: { auto?: boolean; name?: string } }) => { if (e.type === 'skill_read' && e.data?.auto) opened.push(e.data.name!); });
+  await w.tick();
+  await w.reply(0, { monologue: '看看脚下', decision: 'new', activity: { what: '观察脚下位置', steps: [step()] } });
+  w.mind.attention.notice('test_auto', '观察脚下位置', 0.8);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  assert.deepEqual(opened, [], '文字笔记和无效定义都不会被自动接手');
+});
+
+test('加载成功的可执行技能仍会按关键词自动翻开正文', async (t) => {
+  const os = await import('node:os');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { BUILTIN_SKILLS_DIR, SkillBook } = await import('../src/knowledge/skillbook.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-auto-open-ok-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const book = new SkillBook(BUILTIN_SKILLS_DIR, dir);
+  assert.ok(book.write('observe-valid', '观察脚下位置', '观察当前脚下位置。', { code: 'return { ok: true };', verify: "const s = await api.state(); return s.onGround ? true : '不在落地';" }).ok);
+  const w = fixture(t, { book, behaviors: true });
+  const opened: string[] = [];
+  w.bus.on('event', (e: { type: string; data?: { auto?: boolean; name?: string } }) => { if (e.type === 'skill_read' && e.data?.auto) opened.push(e.data.name!); });
+  
+  await w.tick();
+  await w.reply(0, { monologue: '看看脚下', decision: 'new', activity: { what: '观察脚下位置', steps: [step()] } });
+  w.mind.attention.notice('test_auto', '观察脚下位置', 0.8);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  assert.deepEqual(opened, ['observe-valid'], '可执行技能照常自动翻开');
 });

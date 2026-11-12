@@ -126,6 +126,10 @@ export function failureFor(step: { skill: string; args?: unknown }, result: { fa
   };
 }
 
+/** 自写纯文字做法只算未验证笔记；同名已有可执行技能照常触发，这段笔记本身不会被自动接手。 */
+const textNoteNotice = (name: string, description: string, created: boolean, live: boolean) =>
+  `${created ? '写了一份未验证的文字笔记' : '修订了文字笔记'}：${name}——${description}（${live ? '同名的可执行版保持不变、照常触发；这段笔记本身不会被自动接手' : '不会被自动接手'}，需主动 skill 查询）`;
+
 const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near']);
 /** 绕路时可以把移动会话整体挂起、回来用同一 sessionId 续接的两个长程工具。 */
 const RESUMABLE_LONG_RANGE = new Set(['explore_toward', 'travel_to']);
@@ -1967,9 +1971,10 @@ export class Mind {
     let openedSkill: MindContext['openedSkill'];
     // 自动展开正文前核对触发条件：只有关键词命中、条件不符时只留名字/用途，正文由 Agent 按需查。
     // 纯文字技能只是未验证笔记：可以按关键词被想起，但不自动展开成“这次就按它做”。
-    // 只有带可执行 behavior 的技能才自动翻开；笔记需要 Agent 显式用 skill 查询阅读。
-    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref && book?.get(r.ref)?.behavior !== undefined
-      && (!this.d.behaviors || this.d.behaviors.conditionHolds(r.ref, this.d.arbiter.info())));
+    // 只认行为引擎里真正加载成功的可执行版（文字笔记、无效定义、候选都不自动翻开），再核对 when。
+    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref
+      && this.d.behaviors && this.d.behaviors.get(r.ref) !== undefined
+      && this.d.behaviors.conditionHolds(r.ref, this.d.arbiter.info()));
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
       const k = book.get(top.ref!)!;
       this.skillOpenedAt.set(k.name, Date.now());
@@ -2177,8 +2182,8 @@ export class Mind {
       } else if (c.skill) {
         const w = this.safe(() => this.d.thinker.skillBook?.write(c.skill!.name, c.skill!.description, c.skill!.body) ?? null, null);
         if (w?.ok) {
-          this.d.self.think(`把「${w.skill.description}」的做法写成了自己的技能 ${w.skill.name}`, 'learned');
-          this.d.bus.publish('skill_written', 'P2', `${w.created ? '写了一份未验证的文字笔记' : '修订了文字笔记'}：${w.skill.name}——${w.skill.description}（不会被自动接手，需主动 skill 查询）`, { name: w.skill.name });
+          this.d.self.think(`把「${w.skill.description}」记成未验证的文字笔记 ${w.skill.name}`, 'learned');
+          this.d.bus.publish('skill_written', 'P2', textNoteNotice(w.skill.name, w.skill.description, w.created, this.d.behaviors?.get(w.skill.name) !== undefined), { name: w.skill.name });
         } else if (w && !w.ok) this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
       }
       for (const a of c.agendaAdd ?? []) {
@@ -2413,8 +2418,8 @@ export class Mind {
     const w = book && typeof raw.name === 'string' && typeof raw.description === 'string' && typeof raw.body === 'string'
       ? this.safe(() => book.write(raw.name, raw.description, raw.body), null) : null;
     if (w?.ok) {
-      this.d.self.think(`把「${w.skill.description}」写成了技能 ${w.skill.name}`, 'learned');
-      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下未验证的文字笔记' : '修订文字笔记'} ${w.skill.name}——${w.skill.description}（不会被自动接手，需主动 skill 查询）`, { name: w.skill.name, mode: 'knowledge' });
+      this.d.self.think(`把「${w.skill.description}」记成未验证的文字笔记 ${w.skill.name}`, 'learned');
+      this.d.bus.publish('skill_written', 'P2', textNoteNotice(w.skill.name, w.skill.description, w.created, this.d.behaviors?.get(w.skill.name) !== undefined), { name: w.skill.name, mode: 'knowledge' });
     } else decision.notes.push(`skill 没存下：${w && !w.ok ? w.error : '需要 name、description，以及 steps（可执行）或 body（做法说明）'}`);
   }
 

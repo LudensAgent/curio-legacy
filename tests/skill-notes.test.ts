@@ -91,3 +91,17 @@ test('后台改进接收已有正文、笔记及调度约束', async (t) => {
   assert.equal(improver.consider('observe-feet', 'requested'), null);
   await completed;
 });
+
+test('自写的纯文字技能被想起时标明未验证，不会和可执行技能混在一起', async (t) => {
+  const { book } = setup(t);
+  assert.ok(book.write('observe-feet', '观察脚下位置', notes).ok);
+  const { SelfModel } = await import('../src/mind/self.ts');
+  const { WorldMemory } = await import('../src/memory/store.ts');
+  const { recallLocal } = await import('../src/mind/recall.ts');
+  const memory = new WorldMemory(null);
+  const recalled = recallLocal('观察脚下位置', { self: new SelfModel(null), memory, book });
+  memory.close();
+  const skill = recalled.find((r) => r.ref === 'observe-feet');
+  assert.ok(skill, '文字笔记仍可被想起');
+  assert.match(skill.text, /未验证的文字笔记/);
+});

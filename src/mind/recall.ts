@@ -104,7 +104,9 @@ export function recallLocal(query: string, src: RecallSources, opts: {
       const trial = candidate
         ? `（候选，尚未验收；用途与触发条件见 {"kind":"skill","name":"${s.name}"}，是否试用由你决定）`
         : '';
-      push({ kind: 'skill', text: `${s.name}：${s.description}${trial}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
+      // 自写的纯文字做法只是未验证笔记：想起时也标明，不能和已验证/可执行技能混在一起。
+      const note = s.source === 'self' && s.behavior === undefined ? '（未验证的文字笔记，不会自动执行）' : '';
+      push({ kind: 'skill', text: `${s.name}：${s.description}${note}${trial}`, ref: s.name }, score(`${s.name.replace(/-/g, ' ')} ${s.description}`, [s.body.slice(0, 600)]) * 0.9);
     }
     for (const s of src.extraSkills ?? []) push({ kind: 'skill', text: s.text, ref: s.name }, score(s.text));
   }
