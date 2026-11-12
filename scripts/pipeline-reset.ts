@@ -8,18 +8,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config, requireLocalMode } from '../src/config.ts';
 
-const args = new Set(process.argv.slice(2));
-const allowed = new Set(['--apply', '--dry-run', '--help']);
+const argv = process.argv.slice(2);
+const dataIndex = argv.indexOf('--data');
+const explicitData = dataIndex >= 0 ? argv[dataIndex + 1] : undefined;
+if (dataIndex >= 0 && (!explicitData || explicitData.startsWith('--'))) throw new Error('--data 后需要数据目录');
+const args = new Set(argv.filter((_arg, i) => i !== dataIndex && i !== dataIndex + 1));
+const allowed = new Set(['--apply', '--dry-run', '--help', '--data']);
 const unknown = [...args].find((arg) => !allowed.has(arg));
-if (unknown) throw new Error(`未知参数 ${unknown}；支持 --dry-run（默认）与 --apply`);
+if (unknown) throw new Error(`未知参数 ${unknown}；支持 --dry-run（默认）、--apply 与 --data <目录>`);
 
 if (args.has('--help')) {
-  console.log('npm run mind:reset-pipeline [-- --apply]；先退出 Agent。默认预览，--apply 会先备份再写入。');
+  console.log('npm run mind:reset-pipeline [-- --apply] [-- --data <数据目录>]；先退出 Agent。默认预览，--apply 会先备份再写入。');
   process.exit(0);
 }
 
 requireLocalMode('切换学习链数据');
-const dataDir = path.resolve(config.dataDir);
+const dataDir = path.resolve(explicitData ?? config.dataDir);
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const backup = (file: string) => {
   const target = `${file}.bak-pipeline-reset-${stamp}`;

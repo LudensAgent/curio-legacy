@@ -34,6 +34,8 @@
     "check:rcon:live": "node --env-file=.env.live --import tsx scripts/check-rcon.ts",
     "memory:clear": "tsx scripts/clear-memory.ts",
     "mind:reset-pipeline": "tsx scripts/pipeline-reset.ts",
+    "mind:reset-pipeline:local": "node --env-file=.env.local --import tsx scripts/pipeline-reset.ts",
+    "mind:reset-pipeline:live": "node --env-file=.env.live --import tsx scripts/pipeline-reset.ts",
     "memory:reset": "tsx scripts/clear-memory.ts --full",
     "memory:serve": "docker compose -f compose.memory.yaml up -d",
     "memory:serve:local": "docker compose --env-file .env --env-file .env.local -f compose.memory.yaml up -d",
