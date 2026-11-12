@@ -648,7 +648,8 @@ export class SelfModel {
         && (r.resource?.mode === 'find' || r.resource?.mode === 'mixed') && searchMissing;
       // 只有活动点名了目标时，“没找到”才是反例；
       // 没写 until 的“向北探索 96 格”完成距离委托，本来就没有寻找对象，不能写成目标失败。
-      const searchTargetMiss = searchContractMiss && (r.resource?.targets?.length ?? 0) > 0;
+      // 被 Agent 自己改做/放下、或被死亡断线打断的活没有做到底：“还没找到”不是这条窍门的反例。
+      const searchTargetMiss = searchContractMiss && (r.resource?.targets?.length ?? 0) > 0 && (r.outcome === 'done' || r.outcome === 'unmet');
       if (applied) k.applications = [...(k.applications ?? []), {
         at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}),
         summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}),

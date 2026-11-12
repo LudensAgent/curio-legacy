@@ -349,7 +349,8 @@ function mySkills(): MySkillInfo[] {
     trials: { verified: d.trials.filter((t) => t.status === 'verified').length, failed: d.trials.filter((t) => t.status === 'failed').length } }));
   const fromMacros: MySkillInfo[] = library.list().filter((d) => !d.disabled).slice(-6).map((d) => {
     const st = stats[`macro:${d.name}`];
-    return { name: `macro:${d.name}`, status: 'macro' as const, description: d.description.slice(0, 80), ...(st?.runs ? { success: `${st.ok}/${st.runs}` } : {}) };
+    // 成功率只按有结果的运行算；被取消的运行另列，不当失败。
+    return { name: `macro:${d.name}`, status: 'macro' as const, description: d.description.slice(0, 80), ...(st && st.ok + st.fail ? { success: `${st.ok}/${st.ok + st.fail}${st.cancelled ? `（另取消 ${st.cancelled}）` : ''}` } : {}) };
   });
   return [...fromMethods, ...fromMacros].slice(-10);
 }

@@ -244,3 +244,19 @@ test('反向混合：看见寻找目标但没取得采集目标，不算寻找�
   assert.equal(k.wins, 1, '寻找目标已找到，不能因取得缺口判寻找失败');
   assert.equal(k.counterexamples?.length ?? 0, 0, '不应写 TARGET_NOT_FOUND');
 });
+
+test('被改做、放下或打断的寻找活没做到底：不给窍门记“没找到”的反例，也不记失败', () => {
+  for (const outcome of ['replaced', 'abandoned', 'interrupted'] as const) {
+    const self = new SelfModel(null);
+    const k = self.learn('沿北向开巷能找到下界要塞', { source: 'reflection', kind: 'explore' })!;
+    self.record(record({
+      id: `a-${outcome}`, applying: k.id, applyingText: k.text, outcome,
+      summary: '推进途中改了主意',
+      exploration: { start: { x: 0, y: 64, z: 0 }, end: { x: 0, y: 64, z: -40 }, maxHorizontal: 40, visitedCells: 40, newChunks: 2, searchIntent: true, localOnly: false, found: [], blocked: false },
+      resource: { intent: true, mode: 'find', targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
+    }));
+    assert.equal(k.counterexamples, undefined, `${outcome} 不是反例`);
+    assert.equal(k.losses, 0, `${outcome} 不记失败`);
+    assert.equal(k.applications?.length, 1, `${outcome} 仍如实记下应用经过`);
+  }
+});

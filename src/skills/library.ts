@@ -102,13 +102,14 @@ export class SkillLibrary {
     this.bus.publish('skill_forgotten', 'P1', `淘汰组合技能 ${PREFIX}${n}：${why}`);
   }
 
-  /** 成功率太低的组合技能自动淘汰（≥3 次运行且成功率 < 1/3） */
+  /** 成功率太低的组合技能自动淘汰（≥3 次有结果的运行且成功率 < 1/3）；被取消的运行没有结果，不算失败 */
   prune() {
     const stats = this.memory.skillStats();
     for (const d of this.defs.values()) {
       if (d.disabled) continue;
       const st = stats[PREFIX + d.name];
-      if (st && st.runs >= 3 && st.ok / st.runs < 1 / 3) this.forget(d.name, `成功 ${st.ok}/${st.runs}`);
+      const decided = st ? st.ok + st.fail : 0;
+      if (st && decided >= 3 && st.ok / decided < 1 / 3) this.forget(d.name, `成功 ${st.ok}/${decided}${st.cancelled ? `（另有 ${st.cancelled} 次被取消，不计）` : ''}`);
     }
   }
 
