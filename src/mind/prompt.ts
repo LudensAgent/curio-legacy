@@ -16,7 +16,7 @@ import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
-import { cleanLesson, moodWords, PLAN_REVISION_MIN, type SelfModel } from './self.ts';
+import { cleanLesson, moodWords, PLAN_REVISION_MIN, type PlanAttemptEvidence, type SelfModel } from './self.ts';
 import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
@@ -591,6 +591,18 @@ export function situationalReminders(ctx: MindContext): string[] {
 // 展示身体位置用「脚部占据格」（floor，与 local 图原点一致），不用四舍五入，避免与局部图推算出的绝对坐标差一格。
 const pos3 = (p: [number, number, number]) => [Math.floor(p[0]), Math.floor(p[1] + 0.05), Math.floor(p[2])].join(',');
 
+/**
+ * 一次计划尝试的实测证据，压成一行给模型复盘。施工量、覆盖和目标证据分开：
+ * “走 24 格已知通路”会显示 dug0/filled0/open24，而不是只显示 done。
+ */
+function attemptEvidenceText(e: PlanAttemptEvidence): string {
+  const passage = `挖${e.dug}/补${e.filled}/原通${e.openSteps}`;
+  const coverage = `新格${e.newChunks ?? '?'}/覆盖${Math.round(e.maxHorizontal)}格`;
+  const target = e.found.length ? `看见${e.found.slice(0, 3).join('、')}` : e.located ? '目标已定位' : '目标未定位';
+  const acquired = e.acquired === true ? '已取得' : e.acquired === false ? '未取得' : '取得未知';
+  return `${passage}；${coverage}；${target}，${acquired}`;
+}
+
 /** 【专注】：主目标、清单、手上的活是不是在推进它（放在消息靠后，模型最看得见的地方） */
 function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   const item = ctx.self.activeAgenda();
@@ -608,8 +620,9 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       ...(plan.methods?.some((m) => m.status === 'active') ? { methods: plan.methods.filter((m) => m.status === 'active').map((m) => ({
         id: m.id, text: m.text, ...(m.outcomeId ? { outcome: m.outcomeId } : {}), attempts: m.attempts,
         ...(Object.keys(m.stopReasons).length ? { stopped: m.stopReasons } : {}),
+        ...(m.lastEvidence ? { last_evidence: attemptEvidenceText(m.lastEvidence) } : {}),
       })) } : {}),
-      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}`) } : {}),
+      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       checklist_note: '清单是成果（找到/到达/取得/确认），不是做法（开一条巷/挖N格/推进N格）；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(() => {

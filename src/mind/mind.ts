@@ -1036,11 +1036,24 @@ export class Mind {
     // 计划在活动期间被换掉时，旧活动的成果/做法不能写进新计划的账。
     // 旧活动没有该字段时按通配；新活动明确记下 null（开工时没有计划），之后新建的计划不能认领它。
     const planStillCurrent = a.planAgendaId === undefined || a.planAgendaId === (planForProgress?.agendaId ?? null);
+    // 一次尝试的证据：施工量、覆盖与目标证据分开。按距离完成的 24 格已知通路
+    // 会留下 openSteps=24，但 dug/filled=0、found 为空；复盘不能只看 done。
+    const work = record.work ?? { dug: 0, filled: 0, openSteps: 0 };
+    const attemptEvidence = {
+      dug: work.dug, filled: work.filled, openSteps: work.openSteps,
+      newChunks: record.exploration?.newChunks ?? null,
+      visitedCells: record.exploration?.visitedCells ?? 0,
+      maxHorizontal: record.exploration?.maxHorizontal ?? 0,
+      found: record.exploration?.found ?? [],
+      located: record.resource?.located ?? false,
+      acquired: record.resource?.acquired ?? null,
+    };
     if (planStillCurrent && (a.outcomeId || a.methodId)) {
       this.d.self.recordPlanAttempt({
         outcomeId: a.outcomeId, methodId: a.methodId, where: { ...state.pos },
         whatHappened: `${a.what} → ${outcome}：${summary}`,
         whyStopped: failed?.failureCode ?? outcome,
+        evidence: attemptEvidence,
       });
     }
     // 进展账本按目标累计，不按动作名/做法分桶：换方法、改活动标题都不会清零。
@@ -1054,6 +1067,8 @@ export class Mind {
         : '未关联当前计划';
       this.d.self.recordProgress({
         targetId, label, at: record.at, dim: state.dim, start: a.startPos, end: state.pos,
+        // 显式 outcome_id / 落到下一项 / 未关联，分别记账；复盘能看出这条活动是不是真的属于该成果。
+        attribution: targetId === 'unassigned' ? 'unassigned' : a.outcomeId === targetId ? 'explicit' : 'next_outcome',
         outcome, ...(record.completion ? { completion: record.completion } : {}),
         ...(record.stop?.reason ? { stopReason: record.stop.reason } : {}),
         failedCode: failed?.failureCode ?? null, summary: record.summary ?? summary, durationSec: record.durationSec,
@@ -1061,6 +1076,9 @@ export class Mind {
         gained: record.gained, lost: record.lost,
         ...(record.resource?.targets ? { targets: record.resource.targets } : {}),
         ...(record.resource ? { acquired: record.resource.acquired } : {}),
+        ...(record.exploration?.found.length ? { found: record.exploration.found } : {}),
+        ...(record.resource ? { located: record.resource.located } : {}),
+        ...(record.work ? { work: record.work } : {}),
         ...(a.startVitals?.hp !== undefined && typeof state.hp === 'number' ? { hpDelta: state.hp - a.startVitals.hp } : {}),
         ...(a.startVitals?.food !== undefined && typeof state.food === 'number' ? { foodDelta: state.food - a.startVitals.food } : {}),
       });

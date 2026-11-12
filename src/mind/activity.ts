@@ -1094,6 +1094,13 @@ export function localStepFailure(
 export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string, state: AgentState, info: { newChunks?: number | null } = {}): ActivityRecord {
   const { gained, lost } = diffInventory(a.startInventory, inventoryOf(state));
   const receipts = a.results.flatMap((result) => result.data ? [result.data] : []);
+  // 施工回执里的真实工作量：挖开/补支撑/本来就能直接走。后两者必须分开：
+  // 走 24 格已知通路不是新挖 24 格通道，不能只凭活动按距离完成就算新进展。
+  const work = receipts.reduce<{ dug: number; filled: number; openSteps: number }>((sum, data) => ({
+    dug: sum.dug + (typeof data.excavatedBlocks === 'number' ? data.excavatedBlocks : 0),
+    filled: sum.filled + (typeof data.filledBlocks === 'number' ? data.filledBlocks : 0),
+    openSteps: sum.openSteps + (typeof data.openSteps === 'number' ? data.openSteps : 0),
+  }), { dug: 0, filled: 0, openSteps: 0 });
   const attemptOnly = !!a.attemptOnly;
   const exploration = explorationOf(a, state.pos, info.newChunks ?? null);
   const failed = [...a.results].reverse().find((result) => result.status === 'failed');
@@ -1181,6 +1188,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
     } } : {}),
     ...(collectionResult && collectionReceipt ? { collection: { ...collectionReceipt, skill: collectionResult.skill, ...(collectionResult.args !== undefined ? { args: collectionResult.args } : {}), at: collectionResult.at } } : {}),
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),
+    ...(work.dug > 0 || work.filled > 0 || work.openSteps > 0 ? { work } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
     ...(a.expect ? { expect: a.expect } : {}), ...(a.hypothesis ? { hypothesis: a.hypothesis } : {}),
     ...(a.applying ? { applying: a.applying } : {}), ...(a.applyingText ? { applyingText: a.applyingText } : {}),

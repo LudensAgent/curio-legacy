@@ -213,6 +213,11 @@ export interface ActivityRecord {
   collection?: CollectionRecord;
   /** 实测探索覆盖：位置来自每步回执，不来自活动标题。 */
   exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean; found: string[]; blocked: boolean };
+  /**
+   * 施工类回执的实际工作量：挖掉、补上、以及本来就能直接走的格。
+   * `openSteps` 是覆盖/已通行的格，不是新开通道；目标复盘要靠 dug/filled 判断有没有新通道。
+   */
+  work?: { dug: number; filled: number; openSteps: number };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
   /** 这段活关联的计划成果/做法（po_… / pm_…）；旧记录没有该字段时不猜。 */

@@ -100,3 +100,48 @@ test('A→B→A 的往返按真实回程记重复到访，而不是只看连续�
   assert.equal(entry.spatial.repeatVisits, 2, '每次走回已到过的区块都记一次');
   assert.equal(entry.movement.activities, 3);
 });
+
+test('24 格本来就能走的已知通路只记覆盖/通行，不冒充新通道或目标进展', () => {
+  const entry = applyProgress(emptyProgressLedger(), base({
+    outcome: 'done', summary: '24 格里挖掉 0 块、补了 0 处支撑、24 格本来就能直接走',
+    newChunks: 0, visitedCells: 25, gained: {}, lost: {},
+    targets: ['nether_bricks'], acquired: false, located: false, found: [],
+    work: { dug: 0, filled: 0, openSteps: 24 },
+  })).entries.po_fort!;
+  assert.deepEqual(entry.passage, { dug: 0, filled: 0, openSteps: 24 });
+  assert.equal(entry.targetEvidence.located, false);
+  assert.deepEqual(entry.targetEvidence.found, []);
+  assert.equal(entry.items.explicitTargets.nether_bricks, 0);
+  const summary = progressSummary(entry)!;
+  assert.deepEqual(summary.passage, { dug: 0, filled: 0, openSteps: 24 });
+  assert.equal(summary.target_evidence?.located, false);
+  assert.match(summary.coverage_note, /移动覆盖/);
+  assert.equal(summary.activities, 1, '覆盖仍然记录，但与目标证据分开');
+});
+
+test('真正挖开/补支撑的尝试在 passage 里单独累计', () => {
+  const first = applyProgress(emptyProgressLedger(), base({ work: { dug: 6, filled: 2, openSteps: 4 } }));
+  const second = applyProgress(first, base({ work: { dug: 3, filled: 1, openSteps: 10 } }));
+  assert.deepEqual(second.entries.po_fort!.passage, { dug: 9, filled: 3, openSteps: 14 });
+});
+
+test('提示词把移动覆盖与施工/目标证据分开投影，并带出最近尝试证据', (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
+  t.after(() => { memory.close(); self.close(); });
+  const plan = self.setPlan('找到下界要塞', ['找到下界要塞'], [null], { methods: [{ text: '沿北向开平巷', outcome: 0 }] })!;
+  const outcomeId = plan.steps[0]!.id, methodId = plan.methods![0]!.id;
+  const evidence = { dug: 0, filled: 0, openSteps: 24, newChunks: 0, visitedCells: 25, maxHorizontal: 24, found: [], located: false, acquired: false };
+  self.recordProgress(base({ targetId: outcomeId, label: plan.goal, work: { dug: 0, filled: 0, openSteps: 24 }, newChunks: 0, visitedCells: 25, targets: ['nether_bricks'], acquired: false, located: false, found: [] }));
+  self.recordPlanAttempt({ outcomeId, methodId, whatHappened: '沿已知通道走 24 格', whyStopped: 'done', evidence });
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  const percept = perception.update(), state = adapter.state();
+  const [, user] = buildMindMessages({
+    tier: 'deliberate', reason: '测试', percept, state, self, memory, plan, activity: null,
+    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', lastRecord: null,
+  } as any);
+  assert.match(user.content, /"passage":\{"dug":0,"filled":0,"openSteps":24\}/);
+  assert.match(user.content, /"target_evidence":\{"located":false,"acquired":false\}/);
+  assert.match(user.content, /coverage_note/);
+  assert.match(user.content, /挖0\/补0\/原通24/);
+  assert.match(user.content, /目标未定位/);
+});

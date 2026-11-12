@@ -61,11 +61,22 @@ export interface PlanOutcome {
   /** 稳定 id：改写清单时按文字保留，供活动/尝试引用。 */
   id: string; text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean;
 }
+/**
+ * 一次尝试的实测证据：施工量、覆盖和目标证据分开。`openSteps` 是本来就能直接
+ * 走的格，不是新开通道；`found/located/acquired` 才是目标证据，不能由移动距离推出。
+ */
+export interface PlanAttemptEvidence {
+  dug: number; filled: number; openSteps: number;
+  newChunks: number | null; visitedCells: number; maxHorizontal: number;
+  found: string[]; located: boolean; acquired: boolean | null;
+}
 /** 计划里的一个做法：可以换、可以停，不因方法变更而删成果。 */
 export interface PlanMethod {
   id: string; text: string; outcomeId?: string;
   status: 'active' | 'paused' | 'dropped';
   attempts: number; stopReasons: Record<string, number>;
+  /** 最近一次尝试的实测证据；旧存档没有该字段时不猜。 */
+  lastEvidence?: PlanAttemptEvidence;
   addedAt: number; updatedAt: number;
 }
 /** 一次具体尝试：做了什么、在哪儿停的；归因仍由 Agent 判断。 */
@@ -73,6 +84,8 @@ export interface PlanAttempt {
   at: number; methodId?: string; outcomeId?: string;
   where?: { x: number; y: number; z: number };
   whatHappened: string; whyStopped?: string;
+  /** 这次尝试实际做了什么/看到了什么；让复盘区分“按距离完成”和“目标有进展”。 */
+  evidence?: PlanAttemptEvidence;
 }
 
 export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[]; setAt: number; updatedAt: number;
@@ -484,19 +497,21 @@ export class SelfModel {
   }
 
   /** 把一段活的结局记到做法/成果的尝试账上；不判断成败原因，只记事实。 */
-  recordPlanAttempt(input: { outcomeId?: string; methodId?: string; where?: { x: number; y: number; z: number }; whatHappened: string; whyStopped?: string; at?: number }) {
+  recordPlanAttempt(input: { outcomeId?: string; methodId?: string; where?: { x: number; y: number; z: number }; whatHappened: string; whyStopped?: string; evidence?: PlanAttemptEvidence; at?: number }) {
     const p = this.plan();
     if (!p || (!input.outcomeId && !input.methodId)) return null;
     const at = input.at ?? Date.now();
     const attempt: PlanAttempt = {
       at, ...(input.outcomeId ? { outcomeId: input.outcomeId } : {}), ...(input.methodId ? { methodId: input.methodId } : {}),
       ...(input.where ? { where: { ...input.where } } : {}), whatHappened: input.whatHappened.slice(0, 240), ...(input.whyStopped ? { whyStopped: input.whyStopped } : {}),
+      ...(input.evidence ? { evidence: { ...input.evidence, found: [...input.evidence.found] } } : {}),
     };
     p.attempts = [...(p.attempts ?? []), attempt].slice(-40);
     const method = input.methodId ? p.methods?.find((m) => m.id === input.methodId) : undefined;
     if (method) {
       method.attempts += 1; method.updatedAt = at;
       if (input.whyStopped) method.stopReasons[input.whyStopped] = (method.stopReasons[input.whyStopped] ?? 0) + 1;
+      if (input.evidence) method.lastEvidence = { ...input.evidence, found: [...input.evidence.found] };
     }
     p.updatedAt = at;
     this.touch();

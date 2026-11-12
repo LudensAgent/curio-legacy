@@ -118,3 +118,29 @@ test('只改做法时 focus 指向别的主目标会被拒绝，不污染新计�
   assert.deepEqual(self.plan()!.methods!.map((m) => m.text), ['沿北向开巷']);
   assert.equal(self.plan()!.steps[0]!.done, false, '被拒绝的 plan 不能顺手勾掉当前计划的项');
 });
+
+test('计划尝试保留施工量/覆盖/目标证据，方法记录最近一次证据', () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('找到下界要塞', ['找到下界要塞'], [null], { methods: [{ text: '沿北向开平巷', outcome: 0 }] })!;
+  const outcomeId = plan.steps[0]!.id, methodId = plan.methods![0]!.id;
+  const evidence = { dug: 0, filled: 0, openSteps: 24, newChunks: 0, visitedCells: 25, maxHorizontal: 24, found: [], located: false, acquired: false };
+  self.recordPlanAttempt({ outcomeId, methodId, whatHappened: '沿已知通道走 24 格', whyStopped: 'done', evidence });
+  const p = self.plan()!;
+  assert.deepEqual(p.attempts!.at(-1)!.evidence, evidence);
+  assert.deepEqual(p.methods!.find((m) => m.id === methodId)!.lastEvidence, evidence);
+});
+
+test('按距离完成的尝试/进展不重置计划 stall 时钟；只有勾清单项才算推进', async () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('找到下界要塞', ['找到下界要塞'], [null], { methods: [{ text: '沿北向开平巷', outcome: 0 }] })!;
+  const outcomeId = plan.steps[0]!.id, methodId = plan.methods![0]!.id;
+  const progressAt = self.plan()!.progressAt;
+  self.recordPlanAttempt({ outcomeId, methodId, whatHappened: '沿已知通道走 24 格', whyStopped: 'done',
+    evidence: { dug: 0, filled: 0, openSteps: 24, newChunks: 0, visitedCells: 25, maxHorizontal: 24, found: [], located: false, acquired: false } });
+  assert.equal(self.plan()!.progressAt, progressAt, '尝试记录不算清单推进');
+  self.recordProgress({ targetId: outcomeId, label: plan.goal, at: Date.now(), dim: 'the_nether', start: { x: 0, y: 64, z: 0 }, end: { x: 24, y: 64, z: 0 }, outcome: 'done', summary: '走 24 格', durationSec: 10, newChunks: 0, visitedCells: 25, gained: {}, lost: {}, work: { dug: 0, filled: 0, openSteps: 24 } });
+  assert.equal(self.plan()!.progressAt, progressAt, '进展账的覆盖不重置 stall');
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  self.checkPlan([0]);
+  assert.notEqual(self.plan()!.progressAt, progressAt, '勾掉清单项才是真正的计划推进');
+});
