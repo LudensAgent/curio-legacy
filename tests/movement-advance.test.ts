@@ -734,6 +734,30 @@ test('开路迈步前用当前已加载方块确认落点支撑：落点是空�
   assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 }, '没有走进空腔');
 });
 
+test('开路迈步前身体偏在格边、扫掠会擦到斜角方块时，先在本格归心再迈，不多挖', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  // 身体偏向 z+ 格边：从这里直接朝 (1,64,0) 走，0.6 宽的身体会擦到斜角 (1,64,1) 的石头。
+  adapter.pos = { x: 0.5, y: 64, z: 0.85 };
+  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 1 } });
+  const moves: MoveTarget[] = [];
+  const original = adapter.moveTo.bind(adapter);
+  adapter.moveTo = async (target, opts) => {
+    moves.push(target);
+    return original(target, opts);
+  };
+  const leg = await runMakeWay(ctx, {
+    steps: [{ kind: 'move' as const, to: { x: 1, y: 64, z: 0 }, dig: [] }],
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits: [], deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: () => null, onProgress: () => {},
+  });
+  assert.equal(leg.executed, 1, JSON.stringify(leg));
+  assert.deepEqual(moves.map((m) => m.kind === 'feet' ? [m.x, m.z] : m.kind), [[0.5, 0.5], [1.5, 0.5]], '先回本格格心，再迈到计划格');
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 });
+  assert.equal(adapter.blockAt({ x: 1, y: 64, z: 1 }), 'stone', '没有替计划多挖斜角方块');
+});
+
 test('开路迈步确认不了当前方块时停下，不把未加载格当成可走', async (t) => {
   const { adapter, ctx } = setup(corridor(8));
   t.after(() => ctx.memory.close());

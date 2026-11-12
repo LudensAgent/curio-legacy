@@ -214,7 +214,7 @@ export async function runMakeWay(
     }
     if (step.kind === 'move') {
       // place_support 为看见参照面可能已经挪动身体：已站进目标格列且脚高相符就不再迈；同列不同高说明计划不再适用，交回重规划。
-      const now = ctx.adapter.state().pos;
+      let now = ctx.adapter.state().pos;
       const inColumn = Math.floor(now.x) === step.to.x && Math.floor(now.z) === step.to.z;
       if (inColumn && Math.abs(now.y - step.to.y) > 0.5) { failure = `身体已在目标格列 (${step.to.x},${step.to.z})，但脚高 ${now.y.toFixed(2)} 与计划 ${step.to.y} 不符`; break; }
       if (!inColumn) {
@@ -224,8 +224,26 @@ export async function runMakeWay(
         // 计划可以按“未观察格大概有支撑”排路线，但迈出前必须用当前已加载方块再确认这一步：
         // 落点支撑、身体扫掠与危险格都由 liveEdgeStatus 按真实碰撞形状看。确认不了（未加载/形状未知）
         // 或看到阻挡/缺支撑就停下交回，不先迈出去再等落地失败——1 格宽的桥/岩浆边没有第二次机会。
-        const live = liveEdgeStatus(ctx.adapter, now, { x: step.to.x + 0.5, y: footY, z: step.to.z + 0.5 },
-          footY - now.y > 0.05 ? 'step' : footY - now.y < -0.05 ? 'drop' : 'walk', { wade: job.wade === true });
+        const target = { x: step.to.x + 0.5, y: footY, z: step.to.z + 0.5 };
+        const liveFrom = (pos: Vec3Like) => liveEdgeStatus(ctx.adapter, pos, target,
+          footY - pos.y > 0.05 ? 'step' : footY - pos.y < -0.05 ? 'drop' : 'walk', { wade: job.wade === true });
+        let live = liveFrom(now);
+        // 开路计划按格心到格心排步；身体偏在格边时，扫掠会擦到斜角那一列（计划没挖它）。
+        // 从本格格心能走通就先在本格内归心再迈，不改目标、不多挖；归心本身也要当前方块确认。
+        const center = { x: Math.floor(now.x) + 0.5, y: now.y, z: Math.floor(now.z) + 0.5 };
+        if (live.status === 'blocked' && Math.hypot(now.x - center.x, now.z - center.z) > 0.1 && liveFrom(center).status === 'open'
+          && liveEdgeStatus(ctx.adapter, now, center, 'walk', { wade: job.wade === true }).status === 'open') {
+          try {
+            await ctx.adapter.moveTo({ kind: 'feet', ...center }, { signal: ctx.signal, timeoutMs: Math.min(1500, Math.max(1, deadline - Date.now())) });
+          } catch (error) {
+            if (isAbort(error)) throw error;
+            failure = `归心到 (${center.x},${center.y},${center.z})：${error instanceof Error ? error.message : String(error)}`;
+            break;
+          }
+          now = ctx.adapter.state().pos;
+          previousMoveHandedOff = false;
+          live = liveFrom(now);
+        }
         if (live.status !== 'open') {
           failure = `落点 (${step.to.x},${step.to.y},${step.to.z}) 的当前已加载方块不能确认这一步可以走（${live.status}${live.reason === undefined ? '' : `：${live.reason}`}）；没有迈出，交回重规划`;
           break;
