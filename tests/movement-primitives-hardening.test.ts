@@ -74,8 +74,20 @@ test('mine_cell 适配器抛错但目标格已空：按已确认效果结算并�
   assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air');
 });
 
-test('mine_cell 未观察的邻格默认阻止挖掘，显式授权后才挖', async (t) => {
-  const w = flat();
+test('mine_cell 未加载的邻格默认阻止挖掘，显式授权后才挖', async (t) => {
+  let targetPresent = true;
+  const w = new (class extends FakeAdapter {
+    override blockAt(pos: Vec3Like): string {
+      if (pos.x === 1 && pos.y === 64 && pos.z === 0) return targetPresent ? 'stone' : 'air';
+      return null as unknown as string;
+    }
+    override async dig(pos: Vec3Like, signal: AbortSignal) {
+      const result = await super.dig(pos, signal);
+      if (pos.x === 1 && pos.y === 64 && pos.z === 0) targetPresent = false;
+      return result;
+    }
+  })();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
   const targetOnly = (positions: Vec3Like[]) => positions
     .filter((p) => p.x === 1 && p.y === 64 && p.z === 0)
@@ -89,7 +101,7 @@ test('mine_cell 未观察的邻格默认阻止挖掘，显式授权后才挖', a
   assert.equal(denied.status, 'failed');
   assert.equal(problemKind(denied), 'UNKNOWN_ADJACENT_UNAUTHORIZED');
   const unknown = denied.data?.unknownAdjacent as [number, number, number][];
-  assert.ok(Array.isArray(unknown) && unknown.length > 0, '未观察的邻格要单独列出');
+  assert.ok(Array.isArray(unknown) && unknown.length > 0, '未加载的邻格要单独列出');
   assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'stone', '未授权时不能挖');
 
   const allowed = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E', allowUnknownAdjacent: true });

@@ -88,8 +88,13 @@ test('mine_cell 失败或未执行时 0 次写入', async () => {
   try {
     const w = flatWorld();
     w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
-    // 目标看不见：未执行挖掘。
-    const blind = { ...makeCtx(w, { senses: { observeBlocks: () => [] } }), spatial, taskId: ACTION };
+    // 目标未加载：未执行挖掘。
+    const blindWorld = new (class extends FakeAdapter {
+      override blockAt(pos: Vec3Like): string { return (pos.x === 1 && pos.y === 64 && pos.z === 0 ? null : super.blockAt(pos)) as unknown as string; }
+    })();
+    Object.assign(blindWorld, { pos: { x: 0.5, y: 64, z: 0.5 }, worldId: WORLD, sessionId: SESSION, dim: DIM });
+    blindWorld.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+    const blind = { ...makeCtx(blindWorld, { senses: { observeBlocks: () => [] } }), spatial, taskId: ACTION };
     assert.equal((await mineCell.run(blind, { at: [1, 0, 0], facing: 'E' })).status, 'failed');
     // 挖后复核不是空气：EFFECT_NOT_CONFIRMED。
     w.blocks = w.blocks.filter((b) => b.pos.x !== 1 || b.pos.y !== 64);

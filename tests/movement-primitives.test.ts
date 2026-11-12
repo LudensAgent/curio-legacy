@@ -675,15 +675,35 @@ test('mine_cell：只挖指定格，液体邻格默认拒绝，wet 显式接受'
   assert.match(wet.summary, /water/);
 });
 
-test('mine_cell 不做未观察的推测：目标看不见时返回未知且不挖', async (t) => {
-  const w = pocket();
+class UnloadedTarget extends FakeAdapter {
+  override blockAt(pos: Vec3Like): string {
+    return (pos.x === 0 && pos.y === 60 && pos.z === -1 ? null : super.blockAt(pos)) as unknown as string;
+  }
+}
+
+test('mine_cell 不做未观察的推测：目标格未加载时返回未知且不挖', async (t) => {
+  const w = new UnloadedTarget();
+  w.pos = { x: 0.5, y: 60, z: 0.5 };
+  w.removed.add('0,60,0');
+  w.removed.add('0,61,0');
   w.blocks.push({ name: 'stone', pos: { x: 0, y: 60, z: -1 } });
   const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
   t.after(() => ctx.memory.close());
   const r = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'N' });
   assert.equal(r.status, 'failed');
-  assert.equal(w.blockAt({ x: 0, y: 60, z: -1 }), 'stone', '未观察的格子不能被挖');
   assert.equal(r.data?.unknown, true);
+  assert.equal(w.actions.length, 0, '未加载的目标格不产生挖掘动作');
+});
+
+test('mine_cell 身边已加载的格即使视线没看到也能挖（视线只是补充观察）', async (t) => {
+  const w = pocket();
+  w.blocks.push({ name: 'stone', pos: { x: 0, y: 60, z: -2 } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [2, 0, 0], facing: 'N' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.stateSource, 'live_loaded');
+  assert.equal(w.blockAt({ x: 0, y: 60, z: -2 }), 'air');
 });
 
 test('place_cell：放置请求的材料，已有不同材料只报占用', async (t) => {

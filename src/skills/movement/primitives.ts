@@ -462,7 +462,7 @@ const moveStepSkill: Skill<MoveArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 const mineCellSkill: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。目标不在视野先转头看，仍看不见返回未知，不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格未看清时默认不挖（无法排除侧后方液体流入）；allowUnknownAdjacent:true 显式接受未知邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。身边能挖到的格以当前已加载方块状态为准：视线只是补充观察，看不见/被遮挡但已加载的格照常开挖（不把未看见当空气，也不当成未知），只有未加载才返回未知、不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格已加载时按实时状态检查；未加载、无法排除侧后方液体流入时默认不挖，allowUnknownAdjacent:true 显式接受未加载邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
   catalog: '{"at":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"tool"?:"物品名","wet"?/"lava"?/"fall"?/"allowUnknownAdjacent"?:true：挖掉身边指定的一格（[0,-1,0] 是脚下支撑）；液体邻格、挖脚下落差、邻格未看清要显式授权',
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
@@ -522,24 +522,14 @@ const mineCellSkill: Skill<MineArgs> = {
     const pos = args.xyz !== undefined ? { ...args.xyz } : digsSupport ? support : toWorld(feet, args.facing, args.at);
     const loaded = adapter.blockAt(pos);
     const ownCell = pos.x === feet.x && pos.z === feet.z && (pos.y === feet.y || pos.y === feet.y + 1);
-    if (loaded === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos), noop: true, obscured: true, ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_removed') });
+    if (loaded === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos), noop: true, obscured: true, unknown: true, ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_removed') });
     if (ownCell && AIR.has(loaded)) return ok(`[${args.at}] 是自己站的格子，本来就空着，别挖这里`, { ...after(ctx, args.facing, pos), noop: true, ...effectConfirmed('block_removed') });
     const key = `${pos.x},${pos.y},${pos.z}`;
-    let seenBefore: string | undefined = ownCell ? loaded : visibleCells(ctx, [pos]).get(key);
-    if (!seenBefore && !ownCell && ctx.senses.observeBlocks) {
-      ctx.senses.refresh();
-      const eye = adapter.eye();
-      if (eye) {
-        const dx = pos.x + 0.5 - eye.x, dy = pos.y + 0.5 - eye.y, dz = pos.z + 0.5 - eye.z;
-        try { await adapter.look(Math.atan2(-dx, -dz), Math.atan2(dy, Math.max(0.3, Math.hypot(dx, dz))), ctx.signal); } catch (e) { if (isAbort(e)) throw e; }
-        await sleep(160, ctx.signal);
-        seenBefore = visibleCells(ctx, [pos]).get(key);
-      }
-    }
-    if (!seenBefore) {
-      return fail('NOT_FOUND', `[${args.at}] 没有发生挖掘：目标格 (${pos.x},${pos.y},${pos.z}) 状态未确认（视野外/被遮挡/未加载），不把未看见当作空气；换个站位或先挖掉挡着的那一格`, { ...after(ctx, args.facing, pos), targetCell: { ...pos }, target: { ...pos }, noop: true, obscured: true, unknown: true, ...problemOf('TARGET_NOT_OBSERVED', 'precondition'), ...effectUnconfirmed('block_removed') });
-    }
-    const before = seenBefore;
+    // 身边能挖到的格以当前已加载方块状态为准；视线只是补充观察，不再作为开挖前置条件。
+    // 未直视/被遮挡不等于它是空气或未知：加载的方块状态就是当前身体的可用事实。
+    const seenBefore = ownCell ? loaded : visibleCells(ctx, [pos]).get(key);
+    const stateSource = seenBefore !== undefined ? 'vision' : 'live_loaded';
+    const before = seenBefore ?? loaded;
     if (AIR.has(before)) {
       // 目标已空时也要说清身体有没有掉：只回“本来就是空的”会让 Agent 反复挖同一格找原因。
       const state = adapter.state();
@@ -550,6 +540,7 @@ const mineCellSkill: Skill<MineArgs> = {
         : '';
       return ok(`[${args.at}] 本来就是空的，不用挖${bodyText}`, {
         cell: [...args.at], was: 'air', ...effectConfirmed('block_removed'),
+        ...(stateSource === 'live_loaded' ? { stateSource } : {}),
         ...(digsSupport ? { onGround: state.onGround, supports } : {}),
         ...after(ctx, args.facing, pos), noop: true,
       });
@@ -558,6 +549,14 @@ const mineCellSkill: Skill<MineArgs> = {
     const neighborPositions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
       .map(([dx, dy, dz]) => ({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }));
     const seenNeighbors = visibleCells(ctx, neighborPositions);
+    // 身边邻格同样以当前已加载方块为准：视线没看到不等于未知；只有没加载的邻格
+    // 才需要 allowUnknownAdjacent。身体自己的脚/头格也是触觉已知的邻格。
+    for (const neighbor of [...neighborPositions, feet, { x: feet.x, y: feet.y + 1, z: feet.z }]) {
+      const neighborKey = `${neighbor.x},${neighbor.y},${neighbor.z}`;
+      if (seenNeighbors.has(neighborKey)) continue;
+      const neighborName = adapter.blockAt(neighbor);
+      if (neighborName !== null) seenNeighbors.set(neighborKey, neighborName);
+    }
     // 未知邻格不当作空气或安全：默认阻止挖掘，避免侧后方液体流入；显式授权才继续。
     const unknownAdjacent = neighborPositions
       .filter((p) => !seenNeighbors.has(`${p.x},${p.y},${p.z}`))
@@ -709,6 +708,7 @@ const mineCellSkill: Skill<MineArgs> = {
     return ok(`挖掉了 [${args.at}] 的 ${before}${adapterError ? `（适配器回执异常：${adapterError}；已核对目标格为空）` : ''}${got}${fallText}`, {
       cell: [...args.at], was: before,
       ...effectConfirmed('block_removed'),
+      ...(stateSource === 'live_loaded' ? { stateSource } : {}),
       ...(adapterError ? { adapterError, reconciled: true, causedByThisAction: 'unknown' as const } : {}),
       ...(locomotion ? { locomotion } : {}),
       ...(digInfo.noDrop !== undefined ? { noDrop: digInfo.noDrop } : {}),

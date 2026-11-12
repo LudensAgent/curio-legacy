@@ -350,8 +350,22 @@ test('L1-9 放置/支撑/垫高：成功、材料消耗与失败分类' , async 
   t.diagnostic('L1-9 materialAccounting place=-1 support=-1 pillar=-1 rollback=no_residual; wrongMaterial=MISSING_MATERIALS');
 });
 
+class UnloadedNeighbors extends FakeAdapter {
+  targetPresent = true;
+  override blockAt(pos: Vec3Like): string {
+    if (pos.x === 1 && pos.y === 64 && pos.z === 0) return this.targetPresent ? 'stone' : 'air';
+    return null as unknown as string;
+  }
+  override async dig(pos: Vec3Like, signal: AbortSignal) {
+    const result = await super.dig(pos, signal);
+    if (pos.x === 1 && pos.y === 64 && pos.z === 0) this.targetPresent = false;
+    return result;
+  }
+}
+
 test('L1-10 确定性失败不重试；未知邻格默认拒绝' , async (t) => {
-  const w = flat();
+  const w = new UnloadedNeighbors();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
   const observed = [{ x: 1, y: 64, z: 0 }];
   const ctx = makeCtx(w, { senses: { observeBlocks: (positions) => targetOnly(positions, observed) } });
@@ -375,3 +389,16 @@ test('L1-10 确定性失败不重试；未知邻格默认拒绝' , async (t) => 
   assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air');
   t.diagnostic('L1-10 unauthorizedAttempts=2 repeatedUnchanged=1 actionsBeforeExplicitAuth=0');
 });
+
+test('L1-10b 紧贴身体/脚下的已加载格被挡住视线时按实时方块确认并开挖', async (t) => {
+  const w = flat();
+  w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });
+  // 视线什么都看不见（模拟门洞/单格高巷道被上方方块遮挡）；目标和邻格都已在当前世界加载。
+  const ctx = makeCtx(w, { senses: { observeBlocks: () => [] } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(r.data?.stateSource, 'live_loaded');
+  assert.equal(w.blockAt({ x: 1, y: 64, z: 0 }), 'air');
+});
+
