@@ -261,11 +261,15 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like, ledger: RiskLedger, opts: P
 function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: RiskLedger, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}) {
   const { adapter } = ctx;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
+  // 火/灵魂火没有碰撞、一下就能打灭：落在这条通道本来要挖开的格里时，按普通工作面挖掉，
+  // 不因此改向；通道旁边的火仍按紧邻危险停下。
+  const fireInColumn = (pos: Vec3Like, name: string) => (name === 'fire' || name === 'soul_fire')
+    && cells.some((cell) => cell.x === pos.x && cell.y === pos.y && cell.z === pos.z);
   for (const pos of cells) {
     const name = adapter.blockAt(pos);
     if (name === null) throw new ExcavationStop('NOT_FOUND', '局部工作面未加载/未知', false, 'unknown');
     // 工作面自身的下落方块默认可挖（挖后逐格复核是否被落回填）；液体/接触型危险仍然硬停。
-    if (hazard(name) && !falling(name)) {
+    if (hazard(name) && !falling(name) && !fireInColumn(pos, name)) {
       // 工作面本身是液体不能靠 wet/lava「挖开」：授权只放行相邻流入，这里始终硬停。
       noteRisk(ledger, pos, name, 'work_face', opts, false);
       const stop = new ExcavationStop(liquid(name) || name === 'lava' ? 'ERROR' : 'BAD_ARGS', `局部工作面是 ${name}（${hazardLabel(name)}）`, false, liquid(name) || name === 'lava' ? 'impossible' : 'risk');
@@ -286,7 +290,7 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: 
       const neighbor = adapter.blockAt(at);
       // 邻格未加载不是已确认的危险；只作为未知边界报告，工作面/落点/身体空间未知仍在别处硬停。
       if (neighbor === null) { noteUnknown(ledger, at); continue; }
-      if (hazard(neighbor) && !noteRisk(ledger, at, neighbor, 'neighbor', opts)) {
+      if (hazard(neighbor) && !fireInColumn(at, neighbor) && !noteRisk(ledger, at, neighbor, 'neighbor', opts)) {
         throw new ExcavationStop('BAD_ARGS', `紧邻开挖面是 ${neighbor}（${hazardLabel(neighbor)}）`, false, 'risk');
       }
     }

@@ -248,6 +248,20 @@ test('excavation refuses an unknown body cell instead of treating it as clear', 
   assert.equal(world.moves.length, 0);
 });
 
+test('fire inside the work column is dug like any face; fire beside the tunnel still stops', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'fire');
+  const result = await excavationSkill.run(context(world), args({ steps: 1 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(world.digs.some((pos) => pos.x === 1 && pos.y === 63), 'the fire cell in the column is dug instead of changing direction');
+  const side = new ExcavationWorld();
+  side.setBlock({ x: 1, y: 63, z: 1 }, 'fire');
+  const stopped = await excavationSkill.run(context(side), args({ steps: 1 }));
+  assert.equal(stopped.status, 'failed');
+  assert.match(stopped.summary, /紧邻开挖面是 fire/);
+  assert.equal(side.digs.length, 0);
+});
+
 test('transparent diggable blocks in the work face (wall_torch) are cleared, not rejected', async () => {
   const world = new ExcavationWorld();
   world.setBlock({ x: 1, y: 63, z: 0 }, 'wall_torch');
