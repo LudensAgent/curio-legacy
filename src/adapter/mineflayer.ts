@@ -2026,7 +2026,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       ? [{ ref: { x: refAt.x, y: refAt.y, z: refAt.z }, face }]
       : [];
     if (!tried.length) {
-      return { ok: false, reason: `EDGE_NO_REFERENCE:目标格 (${target.x},${target.y},${target.z}) 同层的 (${refAt.x},${refAt.y},${refAt.z}) 不是实心参照方块；脚下两格没有可点的侧面，换站位或改用 descend_to/place_cell`, attemptedFaces: [] };
+      return { ok: false, reason: `EDGE_NO_REFERENCE:目标格 (${target.x},${target.y},${target.z}) 需要的同层参照 (${refAt.x},${refAt.y},${refAt.z}) 是 ${refBefore?.name ?? '未加载'}；脚下方块下面没有可点的侧面，无法从这块支撑的边缘补位；先下到有实心同层参照的站位，或换落点`, attemptedFaces: [] };
     }
     const item = preferredItem(b.inventory.items(), itemNames);
     if (!item) return { ok: false, reason: 'NO_ITEM', attemptedFaces: tried };

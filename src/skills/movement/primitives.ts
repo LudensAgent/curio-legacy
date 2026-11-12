@@ -778,15 +778,16 @@ const placeCellSkill: Skill<PlaceArgs> = {
     // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
     const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
+    const atText = args.xyz === undefined ? `[${args.at}]` : `(${pos.x},${pos.y},${pos.z})`;
     const key = `${pos.x},${pos.y},${pos.z}`;
     // stateAt 只判几何/占用；名称、材质说明只来自本次 visibleStates，未看清就如实写未看清。
     const raw = at(pos);
     const seen = visibleStates(ctx, [pos]).get(key) ?? null;
-    if (raw === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否为空，没有放置`, { ...after(ctx, args.facing, pos), ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_placed') });
+    if (raw === null) return fail('NOT_FOUND', `${atText} 目标格未加载，无法确认是否为空，没有放置`, { ...after(ctx, args.facing, pos), ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_placed') });
     if (!AIR.has(raw.name) && !isReplaceable(raw.name)) {
-      if (seen && (seen.name === args.item || WALL_TORCH[args.item] === seen.name)) return ok(`[${args.at}] 已经有 ${seen.name} 了`, { already: seen.name, noop: true, ...effectConfirmed('block_placed'), ...after(ctx, args.facing, pos) });
-      if (seen) return fail('PATH_NOT_FOUND', `[${args.at}] 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是要放的 ${args.item}；先 mine_cell 清掉或换一格`, { occupied: seen.name, ...problemOf('TARGET_OCCUPIED', 'precondition'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos) });
-      return fail('PATH_NOT_FOUND', `[${args.at}] 已被方块占据（本次未看清是什么），无法确认是否已经是 ${args.item}；没有放置，换角度看清楚或先 mine_cell`, { occupied: null, unknown: true, ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos) });
+      if (seen && (seen.name === args.item || WALL_TORCH[args.item] === seen.name)) return ok(`${atText} 已经有 ${seen.name} 了`, { already: seen.name, noop: true, ...effectConfirmed('block_placed'), ...after(ctx, args.facing, pos) });
+      if (seen) return fail('PATH_NOT_FOUND', `${atText} 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是要放的 ${args.item}；先 mine_cell 清掉或换一格`, { occupied: seen.name, ...problemOf('TARGET_OCCUPIED', 'precondition'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos) });
+      return fail('PATH_NOT_FOUND', `${atText} 已被方块占据（本次未看清是什么），无法确认是否已经是 ${args.item}；没有放置，换角度看清楚或先 mine_cell`, { occupied: null, unknown: true, ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos) });
     }
     if (countItems(adapter, [args.item]) <= 0) return fail('MISSING_MATERIALS', `背包里没有 ${args.item}`, { ...after(ctx, args.facing, pos), ...problemOf('MISSING_MATERIAL', 'precondition'), ...effectUnconfirmed('block_placed') });
     const beforeCount = countItems(adapter, [args.item]);
@@ -809,7 +810,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
     const now = replaced.state;
     const matches = replaced.matched;
     if (now === null) {
-      return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 放置后目标格未加载，无法确认实际方块`, {
+      return fail('EFFECT_NOT_CONFIRMED', `${atText} 放置后目标格未加载，无法确认实际方块`, {
         requested: args.item, attemptedFaces, ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError } : {}),
         ...problemOf('EFFECT_UNKNOWN', 'reconciliation'), ...effectUnconfirmed('block_placed', true), ...after(ctx, args.facing, pos),
       });
@@ -819,7 +820,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
       // 目标仍是原来的空气/可替换植物：这是“没放上”，不是放成了错误材料。
       if (AIR.has(now.name) || (now.name === raw.name && isReplaceable(now.name))) {
         if (adapterReason === undefined && adapterError === undefined) {
-          return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 适配器回执成功，但目标格仍是空气`, {
+          return fail('EFFECT_NOT_CONFIRMED', `${atText} 适配器回执成功，但目标格仍是空气`, {
             requested: args.item, attemptedFaces, ...problemOf('EFFECT_NOT_CONFIRMED', 'verification'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos),
           });
         }
@@ -832,13 +833,20 @@ const placeCellSkill: Skill<PlaceArgs> = {
           .map((f) => `参照 (${f.ref.x},${f.ref.y},${f.ref.z}) 的 [${f.face.join(',')}] 面${f.reason ? `：${f.reason}` : ''}`)
           .join('；');
         const detail = [adapterError, faces].filter(Boolean).join('；');
-        return fail(code, `放不到 [${args.at}]：${reason}${detail ? `；${detail}` : ''}`, {
+        // 目标与脚格相邻且在下 1–2 格时，唯一能贴的面常是被自己踩着的支撑块侧面；
+        // place_cell 不换站位，所以要点明 place_support 才能贴边放，而不是让心智反复猜“靠近”。
+        const drop = feet.y - pos.y;
+        const supportLike = Math.abs(pos.x - feet.x) + Math.abs(pos.z - feet.z) === 1 && (drop === 1 || drop === 2);
+        const supportHint = supportLike && /^NO_REFERENCE/.test(adapterReason ?? '')
+          ? '；这一格与脚格相邻且在下 1–2 格：要贴边放用 place_support（它会潜行到方块边缘），place_cell 不换站位'
+          : '';
+        return fail(code, `放不到 ${atText}：${reason}${detail ? `；${detail}` : ''}${supportHint}`, {
           attemptedFaces, ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError } : {}),
           ...problemOf(adapterError ? 'PLACEMENT_ADAPTER_ERROR' : 'PLACEMENT_REFUSED', 'execution'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos),
         });
       }
       // 目标格的实际方块是本次动作的效果证据（目标原本是空气/可替换），不是墙后地形；如实报告。
-      return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 实际出现的是 ${now.name}，不是请求的 ${args.item}`, {
+      return fail('EFFECT_NOT_CONFIRMED', `${atText} 实际出现的是 ${now.name}，不是请求的 ${args.item}`, {
         placed: now.name, requested: args.item, observed: observed !== null, attemptedFaces,
         ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError } : {}),
         ...problemOf('EFFECT_MISMATCH', 'verification'), ...effectUnconfirmed('block_placed', true), ...after(ctx, args.facing, pos),
@@ -852,7 +860,7 @@ const placeCellSkill: Skill<PlaceArgs> = {
     noteEdit(ctx.taskId, 'place', pos);
     if (isStation(now.name)) rememberStation(ctx, now.name, pos);
     return ok(
-      `在 [${args.at}] 放了 ${now.name}${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumptionText(consumption)}`,
+      `在 ${atText} 放了 ${now.name}${adapterError ? `（适配器回执异常：${adapterError}；已核对世界状态）` : ''}；${consumptionText(consumption)}`,
       {
         placed: now.name, requested: args.item, observed: observed !== null,
         ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError, reconciled: true } : {}),
@@ -931,6 +939,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     // 归因用动作开始时的维度，避免确认前后跨维度时把旧格记到新维度。
     const dim = origin.dim;
     const pos = args.xyz !== undefined ? { ...args.xyz } : toWorld(feet, args.facing, args.at);
+    const atText = args.xyz === undefined ? `[${args.at}]` : `(${pos.x},${pos.y},${pos.z})`;
     const key = `${pos.x},${pos.y},${pos.z}`;
     const movementStart = { ...origin.pos };
     // 支撑目标不等于要求玩家到达的脚位。这里只按确认的支撑顶面给出意图脚位和衔接状态：
@@ -959,12 +968,12 @@ const placeSupportSkill: Skill<SupportArgs> = {
     const seenAt = () => visibleStates(ctx, [pos]).get(key) ?? null;
     const inspected = inspectSupport(at, pos);
     const raw = inspected.state;
-    if (raw === null) return fail('NOT_FOUND', `[${args.at}] 目标格未加载，无法确认是否需要支撑`, { ...after(ctx, args.facing, pos), ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('support_formed') });
+    if (raw === null) return fail('NOT_FOUND', `${atText} 目标格未加载，无法确认是否需要支撑`, { ...after(ctx, args.facing, pos), ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('support_formed') });
     const top = inspected.top;
     if (top !== null) {
       const seen = seenAt();
       return ok(
-        `[${args.at}] 已经有可站立支撑${seen ? ` ${seen.name}（${shapeOf(seen.name, seen.properties)}）` : '（本次未看清名称和形状）'}，没有另放 ${args.item}`,
+        `${atText} 已经有可站立支撑${seen ? ` ${seen.name}（${shapeOf(seen.name, seen.properties)}）` : '（本次未看清名称和形状）'}，没有另放 ${args.item}`,
         { already: seen?.name ?? null, observed: seen !== null, supportTop: pos.y + top, standable: true, noop: true, consumed: 0, consumptionVerified: true, ...standFacts(pos.y + top), ...effectConfirmed('support_formed'), ...after(ctx, args.facing, pos) },
       );
     }
@@ -973,8 +982,8 @@ const placeSupportSkill: Skill<SupportArgs> = {
       return fail(
         'PATH_NOT_FOUND',
         seen
-          ? `[${args.at}] 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是可站立支撑；先 mine_cell 清掉或换一格`
-          : `[${args.at}] 已被方块占据（本次未看清是什么），不是可站立支撑；先 mine_cell 清掉或换一格`,
+          ? `${atText} 已被 ${seen.name} 占据（${shapeOf(seen.name, seen.properties)}），不是可站立支撑；先 mine_cell 清掉或换一格`
+          : `${atText} 已被方块占据（本次未看清是什么），不是可站立支撑；先 mine_cell 清掉或换一格`,
         { occupied: seen?.name ?? null, observed: seen !== null, ...problemOf('TARGET_OCCUPIED', 'precondition'), ...effectUnconfirmed('support_formed'), ...after(ctx, args.facing, pos) },
       );
     }
@@ -1045,13 +1054,13 @@ const placeSupportSkill: Skill<SupportArgs> = {
     const stoppedByEffect = (outcome: 'formed' | 'unknown' | 'blocked' | 'unchanged') => {
       if (outcome === 'formed' || outcome === 'unchanged') return null;
       if (outcome === 'unknown') {
-        return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 放置后目标格未加载，无法确认是否已形成支撑；停止重试`, {
+        return fail('EFFECT_NOT_CONFIRMED', `${atText} 放置后目标格未加载，无法确认是否已形成支撑；停止重试`, {
           attempts, materials: [...names], ...consumptionFacts(true), targetCell: { ...pos },
           ...movementFacts(), ...problemOf('EFFECT_UNKNOWN', 'reconciliation'), ...effectUnconfirmed('support_formed', true), ...after(ctx, args.facing, pos),
         });
       }
       const seen = seenAt();
-      return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 目标格已经变成 ${seen?.name ?? '别的方块'}，但没有形成可站立支撑；停止重复放置`, {
+      return fail('EFFECT_NOT_CONFIRMED', `${atText} 目标格已经变成 ${seen?.name ?? '别的方块'}，但没有形成可站立支撑；停止重复放置`, {
         attempts, materials: [...names], ...consumptionFacts(true), targetCell: { ...pos },
         placementEffect: 'changed_without_support' as const,
         ...movementFacts(), ...problemOf('EFFECT_MISMATCH', 'verification'), ...effectUnconfirmed('support_formed', true), ...after(ctx, args.facing, pos),
@@ -1081,7 +1090,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     if (currentStopped) return currentStopped;
     // 回执成功但世界没有变化：两份证据冲突，不能再换站位碰运气。
     if (receiptOk && outcome !== 'formed') {
-      return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 适配器回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
+      return fail('EFFECT_NOT_CONFIRMED', `${atText} 适配器回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
         attempts, materials: [...names], ...consumptionFacts(true), targetCell: { ...pos },
         ...movementFacts(), ...problemOf('EFFECT_NOT_CONFIRMED', 'verification'), ...effectUnconfirmed('support_formed'), ...after(ctx, args.facing, pos),
       });
@@ -1112,7 +1121,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
       const edgeStopped = stoppedByEffect(outcome);
       if (edgeStopped) return edgeStopped;
       if (edgeReceiptOk && outcome !== 'formed') {
-        return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 边缘放置回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
+        return fail('EFFECT_NOT_CONFIRMED', `${atText} 边缘放置回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
           attempts, materials: [...names], ...consumptionFacts(true), targetCell: { ...pos },
           ...movementFacts(), ...problemOf('EFFECT_NOT_CONFIRMED', 'verification'), ...effectUnconfirmed('support_formed'), ...after(ctx, args.facing, pos),
         });
@@ -1138,7 +1147,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
         attemptFacts(stance.name, beforeMove, { reason: `move:${(e as Error).message}`, effect: 'not_attempted' });
         // 移动异常前可能已经走了半程：旧起点生成的候选站位不再成立，不能继续按旧计划换站位。
         if (moved) {
-          return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 换到 ${stance.name} 站位时移动出错，身体已经离开原位置（${beforeMove.x.toFixed(2)},${beforeMove.y.toFixed(2)},${beforeMove.z.toFixed(2)} → ${afterMove.x.toFixed(2)},${afterMove.y.toFixed(2)},${afterMove.z.toFixed(2)}）；不再按旧起点继续换站位`, {
+          return fail('EFFECT_NOT_CONFIRMED', `${atText} 换到 ${stance.name} 站位时移动出错，身体已经离开原位置（${beforeMove.x.toFixed(2)},${beforeMove.y.toFixed(2)},${beforeMove.z.toFixed(2)} → ${afterMove.x.toFixed(2)},${afterMove.y.toFixed(2)},${afterMove.z.toFixed(2)}）；不再按旧起点继续换站位`, {
             attempts, materials: [...names], targetCell: { ...pos }, stanceMove: { from: beforeMove, to: afterMove },
             ...movementFacts(), ...problemOf('STANCE_MOVE_PARTIAL', 'execution', true), ...effectUnconfirmed('support_formed', true), ...after(ctx, args.facing, pos),
           });
@@ -1173,25 +1182,31 @@ const placeSupportSkill: Skill<SupportArgs> = {
       const stanceStopped = stoppedByEffect(outcome);
       if (stanceStopped) return stanceStopped;
       if (stanceReceiptOk) {
-        return fail('EFFECT_NOT_CONFIRMED', `[${args.at}] 在 ${stance.name} 站位放置回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
+        return fail('EFFECT_NOT_CONFIRMED', `${atText} 在 ${stance.name} 站位放置回执成功，但目标格仍没有形成可站立支撑；停止重试`, {
           attempts, materials: [...names], ...consumptionFacts(true), targetCell: { ...pos },
           ...movementFacts(), ...problemOf('EFFECT_NOT_CONFIRMED', 'verification'), ...effectUnconfirmed('support_formed'), ...after(ctx, args.facing, pos),
         });
       }
     }
     if (!formed) {
-      // 摘要里带上适配器已经给出的参照面/站位细节；只放进 data 时心智看不到，会反复猜同一格。
+      // 每次尝试只留“站位:原因”，完整 detail 留在 data；否则摘要会被心智的长文截断，
+      // 真正有用的 edge/EDGE_NO_REFERENCE 正好落在被截掉的中间。
       const brief = (s: string) => s.length <= 120 ? s : `${s.slice(0, 119)}…`;
       const attemptText = attempts
-        .map((a) => brief(`${a.stance}:${a.reason ?? '未放置'}${a.detail ? `（${a.detail}）` : ''}`))
+        .map((a) => `${a.stance}:${brief(a.reason ?? '未放置')}`)
         .join('；');
       const firstDetail = attempts.find((a) => a.detail)?.detail;
+      // 目标不在贴边放置的几何内时，把原因直接说清楚，别只列一堆 stance-not-confirmed。
+      const geometryNote = Math.abs(dx) + Math.abs(dz) !== 1
+        ? `；目标与脚格水平相距 ${Math.abs(dx) + Math.abs(dz)} 格，贴边放置只支持水平相邻格；先走到目标旁或换落点`
+        : drop < 1 || drop > 2 ? `；目标在脚下 ${drop} 格，place_support 只补脚下一格或两格；先下到目标层或换落点` : '';
       // 直接调用 place_support 时参照面不成立是参数/站位问题（BAD_ARGS）；但 excavate_run 的 fill
       // 需要区分“仍缺支撑”和其他能力缺口，所以额外给出结构化的原因。
       const referenceGap = attempts.some((a) => a.problem !== undefined && REFERENCE_PROBLEMS.has(a.problem.kind));
       // 材料在预检后不可用：按材料缺口报告，不混成参数/站位问题。
       const missingMaterial = attempts.some((a) => a.problem?.kind === 'MISSING_MATERIAL');
-      return fail(missingMaterial ? 'MISSING_MATERIALS' : 'BAD_ARGS', `[${args.at}] 没能形成可站立支撑：${attemptText}`, {
+      return fail(missingMaterial ? 'MISSING_MATERIALS' : 'BAD_ARGS',
+        `${atText} 没能形成可站立支撑：${attemptText}${firstDetail ? `；${brief(firstDetail)}` : ''}${geometryNote}`, {
         attempts, materials: [...names], ...consumptionFacts(false), targetCell: { ...pos },
         ...(referenceGap ? { failureCause: 'reference' as const } : {}),
         remediation: {
@@ -1210,7 +1225,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
     if (observed && isStation(observed.name)) rememberStation(ctx, observed.name, pos);
     const supportTopY = inspectSupport(at, pos).top;
     return ok(
-      `[${args.at}] 形成可站立支撑${observed ? ` ${observed.name}` : '（实际材料名称本次未看清）'}，${consumptionText(consumption)}`,
+      `${atText} 形成可站立支撑${observed ? ` ${observed.name}` : '（实际材料名称本次未看清）'}，${consumptionText(consumption)}`,
       {
         placed: observed?.name ?? null, observed: observed !== null, materials: [...names], ...consumption,
         attempts, targetCell: { ...pos }, supportTop: supportTopY === null ? null : pos.y + supportTopY,

@@ -45,6 +45,18 @@ class EdgeWorld extends FakeAdapter {
   }
 }
 
+/** 每次放置都因“只在脚下有参照面”失败；用于 place_cell 的站位提示。 */
+class CellNoReferenceWorld extends FakeAdapter {
+  override async placeBlockAt(_pos: Vec3Like, _items: string[], _signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: PlacementFaceAttempt[] }> {
+    return {
+      ok: false,
+      reason: 'NO_REFERENCE',
+      detail: '(0,63,0) 命中的不是请求的那一面（可能斜穿）',
+      attemptedFaces: [{ ref: { x: 0, y: 63, z: 0 }, face: [1, 0, 0], reason: 'FACE_NOT_CLICKABLE:视线被挡或超出交互距离' }],
+    };
+  }
+}
+
 /** 每次放置都失败，并带回结构化参照面事实。 */
 class FaceFailWorld extends FakeAdapter {
   override async placeBlockAt(_pos: Vec3Like, _items: string[], _signal: AbortSignal): Promise<ActionResult & { attemptedFaces?: PlacementFaceAttempt[] }> {
@@ -217,6 +229,49 @@ test('place_support 三格下不走边缘潜行，不扩成自动施工', async 
   const r = await placeSupport.run(ctx, { at: [0, 0, 0], facing: 'E', xyz: { x: 1, y: 61, z: 0 }, item: 'cobblestone' });
   assert.equal(r.status, 'failed');
   assert.deepEqual(w.edgeCalls, []);
+  assert.match(r.summary, /\(1,61,0\)/, '摘要要写实际目标格，不能是调用方占位用的 [0,0,0]');
+  assert.doesNotMatch(r.summary, /\[0,0,0\]/);
+  assert.match(r.summary, /脚下 3 格/, '超出脚下 1–2 格时要说明补支撑的几何范围');
+});
+
+test('place_support 目标水平相距 2 格时说明贴边放置不适用，而不是只报 NO_REFERENCE', async (t) => {
+  const w = new FaceFailWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('cobblestone', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [2, 0, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /水平相距 2 格/);
+  assert.match(r.summary, /只支持水平相邻格/);
+});
+
+test('place_support 失败摘要列出每个站位的短原因，edge 失败不被 detail 挤掉', async (t) => {
+  const w = new EdgeWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.removed.add('1,62,0');
+  w.inv.set('cobblestone', 1);
+  w.edgeMode = 'no_ref';
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeSupport.run(ctx, { at: [1, -2, 0], facing: 'E', item: 'cobblestone' });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /current:NO_REFERENCE/);
+  assert.match(r.summary, /edge:EDGE_NO_REFERENCE/);
+  assert.ok(r.summary.length < 320, `失败摘要要能在心智的截断窗口内读到 edge：${r.summary.length}`);
+});
+
+test('place_cell 在脚下相邻格只能看到自己踩着的侧面时，点明 place_support 可贴边放', async (t) => {
+  const w = new CellNoReferenceWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.groundY = 62; // 目标 (1,63,0) 是空气，且身体仍站在脚格高度
+  w.inv.set('netherrack', 1);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await placeCell.run(ctx, { at: [1, -1, 0], facing: 'E', item: 'netherrack' });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /place_support/, '要让心智知道换用会贴边放置的技能，而不是只反复“靠近/侧移”');
+  assert.match(r.summary, /不换站位/);
 });
 
 /** 真实 MineflayerAdapter + 最小 fake bot：只模拟服务器放置/装备/移动，几何走真实实现。 */

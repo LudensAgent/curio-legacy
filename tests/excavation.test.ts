@@ -670,7 +670,9 @@ test('fill 补支撑仍无支撑时报 missing_support，并带出结构化站�
   const attempts = result.data?.fillAttempts as Record<string, unknown>[];
   assert.ok(Array.isArray(attempts) && attempts.length > 0, 'attempts 作为结构化字段返回');
   assert.equal(attempts[0].stance, 'current');
-  assert.match(result.summary, /站位尝试/);
+  assert.match(result.summary, /\(1,63,0\)/, '摘要写实际补的支撑格，不是占位的 [0,0,0]');
+  assert.match(result.summary, /current:NO_REFERENCE/);
+  assert.match(result.summary, /补支撑失败/);
   assert.equal(world.digs.length, 0);
   assert.equal(world.inv.get('netherrack'), 5, '补支撑失败没有消耗材料');
 });
