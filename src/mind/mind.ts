@@ -250,7 +250,12 @@ export class Mind {
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
+  /** 挨打反射的停止阈值：血很低，或贴身且血不多；只决定“先停手”，不等于替 Agent 选应对方式。 */
+  static readonly HURT_STOP_HP = 12;
+  static readonly HURT_CLOSE_HP = 16;
   private lastHurtEventAt = 0;
+  /** 连续受伤的次数：两次 hurt 间隔 ≤3000ms 累加，否则重置为 1；用来区分孤立的一下和持续掉血 */
+  private hurtStreak = 0;
   /** 危险还在的这段时间里，等想法时不让身体去张望、捡东西 */
   private dangerUntil = 0;
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
@@ -496,7 +501,7 @@ export class Mind {
     const cur = this.d.arbiter.info();
     const handling = !!cur && ['defend', 'guard', 'flee', 'ranged_defend', 'hunt', 'shelter'].includes(cur.skill);
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
-    if (close.length && hurtRecently && (!handling || hp <= 12)) {
+    if (close.length && hurtRecently && (!handling || hp <= Mind.HURT_STOP_HP)) {
       out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）` });
     }
     return out;
@@ -1720,7 +1725,13 @@ export class Mind {
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     if (ev.type === 'milestone') this.d.self.feel({ type: 'milestone' });
-    if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(typeof (ev.data as { around?: unknown } | undefined)?.around === 'string' ? (ev.data as { around: string }).around : ''); }
+    if (ev.type === 'hurt') {
+      const now = Date.now();
+      this.hurtStreak = now - this.lastHurtEventAt <= 3000 ? this.hurtStreak + 1 : 1;
+      this.lastHurtEventAt = now;
+      this.d.self.feel({ type: 'hurt', amount: 2 });
+      this.hurtWhileBusy(typeof (ev.data as { around?: unknown } | undefined)?.around === 'string' ? (ev.data as { around: string }).around : '');
+    }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });
@@ -1760,17 +1771,32 @@ export class Mind {
 
   /**
    * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
-   * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
+   * 只有血很低、连续挨打（3 秒内两下）或贴身且血不多时才停手/挂起长程；孤立一下、血还够时手上的事不停，
+   * 只把挨打事实交回心智（glance），怎么应对由它自己定。
    * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
    */
   private hurtAt = 0;
-  private hurtWhileBusy(cause = '') {
-    const now = Date.now();
-    if (now - this.hurtAt < 8000) return;
+  /** 环境伤害（着火/岩浆等）停止/挂起的 8 秒节流：避免每个伤害刻都把刚开始的逃离动作再停一次。 */
+  private hurtEnvAt = 0;
+  /** 非停止类挨打提示的 8 秒节流；停止/挂起路径不经过这里。 */
+  private hurtNoticeThrottled(now: number): boolean {
+    if (now - this.hurtAt < 8000) return true;
     this.hurtAt = now;
+    return false;
+  }
+  private hurtEnvThrottled(now: number): boolean {
+    if (now - this.hurtEnvAt < 8000) return true;
+    this.hurtEnvAt = now;
+    return false;
+  }
+  private hurtWhileBusy(cause = '') {
+    // 记下挨打时正在跑的任务：700ms 后只处理同一个任务，避免旧回调停掉期间新开始的活。
+    const hurtTask = this.d.arbiter.info();
+    if (!hurtTask || (hurtTask.source !== 'llm' && hurtTask.source !== 'rule')) return;
+    const hurtTaskId = hurtTask.id;
     setTimeout(() => {
       const cur = this.d.arbiter.info();
-      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule')) return;
+      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule') || cur.id !== hurtTaskId) return;
       const state = this.d.adapter.state();
       // use_skill 里包着的水面技能（比如自己写的爬岸技能）也要按它实际在做的事判断。
       const acting = cur.skill === 'use_skill' ? String((cur.args as { name?: unknown } | undefined)?.name ?? '') : cur.skill;
@@ -1778,6 +1804,9 @@ export class Mind {
       if (!waterEscape && COMBAT.has(cur.skill)) return;
       const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
       const hp = Math.round(state.hp * 10) / 10;
+      const now = Date.now();
+      // 火/岩浆/热地面不是“轻微挨打”：有怪在附近时也按环境危险处理。
+      const hazardDamage = /伤害类型 (in_fire|on_fire|lava|hot_floor)|着火|lava|岩浆/.test(cause) || state.inLava;
       if (!hostiles.length) {
         // 没有怪，但身体在掉血（着火、岩浆、摔、窒息、溺水……）：原来直接返回，手上的移动会一路烧到见底
         // （下界实测 16.5 → 2 血，explore_toward 一直在走）。不替它脱险，只停下并把伤害事实交回心智；
@@ -1786,13 +1815,27 @@ export class Mind {
         const why = cause || '身体在岩浆里';
         // 只是摔了一下（伤害已经结束、没有着火/岩浆/怪）：不打断手上的移动，把事实交回心智，要不要停由它定。
         if (/伤害类型 fall/.test(cause) && !/伤害类型 (?!fall)|着火|lava|岩浆/.test(cause) && !state.inLava) {
+          if (this.hurtNoticeThrottled(now)) return;
           this.requestThink(`正在 ${cur.skill} 时摔了一下（血 ${hp}，${why}）；手上的事没停`, 'glance');
           return;
         }
         if (waterEscape) {
+          if (this.hurtNoticeThrottled(now)) return;
           this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
           return;
         }
+        // 只中了一支没看见射手的箭/三叉戟，血还够、也不是连续受伤：不打断，只把事实交回心智。
+        const projectileOnly = /伤害类型 (arrow|trident)\b/.test(cause) && !hazardDamage;
+        if (projectileOnly && hp > Mind.HURT_STOP_HP && this.hurtStreak < 2) {
+          if (this.hurtNoticeThrottled(now)) return;
+          const fact = `正在 ${cur.skill} 时被远程击中（血 ${hp}，${why}）；手上的事没停`;
+          this.requestThink(fact, 'glance');
+          const n = this.attention.notice('hurt_busy_minor', fact, 0.9, 0);
+          if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+          return;
+        }
+        // 持续环境伤害每刻都会来；8 秒内已经停/挂过一次，就不再打断刚开始的逃离动作。
+        if (this.hurtEnvThrottled(now)) return;
         if (this.pauseResumableLongRange(cur, `掉血了（血 ${hp}，${why}），长程移动已挂起（可续接）`)) {
           this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'glance');
           const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），长程移动已挂起（可续接）`, 0.9, 0);
@@ -1814,8 +1857,21 @@ export class Mind {
       // 人在水里时停下来就是下沉：保留 Agent 自己选的出水/换气动作，只把挨打事实和怪的位置交给它。
       // 思考走 glance——缺氧时再排一次十几秒的 deliberate，命已经没了。
       if (waterEscape) {
+        if (this.hurtNoticeThrottled(now)) return;
         this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}），人在水里，先把出水/换气动作做完`, 'glance');
         const n = this.attention.notice('hurt_busy_water', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），人在水里，动作没停`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
+      // 血够、怪不贴身、也不是连续受伤：不动手上的事，只把事实交回心智。glance/notice 受 8s 限流，避免每下都插话。
+      // 着火/岩浆不是“轻微挨打”，有怪在附近也仍按环境危险停手/挂起；每 8 秒最多停一次。
+      if (hazardDamage && this.hurtEnvThrottled(now)) return;
+      if (!hazardDamage && hp > Mind.HURT_STOP_HP && this.hurtStreak < 2
+        && !(hostiles.some((h) => h.dist <= 3) && hp <= Mind.HURT_CLOSE_HP)) {
+        if (this.hurtNoticeThrottled(now)) return;
+        const fact = `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；手上的事没停`;
+        this.requestThink(fact, 'glance');
+        const n = this.attention.notice('hurt_busy_minor', fact, 0.9, 0);
         if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
         return;
       }
@@ -2679,6 +2735,10 @@ export class Mind {
     const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause) : '不明原因';
     this.deathAt = Date.now();
     this.deathTold = !!info.message;
+    // 死亡后血量和处境都重置：上一段连续受伤的计数/提示节流不能带到复活后的第一下。
+    this.hurtStreak = 0;
+    this.hurtAt = 0;
+    this.hurtEnvAt = 0;
     this.suspend('death');
     this.d.arbiter.cancel('死亡');
     this.d.self.feel({ type: 'death' });
