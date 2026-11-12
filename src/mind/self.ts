@@ -193,12 +193,11 @@ export function keywords(text: string): Set<string> {
 
 const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; for (const k of a) if (b.has(k)) n++; return n; };
 
-/** 近似反例（同原因、摘要前缀相同）只留最新一条；不按自由文字猜语义，保留不同原因。 */
-const dedupeCounterexamples = <T extends { reason: string; summary: string }>(list: readonly T[]): T[] => {
+/** 只合并同一次执行记录的重复反例；不同活动/不同说法即使摘要开头相同也保留。 */
+const dedupeCounterexamples = <T extends { reason: string; summary: string; activityId?: string; at?: number }>(list: readonly T[]): T[] => {
   const seen = new Set<string>();
   return [...list].reverse().filter((item) => {
-    // 同原因且第一句相同（冒号/逗号前的部分）视为近似失败；不把不同原因或不同结论合并。
-    const key = `${item.reason}|${(item.summary.split(/[：:，,。；;]/)[0] ?? '').slice(0, 40)}`;
+    const key = item.activityId ? `activity:${item.activityId}` : `record:${item.at ?? ''}|${item.reason}|${item.summary}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -589,19 +588,27 @@ export class SelfModel {
     for (const k of this.data.knowHow) {
       const applied = explicit && r.applying === k.id && r.applyingText !== undefined && cleanLesson(k.text) === cleanLesson(r.applyingText);
       if (!applied && (explicit || !(k.signature && k.signature === r.signature))) continue;
-      if (applied) k.applications = [...(k.applications ?? []), { at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}), summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}) }].slice(-8);
       // 有界尝试（attempt）不算成功；只在原地/附近的搜索活动成功了，也不能证明“走远找资源”的策略正确。
       // 搜索意图的活动如果没有实际看见/拿到目标，哪怕走了十几格、挖了十几格，也只是“做了动作”，不是策略成功。
       const localOnlySearch = r.exploration?.searchIntent === true && r.exploration.localOnly === true;
-      const searchUnconfirmed = r.exploration?.searchIntent === true
+      const searchNoEvidence = r.exploration?.searchIntent === true
         && (r.exploration.found?.length ?? 0) === 0 && r.resource?.acquired !== true;
-      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch && !searchUnconfirmed) k.wins++;
+      // 只有活动点名了目标（until/find/for/item 等）时，“没找到”才是反例；
+      // 没写 until 的“向北探索 96 格”完成距离委托，本来就没有寻找对象，不能写成目标失败。
+      const searchTargetMiss = searchNoEvidence && (r.resource?.targets?.length ?? 0) > 0;
+      if (applied) k.applications = [...(k.applications ?? []), {
+        at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}),
+        summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}),
+        ...(searchNoEvidence ? { searchUnconfirmed: true } : {}), ...(localOnlySearch ? { limited: true } : {}),
+      }].slice(-8);
+      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch && !searchNoEvidence) k.wins++;
       else if (r.outcome === 'stuck') k.losses++;
-      if (applied && (r.outcome === 'stuck' || searchUnconfirmed)) {
+      if (applied && (r.outcome === 'stuck' || searchTargetMiss)) {
         k.counterexamples = dedupeCounterexamples([...(k.counterexamples ?? []), {
           at: r.at, activityId: r.id, outcome: r.outcome,
-          reason: r.stop?.reason ?? r.failure?.code ?? (searchUnconfirmed ? 'TARGET_NOT_FOUND' : 'stuck'),
-          summary: (searchUnconfirmed && r.outcome === 'done' ? `做了动作但没有确认目标：${r.summary}` : r.summary).slice(0, 160),
+          reason: r.stop?.reason ?? r.failure?.code ?? (searchTargetMiss ? 'TARGET_NOT_FOUND' : 'stuck'),
+          summary: (searchTargetMiss && r.outcome === 'done' ? `做了动作但没有确认目标：${r.summary}` : r.summary).slice(0, 160),
+          claim: cleanLesson(k.text),
           ...(r.failure?.pos ? { pos: { ...r.failure.pos } } : r.navigation?.destination ? { pos: { ...r.navigation.destination } } : {}),
         }]).slice(-8);
         this.data.counterexamplesSinceReflect = (this.data.counterexamplesSinceReflect ?? 0) + 1;

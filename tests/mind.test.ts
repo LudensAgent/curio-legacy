@@ -1754,3 +1754,15 @@ test('预排 next 的作用域与当前不符时不启动，并请求重新决�
   assert.ok(w.bus.recent().some((e) => e.type === 'decision_stale' && /旧世界的下一步/.test(e.msg)));
   assert.ok(!w.bus.recent().some((e) => e.type === 'activity_start' && /旧世界的下一步/.test(e.msg)));
 });
+
+test('开工时没有计划的活动，不会被后来新建的计划认领进展', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '先探一段', decision: 'new', activity: { what: '向北探一段', kind: 'explore', steps: [step()] } });
+  assert.equal(w.self.plan(), null, '开工时没有计划');
+  const plan = w.self.setPlan('找到下界要塞', ['找到下界要塞'])!;
+  const outcomeId = plan.steps[0]!.id;
+  await w.finish(ok('探完一段'));
+  assert.equal(w.self.progressLedger(outcomeId), null, '旧活动不能计入后来新建的成果');
+  assert.equal(w.self.progressLedger('unassigned')?.movement.activities, 1, '记到未关联当前计划');
+});

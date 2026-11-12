@@ -942,7 +942,7 @@ export class Mind {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
     this.linkPlan(a);
-    a.planAgendaId = this.d.self.plan()?.agendaId;
+    a.planAgendaId = this.d.self.plan()?.agendaId ?? null;
     const appliedKnowHow = a.applying ? this.d.self.data.knowHow.find((k) => k.id === a.applying) : undefined;
     if (a.applying && !appliedKnowHow) {
       // 保留 Agent 明确写下的 id，但不设开工快照：记录时不能给任何窍门计数，也不能回退签名。
@@ -1034,7 +1034,8 @@ export class Mind {
     // 计划账：这段活明确关联了成果/做法时，把实际结局与停因记到对应账上；归因仍由 Agent 判断。
     const planForProgress = this.d.self.plan();
     // 计划在活动期间被换掉时，旧活动的成果/做法不能写进新计划的账。
-    const planStillCurrent = a.planAgendaId === undefined || planForProgress?.agendaId === a.planAgendaId;
+    // 旧活动没有该字段时按通配；新活动明确记下 null（开工时没有计划），之后新建的计划不能认领它。
+    const planStillCurrent = a.planAgendaId === undefined || a.planAgendaId === (planForProgress?.agendaId ?? null);
     if (planStillCurrent && (a.outcomeId || a.methodId)) {
       this.d.self.recordPlanAttempt({
         outcomeId: a.outcomeId, methodId: a.methodId, where: { ...state.pos },
@@ -2213,7 +2214,7 @@ export class Mind {
       // 只改做法不能顺带换主目标：归属写错会把旧做法记到新计划上。
       if (focus && focus !== cur.agendaId && focus !== cur.goal) {
         decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；要换主目标请同时写 steps`);
-        return this.applyPlanDone(decision);
+        return; // 拒绝整条 plan，不能顺手勾掉当前计划的项
       }
       const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
       const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];

@@ -1,7 +1,7 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
-import { hostLandEdgePolicy, hostWadingEdgePolicy } from '../../spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
@@ -328,14 +328,22 @@ type VoxelLike = { cellAt(dim: string, x: number, y: number, z: number): CellVie
 
 /** 这条边界相关格的内容证据版本：无关视觉刷新不改变它，相关格变化才改变。 */
 function boundaryEvidenceKeyOf(voxel: VoxelLike, dim: string, boundary: LandSearchBoundary): string {
-  const cells = [boundary.from, boundary.to].flatMap((p) => {
+  const endpoints = [boundary.from, boundary.to].flatMap((p) => {
     const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
-    return [{ x, y, z }, { x, y: y + 1, z }, { x, y: y - 1, z }];
+    return [{ x, y, z }, { x, y: y + 1, z }, { x, y: y - 1, z }, ...supportCellsUnder(p)];
   });
-  return cells.map((c) => {
+  // 扫掠身体会碰到的邻列也要算进证据版本；端点六格不足以覆盖实际依赖。
+  const cells = [...endpoints, ...sweptBodyCells(boundary.from, boundary.to)];
+  const unique = new Map(cells.map((c) => [`${c.x},${c.y},${c.z}`, c]));
+  return [...unique.values()].map((c) => {
     const view = voxel.cellAt(dim, c.x, c.y, c.z);
     return `${c.x},${c.y},${c.z}=${view.observed ? view.evidence?.revision ?? '?' : '?'}`;
   }).join(';');
+}
+
+/** 具体边的身份：冲突只对复核过的这条边成立，不能污染另一条边。 */
+function edgeKeyOf(boundary: LandSearchBoundary): string {
+  return `${boundary.kind}|${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}`;
 }
 
 /** 边界去重键含观察者所在格与相关格证据版本：换站位或相关格变化才是新的证据。 */
@@ -433,10 +441,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   const makeWayLegs: MakeWayLegReceipt[] = [];
   /** 同一站位/终态/边界在“没有新相关观察、身体也没动”时重复搜索的次数。 */
   const sameEvidenceSearches = new Map<string, number>();
+  /** 自上次真实进展以来被记为“无位移”的搜索；后续迈出一步时改回正常搜索。 */
+  let idleSearchesSinceProgress = 0;
   /** 上一次搜索之后是否真的观察到相关证据变化；无关视觉刷新不算。 */
   let evidenceChangedSinceSearch = false;
-  /** 复验已把同一搜索结果判为 OPEN（或相反），但搜索仍给出不同结论。 */
-  let searchContradicted = false;
+  /** 复验已把哪一条边判为 OPEN（或相反），但搜索仍给出不同结论。 */
+  let searchContradictedFor: string | undefined;
   let observation: ObservationReceipt | undefined;
   let invocationTransitions = 0;
   let stop: StopReceipt | null = null;
@@ -593,7 +603,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const searchSawNewEvidence = evidenceChangedSinceSearch;
       evidenceChangedSinceSearch = false;
       // 矛盾结论只属于同一证据版本；观察到新证据后重新判断。
-      if (searchSawNewEvidence) searchContradicted = false;
+      if (searchSawNewEvidence) searchContradictedFor = undefined;
       const segment = await runNavigationSegment(ctx, {
         goal: goalAt(state.pos),
         ...(request.rolling ? { nextWindow: goalAt } : {}),
@@ -636,7 +646,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const measuredMove = Math.hypot(after.pos.x - segment.measuredStart.x, after.pos.z - segment.measuredStart.z)
         + Math.abs(after.pos.y - segment.measuredStart.y);
       const progressed = segment.confirmed.length > 0 || measuredMove > 0.05;
-      if (!progressed) session.counters.idleSearches += segment.searches;
+      if (!progressed) {
+        session.counters.idleSearches += segment.searches;
+        idleSearchesSinceProgress += segment.searches;
+      } else if (idleSearchesSinceProgress > 0) {
+        // 之前“没有位移”的搜索最终导向了真实移动：不再算无位移搜索，避免一边前进一边耗尽预算。
+        session.counters.idleSearches = Math.max(0, session.counters.idleSearches - idleSearchesSinceProgress);
+        idleSearchesSinceProgress = 0;
+      }
       // 朝这个前沿走不出一步：换下一个前沿，不反复挑同一处。
       if (!progressed && frontierGoal !== undefined) triedFrontiers.add(frontierGoal);
       if (!isReplan) {
@@ -668,8 +685,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         sameEvidenceSearches.set(siteKey, count);
         if (!searchSawNewEvidence && count > MAX_SAME_EVIDENCE_SEARCHES) {
           const edge = segment.boundary === undefined ? '' : `（边界 ${cellText(segment.boundary.from)}→${cellText(segment.boundary.to)}）`;
-          stop = stopOf(searchContradicted ? 'CONFLICT' : 'UNKNOWN_BOUNDARY', `同一站位 ${cellText(after.pos)}、同一相关证据下搜索仍返回 ${segment.searchStatus}${edge}`
-            + `；${searchContradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播，下一步由你决定`,
+          // 冲突必须绑定到复验过的那条边；换了边就只是新的未知边界。
+          const contradicted = segment.boundary !== undefined && searchContradictedFor === edgeKeyOf(segment.boundary);
+          stop = stopOf(contradicted ? 'CONFLICT' : 'UNKNOWN_BOUNDARY', `同一站位 ${cellText(after.pos)}、同一相关证据下搜索仍返回 ${segment.searchStatus}${edge}`
+            + `；${contradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播，下一步由你决定`,
             { ...(segment.boundary === undefined ? {} : { boundaries: [segment.boundary] }) });
           break;
         }
@@ -748,6 +767,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.counters.confirmedRouteLength += detour.pathLength;
         if (detour.outcome === 'cancelled') return 'cancelled';
         if (detour.confirmed.length === 0) { session.counters.idleSearches += detour.searches; return 'none'; }
+        if (idleSearchesSinceProgress > 0) {
+          session.counters.idleSearches = Math.max(0, session.counters.idleSearches - idleSearchesSinceProgress);
+          idleSearchesSinceProgress = 0;
+        }
         session.progress.stagnationSegments = 0;
         session.progress.lastProgressAt = Date.now();
         session.phase = 'replanning';
@@ -897,10 +920,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
         }
+        const policyDetail = segment.search.policy?.firstRejection === undefined ? ''
+          : `；被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}`;
         stop = modeGap
-          ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式`, { modeGap: { problem: segment.problemKind } })
-          : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${segment.search.policy?.firstRejection === undefined ? ''
-            : `；被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}`}`);
+          ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式${policyDetail}`, { modeGap: { problem: segment.problemKind } })
+          : segment.failure === 'DELEGATION_RESTRICTION'
+            ? stopOf('DELEGATION_RESTRICTION', `${segment.detail ?? '授权/策略拒绝可走边'}${policyDetail}`)
+            : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${policyDetail}`);
         break;
       }
       if (segment.outcome === 'unknown_boundary') {
@@ -954,7 +980,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (canProceed()) {
           // 同一条边在最新证据下已 OPEN，但这次搜索仍说证据不足/无路：记录矛盾事实，
           // 允许再搜一次；仍不一致时按 CONFLICT 交回，而不是无限重播。
-          searchContradicted = true;
+          if (boundary !== undefined) searchContradictedFor = edgeKeyOf(boundary);
           session.phase = 'replanning';
           continue;
         }
@@ -1133,8 +1159,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
       break;
     }
-    // 开出了路：从新位置回到普通路线。
+    // 开出了路：从新位置回到普通路线。之前停在原地的搜索已由实际迈步证明不是空搜。
     stop = null;
+    if (idleSearchesSinceProgress > 0) {
+      session.counters.idleSearches = Math.max(0, session.counters.idleSearches - idleSearchesSinceProgress);
+      idleSearchesSinceProgress = 0;
+    }
     session.progress.stagnationSegments = 0;
     session.progress.lastProgressAt = Date.now();
     session.phase = 'replanning';
@@ -1213,6 +1243,8 @@ export function coordinatorData(outcome: Extract<CoordinatorOutcome, { ok: true 
       evidenceMode: last.evidenceMode,
       searchStatus: last.searchStatus,
       searchReason: last.searchReason,
+      ...(last.failure === undefined ? {} : { failure: last.failure }),
+      ...(last.searchFailure === undefined ? {} : { searchFailure: last.searchFailure }),
       ...(last.budget === undefined ? {} : { budget: last.budget }),
       ...(last.unavailableSections === undefined ? {} : { unavailableSections: last.unavailableSections }),
       assurance: last.chosen?.assurance ?? last.search.assurance,

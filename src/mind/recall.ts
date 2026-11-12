@@ -55,7 +55,12 @@ export function recallLocal(query: string, src: RecallSources, opts: {
   const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => {
     if (r.ref && hide.has(r.ref)) return;
     const observedAt = ['know_how', 'lesson', 'diary'].includes(r.kind) || r.kind === 'note' && r.source !== 'note:fact' ? 0 : at || undefined;
-    if (base >= (r.kind === 'skill' ? 3 : 2)) out.push({ ...r, text: r.kind === 'skill' ? r.text : recallText(r.text, src.memory, r.dimension, observedAt, now), score: base + fresh(at), match: matchOf(r.text), ...(at ? { at } : {}) });
+    if (base >= (r.kind === 'skill' ? 3 : 2)) {
+      const match = matchOf(r.text);
+      // 目标/执行缺口是当前要用的，历史方法只有在更相关时才排在前面。
+      const weight = match === 'current_goal' ? 1.25 : match === 'execution_gap' ? 1.15 : 1;
+      out.push({ ...r, text: r.kind === 'skill' ? r.text : recallText(r.text, src.memory, r.dimension, observedAt, now), score: (base + fresh(at)) * weight, match, ...(at ? { at } : {}) });
+    }
   };
 
   if (!skip.has('experience')) for (const r of src.self.history(60)) {
@@ -67,14 +72,18 @@ export function recallLocal(query: string, src: RecallSources, opts: {
   if (!skip.has('know_how')) for (const k of src.self.data.knowHow) {
     const trust = (k.wins + 1) / (k.wins + k.losses + 2);
     const applied = k.applications?.length
-      ? `，应用${k.applications.filter((a) => a.outcome === 'done' && a.completion !== 'condition' && a.completion !== 'attempt').length}成/${k.applications.filter((a) => a.outcome === 'stuck').length}败`
+      ? `，应用${k.applications.filter((a) => a.outcome === 'done' && a.completion !== 'condition' && a.completion !== 'attempt' && !a.searchUnconfirmed && !a.limited).length}成/${k.applications.filter((a) => a.outcome === 'stuck').length}败`
       : '';
     const counter = k.counterexamples?.length
       ? `，反例${k.counterexamples.length}条${k.counterexamples.at(-1)?.reason ? `（最近 ${k.counterexamples.at(-1)!.reason}）` : ''}`
       : '';
     const limits = k.limits?.length ? `，边界：${k.limits.slice(0, 2).join('；')}` : '';
     const source = k.source === 'observed' ? '亲眼观察' : k.source === 'experiment' ? '实验' : '反思';
-    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}${counter}${limits}）`, ref: k.id, source: `know_how:${k.id}` }, score(k.text, k.tags) * (0.6 + trust), k.updatedAt);
+    // 最近一次应用失败且仍有未消解的反例：默认注入时再降权；历史仍可主动查。
+    const recent = k.applications?.at(-1);
+    const contested = recent !== undefined && recent.outcome !== 'done' && (k.counterexamples?.length ?? 0) > 0;
+    push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}${counter}${limits}）`, ref: k.id, source: `know_how:${k.id}` },
+      score(k.text, k.tags) * (0.6 + trust) * (contested ? 0.55 : 1), k.updatedAt);
   }
   if (!skip.has('lesson')) {
     // addLesson 以 know_how:<id> 存的副本只是主窍门通道的镜像；主条目被合并/改写/删除后，

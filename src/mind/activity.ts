@@ -611,7 +611,7 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const RECEIPT_KEYS = new Set(['found', 'foundPos', 'foundRef', 'foundEntityId', 'visibleEntities', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
     'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall', 'collection',
     // 结构化停止原因与实测进展：给反思/后续决定用，不复制整份路线或体素。
-    'stop', 'stopReason', 'arrived', 'position']);
+    'stop', 'stopReason', 'arrived', 'position', 'failure', 'searchFailure']);
   const receipt = result.data
     ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
     : undefined;
@@ -958,7 +958,9 @@ const ACQUISITION_ARGS: Readonly<Record<string, readonly ('item' | 'block' | 'fi
 const ACQUISITION_SKILLS = new Set(Object.keys(ACQUISITION_ARGS));
 /** 只消耗/放置而不取得资源的动作：标题里的材料词是耗材，不是目标。 */
 const CONSUMING_SKILLS = new Set(['place_cell', 'place_support', 'pillar_one', 'equip', 'use_item', 'eat', 'store_items', 'drop_item', 'toss_item']);
-/** 标题里常见的资源词到目标类别；只在活动确有“取得/寻找”动作时使用。 */
+/** 只有标题在说要“找/采/挖/取得”时才把资源词当目标；施工、补给、赶路不算。 */
+const ACQUIRE_WORDS = /找|寻找|搜|采|挖|砍|收集|获取|拿|获得|gather|mine|collect|find|get|search/i;
+/** 标题里常见的资源词到目标类别；只在标题确有取得/寻找意图时使用。 */
 const TEXT_RESOURCE_TARGETS: readonly (readonly [RegExp, string])[] = [
   [/原木|木头|木料|菌柄|log|wood/i, 'log'], [/木板|plank/i, 'plank'], [/木棍|stick/i, 'stick'],
   [/铁|iron/i, 'iron'], [/煤|coal/i, 'coal'], [/钻石|diamond/i, 'diamond'], [/金|gold/i, 'gold'], [/铜|copper/i, 'copper'],
@@ -973,11 +975,15 @@ function resourceTargetsOf(a: Activity): string[] {
     const name = value.trim().replace(/^minecraft:/, '');
     if (name && name !== 'any') targets.add(name);
   };
-  if (a.doneWhen?.type === 'inventory_min') add(a.doneWhen.item);
-  if (a.doneWhen?.type === 'exploration') add(a.doneWhen.find);
-  const acquires = a.steps.some((step) => ACQUISITION_SKILLS.has(step.skill));
-  // 标题里的资源词只在确有取得/寻找动作时才算目标；纯放置/消耗活动不补目标。
-  if (acquires) for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
+  const addCondition = (condition: Activity['doneWhen'] | null | undefined) => {
+    if (!condition) return;
+    if (condition.type === 'inventory_min') add(condition.item);
+    else if (condition.type === 'exploration') add(condition.find);
+    else if (condition.type === 'all_of' || condition.type === 'any_of') condition.conditions.forEach(addCondition);
+  };
+  addCondition(a.doneWhen);
+  // 标题里的资源词只在标题确有取得/寻找意图时才算目标；纯放置/补给/赶路活动不补目标。
+  if (ACQUIRE_WORDS.test(a.what)) for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
   for (const step of a.steps) {
     const args = step.args as Record<string, unknown> | undefined;
     for (const key of ACQUISITION_ARGS[step.skill] ?? []) {
@@ -991,7 +997,7 @@ function resourceTargetsOf(a: Activity): string[] {
 function resourceIntentOf(a: Activity, targets: readonly string[]): boolean {
   const consumingOnly = a.steps.length > 0 && a.steps.every((step) => CONSUMING_SKILLS.has(step.skill));
   return targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill))
-    || !consumingOnly && RESOURCE_WORDS.test(a.what);
+    || !consumingOnly && ACQUIRE_WORDS.test(a.what) && RESOURCE_WORDS.test(a.what);
 }
 
 function searchIntentOf(a: Activity): boolean {
@@ -1093,12 +1099,16 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   // 最近一次结构化停止原因：移动会话的完整 stop 回执优先，其次技能自己报告的 stopReason。
   // 只留原因、说明和少量边界，不把整段路线或体素复制进活动历史。
   const stopReceipt = [...a.results].reverse().flatMap((result) => {
-    const stop = result.data?.stop as { reason?: unknown; detail?: unknown; boundaries?: unknown } | undefined;
+    const stop = result.data?.stop as { reason?: unknown; detail?: unknown; boundaries?: unknown; failure?: unknown; searchFailure?: unknown } | undefined;
+    const failure = typeof stop?.failure === 'string' ? stop.failure : result.data?.failure;
+    const searchFailure = typeof stop?.searchFailure === 'string' ? stop.searchFailure : result.data?.searchFailure;
     if (stop !== undefined && typeof stop.reason === 'string') {
       return [{
         reason: stop.reason,
         ...(typeof stop.detail === 'string' ? { detail: stop.detail.slice(0, 240) } : {}),
         ...(Array.isArray(stop.boundaries) && stop.boundaries.length ? { boundaries: stop.boundaries.slice(0, 3) } : {}),
+        ...(typeof failure === 'string' ? { failure } : {}),
+        ...(typeof searchFailure === 'string' || searchFailure === null ? { searchFailure } : {}),
       }];
     }
     const reason = result.data?.stopReason;

@@ -103,3 +103,21 @@ test('背包里多了开路副产物不算空间/目标进展', async () => {
   assert.equal(progressSignals({ exploration: { found: [] }, resource: { intent: true, acquired: true, located: true, goalIncomplete: false } }, { newChunks: false, planAdvanced: false, frontierAdvanced: false }).progressed, true, '取得点名目标算进展');
   assert.equal(progressSignals({ exploration: { found: [] } }, { newChunks: true, planAdvanced: false, frontierAdvanced: false }).progressed, true, '新区块算进展');
 });
+
+test('混合施工+移动不因标题材料词产生资源目标；嵌套条件里的目标能递归提取', () => {
+  const mixed = createActivity({
+    what: '用木板补路再走两格', why: '', kind: 'build', repeat: 1,
+    steps: [{ skill: 'place_support', args: { item: 'oak_planks' } }, { skill: 'move_step', args: { at: [1, 0, 0] } }],
+  }, '', 'llm', state([{ name: 'oak_planks', count: 2 }]));
+  const record = recordOf(mixed, 'done', '补好路并走了两格', state());
+  assert.equal(record.resource, undefined, '施工+移动不是采集目标');
+  assert.equal(record.lost.oak_planks, 2);
+
+  const nested = createActivity({
+    what: '准备材料', why: '', kind: 'build', repeat: 1,
+    steps: [{ skill: 'place_support', args: { item: 'cobblestone' } }],
+    doneWhen: { type: 'all_of', conditions: [{ type: 'inventory_min', item: 'iron_ingot', count: 3 }, { type: 'position_y', max: 64 }] },
+  }, '', 'llm', state([{ name: 'cobblestone', count: 1 }]));
+  const nestedRecord = recordOf(nested, 'stuck', '没拿到铁', state());
+  assert.ok(nestedRecord.resource?.targets?.includes('iron_ingot'), 'all_of 里的资源目标要递归提取');
+});

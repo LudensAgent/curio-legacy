@@ -112,8 +112,8 @@ export interface Activity {
   /** 这段活推进的计划成果/做法（po_… / pm_…）；结束时把尝试与停因记到对应账上。 */
   outcomeId?: string;
   methodId?: string;
-  /** 开工时所属的主目标（议程 id）；计划换掉后不能把旧活动记到新计划上。 */
-  planAgendaId?: string;
+  /** 开工时所属的主目标（议程 id；没有计划为 null）；计划换掉后不能把旧活动记到新计划上。 */
+  planAgendaId?: string | null;
   source: 'llm' | 'rule' | 'habit';
   monologue: string;
   startedAt: number;
@@ -222,7 +222,7 @@ export interface ActivityRecord {
   /** 最近一次失败步骤的真实动作、授权参数、时间、作用域、位置与回执；总结压缩后仍保留失败条件。 */
   failure?: { skill: string; args?: unknown; code: string | null; summary: string; at: number; worldId?: string; dim?: string; pos?: { x: number; y: number; z: number } };
   /** 移动/导航停止的结构化原因（如 UNKNOWN_BOUNDARY/CONFLICT/BUDGET_EXHAUSTED）与具体边界；归因仍由 Agent 判断。 */
-  stop?: { reason: string; detail?: string; boundaries?: unknown[] };
+  stop?: { reason: string; detail?: string; boundaries?: unknown[]; failure?: string; searchFailure?: string | null };
 }
 
 export interface AgendaItem {
@@ -250,9 +250,20 @@ export interface KnowHow {
   losses: number;
   unverified?: boolean;
   /** 后续活动显式声明 applying:<id> 时留下的应用证据；只供复核，不由程序自动宣告结论正确。 */
-  applications?: { at: number; activityId: string; outcome: ActivityOutcome; completion?: ActivityRecord['completion']; summary: string; failure?: ActivityRecord['failure'] }[];
+  applications?: {
+    at: number; activityId: string; outcome: ActivityOutcome; completion?: ActivityRecord['completion']; summary: string; failure?: ActivityRecord['failure'];
+    /** 这次是搜索意图但没确认目标：不能计作成功应用。 */
+    searchUnconfirmed?: boolean;
+    /** 只在原地/附近成功，不能证明远行策略。 */
+    limited?: boolean;
+  }[];
   /** 明确应用后失败/受阻的反例：改写/合并时保留，不能靠换措辞洗掉。 */
-  counterexamples?: { at: number; activityId?: string; outcome: ActivityOutcome; reason: string; summary: string; pos?: { x: number; y: number; z: number } }[];
+  counterexamples?: {
+    at: number; activityId?: string; outcome: ActivityOutcome; reason: string; summary: string;
+    /** 写这条反例时的说法快照；改写后仍能看出它反驳的是哪一版结论。 */
+    claim?: string;
+    pos?: { x: number; y: number; z: number };
+  }[];
   /** 已确认的适用边界或尚未验证的部分（自由文字，由 Agent 写；程序不自动推断）。 */
   limits?: string[];
   createdAt: number;

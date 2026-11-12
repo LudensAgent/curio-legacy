@@ -88,6 +88,7 @@ test('走了十几格但没确认目标，不能给“找要塞”的策略记�
     id: 'a1', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps',
     summary: '开了 16 格，没看见要塞',
     exploration: { start: { x: 0, y: 64, z: 0 }, end: { x: 0, y: 64, z: -16 }, maxHorizontal: 16, visitedCells: 16, newChunks: 1, searchIntent: true, localOnly: false, found: [], blocked: false },
+    resource: { intent: true, targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
   }));
   assert.equal(k.wins, 0, '动作做完不等于找到目标');
   assert.equal(k.counterexamples?.length, 1);
@@ -120,15 +121,38 @@ test('召回给每条标注当前目标/执行缺口/历史，不再混成一个
   assert.ok(hits.some((hit) => hit.match === 'historical'), '历史经历仍是历史');
 });
 
-test('近似反例（同原因、同摘要前缀）合并为最新一条，不同原因保留', () => {
+test('不同执行记录的反例不因摘要前缀相同而互相覆盖；同一记录重复才去重', () => {
   const self = new SelfModel(null);
   const k = self.learn('走远找树时沿北开巷', { source: 'reflection' })!;
-  const apply = (summary: string, reason: string) => self.record(record({
-    id: `a${Math.random()}`, applying: k.id, applyingText: k.text, outcome: 'stuck', summary, stop: { reason },
+  const apply = (id: string, summary: string, reason: string) => self.record(record({
+    id, applying: k.id, applyingText: k.text, outcome: 'stuck', summary, stop: { reason },
   }));
-  apply('同一站位搜索与复验矛盾：东侧边界', 'CONFLICT');
-  apply('同一站位搜索与复验矛盾：西侧边界', 'CONFLICT');
-  apply('开巷后没有落脚点', 'UNKNOWN_BOUNDARY');
-  assert.equal(k.counterexamples?.length, 2, '同原因同前缀合并，不同原因保留');
-  assert.match(k.counterexamples![0]!.summary, /西侧边界/, '合并保留最新一条');
+  apply('a1', '同一站位搜索与复验矛盾：东侧边界', 'CONFLICT');
+  apply('a2', '同一站位搜索与复验矛盾：西侧边界', 'CONFLICT');
+  apply('a3', '开巷后没有落脚点', 'UNKNOWN_BOUNDARY');
+  assert.equal(k.counterexamples?.length, 3, '不同经历都保留，不靠摘要前缀合并');
+  assert.deepEqual(k.counterexamples?.map((c) => c.claim), [k.text, k.text, k.text], '每条绑定当时的说法');
+  apply('a1', '同一站位搜索与复验矛盾：东侧边界（重复回执）', 'CONFLICT');
+  assert.equal(k.counterexamples?.length, 3, '同一活动 id 的重复回执只更新，不增加');
+  assert.match(k.counterexamples!.find((c) => c.activityId === 'a1')!.summary, /重复回执/);
+});
+
+test('没有寻找对象的“向北探索 96 格”不写目标失败反例；点名目标才写', () => {
+  const self = new SelfModel(null);
+  const k = self.learn('沿北向探索能推进', { source: 'reflection', kind: 'explore' })!;
+  const explore = { start: { x: 0, y: 64, z: 0 }, end: { x: 0, y: 64, z: -96 }, maxHorizontal: 96, visitedCells: 96, newChunks: 4, searchIntent: true, localOnly: false, found: [], blocked: false };
+  self.record(record({
+    id: 'a1', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps', summary: '向北走了 96 格',
+    exploration: explore, resource: { intent: true, located: false, acquired: null, goalIncomplete: false },
+  }));
+  assert.equal(k.wins, 0, '没确认找到东西，不能记策略成功');
+  assert.equal(k.counterexamples?.length ?? 0, 0, '本来没有寻找对象，不是目标失败');
+
+  self.record(record({
+    id: 'a2', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps', summary: '向北走了 32 格，没找到橡木',
+    exploration: { ...explore, maxHorizontal: 32, end: { x: 0, y: 64, z: -32 } },
+    resource: { intent: true, targets: ['oak_log'], located: false, acquired: null, goalIncomplete: true },
+  }));
+  assert.equal(k.counterexamples?.length, 1, '点名了橡木且没找到，才写目标反例');
+  assert.equal(k.counterexamples?.[0]?.reason, 'TARGET_NOT_FOUND');
 });

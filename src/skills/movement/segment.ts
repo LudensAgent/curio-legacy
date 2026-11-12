@@ -296,18 +296,6 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
   let result: SegmentReceipt | undefined;
   try {
     result = await runNavigationSegmentInner(ctx, request, leases, execution);
-    result.failure = movementFailureOfSegment(result.outcome, {
-      ...(result.problemKind === undefined ? {} : { problemKind: result.problemKind }),
-      ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
-      ...(result.disallowed === undefined ? {} : { disallowed: true }),
-      ...(result.problemKind === 'UNSUPPORTED_ENVIRONMENT' ? { modeGap: true } : {}),
-    });
-    result.searchFailure = movementFailureOfSearch(result.searchStatus, {
-      ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
-      ...(result.unavailableSections?.length ? { unavailableSections: result.unavailableSections.length } : {}),
-      ...(request.corridor === undefined ? {} : { corridorLimited: result.outcome === 'corridor_exhausted' }),
-    });
-    return result;
   } finally {
     const finishedSearches = execution.finishPreview?.();
     if (execution.handedOver) {
@@ -358,6 +346,20 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     const spatial = ctx.spatial;
     if (spatial !== undefined) for (const residency of leases) releaseRouteResidency(spatial, residency);
   }
+  if (result === undefined) throw new Error('导航段没有返回结果');
+  // 最终状态已经确定（取消/超时/物理失败可能由 finally 改写），此时再分类。
+  result.failure = movementFailureOfSegment(result.outcome, {
+    ...(result.problemKind === undefined ? {} : { problemKind: result.problemKind }),
+    ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
+    ...(result.disallowed === undefined ? {} : { disallowed: true }),
+    ...(result.problemKind === 'UNSUPPORTED_ENVIRONMENT' ? { modeGap: true } : {}),
+  });
+  result.searchFailure = movementFailureOfSearch(result.searchStatus, {
+    ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
+    ...(result.unavailableSections?.length ? { unavailableSections: result.unavailableSections.length } : {}),
+    ...(request.corridor === undefined ? {} : { corridorLimited: result.outcome === 'corridor_exhausted' }),
+  });
+  return result;
 }
 
 async function runNavigationSegmentInner(
