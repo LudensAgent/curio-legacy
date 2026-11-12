@@ -158,5 +158,14 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
   },
 });
 
+/**
+ * 这个拒绝原因是否能由显式授权的 place 修复（补脚下支撑 / 搭桥跨过缺口），
+ * 而不是液体、涉水未授权或危险格这类不能靠“垫一块”改变的安全/模式限制。
+ */
+export function isConstructionFixablePolicyRejection(reason: string): boolean {
+  return reason.includes('stance supported only by a neighbouring column')
+    || (reason.includes('cannot clear a') && reason.includes('horizontal gap jump'));
+}
+
 export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-only.dry.lava-neighbor-3.v6', new Set(['fall']), false);
 export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-wade.lava-neighbor-3.v6', new Set(['fall', 'water_contact']), true);

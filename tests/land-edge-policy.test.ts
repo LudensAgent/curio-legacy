@@ -6,7 +6,7 @@ import type {
   LandSearchPolicyEdge,
   LandSearchPolicyRead,
 } from 'curio-minecraft-3d-memory/navigation';
-import { hostLandEdgePolicy, isDangerousBlock, LAVA_EDGE_COST } from '../src/spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, isConstructionFixablePolicyRejection, isDangerousBlock, LAVA_EDGE_COST } from '../src/spatial/land-edge-policy.ts';
 
 type Hazard = LandSearchPolicyEdge['hazards'][number];
 type CellEntry = readonly [x: number, y: number, z: number, cell: LandSearchPolicyCell];
@@ -262,4 +262,21 @@ test('跨缺口跳跃：超出不疾跑起跳能力的宽缺口不规划；落�
   assert.match(rejectionReason(hostLandEdgePolicy.evaluate(gap, overFire.read)), /miss would land in recorded fire at \(-73,66,-19\)/);
   const overFloor = fakeReader([[-73, 68, -19, recorded('minecraft:air')], [-73, 67, -19, recorded('netherrack')], [-73, 66, -19, recorded('fire')]], 128, supports);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(gap, overFloor.read)), 0, '缺口下先碰到实心地面，落空也落在地面上');
+});
+
+test('策略拒绝分类：缺中心支撑/宽缺口可由授权 place 修，危险格与未授权涉水仍交回', () => {
+  const to = at(95.29, 70, -39.55);
+  const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
+  const unavailableBelow = fakeReader([[95, 69, -40, unavailableCell]], 64, []);
+  assert.equal(isConstructionFixablePolicyRejection(rejectionReason(hostLandEdgePolicy.evaluate(edge, unavailableBelow.read))), true);
+
+  const wide = edgeAt(at(-70.39, 69, -18.55), { kind: 'jump', from: at(-73.39, 69, -18.55) });
+  const supports = [at(-70.39, 69, -18.55), at(-71.5, 69, -18.5)];
+  assert.equal(isConstructionFixablePolicyRejection(rejectionReason(hostLandEdgePolicy.evaluate(wide, fakeReader([], 64, supports).read))), true);
+
+  const lava = fakeReader([[95, 70, -40, recorded('minecraft:lava')]], 64, []);
+  assert.equal(isConstructionFixablePolicyRejection(rejectionReason(hostLandEdgePolicy.evaluate(edge, lava.read))), false);
+  const water = fakeReader([[95, 70, -40, recorded('minecraft:water')]], 64, []);
+  assert.equal(isConstructionFixablePolicyRejection(rejectionReason(hostLandEdgePolicy.evaluate(edge, water.read))), false);
+  assert.equal(isConstructionFixablePolicyRejection('host policy rejects geometric lava hazard; only fall is allowed'), false);
 });

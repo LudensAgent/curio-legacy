@@ -672,6 +672,36 @@ test('开路：困在 1×1 深两格的坑里，授权 place 后原地垫高一�
   assert.equal(adapter.inv.get('cobblestone'), 7, '只用了一块圆石');
 });
 
+test('开路：唯一前进边因落点脚底中心缺支撑被策略拒绝，授权 place 时补支撑后继续', async (t) => {
+  clearMovementSessions();
+  // 一格宽走廊，x=6 脚下是空洞；两侧无观测，头顶封死，跳不过去，走边又被
+  // “中心支撑只靠邻列擦边/没有观测支撑”的宿主策略拒绝。授权 place 后应在 (6,63) 补一块。
+  const map = corridor(14, -1, [0, 0]);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  fill(map, 'minecraft:air', [{ x: 6, y: 63, z: 0 }]);
+  fill(map, 'minecraft:stone', Array.from({ length: 16 }, (_, i) => i - 1).map((x) => ({ x, y: 66, z: 0 })));
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  adapter.removed.add('6,63,0');
+  adapter.blocks.push(...Array.from({ length: 16 }, (_, i) => i - 1).map((x) => ({ name: 'stone', pos: { x, y: 66, z: 0 } })));
+  adapter.inv.set('netherrack', 8);
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  const realPlace = adapter.placeBlockAt.bind(adapter);
+  adapter.placeBlockAt = async (pos, items, signal) => {
+    const r = await realPlace(pos, items, signal);
+    if (r.ok) fill(map, 'minecraft:netherrack', [{ ...pos }]);
+    return r;
+  };
+  const validated = travelTo.validate({ to: { x: 12, y: 64, z: 0 }, range: 1, place: 'netherrack' }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await travelTo.run(ctx, validated.args);
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(adapter.pos.x >= 11, `补支撑后走过空洞（实测 x=${adapter.pos.x}）`);
+  const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
+  assert.deepEqual(edits.map((e) => `${e.kind}@${e.pos.x},${e.pos.y},${e.pos.z}`), ['place@6,63,0']);
+  assert.equal(adapter.inv.get('netherrack'), 7);
+});
+
 test('farthestFrontier：高度参照固定为出发脚高，身体往下走一段后不会把更深的旧矿道算进来', async () => {
   const map = corridor(30, -1, [-3, 3]);
   // 出发高度 y=64 的地表已知到 x=30；地下 y=44（出发高度以下 20 格）有一条旧矿道一直延伸到 x=60。

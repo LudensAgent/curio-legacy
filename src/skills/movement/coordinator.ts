@@ -1,7 +1,7 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
-import { hostLandEdgePolicy, hostWadingEdgePolicy, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
@@ -941,12 +941,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
         }
-        const policyDetail = segment.search.policy?.firstRejection === undefined ? ''
-          : `；被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}`;
+        const policyLead = segment.search.policy?.firstRejection === undefined ? ''
+          : `被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}；`;
+        const policyDetail = policyLead === '' ? '' : `；${policyLead.slice(0, -1)}`;
         stop = modeGap
           ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式${policyDetail}`, { modeGap: { problem: segment.problemKind } })
           : segment.failure === 'DELEGATION_RESTRICTION'
-            ? stopOf('DELEGATION_RESTRICTION', `${segment.detail ?? '授权/策略拒绝可走边'}${policyDetail}`)
+            // 具体哪条策略拒绝了哪条边，比库的泛化 UNSUPPORTED 说明更能让心智决定
+            // 换方向、授权施工还是接受风险；放在最前面，避免被长摘要截掉。
+            ? stopOf('DELEGATION_RESTRICTION', `${policyLead}${segment.detail ?? '授权/策略拒绝可走边'}`)
             : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${policyDetail}`);
         break;
       }
@@ -1140,7 +1143,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
     // 普通路线走不通且委托授权了开路：在已记录体素上规划挖开/补支撑/垫高的路线，执行完回到普通路线。
     const makeWay = request.makeWay;
-    if (makeWay === undefined || stop === null || !MAKE_WAY_STOPS.has(stop.reason) || makeWayEdits.length >= makeWay.maxEdits
+    // 宿主策略拒绝的边里，有一部分是“落点脚底中心缺支撑/只靠邻列擦边”或“缺口超过跳跃能力”：
+    // 这两种本来就该由显式授权的 place 修（补支撑/搭桥），不是不能走。危险格、涉水未授权
+    // 等其余拒绝仍按限制交回，不能靠垫一块绕过。
+    const lastSegment = session.lastSegment as SegmentReceipt | undefined;
+    const policyFixable = makeWay?.place !== undefined
+      && stop?.reason === 'DELEGATION_RESTRICTION'
+      && lastSegment?.search.policy?.firstRejection !== undefined
+      && isConstructionFixablePolicyRejection(lastSegment.search.policy.firstRejection.reason);
+    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable) || makeWayEdits.length >= makeWay.maxEdits
       || makeWayLegs.length >= MAX_MAKE_WAY_LEGS || Date.now() >= deadline || ctx.signal.aborted) break;
     const voxel = spatial.session.voxel;
     const here = ctx.adapter.state().pos;
