@@ -21,7 +21,7 @@ import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
 import { RECALL_LABEL, type Recalled } from './recall.ts';
-import { describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
+import { describeCurrentTrip, describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
 import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
@@ -826,16 +826,20 @@ function worldKnowledge(ctx: MindContext) {
   // 出行记录：本维度最近几段，以及身边 16 格内的门通往的维度最近几段（站在门前要不要进、带什么，由它掂量）。
   // 按数据是否存在给出，不看打算的措辞。
   const legs = (ctx.excursions ?? []).filter((l) => l.worldId === s.worldId && l.onlineMs >= 60_000);
+  // 当前这一趟不按 60 秒过滤：刚出发的几分钟也要能看到方向覆盖与最近探索。
+  const currentLeg = (ctx.excursions ?? []).find((l) => !l.end && l.worldId === s.worldId && l.dim === p.self.dim);
+  const currentTrip = currentLeg ? describeCurrentTrip(currentLeg) : null;
   const portalNear = (dim: string) => (pos: Vec3Like) => portalSnapshot.endpoints
     .filter((e) => e.dim === dim && Math.hypot(e.pos.x - pos.x, e.pos.y - pos.y, e.pos.z - pos.z) <= 6)
     .sort((a, b) => Math.hypot(a.pos.x - pos.x, a.pos.z - pos.z) - Math.hypot(b.pos.x - pos.x, b.pos.z - pos.z))[0]?.id ?? null;
-  const tripsHere = legs.filter((l) => l.dim === p.self.dim).slice(-3)
-    .map((l) => describeLeg(l, { here, portalNear: portalNear(l.dim) }));
+  const tripsHere = ctx.tier === 'deliberate' ? legs.filter((l) => l.dim === p.self.dim).slice(-3)
+    .map((l) => describeLeg(l, { here, portalNear: portalNear(l.dim) })) : [];
   const beyond = [...new Set(portalSnapshot.endpoints
     .filter((e) => e.dim === p.self.dim && Math.hypot(e.pos.x - here.x, e.pos.y - here.y, e.pos.z - here.z) <= 16)
     .flatMap((e) => portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => endpointById.get(r.toId)?.dim))
     .filter((d): d is string => !!d && d !== p.self.dim))];
-  const tripsBeyond = beyond.flatMap((dim) => legs.filter((l) => l.dim === dim).slice(-3).map((l) => describeLeg(l, { portalNear: portalNear(dim) })));
+  const tripsBeyond = ctx.tier === 'deliberate'
+    ? beyond.flatMap((dim) => legs.filter((l) => l.dim === dim).slice(-3).map((l) => describeLeg(l, { portalNear: portalNear(dim) }))) : [];
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
@@ -860,11 +864,12 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
-    ...(tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
+    ...(currentTrip ? { current_trip: currentTrip, current_trip_note: '本趟=当前这段出行；各方向最远是身体站稳过的脚格，最近探索是任务回执的实测推进；现在能否续走未确认，坐标可直接作为移动目标' } : {}),
+    ...(ctx.tier === 'deliberate' && tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
     ...(reachLines(ctx, here, 32).length ? { walked_farthest: { from: `(${ctx.reach!.origin.x},${ctx.reach!.origin.y},${ctx.reach!.origin.z}) 起算`, by_direction: reachLines(ctx, here, 32),
       note: `身体实际站过的脚格（体素到访记录，${Math.round((Date.now() - ctx.reach!.at) / 60_000)} 分钟前读取${ctx.reach!.truncated ? '，没读完全部区段' : ''}）；现在能否走通未确认，沿途也不等于看全了；坐标可以直接作为移动目标` } } : {}),
-    ...(tripsBeyond.length ? { my_trips_beyond_nearby_portal: tripsBeyond } : {}),
-    ...(tripsHere.length || tripsBeyond.length ? { trips_note: LEG_NOTE } : {}),
+    ...(ctx.tier === 'deliberate' && tripsBeyond.length ? { my_trips_beyond_nearby_portal: tripsBeyond } : {}),
+    ...(ctx.tier === 'deliberate' && (tripsHere.length || tripsBeyond.length) ? { trips_note: LEG_NOTE } : {}),
     ...(danger.length ? { danger_zones: danger } : {}),
     ...(lastDeaths.length ? { last_deaths: lastDeaths } : {}),
     // 自己开了头、要等它自己变化的事：离开时留下的样子和现在看得到的样子

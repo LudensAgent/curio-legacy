@@ -106,7 +106,39 @@ test('go_near 没有可达相邻站立格时停下报事实', async (t) => {
   assert.equal(r.status, 'failed');
   assert.match(r.summary, /没有找到可到达/);
   assert.ok(Array.isArray(r.data?.candidates));
+  // 身体当前列没有已观测支撑：不能把“零长度路线”当成可达站位。
+  assert.equal((r.data?.candidates as { to: { x: number; z: number } }[]).some((c) => c.to.x === 0 && c.to.z === 0), false);
   assert.deepEqual(adapter.actions, []);
+});
+
+test('go_near 相邻格都不可站时退到第二环的可达站立格', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const floor = [{ x: -2, y: 63, z: 0 }, { x: -1, y: 63, z: 0 }, { x: 0, y: 63, z: 0 }];
+  const chest = { x: 2, y: 64, z: 0 };
+  // 每个格只观测一次，避免同毫秒重复观测被判成冲突。
+  const xs = Array.from({ length: 9 }, (_, i) => i - 3);
+  const zs = Array.from({ length: 7 }, (_, i) => i - 3);
+  const air = xs.flatMap((x) => zs.flatMap((z) =>
+    [63, 64, 65, 66].map((y) => ({ x, y, z })).filter((p) =>
+      !floor.some((f) => f.x === p.x && f.y === p.y && f.z === p.z) && !(p.x === chest.x && p.y === chest.y && p.z === chest.z))));
+  fill(map, 'minecraft:air', air);
+  // 目标四周的第一环列都只有空气；只有起点通往第二环候选的一条走道有支撑。
+  fill(map, 'minecraft:grass_block', floor);
+  fill(map, 'minecraft:chest', [chest]);
+  const { adapter, ctx } = setup(map);
+  adapter.pos = { x: -1.5, y: 64, z: 0.5 };
+  t.after(() => ctx.memory.close());
+  const r = await goNear.run(ctx, {
+    target: { x: 2, y: 64, z: 0 }, allowed: ['walk', 'step'], historical: true, maxSteps: 8, allowUnknownCorridor: false,
+  });
+  assert.equal(r.status, 'succeeded', r.summary);
+  // 相邻四列都走不过去，只有 Chebyshev 距离 2 的 (0,0) 可站。
+  assert.deepEqual(r.data?.chosen, { x: 0, y: 64, z: 0 });
+  assert.equal(r.data?.chosenRing, 2);
+  assert.deepEqual(r.data?.ringsTried, [1, 2]);
+  assert.equal(Math.floor(adapter.pos.x), 0);
+  assert.equal(Math.floor(adapter.pos.z), 0);
+  assert.ok(Math.abs(adapter.pos.y - 64) < 0.01);
 });
 
 test('go_near 按该列真实脚高接近：目标是门的上半格时，候选 y 解析到地面，到了就算到', async (t) => {

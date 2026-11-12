@@ -16,10 +16,26 @@ type ApproachArgs = {
 
 const KINDS: readonly Kind[] = ['walk', 'step', 'drop'];
 const AIR = /^(air|cave_air|void_air)$/;
-const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+/**
+ * 候选站位按由近到远的环排列。第一环沿用原有四向邻格；第二环是 Chebyshev
+ * 距离恰好为 2 的一整圈，用于相邻格不可站、但更远一格仍在交互距离内的情况。
+ */
+const RINGS: readonly (readonly (readonly [number, number])[])[] = [
+  [[1, 0], [-1, 0], [0, 1], [0, -1]],
+  [
+    [2, 0], [-2, 0], [0, 2], [0, -2],
+    [2, 1], [-2, 1], [2, -1], [-2, -1],
+    [1, 2], [-1, 2], [1, -2], [-1, -2],
+    [2, 2], [-2, 2], [2, -2], [-2, -2],
+  ],
+];
 const Y_OFFSETS = [0, -1, 1] as const;
-/** Shared wall-clock budget for all candidate searches in one go_near call. */
-const GO_NEAR_SEARCH_MS = 5000;
+/**
+ * Shared wall-clock budget for all candidate searches in one go_near call.
+ * 第二环比第一环多 48 个候选，所有搜索共用同一截止时间；从 5000ms 提到
+ * 8000ms 只用于给这一圈留出实际搜索时间，不改变单次搜索的预算语义。
+ */
+const GO_NEAR_SEARCH_MS = 8000;
 
 const point = (v: unknown): Vec3Like | null => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
@@ -30,11 +46,11 @@ const point = (v: unknown): Vec3Like | null => {
 
 /**
  * 容器/门/床/传送门的目标是方块，不是站立格。这个动作只负责走到方块旁一个
- * 可到达的相邻站立格；不打开、不拿、不睡、不穿门，也不改交互目标。
+ * 可到达的附近站立格（由近到远，最多距离 2 格）；不打开、不拿、不睡、不穿门，也不改交互目标。
  */
 export const goNear: Skill<ApproachArgs> = {
   name: 'go_near',
-  description: '走到指定容器/门/床/传送门方块旁的一个相邻站立格，为后续 take_items/sleep/travel_portal 做准备。只做路线规划与移动，不打开、不拿、不睡、不穿门，不换交互目标；没有可到达的相邻站立格就停下报事实。',
+  description: '走到指定容器/门/床/传送门方块旁的一个可到达站立格（先试相邻格，没路再试距离 2 格），为后续 take_items/sleep/travel_portal 做准备。只做路线规划与移动，不打开、不拿、不睡、不穿门，不换交互目标；没有可到达的附近站立格就停下报事实。',
   catalog: '{"target":{x,y,z}}：走到容器/门/床/传送门方块旁的站立格（target 是方块坐标，不是站立格）',
   argsDoc: '{"target":{"x":整数,"y":整数,"z":整数}（容器/门/床/传送门的方块坐标）,"allowed"?":["walk","step","drop"],"historical"?true,"maxSteps"?16,"allowUnknownCorridor"?false}；不是站立格，站立格先用 resolve_target。',
   timeoutMs: 30000,
@@ -79,7 +95,8 @@ export const goNear: Skill<ApproachArgs> = {
       return fail('BAD_ARGS', `target (${target.x},${target.y},${target.z}) 是空气/站立格；go_near 只用于容器/门/床/传送门方块；走到这个位置用 travel_to {"to":{"x":${target.x},"y":${target.y},"z":${target.z}}} 或 approach_visible {"target":{"pos":…}}，需要逐格核实的精确站位才用 navigate_to`, { target });
     }
     // One deadline for every candidate and the historical fallback: a single
-    // go_near call must not multiply the per-search wall-clock budget by 12.
+    // go_near call must not multiply the per-search wall-clock budget by the
+    // candidate count (ring 1 and, when needed, ring 2).
     const deadlineMs = Date.now() + GO_NEAR_SEARCH_MS;
     const request = {
       worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
@@ -94,7 +111,8 @@ export const goNear: Skill<ApproachArgs> = {
       return n === targetStem;
     };
     const columnYs = [target.y - 1, target.y, target.y + 1, target.y + 2];
-    const candidates = DIRS.flatMap(([dx, dz]) => Y_OFFSETS.map((dy) => ({
+    const startCell = { x: Math.floor(state.pos.x), z: Math.floor(state.pos.z) };
+    const rings = RINGS.map((offsets) => offsets.flatMap(([dx, dz]) => Y_OFFSETS.map((dy) => ({
       x: target.x + dx, y: target.y + dy, z: target.z + dz,
     }))).filter((to) => !columnYs.some((y) => {
       // 床的另一半、传送门同平面的另一格、双箱子的邻箱都不是“旁边的站立格”。
@@ -105,38 +123,49 @@ export const goNear: Skill<ApproachArgs> = {
       // 近似候选语义由这里拥有：只在地图里已观测的该列解析真实支撑面；
       // 解析不到就保留候选格猜测脚高，让库返回真实证据缺口，不做全局吸附。
       footY: observedFootY(spatial.session.voxel, state.dim, to.x, to.z, to.y, 2, 2),
-    }));
+    })).filter(({ to, footY }) =>
+      // 身体已站的列只有观测到支撑时才算候选：否则目标与起点重合的零长度路线
+      // 会让没有任何站立格证据的地图也“找到路线”。
+      footY !== null || to.x !== startCell.x || to.z !== startCell.z));
+    const routeUsable = (result: LandSearchResult) => result.status === 'FOUND'
+      && !result.transitions.some((transition) => !(args.allowed as readonly string[]).includes(transition.kind));
     // 先只跑严格证据；严格全失败才用历史证据回退。
     // 分片搜索：所有候选共用同一个截止时间；搜索期间让出事件循环，取消不必等整轮跑完。
-    const strictResults: { to: Vec3Like; footY: number; goal: NavigationGoal; result: LandSearchResult }[] = [];
-    for (const candidate of candidates) {
+    // 最近的环有可用路线就停：只有第一环没有可用路线时才搜索第二环。
+    const strictResults: { to: Vec3Like; footY: number; goal: NavigationGoal; ring: number; result: LandSearchResult }[] = [];
+    const ringsTried: number[] = [];
+    for (const [index, candidates] of rings.entries()) {
       if (ctx.signal.aborted) break;
-      const footY = candidate.footY ?? candidate.to.y;
-      const goal = cellGoal({ x: candidate.to.x, z: candidate.to.z }, footY, candidate.to);
-      strictResults.push({
-        to: candidate.to, footY, goal,
-        result: await searchLandRouteAsync(spatial.session.voxel, { ...request, goal }),
-      });
+      let searched = false;
+      for (const candidate of candidates) {
+        if (ctx.signal.aborted) break;
+        searched = true;
+        const footY = candidate.footY ?? candidate.to.y;
+        const goal = cellGoal({ x: candidate.to.x, z: candidate.to.z }, footY, candidate.to);
+        strictResults.push({
+          to: candidate.to, footY, goal, ring: index + 1,
+          result: await searchLandRouteAsync(spatial.session.voxel, { ...request, goal }),
+        });
+      }
+      if (searched) ringsTried.push(index + 1);
+      if (strictResults.some((entry) => routeUsable(entry.result))) break;
     }
-    const usable = strictResults.flatMap((entry) =>
-      entry.result.status === 'FOUND' && !entry.result.transitions.some((transition) => !(args.allowed as readonly string[]).includes(transition.kind))
-        ? [entry] : []);
+    const usable = strictResults.filter((entry) => routeUsable(entry.result));
     if (!usable.length && args.historical) {
+      // 严格证据全部失败后才用历史证据；候选顺序仍由近到远。
       for (const entry of strictResults) {
         if (entry.result.status === 'FOUND' || ctx.signal.aborted) continue;
         const historical = await searchLandRouteAsync(spatial.session.voxel, { ...request, goal: entry.goal, evidenceMode: 'remembered' });
-        if (historical.status === 'FOUND'
-          && !historical.transitions.some((transition) => !(args.allowed as readonly string[]).includes(transition.kind))) {
-          usable.push({ ...entry, result: historical });
-        }
+        if (routeUsable(historical)) usable.push({ ...entry, result: historical });
       }
     }
+    // 严格证据优先；同一证据模式下先近环、再代价，避免历史回退把第 2 圈排到第 1 圈前面。
     usable.sort((a, b) => (a.result.evidenceMode === b.result.evidenceMode ? 0 : a.result.evidenceMode === 'current' ? -1 : 1)
-      || a.result.cost - b.result.cost);
+      || a.ring - b.ring || a.result.cost - b.result.cost);
     const chosen = usable[0];
     if (!chosen) {
-      const attempts = strictResults.map(({ to, result }) => ({
-        to, status: result.status, budget: result.budget ?? null,
+      const attempts = strictResults.map(({ to, ring, result }) => ({
+        to, ring, status: result.status, budget: result.budget ?? null,
         searchMs: result.stats.durationMs, yieldCount: result.stats.yieldCount,
         maxSyncSliceMs: result.stats.maxSyncSliceMs, boundaries: result.boundaries.length,
         unavailableSections: result.unavailableSections.length, policy: result.policy ?? null,
@@ -144,21 +173,21 @@ export const goNear: Skill<ApproachArgs> = {
       // 预算耗尽、证据不足和“已存几何无路”都不是同一件事：不能一律报 PATH_NOT_FOUND。
       const budgetHit = strictResults.some(({ result }) => result.status === 'BUDGET_EXHAUSTED');
       const timeBudgetHit = strictResults.some(({ result }) => result.budget === 'time');
-      const noPath = strictResults.some(({ result }) => result.status === 'NO_PATH_IN_MEMORY');
+      const noPath = strictResults.length > 0 && strictResults.every(({ result }) => result.status === 'NO_PATH_IN_MEMORY');
       const insufficientEvidence = strictResults.some(({ result }) => result.status === 'INSUFFICIENT_EVIDENCE');
       const unsupported = !budgetHit && !noPath && !insufficientEvidence
         && strictResults.some(({ result }) => result.status === 'UNSUPPORTED');
       const reason = budgetHit
         ? `搜索预算已耗尽（${timeBudgetHit ? `时间 ${GO_NEAR_SEARCH_MS}ms` : `原因 ${strictResults.find(({ result }) => result.status === 'BUDGET_EXHAUSTED')?.result.budget ?? '节点/边'}`}；${strictResults.length} 个候选），不代表没有路；先缩小范围或走近再试`
         : noPath
-          ? '所有候选都返回 NO_PATH_IN_MEMORY（已存几何里没有相邻站立格路线）'
+          ? '所有候选都返回 NO_PATH_IN_MEMORY（已存几何里没有附近站立格路线）'
           : insufficientEvidence
             ? `候选都缺证据（INSUFFICIENT_EVIDENCE），不能当成已确认无路；先 look_around/走近刷新证据`
             : unsupported
               ? `候选目标不被现有搜索支持（UNSUPPORTED）：${strictResults.find(({ result }) => result.status === 'UNSUPPORTED')?.result.reason ?? ''}`
               : '所有候选都没有找到可用路线';
-      return fail(budgetHit ? 'TIMEOUT' : unsupported ? 'BAD_ARGS' : noPath ? 'PATH_NOT_FOUND' : 'NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的相邻站立格：${reason}；不会把目标方块本身当站立格`, {
-        target, targetName, candidates: attempts, candidateCount: strictResults.length,
+      return fail(budgetHit ? 'TIMEOUT' : unsupported ? 'BAD_ARGS' : noPath ? 'PATH_NOT_FOUND' : 'NOT_FOUND', `go_near 没有找到可到达 ${targetName ?? '目标方块'} 旁的站立格：${reason}；不会把目标方块本身当站立格`, {
+        target, targetName, candidates: attempts, candidateCount: strictResults.length, ringsTried,
         budgetMs: GO_NEAR_SEARCH_MS, budgetHit, timeBudgetHit, insufficientEvidence, position: { ...state.pos },
       });
     }
@@ -177,13 +206,14 @@ export const goNear: Skill<ApproachArgs> = {
     if (moved.status !== 'succeeded') {
       const { local: _local, around: _around, ...data } = (moved.data ?? {}) as Record<string, unknown>;
       return fail(moved.failureCode ?? 'ERROR', `go_near 没能走到 ${targetName ?? '目标方块'} 旁：${moved.summary}`, {
-        target, targetName, chosen: stance, navigation: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data },
+        target, targetName, chosen: stance, chosenRing: chosen.ring, ringsTried,
+        navigation: { code: moved.failureCode ?? 'ERROR', summary: moved.summary, data },
       });
     }
     // 把原目标的精确坐标回显进摘要：模型只看到摘要，写“指向原目标”时经常丢掉 target。
     const targetArg = JSON.stringify({ x: target.x, y: target.y, z: target.z });
     return ok(`已到 ${targetName ?? '目标方块'} (${target.x},${target.y},${target.z}) 旁的站立格 (${stance.x},${stance.y},${stance.z})；后续动作的 target 写 ${targetArg}（容器用 take_items/store_items，床用 sleep，门/工作站用 interact_block/use_gui，传送门用 observe_portal/travel_portal）`, {
-      target, targetName, chosen: stance, evidenceMode: chosen.result.evidenceMode,
+      target, targetName, chosen: stance, chosenRing: chosen.ring, ringsTried, evidenceMode: chosen.result.evidenceMode,
       policy: chosen.result.policy ?? null,
       candidateCount: strictResults.length, budgetMs: GO_NEAR_SEARCH_MS,
       maxSyncSliceMs: Math.max(...strictResults.map(({ result }) => result.stats.maxSyncSliceMs)),

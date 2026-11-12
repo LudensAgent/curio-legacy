@@ -192,6 +192,11 @@ export function remainingMakeWayEdits(session: MovementSession): number {
   return Math.max(0, (session.authorization.makeWay?.maxEdits ?? 0) - session.counters.makeWayEdits);
 }
 
+/** 本次调用实际可用的施工改动数：原 session 余额与本调用收窄后的授权取小。 */
+export function makeWayEditBudget(session: MovementSession, authorization: MovementAuthorization): number {
+  return Math.min(remainingMakeWayEdits(session), authorization.makeWay?.maxEdits ?? 0);
+}
+
 /** 同一 intent 的稳定指纹（不含预算与单次调用旋钮）。 */
 export function intentKeyOf(intent: MovementIntent): string {
   return JSON.stringify(intent.kind === 'navigate'

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { shortId } from '../util.ts';
 import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
-import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
+import type { Arbiter, Step, TaskInfo, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, navigationDisplacement, noteNavigationDispatch, noteNavigationResult, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, progressSignals, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, navigationDisplacement, noteNavigationDispatch, noteNavigationResult, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, prepProgressOf, progressSignals, recordOf, remainingSteps, signatureOf, storedItemsOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { suspendScopeSessions } from '../skills/movement/session.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
@@ -31,7 +31,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
-import { describeLeg, type ExcursionLog } from './excursions.ts';
+import { describeLeg, exploreAttemptFromReceipt, type ExcursionLog } from './excursions.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, NextDraft, Noticing } from './types.ts';
 
@@ -250,7 +250,12 @@ export class Mind {
   static NEAR_END_REASON = NEAR_END_REASON;
   /** 要命的处境（窒息、被贴身围攻、水下没气）：用“瞥一眼”那档快速拿主意，几秒都等不起 */
   static DANGER_REASON = '有危险，马上拿主意';
+  /** 挨打反射的停止阈值：血很低，或贴身且血不多；只决定“先停手”，不等于替 Agent 选应对方式。 */
+  static readonly HURT_STOP_HP = 12;
+  static readonly HURT_CLOSE_HP = 16;
   private lastHurtEventAt = 0;
+  /** 连续受伤的次数：两次 hurt 间隔 ≤3000ms 累加，否则重置为 1；用来区分孤立的一下和持续掉血 */
+  private hurtStreak = 0;
   /** 危险还在的这段时间里，等想法时不让身体去张望、捡东西 */
   private dangerUntil = 0;
   /** 刚从绕路回到这段活：先想一想再动手（放下它的这段时间里情况可能变了，比如等的东西到了、要的已经够了） */
@@ -496,7 +501,7 @@ export class Mind {
     const cur = this.d.arbiter.info();
     const handling = !!cur && ['defend', 'guard', 'flee', 'ranged_defend', 'hunt', 'shelter'].includes(cur.skill);
     const close = p.nearby.hostile.filter((h) => h.dist <= 3 && h.name !== 'creeper');
-    if (close.length && hurtRecently && (!handling || hp <= 12)) {
+    if (close.length && hurtRecently && (!handling || hp <= Mind.HURT_STOP_HP)) {
       out.push({ key: 'danger:melee', what: `被 ${close.map((h) => `${h.name} ${h.dist}格`).join('、')} 贴身打（血 ${hp}）` });
     }
     return out;
@@ -1125,10 +1130,13 @@ export class Mind {
     // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。
     // 进展不按“背包有没有变多”算：开路副产物（如下界岩）不清空间停滞。
     // 只有点名目标真的取得、真正看见搜索目标、新区块/清单进展/出行前沿推进才算。
+    // 准备类（腾空位、囤食物、修装备、存入容器）按开工到结束的实测差量算，不看活动标题。
     const signals = progressSignals(record, {
       newChunks: this.d.memory.visitedChunkCount > chunksBefore,
       planAdvanced: planAfter !== planBefore,
       frontierAdvanced: !!this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt),
+      ...prepProgressOf(a, state, { countFreedSlots: outcome !== 'interrupted' && state.alive }),
+      storedItems: storedItemsOf(a),
     });
     this.noteProgressOutcome(a, record, signals.progressed);
     this.lastRecord = record;
@@ -1275,10 +1283,10 @@ export class Mind {
     };
     this.lastProgressGateAt = now;
     const repeated = [...new Set(activities.map((entry) => entry.what))].slice(0, 4).join('；');
-    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点的变化：${repeated}`, {
+    this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点/准备度（空槽、食物、耐久、存入）的变化：${repeated}`, {
       agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
     });
-    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块或出行最远点的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
+    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
   }
 
   /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */
@@ -1290,7 +1298,7 @@ export class Mind {
       no_progress_activities: gate.activities.length,
       recent: gate.activities.map((entry) => `${entry.what} → ${entry.outcome}：${entry.summary}`),
       repeated_signatures: gate.signatures.map((signature) => signature.length > 160 ? `${signature.slice(0, 159)}…` : signature),
-      measured: '进展只按物品、清单勾项、新区块和出行离入口最远点计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
+      measured: '进展按物品、清单勾项、新区块、出行离入口最远点，或准备度实测变化（空槽增加、食物点增加、护甲/镐耐久增加、存入容器的件数）计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
       available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；explore_toward 朝选定方向边走边看；travel_to 去记得的坐标；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点和出行记录见【记得的地方】。',
       rule: `上面列出的签名（同一做法+同一区域+同一证据版本）会被退回重新确认；连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次仍写同一做法就放行。也可以写 plan 改清单或主目标。`,
     };
@@ -1454,10 +1462,29 @@ export class Mind {
       { planId: owner.id, stepId: step.id, sessionId });
   }
 
+  /** 把一次探索委托的实测推进记进当前这段出行；只供提示词回放事实，不判断该往哪走。 */
+  private noteExploreOutcome(o: TaskOutcome) {
+    const state = this.d.adapter.state();
+    const leg = this.d.excursions?.current(state.worldId);
+    // 迟到的回执或穿门后到达的回执不属于当前这段出行：不把旧维度的推进记到新账上。
+    if (!leg || leg.dim !== state.dim || leg.startedAt > o.task.startedAt) return;
+    const record = exploreAttemptFromReceipt({
+      status: o.suspended === true ? 'suspended'
+        : o.result.status === 'succeeded' ? 'succeeded' : o.result.status === 'cancelled' ? 'cancelled' : 'failed',
+      failureCode: o.result.failureCode,
+      data: (o.result.data ?? {}) as Record<string, unknown>,
+      args: (o.task.args ?? {}) as Record<string, unknown>,
+      fallbackEnd: state.pos, at: Date.now(), dim: state.dim,
+    });
+    if (record) this.d.excursions?.noteExplore(record);
+  }
+
   // ---------------------------------------------------------------- 动作结果
   private onDone(o: TaskOutcome) {
     if (this.stepExpiry?.taskId === o.task.id) this.clearStepExpiry();
     if (o.task.source === 'filler') return;
+    // 挂起也是一次委托调用的结束：先把已观测到的推进记进账，再做会话归还。
+    if (o.task.skill === 'explore_toward' || o.task.skill === 'expedition') this.safe(() => this.noteExploreOutcome(o), undefined);
     // 挂起任务可能落定为 cancelled，也可能在观察到中止前自然停止（failed）；两者都要归还会话，
     // 不能因为状态不是 cancelled 就把回执丢给插曲活动。
     if (o.suspended === true) { this.noteSuspendedMovement(o); return; }
@@ -1698,7 +1725,13 @@ export class Mind {
     const n = this.attention.fromEvent(ev);
     if (n && n.level !== 'note') this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
     if (ev.type === 'milestone') this.d.self.feel({ type: 'milestone' });
-    if (ev.type === 'hurt') { this.lastHurtEventAt = Date.now(); this.d.self.feel({ type: 'hurt', amount: 2 }); this.hurtWhileBusy(typeof (ev.data as { around?: unknown } | undefined)?.around === 'string' ? (ev.data as { around: string }).around : ''); }
+    if (ev.type === 'hurt') {
+      const now = Date.now();
+      this.hurtStreak = now - this.lastHurtEventAt <= 3000 ? this.hurtStreak + 1 : 1;
+      this.lastHurtEventAt = now;
+      this.d.self.feel({ type: 'hurt', amount: 2 });
+      this.hurtWhileBusy(typeof (ev.data as { around?: unknown } | undefined)?.around === 'string' ? (ev.data as { around: string }).around : '');
+    }
     if (ev.type === 'item_new' || ev.type === 'discovery') {
       this.speechEventAt = Date.now();
       this.d.self.feel({ type: 'novelty', strength: ev.type === 'item_new' ? 0.6 : 0.4 });
@@ -1707,18 +1740,63 @@ export class Mind {
   }
 
   /**
+   * 把活动当前步骤对应的移动会话挂起，保留续接凭据与实测进展；不自动恢复。
+   * 步骤实例与正在跑的任务必须对得上，避免把暂停挂到别的步骤上。
+   */
+  private pauseActivityMovement(a: Activity, task: Pick<TaskInfo, 'id' | 'skill' | 'stepId'>, kind: 'hurt' | 'detour', reason: string): boolean {
+    const step = a.steps[Math.max(0, a.index - 1)];
+    if (!step || step.id === undefined || (task.stepId !== undefined && task.stepId !== step.id)) return false;
+    const previous = a.movementPause?.stepId === step.id ? a.movementPause : undefined;
+    a.movementPause = {
+      taskId: task.id, stepId: step.id,
+      ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
+    };
+    const state = this.d.adapter.state();
+    suspendScopeSessions({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
+    this.d.arbiter.suspend();
+    a.index = Math.max(0, a.index - 1);
+    a.lastInterruption = { at: Date.now(), kind, reason, skill: task.skill, pos: { ...state.pos } };
+    return true;
+  }
+
+  /** 挂起正在跑的长程移动；不在当前活动/不是可续接技能时不接管。 */
+  private pauseResumableLongRange(cur: TaskInfo, reason: string): boolean {
+    if (!RESUMABLE_LONG_RANGE.has(cur.skill)) return false;
+    const a = this.activity;
+    if (!a || cur.planId !== a.id) return false;
+    if (!this.pauseActivityMovement(a, cur, 'hurt', reason)) return false;
+    this.resumeCheck = a.id;
+    return true;
+  }
+
+  /**
    * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
-   * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
+   * 只有血很低、连续挨打（3 秒内两下）或贴身且血不多时才停手/挂起长程；孤立一下、血还够时手上的事不停，
+   * 只把挨打事实交回心智（glance），怎么应对由它自己定。
    * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
    */
   private hurtAt = 0;
-  private hurtWhileBusy(cause = '') {
-    const now = Date.now();
-    if (now - this.hurtAt < 8000) return;
+  /** 环境伤害（着火/岩浆等）停止/挂起的 8 秒节流：避免每个伤害刻都把刚开始的逃离动作再停一次。 */
+  private hurtEnvAt = 0;
+  /** 非停止类挨打提示的 8 秒节流；停止/挂起路径不经过这里。 */
+  private hurtNoticeThrottled(now: number): boolean {
+    if (now - this.hurtAt < 8000) return true;
     this.hurtAt = now;
+    return false;
+  }
+  private hurtEnvThrottled(now: number): boolean {
+    if (now - this.hurtEnvAt < 8000) return true;
+    this.hurtEnvAt = now;
+    return false;
+  }
+  private hurtWhileBusy(cause = '') {
+    // 记下挨打时正在跑的任务：700ms 后只处理同一个任务，避免旧回调停掉期间新开始的活。
+    const hurtTask = this.d.arbiter.info();
+    if (!hurtTask || (hurtTask.source !== 'llm' && hurtTask.source !== 'rule')) return;
+    const hurtTaskId = hurtTask.id;
     setTimeout(() => {
       const cur = this.d.arbiter.info();
-      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule')) return;
+      if (!cur || (cur.source !== 'llm' && cur.source !== 'rule') || cur.id !== hurtTaskId) return;
       const state = this.d.adapter.state();
       // use_skill 里包着的水面技能（比如自己写的爬岸技能）也要按它实际在做的事判断。
       const acting = cur.skill === 'use_skill' ? String((cur.args as { name?: unknown } | undefined)?.name ?? '') : cur.skill;
@@ -1726,6 +1804,9 @@ export class Mind {
       if (!waterEscape && COMBAT.has(cur.skill)) return;
       const hostiles = this.safe(() => this.d.perception.snapshot().nearby.hostile.filter((h) => h.dist <= 8), []);
       const hp = Math.round(state.hp * 10) / 10;
+      const now = Date.now();
+      // 火/岩浆/热地面不是“轻微挨打”：有怪在附近时也按环境危险处理。
+      const hazardDamage = /伤害类型 (in_fire|on_fire|lava|hot_floor)|着火|lava|岩浆/.test(cause) || state.inLava;
       if (!hostiles.length) {
         // 没有怪，但身体在掉血（着火、岩浆、摔、窒息、溺水……）：原来直接返回，手上的移动会一路烧到见底
         // （下界实测 16.5 → 2 血，explore_toward 一直在走）。不替它脱险，只停下并把伤害事实交回心智；
@@ -1734,11 +1815,31 @@ export class Mind {
         const why = cause || '身体在岩浆里';
         // 只是摔了一下（伤害已经结束、没有着火/岩浆/怪）：不打断手上的移动，把事实交回心智，要不要停由它定。
         if (/伤害类型 fall/.test(cause) && !/伤害类型 (?!fall)|着火|lava|岩浆/.test(cause) && !state.inLava) {
+          if (this.hurtNoticeThrottled(now)) return;
           this.requestThink(`正在 ${cur.skill} 时摔了一下（血 ${hp}，${why}）；手上的事没停`, 'glance');
           return;
         }
         if (waterEscape) {
+          if (this.hurtNoticeThrottled(now)) return;
           this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
+          return;
+        }
+        // 只中了一支没看见射手的箭/三叉戟，血还够、也不是连续受伤：不打断，只把事实交回心智。
+        const projectileOnly = /伤害类型 (arrow|trident)\b/.test(cause) && !hazardDamage;
+        if (projectileOnly && hp > Mind.HURT_STOP_HP && this.hurtStreak < 2) {
+          if (this.hurtNoticeThrottled(now)) return;
+          const fact = `正在 ${cur.skill} 时被远程击中（血 ${hp}，${why}）；手上的事没停`;
+          this.requestThink(fact, 'glance');
+          const n = this.attention.notice('hurt_busy_minor', fact, 0.9, 0);
+          if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+          return;
+        }
+        // 持续环境伤害每刻都会来；8 秒内已经停/挂过一次，就不再打断刚开始的逃离动作。
+        if (this.hurtEnvThrottled(now)) return;
+        if (this.pauseResumableLongRange(cur, `掉血了（血 ${hp}，${why}），长程移动已挂起（可续接）`)) {
+          this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'glance');
+          const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），长程移动已挂起（可续接）`, 0.9, 0);
+          if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
           return;
         }
         if (this.activity && cur.planId === this.activity.id) {
@@ -1756,8 +1857,28 @@ export class Mind {
       // 人在水里时停下来就是下沉：保留 Agent 自己选的出水/换气动作，只把挨打事实和怪的位置交给它。
       // 思考走 glance——缺氧时再排一次十几秒的 deliberate，命已经没了。
       if (waterEscape) {
+        if (this.hurtNoticeThrottled(now)) return;
         this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}），人在水里，先把出水/换气动作做完`, 'glance');
         const n = this.attention.notice('hurt_busy_water', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），人在水里，动作没停`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
+      // 血够、怪不贴身、也不是连续受伤：不动手上的事，只把事实交回心智。glance/notice 受 8s 限流，避免每下都插话。
+      // 着火/岩浆不是“轻微挨打”，有怪在附近也仍按环境危险停手/挂起；每 8 秒最多停一次。
+      if (hazardDamage && this.hurtEnvThrottled(now)) return;
+      if (!hazardDamage && hp > Mind.HURT_STOP_HP && this.hurtStreak < 2
+        && !(hostiles.some((h) => h.dist <= 3) && hp <= Mind.HURT_CLOSE_HP)) {
+        if (this.hurtNoticeThrottled(now)) return;
+        const fact = `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；手上的事没停`;
+        this.requestThink(fact, 'glance');
+        const n = this.attention.notice('hurt_busy_minor', fact, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
+      // 长程移动先把会话挂起：实测进展与 session 保留，回不回来由心智决定。
+      if (this.pauseResumableLongRange(cur, `挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`)) {
+        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'deliberate');
+        const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`, 0.9, 0);
         if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
         return;
       }
@@ -1904,7 +2025,7 @@ export class Mind {
         this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
-      ...(tier === 'deliberate' && this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
+      ...(this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
       ...(tier === 'deliberate' ? (() => {
         this.safe(() => this.refreshReach(state), undefined);
         const reach = this.reachCache.get(state.dim);
@@ -2244,31 +2365,17 @@ export class Mind {
       const running = this.d.arbiter.info();
       if (running?.planId === a.id) {
         const resumeMovement = RESUMABLE_LONG_RANGE.has(running.skill);
-        if (resumeMovement) {
-          // 先记下挂起发生在哪个步骤实例；取消回执可能晚到，不能按回来时的 index 猜。
-          const runningStep = a.steps[Math.max(0, a.index - 1)];
-          if (runningStep?.id !== undefined) {
-            const previous = a.movementPause?.stepId === runningStep.id ? a.movementPause : undefined;
-            a.movementPause = {
-              taskId: running.id, stepId: runningStep.id,
-              ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
-            };
-          }
-          // 先标记原移动 session 可续接，再挂起；插曲随后新建的移动意图只取代仍在执行的 session。
-          const state = this.d.adapter.state();
-          suspendScopeSessions({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
-          this.d.arbiter.suspend();
-        } else {
+        // 可续接的移动会话先挂起；步骤实例对不上或不可续接时退回取消。
+        if (!resumeMovement || !this.pauseActivityMovement(a, running,
+          'detour', '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接')) {
           this.d.arbiter.cancel('先去处理别的事');
+          a.index = Math.max(0, a.index - 1);
+          a.lastInterruption = {
+            at: Date.now(), kind: 'detour',
+            reason: '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
+            skill: running.skill, pos: { ...this.d.adapter.state().pos },
+          };
         }
-        a.index = Math.max(0, a.index - 1);
-        a.lastInterruption = {
-          at: Date.now(), kind: 'detour',
-          reason: resumeMovement
-            ? '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接'
-            : '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
-          skill: running.skill, pos: { ...this.d.adapter.state().pos },
-        };
       }
       a.suspendedAt = Date.now();
       this.suspended.push(a);
@@ -2628,6 +2735,10 @@ export class Mind {
     const cause = info.message ? `游戏播报：${info.message}` : info.cause ? causeName(info.cause) : '不明原因';
     this.deathAt = Date.now();
     this.deathTold = !!info.message;
+    // 死亡后血量和处境都重置：上一段连续受伤的计数/提示节流不能带到复活后的第一下。
+    this.hurtStreak = 0;
+    this.hurtAt = 0;
+    this.hurtEnvAt = 0;
     this.suspend('death');
     this.d.arbiter.cancel('死亡');
     this.d.self.feel({ type: 'death' });

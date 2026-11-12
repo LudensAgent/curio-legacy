@@ -6,6 +6,8 @@ import type { StopReason } from '../src/skills/movement/session.ts';
 import {
   failureCodeOfMovement, movementFailureOfError, movementFailureOfSearch, movementFailureOfSegment, movementFailureOfStop,
 } from '../src/skills/movement/contract.ts';
+import { resumeAuthorizationAllowed } from '../src/skills/movement/coordinator.ts';
+import type { MovementAuthorization } from '../src/skills/movement/session.ts';
 
 test('搜索终态映射：证据缺口、几何无路、预算、取消分开', () => {
   const expected: Record<LandSearchStatus, string | null> = {
@@ -107,4 +109,23 @@ test('真实回执边界用统一分类：预算、冲突、驻留不再各自�
   assert.equal(code('PHYSICAL_FAILURE'), 'EFFECT_NOT_CONFIRMED');
   assert.equal(code('SCOPE_CHANGED'), 'WRONG_DIMENSION');
   assert.equal(failureCodeOfMovement('NO_PATH_EVIDENCE'), 'NOT_FOUND');
+});
+
+test('续接授权只能收窄：放弃施工、同材料、更小 maxEdits 可以；新增/换材料/放大不行', () => {
+  const auth = (over: Partial<MovementAuthorization> = {}): MovementAuthorization => ({ swim: false, ...over });
+  const way = (over: Partial<NonNullable<MovementAuthorization['makeWay']>> = {}) => ({ maxEdits: 16, ...over });
+  assert.equal(resumeAuthorizationAllowed(auth(), auth()), true);
+  assert.equal(resumeAuthorizationAllowed(auth({ swim: true }), auth({ swim: false })), true, '可以放弃涉水');
+  assert.equal(resumeAuthorizationAllowed(auth(), auth({ swim: true })), false, '不能新增涉水');
+  assert.equal(resumeAuthorizationAllowed(auth(), auth({ makeWay: way() })), false, '不能新增施工');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way() }), auth()), true, '可以放弃施工');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: { tool: 'iron_pickaxe' } }) }), auth({ makeWay: way({ dig: { tool: 'iron_pickaxe' }, maxEdits: 8 }) })), true);
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: { tool: 'iron_pickaxe' } }) }), auth({ makeWay: way({ dig: { tool: 'stone_pickaxe' } }) })), false, '不能换工具');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: { tool: 'iron_pickaxe' } }) }), auth({ makeWay: way({ dig: {} }) })), false, '不能从指定工具放宽到当前手持');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: {} }) }), auth({ makeWay: way({ dig: { tool: 'iron_pickaxe' }, maxEdits: 8 }) })), true, '原来不限工具，续接可以收窄到指定工具');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'dirt' } }) }), auth({ makeWay: way({ place: { item: 'dirt' }, maxEdits: 8 }) })), true);
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'dirt' } }) }), auth({ makeWay: way({ place: { item: 'stone' } }) })), false, '不能换材料');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'any' } }) }), auth({ makeWay: way({ place: { item: 'dirt' } }) })), true, 'any 可以收窄到具体材料');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'dirt' } }) }), auth({ makeWay: way({ place: { item: 'any' } }) })), false, '不能从具体材料放宽到 any');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way() }), auth({ makeWay: way({ maxEdits: 20 }) })), false, '不能放大 maxEdits');
 });

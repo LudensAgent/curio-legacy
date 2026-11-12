@@ -1619,6 +1619,7 @@ test('盖房、走路这类事做着做着挨了打，又没有技能接手：�
   await w.tick();
   assert.deepEqual(w.arbiter.info()?.args, { n: 1 });
   (w.mind as any).d.perception.snapshot = () => ({ nearby: { hostile: [{ name: 'zombie', dist: 2, how: 'seen' }] } });
+  w.adapter.hp = 15;
   w.bus.publish('hurt', 'P1', '受到伤害，生命 15');
   await new Promise((r) => setTimeout(r, 800));
   await flush();
