@@ -4,6 +4,9 @@ import { shortId } from '../util.ts';
 import { applyProgress, emptyProgressLedger, progressSummary, type ProgressEntry, type ProgressInput, type ProgressLedger } from './progress-ledger.ts';
 import type { ActivityKind, ActivityRecord, AgendaItem, DiaryEntry, Experiment, Habits, KnowHow, Mood, Thought } from './types.ts';
 
+/** 查过的资料只留最近几条，供之后几次思考对照，不堆成资料库。 */
+const KNOWLEDGE_FACTS_MAX = 6;
+
 interface SelfData {
   version: 1;
   traits: string[];
@@ -38,6 +41,18 @@ interface SelfData {
   observedProgress?: ObservedProgress;
   /** 当前任务事实：无进展尝试和最近一次局部失败；跨重连/换维度保留，但要按世界/会话/时间重新核对。 */
   taskFacts?: TaskFacts;
+  /** 查过的外部资料摘录：跨重启保留，供之后的思考和回想对照；不是当前世界事实。 */
+  knowledgeFacts?: KnowledgeFact[];
+}
+
+export interface KnowledgeFact {
+  at: number;
+  docId: string;
+  title: string;
+  section?: string;
+  sectionTitle?: string;
+  /** 一句资料原文摘录，不是 Agent 的结论。 */
+  fact: string;
 }
 
 export interface TaskFacts {
@@ -268,6 +283,20 @@ export class SelfModel {
   setObservedProgress(value: ObservedProgress) { this.data.observedProgress = { ...value }; this.touch(); }
   taskFacts(): TaskFacts { return this.data.taskFacts ?? {}; }
   setTaskFacts(value: TaskFacts) { this.data.taskFacts = value; this.touch(); }
+  knowledgeFacts(n = 6): KnowledgeFact[] { return (this.data.knowledgeFacts ?? []).slice(-n); }
+  /** 记下查到的资料摘录（同一文档/章节只保留最新一条）；外部参考，不进入窍门或亲历记忆。 */
+  recordKnowledgeFacts(facts: Omit<KnowledgeFact, 'at'>[]) {
+    const at = Date.now();
+    const next = facts.reduce((merged, input) => {
+      const key = `${input.docId}#${input.section ?? ''}`;
+      // 重新查到同一章节时移到末尾：显示只取最近几条，旧位置会让新内容被当成最旧丢掉。
+      merged.delete(key);
+      merged.set(key, { ...input, at });
+      return merged;
+    }, new Map((this.data.knowledgeFacts ?? []).map((fact) => [`${fact.docId}#${fact.section ?? ''}`, fact])));
+    this.data.knowledgeFacts = [...next.values()].slice(-KNOWLEDGE_FACTS_MAX);
+    this.touch();
+  }
   flush() {
     if (!this.file || !this.dirty) return;
     this.dirty = false;

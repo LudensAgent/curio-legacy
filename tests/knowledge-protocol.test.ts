@@ -60,10 +60,11 @@ ${body}
   return { adapter, memory, bus, self, planner, knowledge, calls, ctx, think: () => thinker.think(ctx, new AbortController().signal) };
 }
 
-test('knowledge search and section reading inform a decision without executing actions or changing personal memory and skills', async (t) => {
+test('knowledge search and section reading inform a decision without executing actions or changing personal memory and skills, and only add external facts', async (t) => {
   const w = fixture(t, [{ kind: 'knowledge', query: '床的使用条件' }, { kind: 'knowledge', id: 'fixture-topic', section: 'conditions' }, decision]);
   const skills = Object.entries(SKILLS);
-  const personal = structuredClone({ self: w.self.data, notes: w.memory.notesFor({ n: 100 }), lessons: w.memory.lessons(100), goals: w.memory.recentGoals(100), landmarks: w.memory.landmarks() });
+  const personalState = () => ({ self: { ...w.self.data, knowledgeFacts: undefined }, notes: w.memory.notesFor({ n: 100 }), lessons: w.memory.lessons(100), goals: w.memory.recentGoals(100), landmarks: w.memory.landmarks() });
+  const personal = structuredClone(personalState());
   const result = await w.think();
   assert.equal(result.activity?.steps[0].skill, 'look_around');
   assert.equal(w.calls.length, 3);
@@ -78,7 +79,8 @@ test('knowledge search and section reading inform a decision without executing a
   assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 2);
   assert.deepEqual(w.adapter.actions, []);
   assert.deepEqual(Object.entries(SKILLS), skills);
-  assert.deepEqual({ self: w.self.data, notes: w.memory.notesFor({ n: 100 }), lessons: w.memory.lessons(100), goals: w.memory.recentGoals(100), landmarks: w.memory.landmarks() }, personal);
+  assert.deepEqual(personalState(), personal);
+  assert.ok(w.self.knowledgeFacts().some((fact) => fact.docId === 'fixture-topic'), '查到的资料摘录要记下，供之后的思考和回想对照');
 });
 
 test('knowledge is discoverable in glance and a direct query upgrades the following decision to deliberate', async (t) => {
@@ -191,4 +193,13 @@ test('knowledge reading obeys one cumulative byte budget, reports pagination or 
   await w.think();
   assert.equal(queried.mock.calls.length, backendCalls + 1, 'a new thought gets a fresh knowledge budget');
   assert.match(w.calls[5].at(-1)!.content, /"action":"read"/);
+});
+
+test('reading a document directory persists its chapter list for later thoughts', async (t) => {
+  const w = fixture(t, [{ kind: 'knowledge', id: 'fixture-topic' }, decision]);
+  await w.think();
+  const facts = w.self.knowledgeFacts();
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0]!.docId, 'fixture-topic');
+  assert.match(facts[0]!.fact, /章节：条件；效果/);
 });

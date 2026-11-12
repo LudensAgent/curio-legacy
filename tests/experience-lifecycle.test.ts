@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { KNOW_HOW_LESSON_KEY_PREFIX, WorldMemory } from '../src/memory/store.ts';
@@ -341,4 +344,37 @@ test('没有检索到相关事实时反思输入不出现知识字段', () => {
   const payload = JSON.parse(buildReflectionMessages(self, 'P', [], [], memory, { query: '找要塞', matches: [] })[1].content.split('\n')[0]);
   assert.equal('knowledge' in payload, false);
   memory.close();
+});
+
+test('查过的资料会跨思考保留并标成外部参考，不写成窍门', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
+  memory.setWorld(adapter.worldId);
+  self.recordKnowledgeFacts([{ docId: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', fact: '要塞按 432×432 区域生成' }]);
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+  const me = JSON.parse(user.content.split('\n').find((line) => line.startsWith('【我】'))!.slice('【我】'.length));
+  assert.match(me.knowledge_facts[0], /^blazes-and-fortresses#generation｜烈焰人与下界要塞：要塞按 432×432 区域生成（.+查到）$/);
+  assert.match(me.knowledge_facts_note, /不是当前世界已有资源或现场事实/);
+  const payload = JSON.parse(buildReflectionMessages(self, 'P', [], [], memory)[1].content.split('\n')[0]);
+  assert.match(payload.knowledge_facts[0], /^blazes-and-fortresses#generation｜烈焰人与下界要塞：要塞按 432×432 区域生成（.+查到）$/, '回想也能看到以前查过的资料');
+  assert.equal(self.data.knowHow.length, 0, '资料摘录是外部参考，不写成亲历窍门');
+  memory.close();
+});
+
+test('查过的资料写入 self 存档，重载后仍在；重新查到同一章节会移到最近', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-knowledge-facts-')), file = path.join(dir, 'self.json');
+  const self = new SelfModel(file);
+  self.recordKnowledgeFacts([{ docId: 'bed', title: '床', section: 'conditions', fact: '要有两格空间' }]);
+  self.recordKnowledgeFacts([{ docId: 'bed', title: '床', section: 'conditions', fact: '附近不能有怪' }]);
+  self.recordKnowledgeFacts([{ docId: 'torch', title: '火把', section: 'lighting', fact: '火把照亮周围方块' }]);
+  self.recordKnowledgeFacts([{ docId: 'bed', title: '床', section: 'conditions', fact: '第三次查到的条件' }]);
+  self.close();
+  const reloaded = new SelfModel(file);
+  const facts = reloaded.knowledgeFacts();
+  assert.equal(facts.length, 2);
+  assert.equal(facts.at(-1)!.docId, 'bed', '重新查到的条目在最近一端');
+  assert.equal(facts.at(-1)!.fact, '第三次查到的条件');
+  reloaded.close();
+  fs.rmSync(dir, { recursive: true, force: true });
 });

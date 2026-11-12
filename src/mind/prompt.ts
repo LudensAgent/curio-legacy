@@ -16,10 +16,11 @@ import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
-import { cleanLesson, moodWords, PLAN_REVISION_MIN, type PlanAttemptEvidence, type SelfModel } from './self.ts';
+import { cleanLesson, moodWords, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
 import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
+
 import { RECALL_LABEL, type Recalled } from './recall.ts';
 import { describeCurrentTrip, describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
 import { foodNote } from '../skills/food.ts';
@@ -33,6 +34,12 @@ import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
+/** 查过的资料：出处 + 一句摘录 + 读取时间；只作外部参考，不是现场事实。 */
+const knowledgeFactLine = (fact: KnowledgeFact) => {
+  const minutes = Math.max(0, Math.round((Date.now() - fact.at) / 60_000));
+  const age = minutes < 60 ? `${minutes || 1} 分钟前` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`;
+  return `${fact.docId}${fact.section ? `#${fact.section}` : ''}｜${fact.title}：${fact.fact}（${age}查到）`;
+};
 export { noteGoneSpots } from '../memory/recollection.ts';
 
 const PATH_REPEAT = new Set(['move_step', 'plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'go_near']);
@@ -909,6 +916,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
   const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
+  // 以前查过的资料摘录：只放最近的几条；瞥一眼少带，仍是外部参考，不是现场事实。
+  const knowledgeFacts = self.knowledgeFacts(glance ? 3 : 6);
   // 恢复类技能由行为引擎在失败时自动接手，系统索引已按组列出；这里只保留需要手动
   // 写进 routine 的做法，避免同一批技能名在 system 和 user 消息里重复出现。
   const learnedSkills = (ctx.learnedSkills ?? []).filter((line) => !line.includes('失败时先试'));
@@ -926,6 +935,8 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
         ...(k.counterexamples?.length ? { counterexamples: { count: k.counterexamples.length, last: `${k.counterexamples[k.counterexamples.length - 1]!.reason}：${k.counterexamples[k.counterexamples.length - 1]!.summary.slice(0, 80)}`, ...(k.counterexamples[k.counterexamples.length - 1]!.claim ? { against: k.counterexamples[k.counterexamples.length - 1]!.claim!.slice(0, 80) } : {}) } } : {}),
         ...(k.limits?.length ? { limits: k.limits.slice(0, 4) } : {}) })),
       ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
+      ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine),
+        knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用、采用与否由你判断。' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
@@ -1034,7 +1045,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
 - 整理后窍门总数最好不超过 25 条。
 - 如果这段时间琢磨出了一整套成体系、以后还会用到的做法（比如怎么在深洞里照明、怎么顺着矿脉找钻石、夜里怎么过），可以写成一份自己的技能（skill：英文小写名字、一句用途、几行 Markdown 写清步骤和要点），以后直接翻开用；已有同名的自己写的技能会被更新。没有就省略。
-- 如果给了 knowledge（按当前目标/经历检索出的相关文档/章节摘录，不是全库目录），写涉及世界机制/结构/地形的策略前先对照这些事实；在技能正文里写出处（文档 id/章节）、适用条件和限制。与摘录矛盾、或只有一次有限经历支撑的做法，不要写成普遍策略；摘要不足时只能写成未验证的文字笔记候选。没有检索到相关事实就不要编造。
+- 如果给了 knowledge（按当前目标/经历检索出的相关文档/章节摘录，不是全库目录）或 knowledge_facts（你以前查过并记下的资料摘录），写涉及世界机制/结构/地形的策略前先对照这些事实；在技能正文里写出处（文档 id/章节）、适用条件和限制。与摘录矛盾、或只有一次有限经历支撑的做法，不要写成普遍策略；摘要不足时只能写成未验证的文字笔记候选。没有检索到相关事实就不要编造。knowledge_facts 是外部参考资料，不是当前世界已有什么的证明。
 - 再退一步看看日子是怎么过的（strategy：夜里在哪过、怎么死的、哪些目标耗了很多段活、装备升到哪了、游戏进度到哪了）：
   找出最大的、一再出现的麻烦，问自己“有没有一种根本不同的玩法能让它不再发生”——不是把同一件事做得更用力，而是换个思路（出门时带上什么、把什么搬到哪、换个地方住、先去弄某样东西、干脆放下某件事）。
   换玩法多半是做法上的改变（出门带什么、什么时候收工、在哪冶炼、一次挖多少）：写成一条窍门 add，不进议程。
@@ -1042,6 +1053,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
 只输出一个 JSON 对象：
 {"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
+  const knowledgeFacts = self.knowledgeFacts(6);
   const payload = {
     know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses,
       ...(k.prior ? { before_rewrite: { wins: k.prior.wins, losses: k.prior.losses, revisions: k.prior.revisions, last_text: k.prior.lastText } } : {}),
@@ -1082,6 +1094,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
     feeling: moodWords(self.mood),
     ...(mySkills.length ? { my_skills: mySkills } : {}),
     ...(strategy.length ? { strategy } : {}),
+    ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine) } : {}),
     ...(knowledge && knowledge.matches.length ? { knowledge } : {}),
   };
   return [{ role: 'system', content: system }, { role: 'user', content: `${JSON.stringify(payload)}\n回想一下，整理好再告诉我。` }];

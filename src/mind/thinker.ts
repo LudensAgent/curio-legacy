@@ -606,6 +606,23 @@ export class Thinker {
       if (kind === 'knowledge') {
         if (!this.knowledge) return '知识库未启用，无法查询游戏资料';
         const result = this.knowledge.query(raw, maxBytes);
+        // 查到的资料摘录跨重启保留：下一次思考和回想还能对照，不因空回复或重连丢掉。
+        // 只有命中具体章节的搜索才算“事实”；操作手册（control）不是游戏百科，不混进资料。
+        const facts = result.action === 'search'
+          ? result.matches.flatMap((match) => match.kind !== 'control' && match.section
+            ? [{ docId: match.id, title: match.title, section: match.section, sectionTitle: match.sectionTitle, fact: match.excerpt }]
+            : [])
+          : result.action === 'read'
+            ? result.document.kind === 'control' ? []
+              : 'contents' in result.document
+                ? result.document.contents.length ? [{ docId: result.document.id, title: result.document.title,
+                    fact: `章节：${result.document.contents.map((section) => section.title).join('；')}`.slice(0, 120) }] : []
+                : result.document.sections.flatMap((section) => 'text' in section && section.text
+                  ? [{ docId: result.document.id, title: result.document.title, section: section.id, sectionTitle: section.title,
+                      fact: section.text.split(/\n|。/)[0].slice(0, 120) }]
+                  : [])
+            : [];
+        if (facts.length) ctx.self.recordKnowledgeFacts(facts);
         this.bus.publish('knowledge_query', 'P3', `查知识：${String(raw.id ?? raw.query ?? '目录').slice(0, 80)}`);
         return JSON.stringify(result);
       }
