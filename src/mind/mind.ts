@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { shortId } from '../util.ts';
 import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
-import type { Arbiter, Step, TaskOutcome } from '../arbiter/arbiter.ts';
+import type { Arbiter, Step, TaskInfo, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
@@ -1729,6 +1729,36 @@ export class Mind {
   }
 
   /**
+   * 把活动当前步骤对应的移动会话挂起，保留续接凭据与实测进展；不自动恢复。
+   * 步骤实例与正在跑的任务必须对得上，避免把暂停挂到别的步骤上。
+   */
+  private pauseActivityMovement(a: Activity, task: Pick<TaskInfo, 'id' | 'skill' | 'stepId'>, kind: 'hurt' | 'detour', reason: string): boolean {
+    const step = a.steps[Math.max(0, a.index - 1)];
+    if (!step || step.id === undefined || (task.stepId !== undefined && task.stepId !== step.id)) return false;
+    const previous = a.movementPause?.stepId === step.id ? a.movementPause : undefined;
+    a.movementPause = {
+      taskId: task.id, stepId: step.id,
+      ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
+    };
+    const state = this.d.adapter.state();
+    suspendScopeSessions({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
+    this.d.arbiter.suspend();
+    a.index = Math.max(0, a.index - 1);
+    a.lastInterruption = { at: Date.now(), kind, reason, skill: task.skill, pos: { ...state.pos } };
+    return true;
+  }
+
+  /** 挂起正在跑的长程移动；不在当前活动/不是可续接技能时不接管。 */
+  private pauseResumableLongRange(cur: TaskInfo, reason: string): boolean {
+    if (!RESUMABLE_LONG_RANGE.has(cur.skill)) return false;
+    const a = this.activity;
+    if (!a || cur.planId !== a.id) return false;
+    if (!this.pauseActivityMovement(a, cur, 'hurt', reason)) return false;
+    this.resumeCheck = a.id;
+    return true;
+  }
+
+  /**
    * 正在做跟打架无关的事（盖房、挖、走、原地等）时挨了打，而且身边有怪：
    * 给身体的技能一点时间接手；没有技能接手，就停下手上的事、马上认真想。怎么应对由它自己定，这里只保证它不会边挨打边继续砌墙。
    * 人在水里做水面动作时例外：停下来就是下沉，保留它自己选的出水/换气，只把事实交回去，并用快速档思考。
@@ -1763,6 +1793,12 @@ export class Mind {
           this.requestThink(`正在 ${cur.skill} 时持续掉血（血 ${hp}，当时：${why}），人在水里，先把出水/换气动作做完`, 'glance');
           return;
         }
+        if (this.pauseResumableLongRange(cur, `掉血了（血 ${hp}，${why}），长程移动已挂起（可续接）`)) {
+          this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'glance');
+          const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），长程移动已挂起（可续接）`, 0.9, 0);
+          if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+          return;
+        }
         if (this.activity && cur.planId === this.activity.id) {
           this.activity.index = Math.max(0, this.activity.index - 1);
           this.activity.lastInterruption = { at: Date.now(), kind: 'hurt', reason: `掉血了（血 ${hp}，${why}），手上的事先停了`, skill: cur.skill, pos: { ...state.pos } };
@@ -1780,6 +1816,13 @@ export class Mind {
       if (waterEscape) {
         this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}），人在水里，先把出水/换气动作做完`, 'glance');
         const n = this.attention.notice('hurt_busy_water', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），人在水里，动作没停`, 0.9, 0);
+        if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
+        return;
+      }
+      // 长程移动先把会话挂起：实测进展与 session 保留，回不回来由心智决定。
+      if (this.pauseResumableLongRange(cur, `挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`)) {
+        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'deliberate');
+        const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`, 0.9, 0);
         if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
         return;
       }
@@ -2266,31 +2309,17 @@ export class Mind {
       const running = this.d.arbiter.info();
       if (running?.planId === a.id) {
         const resumeMovement = RESUMABLE_LONG_RANGE.has(running.skill);
-        if (resumeMovement) {
-          // 先记下挂起发生在哪个步骤实例；取消回执可能晚到，不能按回来时的 index 猜。
-          const runningStep = a.steps[Math.max(0, a.index - 1)];
-          if (runningStep?.id !== undefined) {
-            const previous = a.movementPause?.stepId === runningStep.id ? a.movementPause : undefined;
-            a.movementPause = {
-              taskId: running.id, stepId: runningStep.id,
-              ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
-            };
-          }
-          // 先标记原移动 session 可续接，再挂起；插曲随后新建的移动意图只取代仍在执行的 session。
-          const state = this.d.adapter.state();
-          suspendScopeSessions({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
-          this.d.arbiter.suspend();
-        } else {
+        // 可续接的移动会话先挂起；步骤实例对不上或不可续接时退回取消。
+        if (!resumeMovement || !this.pauseActivityMovement(a, running,
+          'detour', '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接')) {
           this.d.arbiter.cancel('先去处理别的事');
+          a.index = Math.max(0, a.index - 1);
+          a.lastInterruption = {
+            at: Date.now(), kind: 'detour',
+            reason: '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
+            skill: running.skill, pos: { ...this.d.adapter.state().pos },
+          };
         }
-        a.index = Math.max(0, a.index - 1);
-        a.lastInterruption = {
-          at: Date.now(), kind: 'detour',
-          reason: resumeMovement
-            ? '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接'
-            : '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
-          skill: running.skill, pos: { ...this.d.adapter.state().pos },
-        };
       }
       a.suspendedAt = Date.now();
       this.suspended.push(a);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  clearMovementSessions, createMovementSession, findMovementSession, remainingMakeWayEdits, suspendScopeSessions,
+  clearMovementSessions, createMovementSession, findMovementSession, makeWayEditBudget, remainingMakeWayEdits, suspendScopeSessions,
   type MovementIntent,
 } from '../src/skills/movement/session.ts';
 
@@ -47,4 +47,18 @@ test('施工额度按原授权减会话累计：暂停前用 7/12，恢复后只
   assert.equal(remainingMakeWayEdits(session), 5);
   session.counters.makeWayEdits = 12;
   assert.equal(remainingMakeWayEdits(session), 0, '恢复不重新获得完整授权');
+});
+
+test('续接收窄 maxEdits 真正限制本次施工额度，而不是只通过校验', () => {
+  clearMovementSessions();
+  const session = createMovementSession({
+    intent: advance('W'), origin: { x: 0, y: 64, z: 0 }, bearing: { x: -1, z: 0 },
+    scope, budget, authorization: { swim: false, makeWay: { maxEdits: 16 } }, now: Date.now(),
+  });
+  session.counters.makeWayEdits = 4; // 原余额 12
+  assert.equal(makeWayEditBudget(session, { swim: false, makeWay: { maxEdits: 8 } }), 8, '收窄到 8 后本次最多 8');
+  assert.equal(makeWayEditBudget(session, { swim: false, makeWay: { maxEdits: 20 } }), 12, '不能超过原余额');
+  assert.equal(makeWayEditBudget(session, { swim: false }), 0, '放弃施工授权后不能施工');
+  session.counters.makeWayEdits = 14; // 原余额 2
+  assert.equal(makeWayEditBudget(session, { swim: false, makeWay: { maxEdits: 8 } }), 2, '收窄不能重新获得已用额度');
 });

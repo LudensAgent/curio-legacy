@@ -18,7 +18,7 @@ import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.t
 import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
-  acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease, remainingMakeWayEdits,
+  acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, makeWayEditBudget as makeWayEditBudgetOf, releaseSessionLease,
   type MovementAuthorization, type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
 } from './session.ts';
 
@@ -279,17 +279,21 @@ const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const cellText = (p: Vec3Like) => `(${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)})`;
 
-/** 续接时的授权必须与创建 session 时一致：旧 sessionId 不是扩大 swim/施工权限的依据。 */
-function sameAuthorization(a: MovementAuthorization, b: MovementAuthorization): boolean {
-  if (a.swim !== b.swim) return false;
-  if ((a.makeWay === undefined) !== (b.makeWay === undefined)) return false;
-  if (a.makeWay === undefined || b.makeWay === undefined) return true;
-  return (a.makeWay.dig === undefined) === (b.makeWay.dig === undefined)
-    && a.makeWay.dig?.tool === b.makeWay.dig?.tool
-    && (a.makeWay.place === undefined) === (b.makeWay.place === undefined)
-    && a.makeWay.place?.item === b.makeWay.place?.item
-    && a.makeWay.maxEdits === b.makeWay.maxEdits
-    && a.makeWay.allowPlainRoute === b.makeWay.allowPlainRoute;
+/** 续接可以收窄授权，不能借旧 sessionId 扩大 swim/施工权限。 */
+export function resumeAuthorizationAllowed(original: MovementAuthorization, resumed: MovementAuthorization): boolean {
+  if (resumed.swim && !original.swim) return false;
+  if (original.makeWay === undefined) return resumed.makeWay === undefined;
+  // 放弃施工授权是收窄；新增施工授权才是扩大。
+  if (resumed.makeWay === undefined) return true;
+  const a = original.makeWay, b = resumed.makeWay;
+  // dig: 原来没授权 -> 现在授权的是扩大；原来限定了工具，续接不能换成不限工具或别的工具。
+  if (b.dig !== undefined && a.dig !== undefined && a.dig.tool !== undefined && b.dig.tool !== a.dig.tool) return false;
+  if (b.dig !== undefined && a.dig === undefined) return false;
+  // place: 原来没授权 -> 现在授权的是扩大；原来限定材料，续接只能同名或放弃；原来 any 可以收窄到具体材料。
+  if (b.place !== undefined && a.place === undefined) return false;
+  if (b.place !== undefined && a.place !== undefined && a.place.item !== 'any' && b.place.item !== a.place.item) return false;
+  if (b.maxEdits > a.maxEdits) return false;
+  return true;
 }
 
 /** 施工额度耗尽时，优先报告真实推进与最后一次改动，而不是旧的碰撞摘要。 */
@@ -497,10 +501,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     if (session.intentKey !== intentKeyOf(request.intent)) {
       return { ok: false, failureCode: 'BAD_ARGS', summary: 'sessionId 与原意图不匹配（目标/方向/距离/允许模式任一变化都是新意图）；请不带 sessionId 新建意图', data: { reason: 'INTENT_MISMATCH', sessionId: session.id } };
     }
-    if (!sameAuthorization(session.authorization, authorization)) {
+    if (!resumeAuthorizationAllowed(session.authorization, authorization)) {
       return {
         ok: false, failureCode: 'BAD_ARGS',
-        summary: 'sessionId 与原委托的 swim/施工授权不一致；续接不能改变 dig/place 与 maxEdits（收窄也算改变），要换授权请新建移动意图',
+        summary: 'sessionId 只能续接原委托或收窄 swim/施工授权（放弃 dig/place、同材料、减小 maxEdits）；扩大或换成别的材料/工具请新建移动意图',
         data: { reason: 'INTENT_MISMATCH', sessionId: session.id, authorization: session.authorization },
       };
     }
@@ -531,7 +535,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   }
 
   // 施工额度属于同一委托：恢复后只剩余额，不重新获得完整授权。
-  const makeWayEditBudget = remainingMakeWayEdits(session);
+  // 续接可以收窄 maxEdits：本次实际额度取原 session 余额与本次授权的小者。
+  const makeWayEditBudget = makeWayEditBudgetOf(session, authorization);
   const segments: SegmentReceipt[] = [];
   const swimLegs: SwimLegReceipt[] = [];
   const makeWayEdits: MakeWayEdit[] = [];
