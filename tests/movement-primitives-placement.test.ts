@@ -355,6 +355,35 @@ test('真实适配器 sneakPlaceAt：脚下方两格没有同层参照时如实 
   assert.deepEqual(f.equipCalls, []);
 });
 
+test('真实适配器 sneakPlaceAt advance：放置后朝原目标方向前进，不沿参照面视线倒退', async (t) => {
+  const f = realAdapterFixture();
+  f.put('stone', new Vec3(0, 63, 0));
+  f.inventory.set('cobblestone', 1);
+  const bot = f.bot;
+  // 让身体按键按 yaw 真正移动，并复刻 mineflayer 放置时“看向被点面中心”的转头行为。
+  bot.look = async (yaw: number, pitch: number) => { bot.entity.yaw = yaw; bot.entity.pitch = pitch; };
+  let forward = false;
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forward = value; };
+  bot.clearControlStates = () => { forward = false; };
+  const timer = setInterval(() => {
+    if (!forward) return;
+    const p = bot.entity.position;
+    bot.entity.position = new Vec3(p.x - Math.sin(bot.entity.yaw) * 0.02, p.y, p.z - Math.cos(bot.entity.yaw) * 0.02);
+  }, 10);
+  t.after(() => clearInterval(timer));
+  bot.placeBlock = async (ref: { position: Vec3 }, face: Vec3) => {
+    f.put('cobblestone', ref.position.plus(face));
+    const point = ref.position.offset(0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5);
+    const delta = point.minus(bot.entity.position.offset(0, bot.entity.eyeHeight, 0));
+    bot.entity.yaw = Math.atan2(-delta.x, -delta.z);
+    bot.entity.pitch = Math.atan2(delta.y, Math.hypot(delta.x, delta.z));
+  };
+  const r = await f.adapter.sneakPlaceAt({ x: 1, y: 63, z: 0 }, ['cobblestone'], new AbortController().signal, { advance: true });
+  assert.equal(r.ok, true, r.reason);
+  // 放置后视线被转向参照面，若不重新瞄准原方向，前进键会把身体带回旧方块。
+  assert.ok(bot.entity.position.x > 1, `前进方向应朝东：x=${bot.entity.position.x.toFixed(2)}`);
+});
+
 test('真实适配器 dig handOnly：空手不从背包装备工具，并返回 noDrop 事实', async () => {
   const f = realAdapterFixture();
   f.put('stone', new Vec3(1, 64, 0));

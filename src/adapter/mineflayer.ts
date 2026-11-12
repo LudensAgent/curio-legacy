@@ -2094,6 +2094,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         const landing = { x: target.x, y: feet.y, z: target.z };
         let last = { x: b.entity.position.x, z: b.entity.position.z }, still = 0;
         try {
+          // 放置会把视线转向被点的参照面：身体已经在旧方块边缘外侧，那个面的中心常在身后，
+          // 直接按前进键会朝反方向走（搭一格退一步）。前进前先转回 dx/dz 的原目标方向。
+          if (ownsControls() && typeof b.look === 'function') {
+            await this.afterAction(() => raceAbort(b.look(Math.atan2(-dx, -dz), -0.35, true), signal, 1000, () => {}), check);
+          }
           if (ownsControls()) b.setControlState('forward', true);
           for (let t = 0; t < 1500; t += 50) {
             await this.afterAction(() => sleep(50, signal), check);
