@@ -7,7 +7,7 @@ import { beginSpatialForeground, endSpatialForeground } from '../spatial/foregro
 import { SKILLS } from '../skills/index.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
-import { AbortedError, shortId } from '../util.ts';
+import { AbortedError, SUSPEND_ABORT_REASON, shortId } from '../util.ts';
 import { availableInventoryFor, craftReservationConflict, reservationsFor } from '../projects/reservations.ts';
 import { config } from '../config.ts';
 import { fuelBurn } from '../methods/fuel.ts';
@@ -56,6 +56,8 @@ export interface TaskOutcome {
   result: SkillResult;
   durationMs: number;
   preemptedBy?: TaskSource;
+  /** 被显式挂起（如先做别的事）而不是终止：执行层已保留可续接的进度。 */
+  suspended?: boolean;
   /** 被“顺手”的短动作（如插火把）打断：恢复时不计入重试次数 */
   gentle?: boolean;
 }
@@ -98,6 +100,8 @@ interface Running extends TaskInfo {
   cancelCode?: FailureCode;
   cancelReason?: string;
   preemptedBy?: TaskSource;
+  /** 当前任务是被显式挂起而不是终止。 */
+  suspended?: boolean;
   gentle?: boolean;
 }
 
@@ -181,7 +185,7 @@ export class Arbiter extends EventEmitter {
 
   info(): TaskInfo | null {
     if (!this.current) return null;
-    const { controller, cancelCode, cancelReason, preemptedBy, gentle, ...info } = this.current;
+    const { controller, cancelCode, cancelReason, preemptedBy, suspended, gentle, ...info } = this.current;
     return info;
   }
 
@@ -466,7 +470,7 @@ export class Arbiter extends EventEmitter {
           // 动作声明的持续效果（比如扔掉的东西几分钟内不该回到手上）：交给 EffectWatch 盯着
           ...(result.status === 'succeeded' && result.data?.expect ? { expect: result.data.expect } : {}),
         });
-        const { controller: _c, cancelCode: _cc, cancelReason: _cr, preemptedBy, gentle, ...info } = task;
+        const { controller: _c, cancelCode: _cc, cancelReason: _cr, preemptedBy, suspended, gentle, ...info } = task;
         // 可选的生产者接缝：默认未注入时这里完全不执行。生产者只收到实际测到的
         // 开始/结束作用域和已结算结果；它不能反过来改写 result/task 或关停流程。
         if (this.taskFactProducer) {
@@ -487,7 +491,7 @@ export class Arbiter extends EventEmitter {
               { taskId: task.id, skill: task.skill });
           }
         }
-        this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);
+        this.emit('done', { task: info, result, durationMs, preemptedBy, gentle, ...(suspended ? { suspended: true } : {}) } satisfies TaskOutcome);
       })
       .finally(() => { if (foreground) endSpatialForeground(); });
 
@@ -505,6 +509,19 @@ export class Arbiter extends EventEmitter {
     t.gentle = gentle;
     this.current = null;
     t.controller.abort(reason);
+    this.adapter.stopAll();
+  }
+
+  /**
+   * 显式挂起当前任务：同样立即停身体，但用类型化中止原因告诉执行层“保留可续接状态”。
+   * 与 cancel 区分，恢复由调用方决定；本方法不自动续跑。
+   */
+  suspend(reason: string) {
+    const t = this.current;
+    if (!t) return;
+    t.suspended = true;
+    this.current = null;
+    t.controller.abort(SUSPEND_ABORT_REASON);
     this.adapter.stopAll();
   }
 }

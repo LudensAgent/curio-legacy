@@ -2,7 +2,7 @@ import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
 import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
-import { shortId, sleep } from '../../util.ts';
+import { isSuspendAbort, shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
@@ -19,7 +19,7 @@ import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
-  type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
+  type MovementAuthorization, type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
 } from './session.ts';
 
 /**
@@ -102,7 +102,11 @@ export interface CoordinatorRequest {
 export type MakeWayEdit = { kind: 'dig' | 'place'; pos: Vec3Like; name: string };
 /** 一段代为开路的执行：计划几步、实际走了几步、停在哪、为什么停。 */
 /** stale：开路计划算完时身体已不在计划起点旁（还在滑动/被推开），这一段没执行，应按实测位置重新规划。 */
-export type MakeWayLegReceipt = { from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string; stale?: true };
+export type MakeWayLegReceipt = {
+  from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string; stale?: true;
+  /** 这一段的停止原因是本次委托剩余的施工额度用尽，而不是开路/身体失败。 */
+  budgetExhausted?: true;
+};
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
 /** 一次调用最多开路几段（每段只做到第一处改动）；总改动数另受 maxEdits 约束。 */
@@ -159,10 +163,15 @@ async function runMakeWay(
   };
   let executed = 0;
   let failure: string | undefined;
+  let budgetExhausted = false;
   outer: for (const step of steps) {
     if (ctx.signal.aborted || Date.now() >= deadline) { failure = ctx.signal.aborted ? '父任务取消' : '期限已到'; break; }
     for (const cell of step.dig) {
-      if (edits.length >= opts.maxEdits) { failure = `开路改动已达上限 ${opts.maxEdits} 次`; break outer; }
+      if (edits.length >= opts.maxEdits) {
+        failure = `本次委托剩余的施工改动额度（${opts.maxEdits} 次）已用尽`;
+        budgetExhausted = true;
+        break outer;
+      }
       const name = nameAt(cell);
       // 规划时已排除已记录的液体邻格；墙后看不见的邻格是授权 dig 承担的风险，不再按“当前视野没看清”拦。
       failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig?.tool === undefined ? {} : { tool: opts.dig.tool }) }) ?? undefined;
@@ -170,7 +179,11 @@ async function runMakeWay(
       edits.push({ kind: 'dig', pos: { ...cell }, name });
     }
     if (step.place !== undefined || step.kind === 'pillar') {
-      if (edits.length >= opts.maxEdits) { failure = `开路改动已达上限 ${opts.maxEdits} 次`; break; }
+      if (edits.length >= opts.maxEdits) {
+        failure = `本次委托剩余的施工改动额度（${opts.maxEdits} 次）已用尽`;
+        budgetExhausted = true;
+        break;
+      }
       const item = opts.place!.item;
       failure = (step.kind === 'pillar'
         ? await run(pillarOne, { item })
@@ -197,7 +210,11 @@ async function runMakeWay(
     // 做完第一处改动就交回：挖开后视觉会看到新露出的格（可能是液体或空腔），后面按新证据重新规划。
     if (step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') break;
   }
-  return { from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed, ...(failure === undefined ? {} : { failure }) };
+  return {
+    from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed,
+    ...(failure === undefined ? {} : { failure }),
+    ...(budgetExhausted ? { budgetExhausted: true as const } : {}),
+  };
 }
 
 /** 一段由协调器代为执行的游泳：目标来自已观察体素，结果按实测记录。 */
@@ -237,16 +254,42 @@ const isSuccess = (reason: StopReason) => reason === 'DISTANCE_MET' || reason ==
 const canResume = (reason: StopReason) =>
   reason === 'BUDGET_EXHAUSTED' || reason === 'TIMEOUT' || reason === 'NO_PROGRESS' || reason === 'UNKNOWN_BOUNDARY'
   || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'RESIDENCY_NOT_READY'
-  || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED' || reason === 'CONFLICT';
+  || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED' || reason === 'CONFLICT'
+  || reason === 'SUSPENDED' || reason === 'MAKE_WAY_BUDGET_EXHAUSTED';
 
 /** 终止后仍允许同一 session 续接的原因；其余终态必须新建意图。 */
 const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
   'BUDGET_EXHAUSTED', 'TIMEOUT', 'NO_PROGRESS', 'UNKNOWN_BOUNDARY',
   'BLOCKED', 'NO_PATH', 'RESIDENCY_NOT_READY', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED', 'CONFLICT',
+  'SUSPENDED', 'MAKE_WAY_BUDGET_EXHAUSTED',
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const cellText = (p: Vec3Like) => `(${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)})`;
+
+/** 续接时的授权必须与创建 session 时一致：旧 sessionId 不是扩大 swim/施工权限的依据。 */
+function sameAuthorization(a: MovementAuthorization, b: MovementAuthorization): boolean {
+  if (a.swim !== b.swim) return false;
+  if ((a.makeWay === undefined) !== (b.makeWay === undefined)) return false;
+  if (a.makeWay === undefined || b.makeWay === undefined) return true;
+  return (a.makeWay.dig === undefined) === (b.makeWay.dig === undefined)
+    && a.makeWay.dig?.tool === b.makeWay.dig?.tool
+    && (a.makeWay.place === undefined) === (b.makeWay.place === undefined)
+    && a.makeWay.place?.item === b.makeWay.place?.item
+    && a.makeWay.maxEdits === b.makeWay.maxEdits;
+}
+
+/** 施工额度耗尽时，优先报告真实推进与最后一次改动，而不是旧的碰撞摘要。 */
+function makeWayBudgetDetail(session: MovementSession, originalStop: StopReceipt): string {
+  const measured = session.measured.current;
+  const progressed = session.intent.kind === 'advance'
+    ? `沿 ${session.intent.direction} 已推进 ${round2(session.progress.along)}/${session.intent.distance} 格`
+    : `距原目标水平 ${round2(Math.hypot(session.intent.to.x - measured.x, session.intent.to.z - measured.z))} 格`;
+  const last = session.lastMakeWayEdit;
+  const lastText = last === undefined ? '没有记录到实际改动'
+    : `最后${last.kind === 'dig' ? '挖开' : '放置'} ${last.name}${cellText(last.pos)}`;
+  return `${originalStop.detail}；${progressed}；施工 ${session.counters.makeWayEdits}/${session.budget.maxMakeWayEdits}，${lastText}；下一步需要更多施工授权（新的明确委托）`;
+}
 
 function stateFacts(session: MovementSession) {
   return {
@@ -281,7 +324,9 @@ function continuationOf(session: MovementSession) {
           : reason === 'CONFLICT' ? ['同一站位/证据下搜索与复验不一致；先观察、换站位或施工改变证据，再决定是否续接']
             : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
             : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
-              : ['用同一 sessionId 续接；累计预算不会重置']
+              : reason === 'SUSPENDED' ? ['身体被其他活动暂借；原目标、实测进展与累计预算保留，回来时用同一 sessionId 续接']
+                : reason === 'MAKE_WAY_BUDGET_EXHAUSTED' ? ['普通路线仍可继续；施工改动额度已用尽，需要更多挖/放时新建明确的移动委托并重新授权']
+                  : ['用同一 sessionId 续接；累计预算不会重置']
       : budgetExhausted && reason !== undefined && canResume(reason)
         ? ['累计 transition 或搜索预算已用尽；同一 session 不能增加预算，若仍要推进需明确新建移动委托']
         : [],
@@ -292,6 +337,13 @@ function continuationOf(session: MovementSession) {
 function stopOf(reason: StopReason, detail: string, extra: Partial<StopReceipt> = {}): StopReceipt {
   const failure = movementFailureOfStop(reason);
   return { reason, at: Date.now(), detail, ...(failure === null ? {} : { failure }), ...extra };
+}
+
+/** 取消类停止：显式挂起保留可续接语义，普通取消仍是终态。 */
+function cancellationStop(ctx: SkillCtx, detail: string): StopReceipt {
+  return isSuspendAbort(ctx.signal)
+    ? stopOf('SUSPENDED', `${detail}；原移动委托与实测进展保留，可用同一 sessionId 续接`)
+    : stopOf('CANCELLED', detail);
 }
 
 /** advance 的横向授权走廊；navigate 意图没有。 */
@@ -410,6 +462,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
 
   const now = Date.now();
   const invocationId = shortId('mi_');
+  const authorization: MovementAuthorization = {
+    swim: request.swim === true,
+    ...(request.makeWay === undefined ? {} : { makeWay: { ...request.makeWay } }),
+  };
   let session: MovementSession;
 
   if (request.sessionId !== undefined) {
@@ -425,6 +481,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
     if (session.intentKey !== intentKeyOf(request.intent)) {
       return { ok: false, failureCode: 'BAD_ARGS', summary: 'sessionId 与原意图不匹配（目标/方向/距离/允许模式任一变化都是新意图）；请不带 sessionId 新建意图', data: { reason: 'INTENT_MISMATCH', sessionId: session.id } };
+    }
+    if (!sameAuthorization(session.authorization, authorization)) {
+      return {
+        ok: false, failureCode: 'BAD_ARGS',
+        summary: 'sessionId 与原委托的 swim/施工授权不一致；续接不能扩大或改写 dig/place 与 maxEdits，要换授权请新建移动意图',
+        data: { reason: 'INTENT_MISMATCH', sessionId: session.id, authorization: session.authorization },
+      };
     }
     if (session.stop?.reason === 'SUPERSEDED') {
       return { ok: false, failureCode: 'BAD_ARGS', summary: '该 session 已被更新的移动意图取代，不能继续执行', data: { reason: 'INTENT_MISMATCH', sessionId: session.id } };
@@ -443,6 +506,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       ...(request.intent.kind === 'advance' ? { bearing: bearingOf(request.intent.direction) } : {}),
       scope,
       budget: budgetOf(request),
+      authorization,
       now,
     });
   }
@@ -451,6 +515,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     return { ok: false, failureCode: 'ERROR', summary: `session ${session.id} 正被另一次执行持有；同一身体同一时间只能有一个移动控制者`, data: { reason: 'BUSY', sessionId: session.id } };
   }
 
+  // 施工额度属于同一委托：恢复后只剩余额，不重新获得完整授权。
+  const makeWayEditBudget = Math.max(0, session.budget.maxMakeWayEdits - session.counters.makeWayEdits);
   const segments: SegmentReceipt[] = [];
   const swimLegs: SwimLegReceipt[] = [];
   const makeWayEdits: MakeWayEdit[] = [];
@@ -505,7 +571,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     for (;;) {
     while (executedSegments < request.maxSegments) {
       if (ctx.signal.aborted) {
-        stop = stopOf('CANCELLED', '父任务取消；保留已确认的位移');
+        stop = cancellationStop(ctx, '父任务取消；保留已确认的位移');
         break;
       }
       const state = ctx.adapter.state();
@@ -571,7 +637,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         const end = ctx.adapter.state();
         swimLegs.push({ mode: target.mode, target: { ...target.pos }, from: { ...state.pos }, to: { ...end.pos },
           status: swimResult.status, summary: swimResult.summary, oxygenBefore: state.oxygen, oxygenAfter: end.oxygen });
-        if (swimResult.status === 'cancelled') { stop = stopOf('CANCELLED', '游泳时父任务取消；实测位置保留'); break; }
+        if (swimResult.status === 'cancelled') { stop = cancellationStop(ctx, '游泳时父任务取消；实测位置保留'); break; }
         if (Math.hypot(end.pos.x - state.pos.x, end.pos.z - state.pos.z) < 1) {
           stop = stopOf('PHYSICAL_FAILURE', `游向 ${cellText(target.pos)} 没有推进：${swimResult.summary}`);
           break;
@@ -593,7 +659,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         origin: session.frozenOrigin, bearing: session.bearing,
         maxLateral: session.intent.maxLateralDrift, maxAlong: session.intent.distance, anchorY: session.frozenOrigin.y,
       }, state.pos, (cell) => triedFrontiers.has(cellText(cell)));
-      if (ctx.signal.aborted) { stop = stopOf('CANCELLED', '规划前沿时父任务取消'); break; }
+      if (ctx.signal.aborted) { stop = cancellationStop(ctx, '规划前沿时父任务取消'); break; }
       const frontierGoal = frontier === null ? undefined : cellText(frontier);
       const goalAt = (pos: Vec3Like): NavigationGoal => {
         if (session.intent.kind === 'navigate') return goalFromIntent(session.intent.to, session.intent.targetKind, session.intent.arrival);
@@ -689,7 +755,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
 
       if (segment.outcome === 'cancelled') {
-        stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
+        stop = cancellationStop(ctx, segment.detail ?? '执行被取消；已确认段保留');
         break;
       }
       // 同一站位、同一相关证据下反复得到同一搜索终态：不是“再搜一次就好”。
@@ -811,7 +877,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (key !== undefined) seen.set(key, tries);
         if (tries > MAX_CELL_RETRIES) {
           const detoured = await tryDetour();
-          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
           stop = retryable
             ? stopOf('PHYSICAL_FAILURE', `${segment.detail ?? '执行偏差'}；同一站位已从实测位置重新规划 ${MAX_CELL_RETRIES} 次，仍未按计划落位，也没有可绕的前沿`)
@@ -863,7 +929,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       if (segment.outcome === 'corridor_exhausted' || segment.outcome === 'no_path') {
         const detoured = await tryDetour();
-        if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+        if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
         if (detoured === 'moved') continue;
       }
       if (segment.outcome === 'corridor_exhausted') {
@@ -921,7 +987,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           }
         }
         const detoured = await tryDetour();
-        if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+        if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
         if (detoured === 'moved') continue;
         stop = stopOf('BLOCKED', segment.detail ?? '已观测到物理阻挡；未自动挖/放', {
           ...(segment.blocker === undefined ? {} : { blocker: segment.blocker }),
@@ -938,7 +1004,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         // 只是危险策略拒绝了几条边（火、岩浆旁）：先绕向别的前沿点，而不是当成目标无法解析。
         if (!modeGap && (segment.search.policy?.rejectedEdges ?? 0) > 0) {
           const detoured = await tryDetour();
-          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
         }
         const policyLead = segment.search.policy?.firstRejection === undefined ? ''
@@ -1031,7 +1097,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         if ((boundary === undefined || boundaryDone) && (!needCurrent || currentDone)) {
           const detoured = await tryDetour();
-          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
           // 周边感知一直在刷新：不因“这里观察过”就停，继续重新规划；连续多段没有进展才交回。
           if (session.progress.stagnationSegments < Math.min(request.maxNoProgressSegments, session.budget.maxNoProgressSegments)) {
@@ -1114,14 +1180,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         }
         session.updatedAt = Date.now();
         // 段内已先走到证据前缀端点，观察就是在新站位朝边界做的；没有相关变化时从同一站位重搜不会有新结果。
-        if (ctx.signal.aborted) { stop = stopOf('CANCELLED', '前沿观察时父任务取消'); break; }
+        if (ctx.signal.aborted) { stop = cancellationStop(ctx, '前沿观察时父任务取消'); break; }
         if (Date.now() >= deadline) { stop = stopOf('TIMEOUT', '前沿观察到达原期限'); break; }
         const boundarySighting = request.checkSighting?.();
         if (boundarySighting !== undefined) { stop = stopOf('UNTIL_SEEN', boundarySighting); break; }
         if (observation.relatedChanged) evidenceChangedSinceSearch = true;
         if (!observation.relatedChanged) {
           const detoured = await tryDetour();
-          if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
+          if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
           // 相关格没变不代表别处没有新证据（周边感知一直在写）：继续重新规划，连续多段没有进展才交回。
           if (session.progress.stagnationSegments < Math.min(request.maxNoProgressSegments, session.budget.maxNoProgressSegments)) {
@@ -1151,8 +1217,17 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       && stop?.reason === 'DELEGATION_RESTRICTION'
       && lastSegment?.search.policy?.firstRejection !== undefined
       && isConstructionFixablePolicyRejection(lastSegment.search.policy.firstRejection.reason);
-    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable) || makeWayEdits.length >= makeWay.maxEdits
-      || makeWayLegs.length >= MAX_MAKE_WAY_LEGS || Date.now() >= deadline || ctx.signal.aborted) break;
+    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable)) break;
+    // 同一委托的施工额度已在前面用掉：普通路线仍可走；若又停在只有施工能解决的原因上，
+    // 如实报告额度耗尽，不重新开一份预算。
+    if (makeWayEdits.length >= makeWayEditBudget) {
+      stop = stopOf('MAKE_WAY_BUDGET_EXHAUSTED', makeWayBudgetDetail(session, stop));
+      break;
+    }
+    if (makeWayLegs.length >= MAX_MAKE_WAY_LEGS || Date.now() >= deadline || ctx.signal.aborted) {
+      if (ctx.signal.aborted) stop = cancellationStop(ctx, '开路前父任务取消');
+      break;
+    }
     const voxel = spatial.session.voxel;
     const here = ctx.adapter.state().pos;
     const target = session.intent.kind === 'navigate' ? session.intent.to : (() => {
@@ -1165,7 +1240,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     // 否则会把一条真实存在的通路丢掉，误报“找不到路线”。
     const steps = await planMakeWay(voxel, scope.dim, start, target, { ...makeWay, allowPlainRoute: true }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
       { signal: ctx.signal, deadlineMs: deadline });
-    if (steps === null && ctx.signal.aborted) { stop = stopOf('CANCELLED', '开路规划时父任务取消'); break; }
+    if (steps === null && ctx.signal.aborted) { stop = cancellationStop(ctx, '开路规划时父任务取消'); break; }
     if (steps === null && Date.now() >= deadline) { stop = stopOf('TIMEOUT', '开路规划到达原期限'); break; }
     if (steps === null) {
       // 说清试过开路、用了哪些授权、缺哪种手段：是否补授权由调用方决定。
@@ -1175,7 +1250,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       break;
     }
     const editsBefore = makeWayEdits.length;
-    const leg = await runMakeWay(ctx, steps, makeWay, makeWayEdits, deadline, (cell) => {
+    const leg = await runMakeWay(ctx, steps, { ...makeWay, maxEdits: makeWayEditBudget }, makeWayEdits, deadline, (cell) => {
       const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
       return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
     }, (cell) => {
@@ -1187,10 +1262,18 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     makeWayLegs.push(leg);
     session.counters.makeWayLegs += 1;
     session.counters.makeWayEdits += makeWayEdits.length - editsBefore;
+    const lastEdit = makeWayEdits.at(-1);
+    if (lastEdit !== undefined) session.lastMakeWayEdit = { ...lastEdit, pos: { ...lastEdit.pos } };
     // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
     if (leg.stale) { stop = null; continue; }
     if (leg.executed === 0) {
-      stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
+      if (ctx.signal.aborted) {
+        stop = cancellationStop(ctx, '开路执行时父任务取消；已确认的改动与位移保留');
+      } else if (leg.budgetExhausted) {
+        stop = stopOf('MAKE_WAY_BUDGET_EXHAUSTED', makeWayBudgetDetail(session, stop));
+      } else {
+        stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
+      }
       break;
     }
     // 开出了路：从新位置回到普通路线。之前停在原地的搜索已由实际迈步证明不是空搜。
@@ -1209,7 +1292,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
   } catch (error) {
     stop = isAbort(error)
-      ? stopOf('CANCELLED', '父任务取消；身体动作已停止，已确认段与实测位置保留')
+      ? cancellationStop(ctx, '父任务取消；身体动作已停止，已确认段与实测位置保留')
       : stopOf('ACTION_FAILURE', `执行异常：${error instanceof Error ? error.message : String(error)}；保留最后实测位置`);
   } finally {
     if (stop !== null) {
@@ -1230,7 +1313,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   }
 
   const finalStop = stop ?? stopOf('ACTION_FAILURE', '协调循环没有产生终止事实');
-  const status: SkillStatus = finalStop.reason === 'CANCELLED' ? 'cancelled'
+  const status: SkillStatus = finalStop.reason === 'CANCELLED' || finalStop.reason === 'SUSPENDED' ? 'cancelled'
     : isSuccess(finalStop.reason) ? 'succeeded' : 'failed';
   return {
     ok: true,
@@ -1322,5 +1405,6 @@ function budgetOf(request: CoordinatorRequest): MovementBudget {
     maxObservedCells: Math.max(0, request.maxObservedCells),
     maxNoProgressSegments: Math.max(1, request.maxNoProgressSegments),
     maxLateralDrift: request.intent.kind === 'advance' ? request.intent.maxLateralDrift : 0,
+    maxMakeWayEdits: Math.max(0, request.makeWay?.maxEdits ?? 0),
   };
 }

@@ -5,6 +5,15 @@ export class AbortedError extends Error {
   }
 }
 
+/**
+ * 显式挂起而不是终止执行：任务被暂时让出身体，可恢复的执行层应保留会话与实测进度。
+ * 与普通取消区分开，调用方不必靠中文理由猜测“还要不要回来”。
+ */
+export const SUSPEND_ABORT_REASON = 'SUSPEND';
+
+export const isSuspendAbort = (signal?: AbortSignal) =>
+  signal?.aborted === true && signal.reason === SUSPEND_ABORT_REASON;
+
 export class TimeoutError extends Error {
   constructor(msg = 'timeout') {
     super(msg);

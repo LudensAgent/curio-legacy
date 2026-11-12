@@ -325,6 +325,97 @@ test('绕路回来时前提已经变了（等的东西到了、要的已经够�
   assert.equal(w.self.history(1)[0].what, '攒原木等图纸', '旧活被放下了');
 });
 
+test('绕路时挂起长程移动，回来带同一 sessionId 续接原委托', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.explore_toward;
+  SKILLS.explore_toward = {
+    name: 'explore_toward', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: (raw: any) => ({ ok: true, args: { direction: 'W', distance: 64, ...(raw?.sessionId ? { sessionId: raw.sessionId } : {}) } }),
+    run: async (ctx) => new Promise<SkillResult>((_resolve, reject) => {
+      const stop = () => {
+        const error = new AbortedError('cancelled');
+        (error as Error & { partial?: Record<string, unknown> }).partial = { sessionId: 'ms_test', stop: { reason: 'SUSPENDED' } };
+        reject(error);
+      };
+      if (ctx.signal.aborted) return stop();
+      ctx.signal.addEventListener('abort', stop, { once: true });
+    }),
+  };
+  t.after(() => { if (previous) SKILLS.explore_toward = previous; else delete SKILLS.explore_toward; });
+
+  await w.tick();
+  await w.reply(0, { monologue: '向西走', decision: 'new', activity: { what: '向西探索', steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64 } }] } });
+  await w.tick();
+  assert.equal(w.arbiter.info()?.skill, 'explore_toward');
+  const original = w.mind.activity!;
+
+  w.mind.attention.notice('hungry', '饿了', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  const detourAt = w.pending.length - 1;
+  await w.reply(detourAt, { monologue: '先捡点东西', decision: 'detour', activity: { what: '捡东西', steps: [step(9)] } });
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '捡东西');
+  assert.deepEqual(w.mind.suspended.map((a) => a.id), [original.id]);
+  assert.equal(w.mind.suspended[0]?.movementPause?.sessionId, 'ms_test', '挂起回执归还到原步骤');
+
+  await w.finish();
+  await w.tick();
+  const askAt = w.pending.length - 1;
+  assert.match(w.pending[askAt].messages[1].content, /还要接着做吗/);
+  await w.reply(askAt, { monologue: '接着向西', decision: 'continue' });
+  await w.tick();
+  const running = w.arbiter.info();
+  assert.equal(running?.skill, 'explore_toward');
+  assert.equal((running?.args as { sessionId?: string }).sessionId, 'ms_test', '续接时把保存的 sessionId 加进派发参数');
+  assert.equal(w.mind.activity?.id, original.id);
+});
+
+test('绕路回来时原活动收工条件已满足：复核后收工，不重新派发移动步', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.explore_toward;
+  SKILLS.explore_toward = {
+    name: 'explore_toward', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: (raw: any) => ({ ok: true, args: { direction: 'W', distance: 64, ...(raw?.sessionId ? { sessionId: raw.sessionId } : {}) } }),
+    run: async (ctx) => new Promise<SkillResult>((_resolve, reject) => {
+      const stop = () => {
+        const error = new AbortedError('cancelled');
+        (error as Error & { partial?: Record<string, unknown> }).partial = { sessionId: 'ms_test' };
+        reject(error);
+      };
+      if (ctx.signal.aborted) return stop();
+      ctx.signal.addEventListener('abort', stop, { once: true });
+    }),
+  };
+  t.after(() => { if (previous) SKILLS.explore_toward = previous; else delete SKILLS.explore_toward; });
+
+  await w.tick();
+  await w.reply(0, { monologue: '向西走', decision: 'new', activity: {
+    what: '向西探索', steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64 } }],
+    done_when: { type: 'exploration', min_distance: 24 },
+  } });
+  await w.tick();
+  const original = w.mind.activity!;
+
+  w.mind.attention.notice('hungry', '饿了', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  const detourAt = w.pending.length - 1;
+  await w.reply(detourAt, { monologue: '先捡点东西', decision: 'detour', activity: { what: '捡东西', steps: [step(9)] } });
+  await w.tick();
+  // 插曲期间身体实际已经走够 24 格：回来复核应收工，而不是再派发一次长程移动。
+  w.adapter.pos = { x: 30.5, y: 64, z: 0.5 };
+  await w.finish();
+  await w.tick();
+  const askAt = w.pending.length - 1;
+  assert.match(w.pending[askAt].messages[1].content, /还要接着做吗/);
+  await w.reply(askAt, { monologue: '已经走够了', decision: 'continue' });
+  await w.tick();
+  assert.equal(w.mind.activity, null, '复核已满足收工条件，不重派移动步');
+  assert.notEqual(w.arbiter.info()?.skill, 'explore_toward');
+  assert.equal(original.conditionTriggered, true);
+});
+
 test('卡住时认真想，并把实际结果和卡住时的备选交给模型；学到的窍门会记下来', async (t) => {
   const w = fixture(t);
   await w.tick();

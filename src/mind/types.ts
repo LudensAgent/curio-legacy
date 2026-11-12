@@ -148,6 +148,11 @@ export interface Activity {
   startInventory: Record<string, number>;
   /** 被绕路的事放下的时刻（回来时要先想想还做不做） */
   suspendedAt?: number;
+  /**
+   * 被绕路挂起的长程移动：把停在 `stepId` 的移动会话凭据留在这里。
+   * 只是执行状态，不写回步骤参数；回来时复核 done_when 再决定是否带 sessionId 续接。
+   */
+  movementPause?: { taskId: string; stepId: string; skill: string; sessionId: string };
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
   /**

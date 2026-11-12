@@ -6,6 +6,7 @@ import { walkCollisionProvider } from '../src/adapter/walk-collision.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
+import { SUSPEND_ABORT_REASON } from '../src/util.ts';
 
 const argsOf = (raw: unknown, adapter: FakeAdapter) => {
   const result = exploreToward.validate(raw, adapter);
@@ -206,6 +207,37 @@ test('until 在短未知前沿仍能通过本轮扫描发现目标', async (t) =
   assert.equal(scans, 1);
   assert.ok((result.data?.progress as { along: number }).along < 16);
   assert.equal(result.data?.arrived, false, '看到目标不冒充完成原距离');
+});
+
+test('显式挂起保留原方向、距离与累计预算，回来可续接同一 session', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture(80);
+  t.after(() => ctx.memory.close());
+  const move = adapter.moveTo.bind(adapter);
+  const controller = new AbortController();
+  let moves = 0;
+  t.mock.method(adapter, 'moveTo', async (...args: Parameters<FakeAdapter['moveTo']>) => {
+    const result = await move(...args);
+    if (++moves === 3) controller.abort(SUSPEND_ABORT_REASON);
+    return result;
+  });
+  const first = await exploreToward.run({ ...ctx, signal: controller.signal },
+    argsOf({ direction: 'E', distance: 64, segment: 16 }, adapter));
+  assert.equal(first.status, 'cancelled', first.summary);
+  assert.equal((first.data?.stop as { reason: string }).reason, 'SUSPENDED');
+  assert.equal((first.data?.continuation as { canContinue: boolean }).canContinue, true);
+  const sessionId = first.data?.sessionId;
+  assert.equal(typeof sessionId, 'string');
+  const before = { ...adapter.pos };
+
+  const resumed = await exploreToward.run(ctx, argsOf({ direction: 'E', distance: 64, segment: 16, sessionId }, adapter));
+  assert.equal(resumed.status, 'succeeded', resumed.summary);
+  assert.equal(resumed.data?.sessionId, sessionId);
+  assert.deepEqual(resumed.data?.frozenOrigin, { x: 0.5, y: 64, z: 0.5 }, '原起点不变');
+  assert.deepEqual((resumed.data?.intent as { direction: string; distance: number }).direction, 'E');
+  assert.equal((resumed.data?.intent as { distance: number }).distance, 64);
+  assert.equal((resumed.data?.progress as { along: number }).along, 64);
+  assert.ok(adapter.pos.x > before.x, '续接从暂停时的实测位置继续，而不是从头走');
+  assert.deepEqual(adapter.pos, { x: 64.5, y: 64, z: 0.5 });
 });
 
 test('未知边界停止，取消保留实测进度，均不转直接寻路', async (t) => {
