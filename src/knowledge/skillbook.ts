@@ -214,7 +214,7 @@ export class SkillBook {
       const candidate = this.candidates.get(s.name);
       const status: string[] = [];
       if (s !== candidate) {
-        if (s.behavior === undefined) status.push(/```behavior(?:\s|$)/.test(s.body) ? '定义无效' : '文字');
+        if (s.behavior === undefined) status.push(/```behavior(?:\s|$)/.test(s.body) ? '定义无效' : '文字（未验证）');
         else if (!executionError) status.push(`未确认可执行${s.mode ? `·${MODE_LABEL[s.mode]}` : ''}`);
         else {
           // 失败原因和“为什么不自动接手”可能很长；索引只留结论，细节用 skill 查询

@@ -1966,7 +1966,9 @@ export class Mind {
     if (tier === 'deliberate') void this.prefetchHindsight(query, percept, generation);
     let openedSkill: MindContext['openedSkill'];
     // 自动展开正文前核对触发条件：只有关键词命中、条件不符时只留名字/用途，正文由 Agent 按需查。
-    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref && book?.get(r.ref)
+    // 纯文字技能只是未验证笔记：可以按关键词被想起，但不自动展开成“这次就按它做”。
+    // 只有带可执行 behavior 的技能才自动翻开；笔记需要 Agent 显式用 skill 查询阅读。
+    const top = recalled.find((r) => r.kind === 'skill' && r.score >= 4 && r.ref && book?.get(r.ref)?.behavior !== undefined
       && (!this.d.behaviors || this.d.behaviors.conditionHolds(r.ref, this.d.arbiter.info())));
     if (tier === 'deliberate' && top && book?.get(top.ref!) && Date.now() - (this.skillOpenedAt.get(top.ref!) ?? 0) > 5 * 60_000) {
       const k = book.get(top.ref!)!;
@@ -2176,7 +2178,7 @@ export class Mind {
         const w = this.safe(() => this.d.thinker.skillBook?.write(c.skill!.name, c.skill!.description, c.skill!.body) ?? null, null);
         if (w?.ok) {
           this.d.self.think(`把「${w.skill.description}」的做法写成了自己的技能 ${w.skill.name}`, 'learned');
-          this.d.bus.publish('skill_written', 'P2', `${w.created ? '写了一份新技能' : '修订了技能'}：${w.skill.name}——${w.skill.description}`, { name: w.skill.name });
+          this.d.bus.publish('skill_written', 'P2', `${w.created ? '写了一份未验证的文字笔记' : '修订了文字笔记'}：${w.skill.name}——${w.skill.description}（不会被自动接手，需主动 skill 查询）`, { name: w.skill.name });
         } else if (w && !w.ok) this.d.bus.publish('skill_rejected', 'P3', `没有保存技能：${w.error}`);
       }
       for (const a of c.agendaAdd ?? []) {
@@ -2412,7 +2414,7 @@ export class Mind {
       ? this.safe(() => book.write(raw.name, raw.description, raw.body), null) : null;
     if (w?.ok) {
       this.d.self.think(`把「${w.skill.description}」写成了技能 ${w.skill.name}`, 'learned');
-      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下新技能' : '修订技能'} ${w.skill.name}——${w.skill.description}`, { name: w.skill.name, mode: 'knowledge' });
+      this.d.bus.publish('skill_written', 'P2', `${w.created ? '写下未验证的文字笔记' : '修订文字笔记'} ${w.skill.name}——${w.skill.description}（不会被自动接手，需主动 skill 查询）`, { name: w.skill.name, mode: 'knowledge' });
     } else decision.notes.push(`skill 没存下：${w && !w.ok ? w.error : '需要 name、description，以及 steps（可执行）或 body（做法说明）'}`);
   }
 

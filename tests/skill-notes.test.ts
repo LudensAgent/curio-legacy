@@ -41,6 +41,12 @@ test('补充笔记保留候选契约和版本，重载、晋升后仍可读', (t
   assert.equal(engine.get('observe-feet')?.candidate, undefined);
 });
 
+test('纯文字技能在索引里明确标为未验证，不会伪装成已验证策略', (t) => {
+  const { book } = setup(t);
+  assert.ok(book.write('observe-feet', '观察脚下位置', notes).ok);
+  assert.match(book.index().join('\n'), /observe-feet（自写）：［文字（未验证）］/, '文字笔记需要标明未验证');
+});
+
 test('同名正式版和候选共享笔记，纯文字转为行为后笔记也不会丢失', (t) => {
   const { directory, book, engine } = setup(t);
   assert.ok(book.write('observe-feet', '观察脚下的文字做法', notes).ok);
