@@ -711,6 +711,33 @@ test('代为开路每完成一步动作就按实测位置上报进度，不是�
   assert.deepEqual(reportedX, [1.5, 2.5, 3.5], '每一步迈完就上报当时的实测位置');
 });
 
+test('代为开路的连续直行 move 使用连续交接，不是每格 move_step 起停', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  const calls: MoveOpts[] = [];
+  const original = adapter.moveTo.bind(adapter);
+  adapter.moveTo = async (target, opts) => {
+    calls.push(opts);
+    await original(target, opts);
+    // 模拟真实 physicsTick 交接：直行段在到点时保留前进键。
+    opts.onCheckpoint?.({ x: target.x, y: target.y, z: target.z });
+  };
+  const leg = await runMakeWay(ctx, {
+    steps: [1, 2, 3].map((x) => ({ kind: 'move' as const, to: { x, y: 64, z: 0 }, dig: [] })),
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits: [], deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: () => null, onProgress: () => {},
+  });
+  assert.equal(leg.executed, 3, JSON.stringify(leg));
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0]!.settleAtTarget, false);
+  assert.equal(calls[0]!.passColumn, true);
+  assert.ok(calls[0]!.onCheckpoint, '直行中间点应尝试交接');
+  assert.equal(calls[1]!.keepControls, true, '接续上一格不清键');
+  assert.equal(calls[2]!.keepControls, true);
+  assert.equal(calls[2]!.settleAtTarget, undefined, '最后一步停稳');
+});
+
 test('开路：困在 1×1 深两格的坑里，授权 place 后原地垫高一格再迈上地面', async (t) => {
   clearMovementSessions();
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });

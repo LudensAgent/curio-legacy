@@ -175,7 +175,11 @@ export async function runMakeWay(
   let executed = 0;
   let failure: string | undefined;
   let budgetExhausted = false;
-  outer: for (const step of steps) {
+  // 连续直行的 move 交接：上一格在 physicsTick 里保留了前进键，下一格直接接续；
+  // 转弯、施工步或最后一步仍正常停稳。开路的普通路线不再退化成每格一次 move_step。
+  let previousMoveHandedOff = false;
+  const feetStart = { x: Math.floor(from.x), y: Math.floor(from.y), z: Math.floor(from.z) };
+  outer: for (const [stepIndex, step] of steps.entries()) {
     if (ctx.signal.aborted || Date.now() >= deadline) { failure = ctx.signal.aborted ? '父任务取消' : '期限已到'; break; }
     for (const cell of step.dig) {
       if (edits.length >= remainingEdits) {
@@ -210,18 +214,47 @@ export async function runMakeWay(
       const inColumn = Math.floor(now.x) === step.to.x && Math.floor(now.z) === step.to.z;
       if (inColumn && Math.abs(now.y - step.to.y) > 0.5) { failure = `身体已在目标格列 (${step.to.x},${step.to.z})，但脚高 ${now.y.toFixed(2)} 与计划 ${step.to.y} 不符`; break; }
       if (!inColumn) {
-        // 落点按脚下已记录方块的真实顶面给脚高（灵魂沙、半砖等不是整格），否则 move_step 会按“脚高不符”拒绝。
+        // 落点按脚下已记录方块的真实顶面给脚高（灵魂沙、半砖等不是整格）。
         const top = supportTopAt({ x: step.to.x, y: step.to.y - 1, z: step.to.z });
         const footY = top !== null && top > 0 && top <= 1 ? step.to.y - 1 + top : step.to.y;
-        failure = await run(moveStep, { xyz: [step.to.x, footY, step.to.z] }) ?? undefined;
-        if (failure !== undefined) break;
+        const next = steps[stepIndex + 1];
+        const currentFrom = stepIndex === 0 ? feetStart : steps[stepIndex - 1]!.to;
+        const chain = step.dig.length === 0 && step.place === undefined
+          && next !== undefined && next.kind === 'move' && next.dig.length === 0 && next.place === undefined
+          && next.to.x - step.to.x === step.to.x - currentFrom.x
+          && next.to.z - step.to.z === step.to.z - currentFrom.z;
+        let handedOff = false;
+        try {
+          await ctx.adapter.moveTo(
+            { kind: 'feet', x: step.to.x + 0.5, y: footY, z: step.to.z + 0.5 },
+            {
+              signal: ctx.signal,
+              timeoutMs: Math.min(3000, Math.max(1, deadline - Date.now())),
+              ...(previousMoveHandedOff ? { keepControls: true } : {}),
+              ...(chain ? {
+                settleAtTarget: false, passColumn: true,
+                onCheckpoint: () => { handedOff = true; return true; },
+              } : {}),
+            },
+          );
+        } catch (error) {
+          if (isAbort(error)) throw error;
+          failure = `move_to：${error instanceof Error ? error.message : String(error)}`;
+          break;
+        }
+        previousMoveHandedOff = handedOff;
+      } else {
+        previousMoveHandedOff = false;
       }
+    } else {
+      previousMoveHandedOff = false;
     }
     executed++;
     onProgress();
     // 做完第一处改动就交回：挖开后视觉会看到新露出的格（可能是液体或空腔），后面按新证据重新规划。
     if (step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') break;
   }
+  if (previousMoveHandedOff) ctx.adapter.stopAll?.();
   return {
     from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed,
     ...(failure === undefined ? {} : { failure }),
