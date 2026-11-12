@@ -584,6 +584,8 @@ test('a throwing diagnostic callback is recorded with identity and never blocks 
 
     shared.session.acquireWorkingSetOperation();
     shared.observe([blockObservation(0, 64, 0, 2200, 11, SESSION)]);
+    await waitFor(() => shared!.pendingObservations().observations > 0);
+    console.log('DEBUG gap', shared.observationGap(), 'pending', shared.pendingObservations());
     await waitFor(() => shared!.observationGap()?.kind === 'busy');
     assert.equal(shared.lastDiagnosticFailure(), diagnosticError);
     shared.session.releaseWorkingSetOperation();
@@ -852,6 +854,53 @@ test('a prepare cancelled by shutdown leaves a visible fact instead of silent lo
 
     assert.equal(shared.observationGap()?.kind, 'prepare_cancelled');
     // 迟到的 ready 仍可应用，因此最终不一定有未处理证据；关闭必须是真实结果。
+    assert.equal(shutdown.error, null);
+    assertClose(close);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    if (!failed) {
+      const result = await shutdownQuietly(shared);
+      if (close === null) close = result?.close ?? null;
+    } else {
+      close = (await shutdownQuietly(shared))?.close ?? null;
+    }
+    cleanup(dir, close);
+  }
+});
+
+test('queue full + busy 后，队列满也要自动重试并清空，不依赖显式 drain', { timeout: 20_000 }, async () => {
+  const { dir, dbPath } = makeTempDb();
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    // 同一个已保存 Section 里的 256 个格，外加 44 条更新把 handoff 队列灌满。
+    const cells = Array.from({ length: 256 }, (_, i) => ({ x: i % 16, y: 64, z: Math.floor(i / 16) }));
+    await seedSaved(dbPath, cells.map((cell, i) => toObservation(blockObservation(cell.x, cell.y, cell.z, 100, i + 1, 'seed'))));
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+
+    shared.session.acquireWorkingSetOperation();
+    const updates = [...cells, ...cells.slice(0, 44)].map((cell, i) => blockObservation(cell.x, cell.y, cell.z, 3000 + i, 1000 + i, SESSION));
+    shared.observe(updates);
+    await waitFor(() => shared!.observationGap()?.kind === 'busy');
+    assert.equal(shared.pendingObservations().observations, 256, '队列满后只接收前 256 条');
+
+    shared.session.releaseWorkingSetOperation();
+    // 不调用 drainObservations：队列满的拒绝本身必须排重试，否则这里会一直卡在 256。
+    await waitFor(() => shared!.pendingObservations().observations === 0, 8000);
+    assert.equal(shared.pendingObservations().loading, false);
+    assert.equal(shared.session.sectionResidency(keyAt()).residency, 'resident');
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
     assert.equal(shutdown.error, null);
     assertClose(close);
   } catch (err) {

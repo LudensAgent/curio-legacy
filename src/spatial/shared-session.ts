@@ -71,6 +71,9 @@ export const MAX_PENDING_OBSERVATION_BYTES = 1024 * 1024;
  */
 const CAPACITY_RETRY_BACKOFF_MS = 5000;
 
+/** 队列满或加载被 busy 挡住后的自动重试间隔；只在仍有可加载 handoff 时生效。 */
+const HANDOFF_RETRY_MS = 300;
+
 /** 诊断摘要里保留的 Section 键上限；超出只保留总数事实，不累积历史键。 */
 const MAX_DIAGNOSTIC_KEYS = 32;
 
@@ -472,10 +475,17 @@ export class SharedSpatialSession {
   private pendingGeneration = 0;
   /** 唯一一个已开始、尚未结算的有限加载任务；结束后不自动重跑。 */
   private loadTask: Promise<void> | null = null;
-  /** 上次真实加载以容量/未就绪/忙碌/硬失败停下；新证据或显式 drain 才再试一次。 */
+  /** 上次真实加载以容量/未就绪/忙碌/硬失败停下；新证据、显式 drain 或自动重试才再试一次。 */
   private loadBlocked = false;
   /** 容量失败后的重试时间下限；pending 保留，仅限制自动重试频率。 */
   private loadRetryNotBefore = 0;
+  /**
+   * 队列满/加载被挡住后的自动重试。没有它时，一旦队列满，新观测全部被拒
+   * （accepted 0）就不会再触发加载，队列会永久卡满、只重复报 gap。
+   */
+  private handoffRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 连续无进展的重试退避；有真实进展后回到 HANDOFF_RETRY_MS。 */
+  private handoffRetryDelayMs = HANDOFF_RETRY_MS;
   private lastGap: SharedSpatialGap | null = null;
   private discarded: SharedSpatialDiscarded | null = null;
   /** 已丢弃批次的累计不同 Section 数；用于保留“已存键/总数”事实。 */
@@ -975,6 +985,7 @@ export class SharedSpatialSession {
   shutdown(): Promise<ShutdownResult> {
     if (this.shutdownPromise !== null) return this.shutdownPromise;
     this.closingFlag = true;
+    this.cancelHandoffRetry();
     this.shutdownPromise = this.doShutdown();
     return this.shutdownPromise;
   }
@@ -1382,6 +1393,7 @@ export class SharedSpatialSession {
     this.diagnosticFailure = null;
     this.cancelFailure = null;
     this.loadBlocked = false;
+    this.cancelHandoffRetry();
     if (this.pending.length === 0) return;
     const observations = this.pending.map((record) => record.observation);
     this.pending = [];
@@ -1426,10 +1438,13 @@ export class SharedSpatialSession {
         rejected,
         `pending handoff budget exceeded (${MAX_PENDING_OBSERVATIONS} observations / ${MAX_PENDING_OBSERVATION_BYTES} bytes); accepted prefix ${accepted.length}, rejected ${rejected.length} observation(s)`,
       );
+      // 队列满时 accepted 可能是 0，不能再依赖“新证据”唤醒加载；排一次自动重试，
+      // 等 busy/容量退避结束后把已有 handoff 写进去，避免永久卡满。
+      this.scheduleHandoffRetry();
     }
     if (accepted.length > 0) {
       // 新证据允许一次有限尝试；若已有 load 在跑，等这一批结束后留待显式 drain/新证据。
-      this.loadBlocked = false;
+      this.noteHandoffProgress();
       this.requestLoadAttempt();
     }
   }
@@ -1509,10 +1524,14 @@ export class SharedSpatialSession {
 
     const task = this.runLoadAttempt();
     this.loadTask = task;
+    const settle = () => {
+      if (this.loadTask === task) this.loadTask = null;
+      // 仍被挡住且还有可加载证据：安排一次有界重试。否则队列满后新观测被拒，
+      // 不会再有 accepted 观测来唤醒加载，会一直卡在 queue_full。
+      if (this.loadBlocked && this.hasLoadablePending()) this.scheduleHandoffRetry();
+    };
     task.then(
-      () => {
-        if (this.loadTask === task) this.loadTask = null;
-      },
+      settle,
       (error: unknown) => {
         // 最后一道异步边界：保留原始错误，绝不产生未处理拒绝。
         if (this.loadTask === task) this.loadTask = null;
@@ -1520,8 +1539,37 @@ export class SharedSpatialSession {
         this.setLoadFailure(error);
         const current = this.currentObservations();
         if (current.length > 0) this.recordGap('observe_failed', current, messageOf(error));
+        if (this.hasLoadablePending()) this.scheduleHandoffRetry();
       },
     );
+  }
+
+  /** 安排一次 handoff 重试；容量退避未到时就等退避结束。 */
+  private scheduleHandoffRetry(): void {
+    if (this.closingFlag || this.handoffRetryTimer !== null || !this.hasLoadablePending()) return;
+    const delay = Math.max(this.handoffRetryDelayMs, this.loadRetryNotBefore - Date.now());
+    this.handoffRetryTimer = setTimeout(() => {
+      this.handoffRetryTimer = null;
+      if (this.closingFlag) return;
+      // 连续失败时逐步退避，避免硬失败被 300ms 轮询放大；有进展就回到快重试。
+      this.handoffRetryDelayMs = Math.min(5000, this.handoffRetryDelayMs * 2);
+      this.loadBlocked = false;
+      this.requestLoadAttempt();
+    }, delay);
+    this.handoffRetryTimer.unref?.();
+  }
+
+  /** 有真实进展（接受/应用/就绪）：清掉加载阻塞与待触发的重试。 */
+  private noteHandoffProgress(): void {
+    this.loadBlocked = false;
+    this.handoffRetryDelayMs = HANDOFF_RETRY_MS;
+    this.cancelHandoffRetry();
+  }
+
+  private cancelHandoffRetry(): void {
+    if (this.handoffRetryTimer === null) return;
+    clearTimeout(this.handoffRetryTimer);
+    this.handoffRetryTimer = null;
   }
 
   private currentObservations(): Observation[] {
@@ -1535,7 +1583,9 @@ export class SharedSpatialSession {
    */
   private async runLoadAttempt(): Promise<void> {
     try {
+      const pendingBefore = this.pending.length;
       this.applyReadyPending();
+      if (this.pending.length < pendingBefore) this.noteHandoffProgress();
       if (this.closingFlag) return;
 
       const loadable = this.pending.filter(
@@ -1584,10 +1634,13 @@ export class SharedSpatialSession {
           this.coordinator!.release(readyLease.token);
         }
         this.clearLoadFailure();
+        this.noteHandoffProgress();
         return;
       }
 
+      const pendingAfterReady = this.pending.length;
       this.applyReadyPending();
+      if (this.pending.length < pendingAfterReady) this.noteHandoffProgress();
 
       if (outcome.kind === 'error') {
         if (outcome.error instanceof PersistenceError && outcome.error.kind === 'closing') {
@@ -1627,6 +1680,7 @@ export class SharedSpatialSession {
       if (result.status === 'ready') {
         this.coordinator!.release(result.lease.token);
         this.clearLoadFailure();
+        this.noteHandoffProgress();
         return;
       }
       if (result.status === 'failed') {
