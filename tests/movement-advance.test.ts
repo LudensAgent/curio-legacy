@@ -4,6 +4,7 @@ import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { farthestFrontier } from '../src/skills/movement/frontier.ts';
 import { advance, travelTo } from '../src/skills/movement/index.ts';
+import { runMakeWay, type MakeWayEdit } from '../src/skills/movement/coordinator.ts';
 import { acquireSessionLease, clearMovementSessions, findMovementSession, releaseSessionLease } from '../src/skills/movement/session.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
 import type { MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
@@ -127,6 +128,8 @@ test('A2 开阔地 50 格：两次调用同一 session 完成，累计预算不�
   const map = corridor(60);
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
+  const fractions: number[] = [];
+  ctx.progress = (fraction) => { fractions.push(fraction); };
   const first = await advance.run(ctx, args({ direction: 'E', distance: 50, maxSegments: 2, maxStepsPerSegment: 16, maxTransitions: 64 }));
   assert.equal(first.status, 'failed', first.summary);
   assert.equal((first.data?.stop as { reason: string }).reason, 'BUDGET_EXHAUSTED');
@@ -144,6 +147,8 @@ test('A2 开阔地 50 格：两次调用同一 session 完成，累计预算不�
   assert.equal(second.status, 'succeeded', second.summary);
   assert.equal((second.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
   assert.equal(second.data?.sessionId, sessionId, '续接同一 session');
+  assert.ok(fractions.every((f, i) => i === 0 || f >= fractions[i - 1]!), `续接后进度不倒退：${fractions}`);
+  assert.equal(fractions.at(-1), 1, `完成后进度报满：${fractions}`);
   const counters = second.data?.counters as { confirmedTransitions: number; segments: number };
   assert.ok(counters.confirmedTransitions >= 50, `累计确认 ${counters.confirmedTransitions}`);
   assert.ok(counters.confirmedTransitions > confirmedFirst, '累计预算与计数不被续接重置');
@@ -249,10 +254,15 @@ test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕�
   fill(map, 'minecraft:stone', [6, 7, 8].flatMap((x) => [63, 64, 65, 66].map((y) => ({ x, y, z: 0 }))));
   const { adapter, ctx } = setup(map);
   t.after(() => ctx.memory.close());
+  const fractions: number[] = [];
+  ctx.progress = (fraction) => { fractions.push(fraction); };
   const r = await advance.run(ctx, args({ direction: 'E', distance: 20, maxLateralDrift: 1 }));
 
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal((r.data?.stop as { reason: string }).reason, 'DISTANCE_MET');
+  assert.ok(fractions.some((f) => f > 0), `横向绕行期间进度更新：${fractions}`);
+  assert.ok(fractions.every((f, i) => i === 0 || f >= fractions[i - 1]!), `绕行时进度不倒退：${fractions}`);
+  assert.equal(fractions.at(-1), 1, `完成后进度报满：${fractions}`);
   const progress = r.data?.progress as { along: number; lateral: number };
   assert.ok(progress.along >= 19.99, `along=${progress.along}`);
   assert.ok(progress.lateral <= 1.01, `final lateral=${progress.lateral}`);
@@ -600,6 +610,8 @@ test('开路：普通路线被已知的墙堵死时，授权 dig 才挖开挡路
     fill(map, 'minecraft:stone', Array.from({ length: 22 }, (_, i) => i - 1).map((x) => ({ x, y: 66, z: 0 })));
     const { adapter, ctx } = setup(map);
     t.after(() => ctx.memory.close());
+    const fractions: number[] = [];
+    ctx.progress = (fraction) => { fractions.push(fraction); };
     for (const pos of wall) adapter.blocks.push({ name: 'stone', pos });
     // 真实会话会把挖过的格标成“动作效果待确认”，等视觉重写；这里由下面的挖掘钩子直接同步体素。
     Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
@@ -627,6 +639,9 @@ test('开路：普通路线被已知的墙堵死时，授权 dig 才挖开挡路
       assert.match(second.summary, /试过开路：已授权 place\(cobblestone\)，未授权 dig/);
     } else {
       assert.equal(result.status, 'succeeded', result.summary);
+      assert.ok(fractions.some((f) => f > 0), `开路/迈步期间进度按实测推进更新：${fractions}`);
+      assert.ok(fractions.every((f, i) => i === 0 || f >= fractions[i - 1]!), `进度只增不减：${fractions}`);
+      assert.equal(fractions.at(-1), 1, `到达后进度报满：${fractions}`);
       assert.ok(adapter.pos.x >= 11, `挖穿墙走进目标范围（实测 x=${adapter.pos.x}）`);
       assert.equal(adapter.actions.filter((a) => a === 'dig:stone').length, 2, '只挖挡路的脚、头两格');
       const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
@@ -634,6 +649,22 @@ test('开路：普通路线被已知的墙堵死时，授权 dig 才挖开挡路
       assert.match(result.summary, /代为开路改动 2 处：挖开 stone\(6,6[45],0\)/);
     }
   }
+});
+
+test('代为开路每完成一步动作就按实测位置上报进度，不是等整段结束才报', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  const reportedX: number[] = [];
+  const edits: MakeWayEdit[] = [];
+  const leg = await runMakeWay(ctx, {
+    steps: [1, 2, 3].map((x) => ({ kind: 'move' as const, to: { x, y: 64, z: 0 }, dig: [] })),
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits, deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: () => null,
+    onProgress: () => reportedX.push(adapter.pos.x),
+  });
+  assert.equal(leg.executed, 3, JSON.stringify(leg));
+  assert.deepEqual(reportedX, [1.5, 2.5, 3.5], '每一步迈完就上报当时的实测位置');
 });
 
 test('开路：困在 1×1 深两格的坑里，授权 place 后原地垫高一格再迈上地面', async (t) => {

@@ -105,6 +105,13 @@ export function cellReached(point: Vec3Like, measured: Vec3Like, onGround: boole
     && Math.abs(measured.y - point.y) <= CELL_FOOT_TOLERANCE;
 }
 
+/** 到达条件使用的目标距离（格）：按方块格取整，与完成判定同一口径。 */
+export function arrivalDistanceOf(requested: Vec3Like, metric: NavigationArrival['metric'], measured: Vec3Like): number {
+  const horizontal = Math.hypot(Math.floor(measured.x) - Math.floor(requested.x), Math.floor(measured.z) - Math.floor(requested.z));
+  return metric === 'horizontal' ? horizontal
+    : Math.hypot(horizontal, Math.floor(measured.y) - Math.floor(requested.y));
+}
+
 /**
  * 冻结目标的完成判定；格目标与连续目标使用不同谓词。
  * `airborneLadderGoal` 只允许目标脚位本身由已证明的攀爬源支撑时免除
@@ -117,10 +124,7 @@ export function goalReached(
   airborneLadderGoal = false,
 ): boolean {
   if (goal.arrival !== undefined) {
-    const horizontal = Math.hypot(Math.floor(measured.x) - Math.floor(goal.requested.x), Math.floor(measured.z) - Math.floor(goal.requested.z));
-    const distance = goal.arrival.metric === 'horizontal' ? horizontal
-      : Math.hypot(horizontal, Math.floor(measured.y) - Math.floor(goal.requested.y));
-    return onGround && distance <= goal.arrival.radius;
+    return onGround && arrivalDistanceOf(goal.requested, goal.arrival.metric, measured) <= goal.arrival.radius;
   }
   const grounded = onGround || airborneLadderGoal;
   return goal.kind === 'cell'

@@ -29,9 +29,13 @@ function lakeFixture(depth = 3) {
 test('swim:true 时在水边游到沿原方向已观察的对岸，再继续陆路完成方向距离', async (t) => {
   const { adapter, ctx } = lakeFixture();
   t.after(() => ctx.memory.close());
+  const fractions: number[] = [];
+  ctx.progress = (fraction) => { fractions.push(fraction); };
   const r = await exploreToward.run(ctx, { direction: 'E', distance: 16, segment: 16, maxLateralDrift: 1,
     timeoutMs: 60_000, origin: { ...adapter.pos }, swim: true });
   assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(fractions.some((f) => f > 0), `游泳/陆路推进期间进度更新：${fractions}`);
+  assert.ok(fractions.every((f, i) => i === 0 || f >= fractions[i - 1]!), `进度只增不减：${fractions}`);
   const legs = r.data?.swimLegs as { mode: string; target: { x: number }; status: string }[];
   assert.ok(legs?.length >= 1, '回执记录代为游泳的段');
   assert.equal(legs[0]!.mode, 'dry_shore');

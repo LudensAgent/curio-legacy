@@ -69,6 +69,8 @@ export type SegmentRequest = {
   nextWindow?: (tail: Vec3Like) => NavigationGoal;
   /** 已确认一步后的当前可见命中，由委托定义具体观察对象。 */
   checkSighting?: () => string | undefined;
+  /** 每确认一步后的进度回调；由委托按实测位置换算，不在段内按计划步数估算。 */
+  onProgress?: () => void;
   allowed: MoveMode[];
   historical: boolean;
   /** 委托显式允许涉水（swim:true）：搜索与逐段复验接受接触水的地面边。 */
@@ -1257,8 +1259,8 @@ async function runNavigationSegmentInner(
         measuredEnd: { ...arrived.pos },
       };
     }
-    // 与既有导航回执一致：每确认一步就上报进度并让出事件循环。
-    ctx.progress(executed / Math.max(1, planned.length), `segment ${executed}/${planned.length}`);
+    // 每确认一步就通知委托；进度口径由委托按实测推进换算（协调器负责），这里不按计划步数估算。
+    request.onProgress?.();
     const sighting = request.checkSighting?.();
     if (sighting !== undefined) return receipt('sighting', { stopCode: 'sighting', detail: sighting });
     if (directionalFinish) return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点达到冻结方向的 ${request.minimumAlong} 格距离` });

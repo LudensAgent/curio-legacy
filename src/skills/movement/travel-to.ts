@@ -259,7 +259,6 @@ export const travelTo: Skill<TravelToArgs> = {
 
     let moved: SkillResult;
     try {
-      ctx.progress(0, `委托 VoxelMap A* 走向 ${label}`);
       moved = await runSkill(ctx, navigateTo, {
         ...nested.args,
         rolling: true,

@@ -157,6 +157,8 @@ export interface MovementSession {
   counters: MovementCounters;
   measured: MovementMeasured;
   progress: MovementProgress;
+  /** 已上报给控制台的最高实测推进（0..1）；绕路、重规划或续接时进度条不倒退。 */
+  reportedProgress: number;
   /** 最近一次实际施工改动（跨调用保留），额度耗尽时用来说明停在哪一处。 */
   lastMakeWayEdit?: { kind: 'dig' | 'place'; pos: Vec3Like; name: string };
 
@@ -282,6 +284,7 @@ export function createMovementSession(opts: {
       ...(opts.intent.kind === 'advance' ? { remaining: opts.intent.distance } : {}),
       stagnationSegments: 0, lastProgressAt: now,
     },
+    reportedProgress: 0,
   };
   sessions.set(session.id, session);
   return session;

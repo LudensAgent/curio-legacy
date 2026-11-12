@@ -4,7 +4,7 @@ import type { Vec3Like } from '../../adapter/types.ts';
 import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { isSuspendAbort, shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
-import { bearingOf, closeReasonOf, progressOf, summaryOf, waypointOf } from './intent.ts';
+import { bearingOf, closeReasonOf, progressMeterOf, progressOf, summaryOf, waypointOf } from './intent.ts';
 import { observeBoundary, type ObservationReceipt } from './observation.ts';
 import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../spatial/land-search.ts';
 import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
@@ -121,7 +121,7 @@ const MAX_SAME_EVIDENCE_SEARCHES = 1;
  * 或原地垫高（pillar_one，只用授权方块），然后迈到下一格（move_step）。每个基础动作照常做自己的安全检查；
  * 任一步失败就停下，把原因交回。改动逐条记入 edits。
  */
-async function runMakeWay(
+export async function runMakeWay(
   ctx: SkillCtx,
   job: {
     steps: MakeWayStep[];
@@ -133,9 +133,11 @@ async function runMakeWay(
     nameAt: (cell: Vec3Like) => string;
     /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
     supportTopAt: (cell: Vec3Like) => number | null;
+    /** 每完成一步开路动作后按实测位置上报进度；施工期间进度条也要动。 */
+    onProgress: () => void;
   },
 ): Promise<MakeWayLegReceipt> {
-  const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt } = job;
+  const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt, onProgress } = job;
   const from = { ...ctx.adapter.state().pos };
   // 规划是异步的：算完时身体可能还在滑动或已被推开。第一步的落点不在身边相邻格（或同格）就不执行，交回重规划。
   const first = steps[0];
@@ -216,6 +218,7 @@ async function runMakeWay(
       }
     }
     executed++;
+    onProgress();
     // 做完第一处改动就交回：挖开后视觉会看到新露出的格（可能是液体或空腔），后面按新证据重新规划。
     if (step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') break;
   }
@@ -545,6 +548,23 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   let invocationTransitions = 0;
   let stop: StopReceipt | null = null;
 
+  /**
+   * 进度条只按实测推进报告（口径见 progressMeterOf）；施工、游泳和绕行都走这里。
+   * 高水位存在 session 上，绕路或续接时不让进度条倒退。
+   */
+  let reportedNote = '';
+  const reportProgress = () => {
+    const state = ctx.adapter.state();
+    const meter = progressMeterOf(session, state.pos);
+    const closed = closeReasonOf(session, state.pos, Date.now(), state.onGround,
+      state.onGround ? false : airborneLadderGoal(ctx, session.intent));
+    const fraction = closed !== null && isSuccess(closed.reason) ? 1 : meter.fraction;
+    // 高水位保持时说明也保持同一个实测口径，不让“进度一半、说明却是当前位置”对不上。
+    if (fraction > session.reportedProgress) reportedNote = meter.note;
+    session.reportedProgress = Math.max(session.reportedProgress, fraction);
+    ctx.progress(session.reportedProgress, reportedNote === '' ? meter.note : reportedNote);
+  };
+
   try {
     // 续接是同一冻结意图的新一次尝试：预算与冻结事实保留，但停止快照与
     // consecutive 停滞计数属于上一次 invocation，不能直接复用。
@@ -556,6 +576,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     // 已完成的 session 不再移动；如实返回原终态，不把“保留”当“继续”。
     if (session.phase === 'completed' || isSuccess(session.stop?.reason ?? 'BUDGET_EXHAUSTED')) {
       const prior = session.stop ?? stopOf((session.intent.kind === 'advance' ? 'DISTANCE_MET' : 'ARRIVED'), '该 session 已经完成冻结意图');
+      ctx.progress(1, prior.detail);
       return {
         ok: true, status: 'succeeded', summary: `session ${session.id} 已完成：${prior.detail}；没有再次移动`, session, segments, stop: prior,
       };
@@ -611,6 +632,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         airborneLadderGoal(ctx, session.intent),
       );
       if (close !== null) {
+        reportProgress();
         stop = stopOf(close.reason, close.detail);
         break;
       }
@@ -657,6 +679,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         executedSegments += 1;
         session.progress.stagnationSegments = 0;
         session.progress.lastProgressAt = Date.now();
+        reportProgress();
         continue;
       }
       const remainingCumulative = session.budget.maxTransitions - session.counters.confirmedTransitions;
@@ -702,6 +725,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         goal: goalAt(state.pos),
         ...(request.rolling ? { nextWindow: goalAt } : {}),
         ...(request.checkSighting === undefined ? {} : { checkSighting: request.checkSighting }),
+        onProgress: reportProgress,
         ...(session.intent.kind === 'advance' ? { goalMetric: 'horizontal' as const, minimumAlong: session.intent.distance } : {}),
         allowed: session.intent.allowed,
         historical: session.intent.historical,
@@ -757,7 +781,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.progress.stagnationSegments = progressed ? 0 : session.progress.stagnationSegments + 1;
       }
       if (progressed) session.progress.lastProgressAt = Date.now();
-      ctx.progress(Math.min(1, executedSegments / request.maxSegments), `${session.intent.kind} ${executedSegments}/${request.maxSegments}`);
+      reportProgress();
       // 陆路在水边走不下去：委托允许下水时，下一轮先游一段，再从实测位置继续陆路。
       if (request.swim === true && !['reached_waypoint', 'replan', 'sighting', 'cancelled', 'timeout'].includes(segment.outcome)
         && closeReasonOf(session, after.pos, Date.now(), after.onGround, false) === null
@@ -849,6 +873,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
           maxTransitions: Math.max(1, Math.min(request.maxStepsPerSegment, session.budget.maxTransitions - session.counters.confirmedTransitions)),
           allowUnknownCorridor: request.allowUnknownCorridor,
+          onProgress: reportProgress,
           deadline,
           searchBudget: Math.max(0, session.budget.maxSearches - session.counters.idleSearches),
           ...(request.searchLimits === undefined ? {} : { searchLimits: request.searchLimits }),
@@ -859,6 +884,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         session.counters.confirmedTransitions += detour.confirmed.length;
         invocationTransitions += detour.confirmed.length;
         session.counters.confirmedRouteLength += detour.pathLength;
+        reportProgress();
         if (detour.outcome === 'cancelled') return 'cancelled';
         if (detour.confirmed.length === 0) {
           session.counters.idleSearches += detour.searches;
@@ -1263,7 +1289,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     }
     const editsBefore = makeWayEdits.length;
     const leg = await runMakeWay(ctx, {
-      steps, opts: makeWay, remainingEdits: makeWayEditBudget, edits: makeWayEdits, deadline,
+      steps, opts: makeWay, remainingEdits: makeWayEditBudget, edits: makeWayEdits, deadline, onProgress: reportProgress,
       nameAt: (cell) => {
         const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
         return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
@@ -1282,6 +1308,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     });
     makeWayLegs.push(leg);
     session.counters.makeWayLegs += 1;
+    reportProgress();
     // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
     if (leg.stale) { stop = null; continue; }
     if (leg.executed === 0) {

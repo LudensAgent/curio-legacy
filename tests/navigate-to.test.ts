@@ -26,6 +26,19 @@ function fill(
   }
 }
 
+/** 模拟服务器在第一步实测推进已确认后、下一步执行前把身体水平推移 dx；记录已上报的进度。 */
+function driftAfterFirstStep(adapter: FakeAdapter, dx: number) {
+  const fractions: number[] = [];
+  let drifted = false;
+  const progress = (fraction: number) => {
+    fractions.push(fraction);
+    if (drifted || fraction <= 0) return;
+    drifted = true;
+    adapter.pos = { ...adapter.pos, x: adapter.pos.x + dx };
+  };
+  return { progress, fractions, drifted: () => drifted };
+}
+
 function flatMap() {
   const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
   const air: { x: number; y: number; z: number }[] = [];
@@ -262,20 +275,15 @@ test('navigate_to 小偏差从实测脚位复验并到达原 cell 目标，计�
 test('navigate_to 已确认一步后在计划起点格列内偏移：从实测位置复验下一步几何，不重搜', async (t) => {
   const { adapter, ctx } = setup(flatMap());
   t.after(() => ctx.memory.close());
-  let drifted = false;
-  ctx.progress = (_fraction, detail) => {
-    // 模拟服务器在第一步落点已确认后、第二步执行前推移身体，仍在同一格列。
-    if (!drifted && detail === 'segment 1/3') {
-      drifted = true;
-      adapter.pos = { ...adapter.pos, x: adapter.pos.x + 0.2 };
-    }
-  };
+  const drift = driftAfterFirstStep(adapter, 0.2);
+  ctx.progress = drift.progress;
   const target = { x: 3, y: 64, z: 0 };
   const r = await navigateTo.run(ctx, {
     to: target, allowed: ['walk', 'step'], historical: false, maxSteps: 16, maxSegments: 4,
     allowUnknownCorridor: false,
   });
-  assert.equal(drifted, true, '测试确实发生段间漂移');
+  assert.equal(drift.drifted(), true, '测试确实发生段间漂移');
+  assert.ok(drift.fractions.every((f, i) => i === 0 || f >= drift.fractions[i - 1]!), `进度不倒退：${drift.fractions}`);
   assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(r.data?.requestedTarget, target, '不改原 cell 目标');
   assert.equal(r.data?.replanCount, undefined);
@@ -289,19 +297,15 @@ test('navigate_to 已确认一步后在计划起点格列内偏移：从实测�
 test('navigate_to 已确认一步后偏移出计划起点格列，下一步必须从实测位置重搜原目标', async (t) => {
   const { adapter, ctx } = setup(flatMap());
   t.after(() => ctx.memory.close());
-  let drifted = false;
-  ctx.progress = (_fraction, detail) => {
-    if (!drifted && detail === 'segment 1/3') {
-      drifted = true;
-      adapter.pos = { ...adapter.pos, x: adapter.pos.x - 0.6 };
-    }
-  };
+  const drift = driftAfterFirstStep(adapter, -0.6);
+  ctx.progress = drift.progress;
   const target = { x: 3, y: 64, z: 0 };
   const r = await navigateTo.run(ctx, {
     to: target, allowed: ['walk', 'step'], historical: false, maxSteps: 16, maxSegments: 4,
     allowUnknownCorridor: false,
   });
-  assert.equal(drifted, true, '测试确实发生段间漂移');
+  assert.equal(drift.drifted(), true, '测试确实发生段间漂移');
+  assert.ok(drift.fractions.every((f, i) => i === 0 || f >= drift.fractions[i - 1]!), `被推回也不倒退：${drift.fractions}`);
   assert.equal(r.status, 'succeeded', r.summary);
   assert.deepEqual(r.data?.requestedTarget, target, '重搜不改原 cell 目标');
   assert.equal(r.data?.replanCount, 1);

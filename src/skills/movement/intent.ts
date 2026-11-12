@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../../adapter/types.ts';
-import { goalFromIntent, goalReached } from './goal.ts';
+import { arrivalDistanceOf, goalFromIntent, goalReached } from './goal.ts';
 import type { CardinalDirection, MovementIntent, MovementProgress, MovementSession, StopReason } from './session.ts';
 
 /** 与世界方向一致：N=-Z、E=+X、S=+Z、W=-X。 */
@@ -40,6 +40,29 @@ export function progressOf(session: MovementSession, current: Vec3Like, sampledA
     stagnationSegments: session.progress.stagnationSegments,
     lastProgressAt: session.progress.lastProgressAt,
   };
+}
+
+/**
+ * 进度条口径的实测推进与说明：advance 用沿冻结方向的距离占比；navigate 用到目标距离的缩短占比，
+ * 距离口径跟随原到达条件（水平/三维）。这里不判断是否完成——到达半径与落地条件由调用方
+ * 按 goalReached 判定后直接报 1，避免“在半径内但未站稳”被写成已完成。
+ * 只读冻结意图与实测位置，不改动 session。
+ */
+export function progressMeterOf(session: MovementSession, current: Vec3Like): { fraction: number; note: string } {
+  const intent = session.intent;
+  if (intent.kind === 'advance') {
+    const along = Math.max(0, progressOf(session, current, Date.now()).along);
+    return { fraction: Math.min(1, along / intent.distance), note: `沿 ${intent.direction} 实测 ${along}/${intent.distance} 格` };
+  }
+  const { to, arrival } = intent;
+  const distanceTo = arrival === undefined
+    ? (p: Vec3Like) => Math.hypot(to.x - p.x, to.y - p.y, to.z - p.z)
+    : (p: Vec3Like) => arrivalDistanceOf(to, arrival.metric, p);
+  const total = distanceTo(session.frozenOrigin);
+  const left = distanceTo(current);
+  // 起点与目标同格（初始距离为 0）时没有“缩短占比”可言；是否完成只由 goalReached 决定。
+  const fraction = total <= 1e-6 ? 0 : Math.max(0, Math.min(1, 1 - left / total));
+  return { fraction, note: `距原目标${arrival?.metric === 'horizontal' ? '水平' : '直线'} ${round2(left)} 格` };
 }
 
 /**
