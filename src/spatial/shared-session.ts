@@ -572,7 +572,6 @@ export class SharedSpatialSession {
   private spooledCount = 0;
   /** 已从 spool 读出、但内存队列当时放不下的行；保持到达顺序等下一轮接收。 */
   private spoolCarry: string[] = [];
-  private spoolCarryGeneration = -1;
   /** 异步加载/派发路径保留的原始错误；不静默吞掉，也不改写成排队成功。 */
   private loadFailure: unknown | null = null;
   private loadFailureGeneration = -1;
@@ -988,7 +987,7 @@ export class SharedSpatialSession {
     const pending = this.pendingObservations();
     if (pending.observations === 0 && pending.spooled === 0) return null;
     return {
-      text: `空间记忆还有 ${pending.observations} 条观测待写入、${pending.spooled} 条在磁盘等待回放（这些格已看见，只是还没写进地图）`,
+      text: `空间记忆还有 ${pending.observations} 条观测待写入、${pending.spooled} 条等待回放（这些格已看见，只是还没写进地图）`,
       data: {
         pending: pending.observations,
         spooled: pending.spooled,
@@ -1241,7 +1240,6 @@ export class SharedSpatialSession {
       }
       this.spooledCount = 0;
       this.spoolCarry = [];
-      this.spoolCarryGeneration = -1;
       try {
         await this.spool?.clear();
       } catch (err) {
@@ -1653,7 +1651,6 @@ export class SharedSpatialSession {
     const spooled = this.spooledCount;
     this.spooledCount = 0;
     this.spoolCarry = [];
-    this.spoolCarryGeneration = -1;
     if (this.spool !== null) void this.spool.clear().catch((error: unknown) => this.setLoadFailure(error));
     if (this.pending.length === 0 && spooled === 0) return;
     const observations = this.pending.map((record) => record.observation);
@@ -1780,14 +1777,10 @@ export class SharedSpatialSession {
     const spool = this.spool;
     const scope = this.scope;
     if (spool === null || scope === null || this.pausedFlag || (!allowClosing && this.closingFlag)) return 0;
+    const generation = this.pendingGeneration;
     let lines: string[];
-    let generation = this.pendingGeneration;
     if (this.spoolCarry.length > 0) {
-      // 上一次读到但放不下的行；只按代校验，作用域字段在下面逐行核对。
-      if (this.spoolCarryGeneration !== generation) {
-        this.spoolCarry = [];
-        return 0;
-      }
+      // 上一次读到但放不下的行；换代时 invalidatePending 已清空 carry。
       lines = this.spoolCarry;
       this.spoolCarry = [];
     } else {
@@ -1798,23 +1791,20 @@ export class SharedSpatialSession {
       // 这些行；同一 session/dim 的重复 beginSession 只替换 scope 对象、代数不变，
       // 不能因此静默吞掉 spool。行内容仍按读取后的当前 scope 校验。
       lines = await spool.readChunk(Math.min(freeBytes, SPOOL_READ_BYTES), Math.min(freeCount, SPOOL_READ_RECORDS));
-      const current = this.scope;
-      if (current === null || generation !== this.pendingGeneration || this.pausedFlag
-        || (!allowClosing && this.closingFlag) || !this.admitted) {
-        // 作用域已换代：这些行属于旧代，已被 invalidatePending 计为丢弃；不再写入。
-        return 0;
-      }
     }
     const current = this.scope;
     if (current === null || generation !== this.pendingGeneration || this.pausedFlag
-      || (!allowClosing && this.closingFlag) || !this.admitted) return 0;
+      || (!allowClosing && this.closingFlag) || !this.admitted) {
+      // 作用域已换代：这些行属于旧代，已被 invalidatePending 计为丢弃；不再写入。
+      return 0;
+    }
     if (lines.length === 0) {
       await spool.compact();
       return 0;
     }
     let count = this.pending.length;
     let bytes = this.pendingBytes();
-    const admitted: PendingHandoff[] = [];
+    const accepted: PendingHandoff[] = [];
     let unusable = 0;
     let consumed = 0;
     let carryFrom = lines.length;
@@ -1831,21 +1821,20 @@ export class SharedSpatialSession {
         carryFrom = index;
         break;
       }
-      admitted.push({ observation: parsed, bytes: size, generation, sessionId: current.sessionId, dim: current.dim });
+      accepted.push({ observation: parsed, bytes: size, generation, sessionId: current.sessionId, dim: current.dim });
       bytes += size;
       count += 1;
       consumed += 1;
     }
     this.spoolCarry = lines.slice(carryFrom);
-    this.spoolCarryGeneration = generation;
     this.spooledCount = Math.max(0, this.spooledCount - consumed);
     if (unusable > 0) this.recordDiscarded('scope', [], unusable);
-    this.pending.push(...admitted);
-    if (admitted.length > 0) this.noteHandoffProgress();
+    this.pending.push(...accepted);
+    if (accepted.length > 0) this.noteHandoffProgress();
     // 还有未接收的行（spoolCarry）时不能压缩，否则文件里已读部分被删除而内存
     // 尚未接住；等 carry 清空后再回收。
     if (this.spoolCarry.length === 0) await spool.compact();
-    return admitted.length;
+    return accepted.length;
   }
 
   private pendingBytes(): number {

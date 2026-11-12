@@ -100,7 +100,7 @@ test('队列溢出落到 spool，drain 按到达顺序回放且不丢证据', { 
       assert.ok(pending.spooledBytes > 0);
       await new Promise<void>((resolve) => setTimeout(resolve, 300));
       assert.ok(existsSync(`${dbPath}.handoff.jsonl`), 'spool 缓冲应异步落盘，不在物理帧里写盘');
-      assert.match(shared.backlogNote()?.text ?? '', /44 条在磁盘等待回放/);
+      assert.match(shared.backlogNote()?.text ?? '', /44 条等待回放/);
 
       await shared.drainObservations({ deadline: Date.now() + 5000 });
       const after = shared.pendingObservations();
