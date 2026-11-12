@@ -105,8 +105,13 @@ export const guard: Skill<{ seconds: number; target?: string; back?: boolean }> 
         senses.refresh();
         const foe = senses.perceivedEntities(16).filter((e) => args.target ? e.name === args.target : e.kind === 'hostile').sort((a, b) => a.dist - b.dist)[0];
         if (foe) faced = `${foe.name} ${Math.round(foe.dist)} 格`;
-        if (adapter.drive) await adapter.drive(args.back ? { back: true } : {}, Math.min(500, end - Date.now()), signal, foe ? { faceEntity: foe.id } : {});
-        else await sleep(Math.min(500, end - Date.now()), signal);
+        // 这一段按秒计，每次推进只负责一拍。被身体本能拦住（前方岩浆/火/悬崖）时 drive 会立刻返回，
+        // 不能再靠它消耗时间：自己补回这一拍，否则整个举盾时长都变成原地空转占满主线程。
+        const beat = Math.min(500, end - Date.now());
+        if (adapter.drive) {
+          const moved = await adapter.drive(args.back ? { back: true } : {}, beat, signal, foe ? { faceEntity: foe.id } : {});
+          if (moved.stopped) await sleep(beat, signal);
+        } else await sleep(beat, signal);
       }
     } catch (e) {
       if (isAbort(e)) { try { await adapter.raiseShield(false, AbortSignal.timeout(1000)); } catch { /* ignore */ } throw e; }

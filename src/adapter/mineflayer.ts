@@ -3272,6 +3272,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let portalCenter: Vec3Like | null = null;
     let last = this.bot?.entity?.position?.clone?.() ?? null;
     let still = 0;
+    const burstStill = { count: 0 };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (!this.ready) return { left: false, dimChanged: false, interrupted: true, noExit: false };
@@ -3302,7 +3303,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         portalCenter = portalBlock ? { x: portalBlock.x + 0.5, y: portalBlock.y + 0.5, z: portalBlock.z + 0.5 } : portalCenter;
         out = { x: approach.cell.x + 0.5, y: approach.cell.y + 1.0, z: approach.cell.z + 0.5 };
       }
-      await this.drive({ forward: true }, 150, signal, { facePoint: out });
+      const burst = await this.driveBurst({ forward: true }, 150, signal, { facePoint: out }, burstStill);
+      if (!burst.go) break;
     }
     const left = !this.bodyInPortal(kind);
     // 站稳后朝远离门的方向：普通前进（press_keys forward）不会立刻又踩回门里。
@@ -3344,6 +3346,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     let enteredAt: number | null = startedInPortal ? startedAt : null; // 本次连续停留的起点
     let everEntered = startedInPortal;       // 这次尝试里是否进过门（离开后仍保留）
     let inPortal = startedInPortal;          // 此刻是否在门方块里
+    // 接近段被身体本能拒绝的原因；有它就不再空耗后面的等待期限。
+    let approachBlocked: DriveResult['stopped'] | 'no-progress' | null = null;
     const markEntered = () => { if (enteredAt === null) enteredAt = Date.now(); inPortal = true; everEntered = true; };
     const markLeft = () => { if (inPortal) lastExitAt = Date.now(); inPortal = false; enteredAt = null; };
     const facts = (endDim: string): PortalTransitionFacts => ({
@@ -3402,6 +3406,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             return !!p && Math.hypot(p.x - stanceCenter.x, p.z - stanceCenter.z) <= 0.45 && p.y >= stanceCenter.y - 0.05;
           };
           const walkDeadline = Date.now() + 8000;
+          const walkStill = { count: 0 };
           while (!atStance() && !this.bodyInPortal(name) && Date.now() < walkDeadline) {
             throwIfAborted(signal);
             const cur = this.transitionProbe();
@@ -3410,9 +3415,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             if (!body?.position || Math.hypot(body.position.x - stanceCenter.x, body.position.z - stanceCenter.z) > 6) break;
             const lower = !!body.onGround && body.position.y < stanceCenter.y - 0.4;
             const blocked = body.isCollidedHorizontally === true;
-            await this.drive({ forward: true, ...(lower || blocked ? { jump: true } : {}) }, 250, signal, { facePoint: { x: stanceCenter.x, y: stanceCenter.y + 1.6, z: stanceCenter.z } });
+            const burst = await this.driveBurst({ forward: true, ...(lower || blocked ? { jump: true } : {}) }, 250, signal, { facePoint: { x: stanceCenter.x, y: stanceCenter.y + 1.6, z: stanceCenter.z } }, walkStill);
+            if (!burst.go) { approachBlocked = burst.stopped ?? 'no-progress'; break; }
           }
           const stepDeadline = Date.now() + 12000;
+          const stepStill = { count: 0 };
           while (Date.now() < stepDeadline) {
             throwIfAborted(signal);
             const cur = this.transitionProbe();
@@ -3423,22 +3430,33 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
             // 门前站位比身体高一级（草地接门框黑曜石等）时，像玩家一样跳上去；只推前进键会一直顶在台阶上。
             const body = this.bot?.entity;
             const below = !!body?.onGround && body.position.y < approach.cell.y - 0.4;
-            await this.drive({ forward: true, ...(below ? { jump: true } : {}) }, 350, signal, { facePoint: approach.center });
+            const burst = await this.driveBurst({ forward: true, ...(below ? { jump: true } : {}) }, 350, signal, { facePoint: approach.center }, stepStill);
+            if (!burst.go) { approachBlocked = burst.stopped ?? 'no-progress'; break; }
           }
         } else {
           // 没有可站立的接近格（门贴着崖/墙）：走到门附近再短促朝门洞中心冲，让身体落进门格
           await this.moveTo({ kind: 'near', pos, range: 1.5 }, { signal, timeoutMs: 20000 });
           const center = { x: pos.x + 0.5, y: pos.y + 0.5, z: pos.z + 0.5 };
           const stepDeadline = Date.now() + 12000;
+          const stepStill = { count: 0 };
           while (Date.now() < stepDeadline) {
             throwIfAborted(signal);
             const cur = this.transitionProbe();
             if (!cur.connected || !cur.alive) return { ok: false, reason: 'TRANSITION_INTERRUPTED' };
             if (cur.dim !== from.dim) break;
             if (this.bodyInPortal(name)) { markEntered(); break; }
-            await this.drive({ forward: true }, 350, signal, { facePoint: center });
+            const burst = await this.driveBurst({ forward: true }, 350, signal, { facePoint: center }, stepStill);
+            if (!burst.go) { approachBlocked = burst.stopped ?? 'no-progress'; break; }
           }
         }
+      }
+      // 身体本能拒绝接近（前方岩浆/火/悬崖）且身体没进门：重试同一条指令不会改变结果，
+      // 后面的 30 秒等待也等不到维度切换。把受阻原因交回心智，由它决定换站位、换门还是别的做法。
+      if (approachBlocked && this.currentDimension() === from.dim && !this.bodyInPortal(name)) {
+        markLeft();
+        const transition = facts(this.currentDimension());
+        trace(transition);
+        return { ok: false, reason: `ENTRY_BLOCKED:${approachBlocked}`, from, transition };
       }
       const deadline = Date.now() + 30000;
       while (Date.now() < deadline) {
@@ -4527,6 +4545,19 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     }
     const moved = Math.round(b.entity.position.distanceTo(start) * 100) / 100;
     return { ok: !stopped, ...(stopped ? { reason: stopped === 'lava' ? 'HAZARD' : 'CLIFF', stopped } : {}), moved, ms: Date.now() - t0 };
+  }
+
+  /**
+   * 推进一拍，并判断还值不值得再推一拍。
+   * drive 被身体本能拒绝（前方岩浆、火、悬崖）时会立刻返回，靠它消耗时间的推进循环因此在
+   * 整段期限里原地空转：实测下界门口空转 8 秒占满主线程，服务器按读超时把连接踢掉。
+   * 连续几拍都没有实测位移就停手，把受阻事实交回调用方——重试同一条被拒的指令不会得到新结果。
+   */
+  private async driveBurst(keys: DriveKeys, ms: number, signal: AbortSignal, opts: DriveOptions, still: { count: number }): Promise<{ go: boolean; stopped?: DriveResult['stopped'] }> {
+    const res = await this.drive(keys, ms, signal, opts);
+    if (!res.stopped && res.moved >= 0.05) { still.count = 0; return { go: true }; }
+    still.count += 1;
+    return { go: still.count < 5, ...(res.stopped ? { stopped: res.stopped } : {}) };
   }
 
   async raiseShield(on: boolean, signal: AbortSignal): Promise<ActionResult> {
