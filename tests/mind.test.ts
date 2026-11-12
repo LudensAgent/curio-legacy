@@ -179,7 +179,7 @@ test('a stopping condition records its actual evidence rather than claiming the 
   assert.equal(lesson.wins, 0, 'a stopping condition is not proof that the described task succeeded');
 });
 
-test('开工前已成立的 done_when 不能验收目标：活动记为 attempted，资源目标仍未完成', async (t) => {
+test('开工前已成立的 done_when 不能验收目标：活动记为 attempted，不编造资源结论', async (t) => {
   const w = fixture(t);
   w.adapter.inv.set('stone_axe', 1);
   await w.tick();
@@ -193,9 +193,8 @@ test('开工前已成立的 done_when 不能验收目标：活动记为 attempte
   const end = w.bus.recent().slice().reverse().find((event) => event.type === 'attempt_end');
   assert.equal(end?.data?.completion, 'attempt');
   assert.equal(end?.data?.status, 'attempted');
-  assert.equal((end?.data?.resource as { goalIncomplete?: boolean } | undefined)?.goalIncomplete, true);
+  assert.equal(end?.data?.resource, undefined, '没有显式资源目标时不做资源结论');
   assert.match(end?.msg ?? '', /有界尝试/);
-  assert.match(end?.msg ?? '', /资源目标未完成/);
 });
 
 test('计划说走远找树但只有观察/采集：活动开始时报告计划覆盖缺口', async (t) => {

@@ -328,9 +328,20 @@ type VoxelLike = { cellAt(dim: string, x: number, y: number, z: number): CellVie
 
 /** 这条边界相关格的内容证据版本：无关视觉刷新不改变它，相关格变化才改变。 */
 function boundaryEvidenceKeyOf(voxel: VoxelLike, dim: string, boundary: LandSearchBoundary): string {
+  const supportCells = (p: Vec3Like) => {
+    // 搜索边界给出的 supportColumn 是它实际读过的支撑 y 范围；必须整段纳入签名，
+    // 否则后台补看了列内另一格，仍会被当成“同证据”。
+    if (boundary.supportColumn === undefined) return supportCellsUnder(p);
+    const cells: Vec3Like[] = [];
+    for (let y = boundary.supportColumn.minY; y <= boundary.supportColumn.maxY; y++) {
+      for (let x = Math.floor(p.x - 0.3 + 1e-6); x <= Math.floor(p.x + 0.3 - 1e-6); x++)
+        for (let z = Math.floor(p.z - 0.3 + 1e-6); z <= Math.floor(p.z + 0.3 - 1e-6); z++) cells.push({ x, y, z });
+    }
+    return cells;
+  };
   const endpoints = [boundary.from, boundary.to].flatMap((p) => {
     const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
-    return [{ x, y, z }, { x, y: y + 1, z }, { x, y: y - 1, z }, ...supportCellsUnder(p)];
+    return [{ x, y, z }, { x, y: y + 1, z }, { x, y: y - 1, z }, ...supportCells(p)];
   });
   // 扫掠身体会碰到的邻列也要算进证据版本；端点六格不足以覆盖实际依赖。
   const cells = [...endpoints, ...sweptBodyCells(boundary.from, boundary.to)];
@@ -344,6 +355,11 @@ function boundaryEvidenceKeyOf(voxel: VoxelLike, dim: string, boundary: LandSear
 /** 具体边的身份：冲突只对复核过的这条边成立，不能污染另一条边。 */
 function edgeKeyOf(boundary: LandSearchBoundary): string {
   return `${boundary.kind}|${boundary.from.x},${boundary.from.y},${boundary.from.z}|${boundary.to.x},${boundary.to.y},${boundary.to.z}`;
+}
+
+/** 冲突绑定“边 + 相关证据版本”：后台更新同一条边的证据后，旧 OPEN 标记不能污染新结论。 */
+function contradictionKeyOf(boundary: LandSearchBoundary, voxel: VoxelLike, dim: string): string {
+  return `${edgeKeyOf(boundary)}|ev:${boundaryEvidenceKeyOf(voxel, dim, boundary)}`;
 }
 
 /** 边界去重键含观察者所在格与相关格证据版本：换站位或相关格变化才是新的证据。 */
@@ -686,7 +702,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (!searchSawNewEvidence && count > MAX_SAME_EVIDENCE_SEARCHES) {
           const edge = segment.boundary === undefined ? '' : `（边界 ${cellText(segment.boundary.from)}→${cellText(segment.boundary.to)}）`;
           // 冲突必须绑定到复验过的那条边；换了边就只是新的未知边界。
-          const contradicted = segment.boundary !== undefined && searchContradictedFor === edgeKeyOf(segment.boundary);
+          const contradicted = segment.boundary !== undefined && searchContradictedFor === contradictionKeyOf(segment.boundary, voxel, scope.dim);
           stop = stopOf(contradicted ? 'CONFLICT' : 'UNKNOWN_BOUNDARY', `同一站位 ${cellText(after.pos)}、同一相关证据下搜索仍返回 ${segment.searchStatus}${edge}`
             + `；${contradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播，下一步由你决定`,
             { ...(segment.boundary === undefined ? {} : { boundaries: [segment.boundary] }) });
@@ -766,7 +782,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         invocationTransitions += detour.confirmed.length;
         session.counters.confirmedRouteLength += detour.pathLength;
         if (detour.outcome === 'cancelled') return 'cancelled';
-        if (detour.confirmed.length === 0) { session.counters.idleSearches += detour.searches; return 'none'; }
+        if (detour.confirmed.length === 0) {
+          session.counters.idleSearches += detour.searches;
+          idleSearchesSinceProgress += detour.searches;
+          return 'none';
+        }
         if (idleSearchesSinceProgress > 0) {
           session.counters.idleSearches = Math.max(0, session.counters.idleSearches - idleSearchesSinceProgress);
           idleSearchesSinceProgress = 0;
@@ -827,6 +847,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           // 存储忙不是“没走出一步”的身体事实：不计入无进展段与无位移搜索。
           session.progress.stagnationSegments = Math.max(0, session.progress.stagnationSegments - 1);
           session.counters.idleSearches = Math.max(0, session.counters.idleSearches - segment.searches);
+          idleSearchesSinceProgress = Math.max(0, idleSearchesSinceProgress - segment.searches);
           await sleep(RESIDENCY_RETRY_MS, ctx.signal);
           session.phase = 'replanning';
           continue;
@@ -980,7 +1001,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (canProceed()) {
           // 同一条边在最新证据下已 OPEN，但这次搜索仍说证据不足/无路：记录矛盾事实，
           // 允许再搜一次；仍不一致时按 CONFLICT 交回，而不是无限重播。
-          if (boundary !== undefined) searchContradictedFor = edgeKeyOf(boundary);
+          if (boundary !== undefined) searchContradictedFor = contradictionKeyOf(boundary, voxel, scope.dim);
           session.phase = 'replanning';
           continue;
         }

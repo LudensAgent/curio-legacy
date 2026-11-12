@@ -1199,7 +1199,16 @@ export class Mind {
     // 停滞按维度独立累计；旧记录没有 dim 时无法归维，仍参与计数。
     const relevant = this.noProgressRuns.filter((run) => run.dim === undefined || run.dim === currentDim);
     if (relevant.length < Mind.PROGRESS_GATE_ACTIVITIES) return;
-    if (this.progressGate || this.review || now < this.dangerUntil || this.order || this.userSuggestion) return;
+    if (this.progressGate) {
+      // 闸门已经开着：把当前维度新累计的重复签名并进去，换维后同区域重复仍会被退回。
+      const known = new Set(this.progressGate.signatures);
+      for (const run of relevant) {
+        const key = run.sourceKey ?? run.signature;
+        if (!known.has(key)) { known.add(key); this.progressGate.signatures.push(key); }
+      }
+      return;
+    }
+    if (this.review || now < this.dangerUntil || this.order || this.userSuggestion) return;
     if (now - this.lastProgressGateAt < Mind.PROGRESS_GATE_COOLDOWN_MS) return;
     const activities = relevant.slice(-Mind.PROGRESS_GATE_ACTIVITIES)
       .map(({ what, outcome, summary }) => ({ what, outcome, summary: summary.slice(0, 120) }));

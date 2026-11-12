@@ -195,7 +195,10 @@ export interface ActivityRecord {
   operationCompleted?: boolean;
   /** 资源型活动的定位/取得/上层目标状态；从活动目标、执行回执和背包变化算，不靠模型口述。 */
   resource?: {
-    intent: boolean; targets?: string[]; located: boolean;
+    intent: boolean;
+    /** find=只要找到/看见；gather=要拿到物品。 */
+    mode?: 'find' | 'gather';
+    targets?: string[]; located: boolean;
     /** null 表示活动没有点名目标、现场也没有足够证据判断是否取得。 */
     acquired: boolean | null; goalIncomplete: boolean;
   };

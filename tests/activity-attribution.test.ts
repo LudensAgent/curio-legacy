@@ -27,7 +27,7 @@ test('开路副产物不自动变成资源取得，也不把隧道施工报成�
 test('标题点名的目标只用实际产物验收，挖掘动作本身不证明取得目标', () => {
   const a = createActivity({
     what: '找铁矿', why: '', kind: 'explore', repeat: 1,
-    steps: [{ skill: 'mine_cell', args: { at: [0, 0, 1] } }],
+    steps: [{ skill: 'gather', args: { block: 'iron_ore', count: 3 } }],
   }, '', 'llm', state());
   a.results.push({
     skill: 'mine_cell', args: {}, status: 'succeeded', summary: '挖掉一格', at: Date.now(), durationMs: 10,
@@ -35,7 +35,7 @@ test('标题点名的目标只用实际产物验收，挖掘动作本身不证�
   });
   const record = recordOf(a, 'done', '只挖到地狱岩', state([{ name: 'netherrack', count: 1 }]));
   assert.equal(record.resource?.intent, true);
-  assert.deepEqual(record.resource?.targets, ['iron']);
+  assert.deepEqual(record.resource?.targets, ['iron_ore']);
   assert.equal(record.resource?.acquired, false, '标题说要铁，挖到地狱岩不能冒充取得');
   assert.equal(record.resource?.goalIncomplete, true, '资源意图还在，但没有可确认的取得');
 });
@@ -120,4 +120,45 @@ test('混合施工+移动不因标题材料词产生资源目标；嵌套条件�
   }, '', 'llm', state([{ name: 'cobblestone', count: 1 }]));
   const nestedRecord = recordOf(nested, 'stuck', '没拿到铁', state());
   assert.ok(nestedRecord.resource?.targets?.includes('iron_ingot'), 'all_of 里的资源目标要递归提取');
+});
+
+test('标题里的工具/耗材词不参与资源目标推断', () => {
+  const tunnel = createActivity({
+    what: '用铁镐向北挖通通道', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'excavate_run', args: { direction: 'N', mode: 'tunnel', steps: 16, tool: 'iron_pickaxe' } }],
+  }, '', 'llm', state());
+  assert.equal(recordOf(tunnel, 'done', '挖了 16 格', state()).resource, undefined, '铁镐不是取得目标');
+
+  const patch = createActivity({
+    what: '补木板后继续挖两格', why: '', kind: 'build', repeat: 1,
+    steps: [{ skill: 'place_support', args: { item: 'oak_planks' } }, { skill: 'excavate_run', args: { direction: 'N', steps: 2 } }],
+  }, '', 'llm', state([{ name: 'oak_planks', count: 1 }]));
+  assert.equal(recordOf(patch, 'done', '补好并挖了两格', state()).resource, undefined, '木板是耗材');
+});
+
+test('explore_toward.until 进入目标记录，未发现时留下目标缺口', () => {
+  const a = createActivity({
+    what: '向北探索找下界砖', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks|log' } }],
+  }, '', 'llm', state());
+  a.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '走了 96 格，没看见目标', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -95.5 }, data: { travelled: 96, found: undefined } });
+  const record = recordOf(a, 'done', '走到 96 格', state());
+  assert.deepEqual(record.resource?.targets, ['nether_bricks', 'log']);
+  assert.equal(record.resource?.located, false);
+  assert.equal(record.resource?.goalIncomplete, true, '有 until 目标但没发现，记录为缺口');
+});
+
+test('只找不取的 until 目标以“看见”验收，找到后不算未完成', () => {
+  const a = createActivity({
+    what: '向北探索找下界砖', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks' } }],
+  }, '', 'llm', state());
+  a.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '看见下界砖', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -50.5 }, data: { travelled: 50, found: 'nether_bricks' } });
+  const record = recordOf(a, 'done', '看见下界砖', state());
+  assert.equal(record.resource?.mode, 'find');
+  assert.equal(record.resource?.located, true);
+  assert.equal(record.resource?.acquired, null);
+  assert.equal(record.resource?.goalIncomplete, false, '看见目标即完成寻找类目标');
 });

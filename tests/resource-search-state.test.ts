@@ -13,7 +13,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const P = (x = 0.5, y = 64, z = 0.5) => ({ x, y, z });
 const TASK_FACT_KEYS = new Set(['noProgressRuns', 'lastLocalFailure', 'lastSourceSwitch', 'lastRegionExpansion']);
-const TASK_FACT_RUN_KEYS = new Set(['at', 'signature', 'sourceKey', 'what', 'outcome', 'summary']);
+const TASK_FACT_RUN_KEYS = new Set(['at', 'dim', 'signature', 'sourceKey', 'what', 'outcome', 'summary']);
 const FORBIDDEN_SPATIAL_KEYS = /^(cells?|voxels?|fragments?|traversals?|nodes?|edges?|blocks?|blockStates?|containers?|containerContents|items?|slots?|geometry|shapes?|observations?|polyline)$/i;
 
 /** Curio 任务事实只能有搜索状态；格点/几何/容器内容仍归共享空间库。 */
@@ -71,7 +71,7 @@ test('局部 look_around 未见只否定这次观察，不推出区域/维度为
   assert.equal(record.exploration?.maxHorizontal, 0);
   assert.equal(record.exploration?.visitedCells, 1);
   assert.equal(record.resource?.located, false);
-  assert.equal(record.resource?.acquired, false);
+  assert.equal(record.resource?.acquired, null, '寻找类目标没有取得语义');
   assert.equal(record.resource?.goalIncomplete, true, '资源目标未完成只是缺口，不是“区域没有资源”');
   assert.match(planCoverageGap(look) ?? '', /不能当作远行或远处搜索/);
 
@@ -284,12 +284,12 @@ test('空间历史仍由共享空间库承担，Curio 任务事实不复制格�
 test('Overworld↔Nether 局部未见循环不算进展：两个维度的同区域重复都被拒', () => {
   const h = searchHarness({ dim: 'overworld', pos: P(0.5, 64), chunks: 0 });
   const miss = { outcome: 'done', gained: {}, summary: '视野内未见 oak_log' };
-  for (let i = 0; i < 4; i++) h.mind.noteProgressOutcome(h.activity(), miss, false);
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) h.mind.noteProgressOutcome(h.activity(), miss, false);
   h.goto('the_nether', P(0.5, 70, 0.5));
-  for (let i = 0; i < 4; i++) h.mind.noteProgressOutcome(h.activity(), miss, false);
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) h.mind.noteProgressOutcome(h.activity(), miss, false);
 
   const runs = h.self.taskFacts().noProgressRuns ?? [];
-  assert.equal(runs.length, 8);
+  assert.equal(runs.length, Mind.PROGRESS_GATE_ACTIVITIES * 2);
   assert.deepEqual([...new Set(runs.map((run) => run.sourceKey!.split('|')[4]))].sort(), ['overworld', 'the_nether'], '换维没有清空无进展记录');
   assert.ok(h.mind.progressGate);
 

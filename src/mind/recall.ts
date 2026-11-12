@@ -52,10 +52,10 @@ export function recallLocal(query: string, src: RecallSources, opts: {
   const fresh = (at: number) => at && now - at < 30 * 60_000 ? 0.6 : at && now - at < 3 * 3600_000 ? 0.3 : 0;
   const hide = new Set(opts.excludeRefs ?? []);
   // 已经在提示词别处出现的不重复；技能要更相关才算想起来（只沾一两个字的建筑说明不算）
-  const push = (r: Omit<Recalled, 'score'>, base: number, at = 0) => {
+  const push = (r: Omit<Recalled, 'score'>, base: number, at = 0, floor = r.kind === 'skill' ? 3 : 2) => {
     if (r.ref && hide.has(r.ref)) return;
     const observedAt = ['know_how', 'lesson', 'diary'].includes(r.kind) || r.kind === 'note' && r.source !== 'note:fact' ? 0 : at || undefined;
-    if (base >= (r.kind === 'skill' ? 3 : 2)) {
+    if (base >= floor) {
       const match = matchOf(r.text);
       // 目标/执行缺口是当前要用的，历史方法只有在更相关时才排在前面。
       const weight = match === 'current_goal' ? 1.25 : match === 'execution_gap' ? 1.15 : 1;
@@ -79,11 +79,10 @@ export function recallLocal(query: string, src: RecallSources, opts: {
       : '';
     const limits = k.limits?.length ? `，边界：${k.limits.slice(0, 2).join('；')}` : '';
     const source = k.source === 'observed' ? '亲眼观察' : k.source === 'experiment' ? '实验' : '反思';
-    // 最近一次应用失败且仍有未消解的反例：默认注入时再降权；历史仍可主动查。
-    const recent = k.applications?.at(-1);
-    const contested = recent !== undefined && recent.outcome !== 'done' && (k.counterexamples?.length ?? 0) > 0;
+    // 未消解的反例多于确认成功（wins 已排除 attempt/原地/搜索未确认）：默认注入时降权；历史仍可主动查。
+    const contested = (k.counterexamples?.length ?? 0) > k.wins;
     push({ kind: 'know_how', text: `${cleanLesson(k.text)}（成${k.wins}/败${k.losses}${k.unverified === true ? '，未验证' : ''}，来源${source}${applied}${counter}${limits}）`, ref: k.id, source: `know_how:${k.id}` },
-      score(k.text, k.tags) * (0.6 + trust) * (contested ? 0.55 : 1), k.updatedAt);
+      score(k.text, k.tags) * (0.6 + trust) * (contested ? 0.55 : 1), k.updatedAt, contested ? 0.5 : 2);
   }
   if (!skip.has('lesson')) {
     // addLesson 以 know_how:<id> 存的副本只是主窍门通道的镜像；主条目被合并/改写/删除后，

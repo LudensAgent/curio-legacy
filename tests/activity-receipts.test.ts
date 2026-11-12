@@ -71,7 +71,7 @@ test('收工条件不能验收目标时记为有界尝试，资源目标未完�
   assert.equal(record.completion, 'attempt');
   assert.equal(record.operationCompleted, true);
   assert.equal(record.resource?.intent, true);
-  assert.equal(record.resource?.acquired, false);
+  assert.equal(record.resource?.acquired, null, 'find_item 是寻找类目标，没有取得语义');
   assert.equal(record.resource?.goalIncomplete, true);
   const described = describeActivity(a, state());
   assert.match(String(described.attempt_only), /不能用来验收目标/);
@@ -83,7 +83,7 @@ test('查询记录/到达都不算定位资源；真正看见或采到才算', (
   queryOnly.results.push({ skill: 'find_item', args: {}, status: 'succeeded', summary: '记录里没有', at: Date.now(), durationMs: 2, pos: { ...pos } });
   const noSource = recordOf(queryOnly, 'done', '查询完成', state());
   assert.equal(noSource.resource?.located, false);
-  assert.equal(noSource.resource?.acquired, false);
+  assert.equal(noSource.resource?.acquired, null);
   assert.equal(noSource.resource?.goalIncomplete, true);
 
   const looked = make('找木料', [{ skill: 'look_around', args: { for: 'oak_log' } }]);

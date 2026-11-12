@@ -222,7 +222,7 @@ test('EX-2a 局部未见 ≠ 区域/维度缺失；同区域重复观察 ≠ 进
   assert.equal(record.exploration?.localOnly, true, '原地观察只能算局部覆盖');
   assert.equal(record.exploration?.maxHorizontal, 0, '只在一个格内观察，不能算远处覆盖');
   assert.equal(record.resource?.located, false);
-  assert.equal(record.resource?.acquired, false);
+  assert.equal(record.resource?.acquired, null, '寻找类目标没有取得语义');
   assert.equal(record.resource?.goalIncomplete, true, '局部未见只是缺口，不是区域/维度为空');
 
   const { mind, self, activity } = searchHarness();

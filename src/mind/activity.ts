@@ -943,61 +943,59 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   return { kind: 'stuck', why: clipFeedback(result.summary) };
 }
 
-/** 资源型活动：步骤、标题或收工条件在要某样东西。只用于回执分类，不替 Agent 选资源。 */
+/** 资源型活动：步骤或收工条件明确在要某样东西。只用于回执分类，不替 Agent 选资源。 */
 const RESOURCE_SKILLS = new Set(['gather', 'forage', 'hunt', 'fish', 'farm', 'take_items', 'craft', 'smelt']);
-const RESOURCE_WORDS = /木料|原木|木板|木棍|菌柄|木头|矿石|铁|煤|钻石|食物|材料|资源|gather|mine|wood|log|plank|stick|ore|iron|coal|diamond/i;
 const SEARCH_SKILLS = new Set(['look_around', 'gather', 'forage', 'hunt', 'fish', 'find_item', 'expedition']);
 const SEARCH_WORDS = /找|搜索|搜寻|探|扫|环顾|查看|look|search|explore|scout/i;
 
-/** 只有这些动作的参数是在“要拿到/找到某物”；放置、装备、使用物品的参数是耗材或持物。 */
-const ACQUISITION_ARGS: Readonly<Record<string, readonly ('item' | 'block' | 'find' | 'for' | 'name')[]>> = {
-  gather: ['item', 'block'], forage: ['item', 'block'], hunt: ['item', 'name'], fish: ['item'],
-  farm: ['item', 'block'], take_items: ['item'], craft: ['item'], smelt: ['item'],
-  find_item: ['item'], look_around: ['for'], expedition: ['find'], mine_cell: ['block'],
+/**
+ * 只有这些动作的参数是在点名目标；放置、装备、使用物品的参数是耗材或持物。
+ * mode=acquire 要拿到物品；mode=search 只要找到/看见对象。
+ */
+const ACQUISITION_ARGS: Readonly<Record<string, {
+  keys: readonly ('item' | 'block' | 'find' | 'for' | 'name' | 'until')[];
+  mode: 'acquire' | 'search';
+}>> = {
+  gather: { keys: ['item', 'block'], mode: 'acquire' }, forage: { keys: ['item', 'block'], mode: 'acquire' },
+  hunt: { keys: ['item', 'name'], mode: 'acquire' }, fish: { keys: ['item'], mode: 'acquire' },
+  farm: { keys: ['item', 'block'], mode: 'acquire' }, take_items: { keys: ['item'], mode: 'acquire' },
+  craft: { keys: ['item'], mode: 'acquire' }, smelt: { keys: ['item'], mode: 'acquire' },
+  mine_cell: { keys: ['block'], mode: 'acquire' },
+  find_item: { keys: ['item'], mode: 'search' }, look_around: { keys: ['for'], mode: 'search' },
+  expedition: { keys: ['find'], mode: 'search' }, explore_toward: { keys: ['until'], mode: 'search' },
 };
-const ACQUISITION_SKILLS = new Set(Object.keys(ACQUISITION_ARGS));
-/** 只消耗/放置而不取得资源的动作：标题里的材料词是耗材，不是目标。 */
-const CONSUMING_SKILLS = new Set(['place_cell', 'place_support', 'pillar_one', 'equip', 'use_item', 'eat', 'store_items', 'drop_item', 'toss_item']);
-/** 只有标题在说要“找/采/挖/取得”时才把资源词当目标；施工、补给、赶路不算。 */
-const ACQUIRE_WORDS = /找|寻找|搜|采|挖|砍|收集|获取|拿|获得|gather|mine|collect|find|get|search/i;
-/** 标题里常见的资源词到目标类别；只在标题确有取得/寻找意图时使用。 */
-const TEXT_RESOURCE_TARGETS: readonly (readonly [RegExp, string])[] = [
-  [/原木|木头|木料|菌柄|log|wood/i, 'log'], [/木板|plank/i, 'plank'], [/木棍|stick/i, 'stick'],
-  [/铁|iron/i, 'iron'], [/煤|coal/i, 'coal'], [/钻石|diamond/i, 'diamond'], [/金|gold/i, 'gold'], [/铜|copper/i, 'copper'],
-  [/圆石|cobblestone/i, 'cobblestone'], [/石头|stone/i, 'stone'],
-];
-
-/** 活动明确点名要的资源；只读取得/寻找类动作的参数，不把耗材或交互对象当目标。 */
-function resourceTargetsOf(a: Activity): string[] {
-  const targets = new Set<string>();
-  const add = (value: unknown) => {
+/** 活动明确点名要的资源；只读显式条件与取得/寻找类动作的参数，标题不参与推断。 */
+function resourceTargetsOf(a: Activity): { targets: string[]; acquire: string[]; search: string[] } {
+  const acquire = new Set<string>(), search = new Set<string>();
+  const add = (value: unknown, into: Set<string>) => {
     if (typeof value !== 'string') return;
-    const name = value.trim().replace(/^minecraft:/, '');
-    if (name && name !== 'any') targets.add(name);
+    for (const part of value.split('|')) {
+      const name = part.trim().replace(/^minecraft:/, '');
+      if (name && name !== 'any') into.add(name);
+    }
   };
   const addCondition = (condition: Activity['doneWhen'] | null | undefined) => {
     if (!condition) return;
-    if (condition.type === 'inventory_min') add(condition.item);
-    else if (condition.type === 'exploration') add(condition.find);
+    if (condition.type === 'inventory_min') add(condition.item, acquire);
+    else if (condition.type === 'exploration') add(condition.find, search);
     else if (condition.type === 'all_of' || condition.type === 'any_of') condition.conditions.forEach(addCondition);
   };
   addCondition(a.doneWhen);
-  // 标题里的资源词只在标题确有取得/寻找意图时才算目标；纯放置/补给/赶路活动不补目标。
-  if (ACQUIRE_WORDS.test(a.what)) for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
   for (const step of a.steps) {
+    const spec = ACQUISITION_ARGS[step.skill];
+    if (!spec) continue;
     const args = step.args as Record<string, unknown> | undefined;
-    for (const key of ACQUISITION_ARGS[step.skill] ?? []) {
+    for (const key of spec.keys) {
       const value = args?.[key];
-      if (Array.isArray(value)) value.forEach(add);
-      else add(value);
+      const into = spec.mode === 'search' ? search : acquire;
+      if (Array.isArray(value)) value.forEach((item) => add(item, into));
+      else add(value, into);
     }
   }
-  return [...targets];
+  return { targets: [...new Set([...acquire, ...search])], acquire: [...acquire], search: [...search] };
 }
-function resourceIntentOf(a: Activity, targets: readonly string[]): boolean {
-  const consumingOnly = a.steps.length > 0 && a.steps.every((step) => CONSUMING_SKILLS.has(step.skill));
-  return targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill))
-    || !consumingOnly && ACQUIRE_WORDS.test(a.what) && RESOURCE_WORDS.test(a.what);
+function resourceIntentOf(targetPlan: { targets: readonly string[] }, a: Activity): boolean {
+  return targetPlan.targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill));
 }
 
 function searchIntentOf(a: Activity): boolean {
@@ -1027,8 +1025,9 @@ export function progressSignals(record: {
   exploration?: { found?: readonly string[] };
 }, opts: { newChunks: boolean; planAdvanced: boolean; frontierAdvanced: boolean }) {
   const acquiredTarget = record.resource?.acquired === true;
+  const locatedTarget = record.resource?.located === true;
   const observedTarget = (record.exploration?.found?.length ?? 0) > 0;
-  return { acquiredTarget, observedTarget, progressed: acquiredTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced };
+  return { acquiredTarget, locatedTarget, observedTarget, progressed: acquiredTarget || locatedTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced };
 }
 
 /** 从每步执行回执的实测位置算覆盖；没有回执的位置不猜。 */
@@ -1118,8 +1117,11 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const collectionResult = [...a.results].reverse().find((result) => !!result.data?.collection);
   const collectionReceipt = collectionResult?.data?.collection as CollectionReceipt | undefined;
   // 资源归因只看活动点名的目标与真实产出：挖掘/移动本身不证明拿到了目标，也不证明资源目标失败。
-  const targets = resourceTargetsOf(a);
-  const intent = resourceIntentOf(a, targets);
+  const targetPlan = resourceTargetsOf(a);
+  const targets = targetPlan.targets;
+  const intent = resourceIntentOf(targetPlan, a);
+  // 只有“找到/看见”类目标时，located 即验收；有取得类目标时必须真的拿到。
+  const findOnly = targets.length > 0 && targetPlan.acquire.length === 0;
   const foundNames = receipts.flatMap((data) => {
     const value = data.found;
     if (typeof value === 'string') return [value.replace(/^minecraft:/, '')];
@@ -1138,10 +1140,12 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   // 挖掘/移动动作本身不再自动算作取得（否则开路副产物会被当成资源目标完成）。无法判断时记 null。
   // 采集回执的 items 是“可能产物”，只有 targetMet/gained 才证明真的进了背包。
   const collected = collectionReceipt?.targetMet === true ? collectionItems : [];
-  const acquired: boolean | null = targets.length
+  const acquiredFromTargets: boolean | null = targets.length
     ? [...gainedNames, ...collected].some((name) => hitsResourceTarget(name, targets))
     : collectionReceipt ? collectionReceipt.targetMet === true
       : wasBlocks.length > 0 && gainedNames.length > 0 ? true : null;
+  // 只找不取的目标：拿到了也算 true；没拿到时“取得”不适用，记 null。
+  const acquired: boolean | null = findOnly ? (acquiredFromTargets === true ? true : null) : acquiredFromTargets;
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1157,11 +1161,11 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
       : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
-    ...(intent || attemptOnly ? { resource: {
-      intent, ...(targets.length ? { targets } : {}), located, acquired,
-      // 有点名目标却没拿到，或没点名目标、只确认了其他产物时，都不能声称资源目标完成；
-      // “取得未知”照实写未知，有界尝试另由 completion=attempt 说明。
-      goalIncomplete: intent && acquired !== true,
+    ...(intent ? { resource: {
+      intent, mode: findOnly ? 'find' as const : 'gather' as const, ...(targets.length ? { targets } : {}), located, acquired,
+      // 找到/看见类目标以 located 验收；取得类目标必须真的有背包增量。
+      // “取得未知”照实写未知，有界尝试另由 completion=attempt 说明，没有资源意图就不生成 resource。
+      goalIncomplete: intent && (findOnly ? !(located || acquired === true) : acquired !== true),
     } } : {}),
     ...(collectionResult && collectionReceipt ? { collection: { ...collectionReceipt, skill: collectionResult.skill, ...(collectionResult.args !== undefined ? { args: collectionResult.args } : {}), at: collectionResult.at } } : {}),
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),

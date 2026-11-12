@@ -592,7 +592,7 @@ export class SelfModel {
       // 搜索意图的活动如果没有实际看见/拿到目标，哪怕走了十几格、挖了十几格，也只是“做了动作”，不是策略成功。
       const localOnlySearch = r.exploration?.searchIntent === true && r.exploration.localOnly === true;
       const searchNoEvidence = r.exploration?.searchIntent === true
-        && (r.exploration.found?.length ?? 0) === 0 && r.resource?.acquired !== true;
+        && (r.exploration.found?.length ?? 0) === 0 && r.resource?.located !== true && r.resource?.acquired !== true;
       // 只有活动点名了目标（until/find/for/item 等）时，“没找到”才是反例；
       // 没写 until 的“向北探索 96 格”完成距离委托，本来就没有寻找对象，不能写成目标失败。
       const searchTargetMiss = searchNoEvidence && (r.resource?.targets?.length ?? 0) > 0;
@@ -684,8 +684,8 @@ export class SelfModel {
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
       // 最近一次明确应用失败、且反例多于成功证据：默认注入时降权，避免刚失败的做法立刻满屏召回；
       // 历史仍可按需查。未验证结论也统一降权；updatedAt 包含失败/中止，不能给它加分。
-      const lastApplied = h.applications?.at(-1);
-      const contested = lastApplied?.outcome === 'stuck' && (h.counterexamples?.length ?? 0) > h.wins;
+      // 反例多于确认成功（wins 已排除 attempt/原地/搜索未确认）就降权；不要求最近一次一定是失败。
+      const contested = (h.counterexamples?.length ?? 0) > h.wins;
       return { h, score: rel * (0.5 + trust) * (h.unverified ? 0.25 : 1) * (contested ? 0.5 : 1) };
     }).filter((e) => e.score > 0.6).sort((a, b) => b.score - a.score).slice(0, n).map((e) => e.h);
   }
