@@ -999,7 +999,9 @@ function resourceIntentOf(targetPlan: { targets: readonly string[] }, a: Activit
 }
 
 function searchIntentOf(a: Activity): boolean {
-  return SEARCH_WORDS.test(a.what) || a.steps.some((step) => SEARCH_SKILLS.has(step.skill));
+  // 显式寻找动作/条件就是搜索契约，不依赖活动标题怎么写。
+  return a.steps.some((step) => SEARCH_SKILLS.has(step.skill) || step.skill === 'explore_toward')
+    || hasExplorationCondition(a.doneWhen) || SEARCH_WORDS.test(a.what);
 }
 
 /**
@@ -1024,7 +1026,7 @@ export function progressSignals(record: {
   resource?: { acquired?: boolean | null; intent?: boolean; located?: boolean; goalIncomplete?: boolean };
   exploration?: { found?: readonly string[] };
 }, opts: { newChunks: boolean; planAdvanced: boolean; frontierAdvanced: boolean }) {
-  const acquiredTarget = record.resource?.acquired === true;
+  const acquiredTarget = record.resource?.acquired === true && record.resource?.goalIncomplete !== true;
   const locatedTarget = record.resource?.located === true;
   const observedTarget = (record.exploration?.found?.length ?? 0) > 0;
   return { acquiredTarget, locatedTarget, observedTarget, progressed: acquiredTarget || locatedTarget || observedTarget || opts.newChunks || opts.planAdvanced || opts.frontierAdvanced };
@@ -1120,8 +1122,6 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const targetPlan = resourceTargetsOf(a);
   const targets = targetPlan.targets;
   const intent = resourceIntentOf(targetPlan, a);
-  // 只有“找到/看见”类目标时，located 即验收；有取得类目标时必须真的拿到。
-  const findOnly = targets.length > 0 && targetPlan.acquire.length === 0;
   const foundNames = receipts.flatMap((data) => {
     const value = data.found;
     if (typeof value === 'string') return [value.replace(/^minecraft:/, '')];
@@ -1132,20 +1132,32 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   const gainedNames = Object.keys(gained).map((name) => name.replace(/^minecraft:/, ''));
   const collectionItems = (collectionReceipt?.items ?? []).map((name) => name.replace(/^minecraft:/, ''));
   const collectionNames = [...collectionItems, ...(collectionReceipt?.block ? [collectionReceipt.block.replace(/^minecraft:/, '')] : [])];
-  // 定位：看见目标、实际挖到/采到它，或背包里已有同名产物；没有点名目标时只把“看见/采集”算定位。
-  const located = targets.length
-    ? [...foundNames, ...wasBlocks, ...gainedNames, ...collectionNames].some((name) => hitsResourceTarget(name, targets))
-    : foundNames.length > 0 || wasBlocks.length > 0 || !!collectionReceipt;
-  // 取得：有点名目标时必须真的拿到它；没点名目标时只有采集回执或“挖到了某个方块且背包有增量”能作证，
-  // 挖掘/移动动作本身不再自动算作取得（否则开路副产物会被当成资源目标完成）。无法判断时记 null。
+  const observedNames = [...foundNames, ...wasBlocks, ...collectionNames];
   // 采集回执的 items 是“可能产物”，只有 targetMet/gained 才证明真的进了背包。
   const collected = collectionReceipt?.targetMet === true ? collectionItems : [];
-  const acquiredFromTargets: boolean | null = targets.length
-    ? [...gainedNames, ...collected].some((name) => hitsResourceTarget(name, targets))
-    : collectionReceipt ? collectionReceipt.targetMet === true
-      : wasBlocks.length > 0 && gainedNames.length > 0 ? true : null;
-  // 只找不取的目标：拿到了也算 true；没拿到时“取得”不适用，记 null。
-  const acquired: boolean | null = findOnly ? (acquiredFromTargets === true ? true : null) : acquiredFromTargets;
+  const gainedTargetNames = [...gainedNames, ...collected];
+  // 寻找目标和取得目标分开验收：同一活动里采到别的资源，不能冒充找到寻找目标。
+  const searchMatched = targetPlan.search.filter((target) => observedNames.some((name) => hitsResourceTarget(name, [target])));
+  const acquireMatched = targetPlan.acquire.filter((target) => gainedTargetNames.some((name) => hitsResourceTarget(name, [target])));
+  const searchIncomplete = targetPlan.search.length > 0 && searchMatched.length === 0;
+  const acquireIncomplete = targetPlan.acquire.length > 0 && acquireMatched.length === 0;
+  const unmet = [
+    ...targetPlan.search.filter((target) => !searchMatched.includes(target)),
+    ...targetPlan.acquire.filter((target) => !acquireMatched.includes(target)),
+  ];
+  const findOnly = targetPlan.search.length > 0 && targetPlan.acquire.length === 0;
+  const mode: 'find' | 'gather' | 'mixed' = findOnly ? 'find' : targetPlan.search.length > 0 ? 'mixed' : 'gather';
+  // 定位只由寻找目标验收；没有寻找目标时，才用“看见/采集到什么”作一般定位事实。
+  const located = targetPlan.search.length
+    ? searchMatched.length > 0
+    : observedNames.some((name) => hitsResourceTarget(name, targets));
+  // 取得只由取得目标验收；纯寻找目标没有“取得”验收语义，但实际拿到了仍作为事实记 true，否则记 null。
+  const gainedSearchTarget = targetPlan.search.some((target) => gainedTargetNames.some((name) => hitsResourceTarget(name, [target])));
+  const acquired: boolean | null = targetPlan.acquire.length
+    ? acquireMatched.length > 0
+    : findOnly ? (gainedSearchTarget ? true : null)
+      : collectionReceipt ? collectionReceipt.targetMet === true
+        : wasBlocks.length > 0 && gainedNames.length > 0 ? true : null;
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1162,10 +1174,10 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
     ...(intent ? { resource: {
-      intent, mode: findOnly ? 'find' as const : 'gather' as const, ...(targets.length ? { targets } : {}), located, acquired,
-      // 找到/看见类目标以 located 验收；取得类目标必须真的有背包增量。
+      intent, mode, ...(targets.length ? { targets } : {}), ...(unmet.length ? { unmet } : {}), located, acquired,
+      // 寻找目标和取得目标分别验收；任一类仍有未完成项才算资源目标未完成。
       // “取得未知”照实写未知，有界尝试另由 completion=attempt 说明，没有资源意图就不生成 resource。
-      goalIncomplete: intent && (findOnly ? !(located || acquired === true) : acquired !== true),
+      goalIncomplete: intent && (searchIncomplete || acquireIncomplete),
     } } : {}),
     ...(collectionResult && collectionReceipt ? { collection: { ...collectionReceipt, skill: collectionResult.skill, ...(collectionResult.args !== undefined ? { args: collectionResult.args } : {}), at: collectionResult.at } } : {}),
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),

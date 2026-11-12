@@ -162,3 +162,24 @@ test('只找不取的 until 目标以“看见”验收，找到后不算未完�
   assert.equal(record.resource?.acquired, null);
   assert.equal(record.resource?.goalIncomplete, false, '看见目标即完成寻找类目标');
 });
+
+test('混合寻找+采集分开验收：采到别的资源不能冒充找到寻找目标', () => {
+  const a = createActivity({
+    what: '找下界砖，顺路采地狱岩', why: '', kind: 'explore', repeat: 1,
+    steps: [
+      { skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks' } },
+      { skill: 'gather', args: { block: 'netherrack', count: 6 } },
+    ],
+  }, '', 'llm', state());
+  a.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '走了 96 格，没找到下界砖', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -95.5 }, data: { travelled: 96, found: undefined } });
+  a.results.push({ skill: 'gather', args: {}, status: 'succeeded', summary: '采了 6 块地狱岩', at: Date.now(), durationMs: 50,
+    pos: { x: 0.5, y: 64, z: -95.5 }, data: { dug: 6, was: 'netherrack' } });
+  const record = recordOf(a, 'done', '探索完并采了地狱岩', state([{ name: 'netherrack', count: 6 }]));
+  assert.equal(record.resource?.mode, 'mixed');
+  assert.deepEqual(record.resource?.targets, ['netherrack', 'nether_bricks']);
+  assert.equal(record.resource?.acquired, true, '地狱岩确实拿到了');
+  assert.equal(record.resource?.located, false, '下界砖没有找到');
+  assert.deepEqual(record.resource?.unmet, ['nether_bricks']);
+  assert.equal(record.resource?.goalIncomplete, true, '寻找目标仍未完成');
+});

@@ -593,15 +593,19 @@ export class SelfModel {
       const localOnlySearch = r.exploration?.searchIntent === true && r.exploration.localOnly === true;
       const searchNoEvidence = r.exploration?.searchIntent === true
         && (r.exploration.found?.length ?? 0) === 0 && r.resource?.located !== true && r.resource?.acquired !== true;
-      // 只有活动点名了目标（until/find/for/item 等）时，“没找到”才是反例；
+      // 显式寻找契约（until/find/for/item 等）仍未验收：即使同一活动采到了别的资源，也不能算策略成功。
+      const searchContractMiss = r.exploration?.searchIntent === true
+        && (r.resource?.mode === 'find' || r.resource?.mode === 'mixed') && r.resource?.goalIncomplete === true;
+      // 只有活动点名了目标时，“没找到”才是反例；
       // 没写 until 的“向北探索 96 格”完成距离委托，本来就没有寻找对象，不能写成目标失败。
-      const searchTargetMiss = searchNoEvidence && (r.resource?.targets?.length ?? 0) > 0;
+      const searchTargetMiss = searchContractMiss && (r.resource?.targets?.length ?? 0) > 0;
       if (applied) k.applications = [...(k.applications ?? []), {
         at: r.at, activityId: r.id, outcome: r.outcome, ...(r.completion ? { completion: r.completion } : {}),
         summary: r.summary.slice(0, 160), ...(r.failure ? { failure: r.failure } : {}),
-        ...(searchNoEvidence ? { searchUnconfirmed: true } : {}), ...(localOnlySearch ? { limited: true } : {}),
+        ...(searchNoEvidence || searchContractMiss ? { searchUnconfirmed: true } : {}), ...(localOnlySearch ? { limited: true } : {}),
       }].slice(-8);
-      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch && !searchNoEvidence) k.wins++;
+      if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt'
+        && !localOnlySearch && !searchNoEvidence && !searchContractMiss) k.wins++;
       else if (r.outcome === 'stuck') k.losses++;
       if (applied && (r.outcome === 'stuck' || searchTargetMiss)) {
         k.counterexamples = dedupeCounterexamples([...(k.counterexamples ?? []), {

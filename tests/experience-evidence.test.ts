@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { WorldMemory } from '../src/memory/store.ts';
 import { recallLocal } from '../src/mind/recall.ts';
+import { createActivity, recordOf } from '../src/mind/activity.ts';
 import { SelfModel } from '../src/mind/self.ts';
+import type { AgentState } from '../src/adapter/types.ts';
 import type { ActivityRecord } from '../src/mind/types.ts';
 
 const record = (patch: Partial<ActivityRecord> & Pick<ActivityRecord, 'id' | 'outcome' | 'summary'>): ActivityRecord => ({
@@ -89,7 +91,7 @@ test('走了十几格但没确认目标，不能给“找要塞”的策略记�
     id: 'a1', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps',
     summary: '开了 16 格，没看见要塞',
     exploration: { start: { x: 0, y: 64, z: 0 }, end: { x: 0, y: 64, z: -16 }, maxHorizontal: 16, visitedCells: 16, newChunks: 1, searchIntent: true, localOnly: false, found: [], blocked: false },
-    resource: { intent: true, targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
+    resource: { intent: true, mode: 'find', targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
   }));
   assert.equal(k.wins, 0, '动作做完不等于找到目标');
   assert.equal(k.counterexamples?.length, 1);
@@ -152,7 +154,7 @@ test('没有寻找对象的“向北探索 96 格”不写目标失败反例；�
   self.record(record({
     id: 'a2', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps', summary: '向北走了 32 格，没找到橡木',
     exploration: { ...explore, maxHorizontal: 32, end: { x: 0, y: 64, z: -32 } },
-    resource: { intent: true, targets: ['oak_log'], located: false, acquired: null, goalIncomplete: true },
+    resource: { intent: true, mode: 'find', targets: ['oak_log'], located: false, acquired: null, goalIncomplete: true },
   }));
   assert.equal(k.counterexamples?.length, 1, '点名了橡木且没找到，才写目标反例');
   assert.equal(k.counterexamples?.[0]?.reason, 'TARGET_NOT_FOUND');
@@ -168,9 +170,52 @@ test('明确未找到目标的经验进入召回降权，而不是仍按成功�
   self.record(record({
     id: 'a1', applying: k.id, applyingText: k.text, outcome: 'done', completion: 'steps', summary: '开了 16 格，没找到下界要塞',
     exploration: { start: { x: 0, y: 64, z: 0 }, end: { x: 0, y: 64, z: -16 }, maxHorizontal: 16, visitedCells: 16, newChunks: 1, searchIntent: true, localOnly: false, found: [], blocked: false },
-    resource: { intent: true, targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
+    resource: { intent: true, mode: 'find', targets: ['fortress'], located: false, acquired: null, goalIncomplete: true },
   }));
   assert.equal(k.wins, 0);
   assert.equal(k.counterexamples?.length, 1);
   assert.ok(score() < before, 'TARGET_NOT_FOUND 反例应降低默认召回分数');
+});
+
+
+const exploreState = (inventory: { name: string; count: number }[] = []) => ({
+  connected: true, alive: true, observationReady: true, observationId: 1, username: 'tester',
+  sessionId: 's', worldId: 'w', dim: 'the_nether', pos: { x: 0.5, y: 64, z: 0.5 },
+  hp: 20, food: 20, oxygen: 20, timeOfDay: 0,
+  inventory, emptySlots: 36 - inventory.length, equipment: [], held: null,
+} as unknown as AgentState);
+
+test('显式 until 的搜索意图不依赖标题；混合活动采到别的资源也不给寻找策略记胜', () => {
+  const self = new SelfModel(null);
+  const k = self.learn('沿北向找下界砖', { source: 'reflection', kind: 'explore' })!;
+  const a = createActivity({
+    what: '继续向北前进', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks' } }],
+  }, '', 'llm', exploreState());
+  a.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '走了 96 格，没找到下界砖', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -95.5 }, data: { travelled: 96 } });
+  const record = recordOf(a, 'done', '向北走了 96 格', exploreState());
+  assert.equal(record.exploration?.searchIntent, true, 'until 契约生成搜索意图');
+  self.record({ ...record, applying: k.id, applyingText: k.text });
+  assert.equal(k.wins, 0);
+  assert.equal(k.counterexamples?.length, 1, '标题不同也留下 TARGET_NOT_FOUND');
+
+  const mixed = createActivity({
+    what: '顺路采点地狱岩', why: '', kind: 'explore', repeat: 1,
+    steps: [
+      { skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks' } },
+      { skill: 'gather', args: { block: 'netherrack', count: 6 } },
+    ],
+  }, '', 'llm', exploreState());
+  mixed.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '没找到下界砖', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -50.5 }, data: { travelled: 50 } });
+  mixed.results.push({ skill: 'gather', args: {}, status: 'succeeded', summary: '采了 6 块地狱岩', at: Date.now(), durationMs: 50,
+    pos: { x: 0.5, y: 64, z: -50.5 }, data: { dug: 6, was: 'netherrack' } });
+  const mixedRecord = recordOf(mixed, 'done', '采了地狱岩但没找到砖', exploreState([{ name: 'netherrack', count: 6 }]));
+  assert.equal(mixedRecord.resource?.goalIncomplete, true);
+  assert.deepEqual(mixedRecord.resource?.unmet, ['nether_bricks']);
+  const k2 = self.learn('没看到下界砖就不算找到', { source: 'reflection', kind: 'explore' })!;
+  self.record({ ...mixedRecord, applying: k2.id, applyingText: k2.text });
+  assert.equal(k2.wins, 0, '采到副产物不能给寻找策略记胜');
+  assert.equal(k2.counterexamples?.length, 1);
 });
