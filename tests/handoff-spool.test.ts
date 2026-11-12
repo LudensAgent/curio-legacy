@@ -31,7 +31,7 @@ test('超过磁盘预算时丢弃并返回条数，未超预算的条目保持�
   const { spool, dir, path } = withSpool(20);
   try {
     const dropped = spool.append(['{"n":1}', '{"n":2}', '{"n":3}']);
-    assert.equal(dropped, 1, '只丢超出预算的尾部');
+    assert.deepEqual(dropped, [2], '返回被丢弃行的下标；大行被丢后小行仍可入队');
     await spool.flush();
     const text = readFileSync(path, 'utf8');
     assert.match(text, /\{"n":1\}/);

@@ -173,3 +173,139 @@ test('换入命中容量时按需保存一次，dirty 换出后重试同一批�
     }
   }
 });
+
+/** 在同一个 Section（cx）里铺 layered 层、每层 16×16 的格；用于制造 >1MiB 的驻留集。 */
+function layered(cx: number, layers: number, from: number): BlockObservation[] {
+  const out: BlockObservation[] = [];
+  for (let layer = 0; layer < layers; layer++) {
+    for (let z = 0; z < 16; z++) {
+      for (let x = 0; x < 16; x++) {
+        out.push({
+          ...observation(cx * 16 + x, z, from + out.length, SESSION),
+          pos: { x: cx * 16 + x, y: 64 + layer, z },
+        });
+      }
+    }
+  }
+  return out;
+}
+
+test('容量恢复的换出目标是有界的：只淘汰足够的冷页，不清空全部驻留', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'working-set-capacity-'));
+  const dbPath = join(dir, 'memory.db');
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    // A（cx=0）与 C（cx=2）各 1400 格（约 1.2MB），先保存成可换出的冷页。
+    const seeder = await SharedSpatialSession.open({ worldId: WORLD, databasePath: dbPath, timeoutMs: 5000 });
+    seeder.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    seeder.observe([...layered(0, 6, 1).slice(0, 1400), ...layered(2, 6, 2000).slice(0, 1400)]);
+    await seeder.checkpoint();
+    (await seeder.shutdown()).close;
+
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      // A+C ≈2.41MB；再加 B 的首观测 ≈1.2MB，B 的 300 格批次会顶破 3.7MB。
+      residencyLimits: { maxResidentBytes: 3_700_000 },
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+
+    // 把 A、C 换入并写入新观测；保存后两者都 clean，是 free 的候选。
+    shared.observe(layered(0, 6, 5000).slice(0, 1400));
+    shared.observe(layered(2, 6, 7000).slice(0, 1400));
+    await shared.drainObservations({ deadline: Date.now() + 5000 });
+    await shared.checkpoint();
+    assert.equal(shared.session.sectionResidency(keyAt(0)).residency, 'resident');
+    assert.equal(shared.session.sectionResidency(keyAt(2)).residency, 'resident');
+
+    // B：首观测驻留，随后一批新格撞上限；恢复只需淘汰最旧的 A。
+    shared.observe(layered(1, 6, 9000).slice(0, 1400));
+    assert.equal(shared.session.sectionResidency(keyAt(1)).residency, 'resident');
+    const batch = Array.from({ length: 300 }, (_, index) => ({
+      ...observation(16 + (index % 16), 0, 11000 + index, SESSION),
+      pos: { x: 16 + (index % 16), y: 70 + Math.floor(index / 256), z: Math.floor(index / 16) % 16 },
+    }));
+    shared.observe(batch);
+    await shared.drainObservations({ deadline: Date.now() + 5000 });
+
+    assert.equal(shared.observationGap(), null, '有界换出应让重试成功');
+    assert.equal(shared.session.sectionResidency(keyAt(0)).residency, 'not_resident', '最旧的 A 被换出');
+    assert.equal(shared.session.sectionResidency(keyAt(2)).residency, 'resident', 'C 不该被一起清空');
+    assert.equal(shared.session.sectionResidency(keyAt(1)).residency, 'resident', '本批 B 仍在驻留');
+    const last = batch[batch.length - 1]!;
+    assert.equal(shared.session.voxel.cellAt(DIM, last.pos.x, last.pos.y, last.pos.z).observed, true);
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
+    assert.equal(shutdown.error, null);
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    if (shared !== null && close === null) {
+      try { close = (await shared.shutdown()).close; } catch { /* 已在正常路径关闭 */ }
+    }
+    if (!failed && close?.completed === true && close.error === null) {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  }
+});
+
+test('计数上限拒绝时按本批新增 Section 数腾位（跨多个 no_record Section）', { timeout: 30_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'working-set-capacity-'));
+  const dbPath = join(dir, 'memory.db');
+  let shared: SharedSpatialSession | null = null;
+  let close: CloseResult | null = null;
+  let failed = false;
+  try {
+    // A、B 先保存；重新打开后把它们换入并保存成 clean，占住 2/3 个 Section 名额。
+    const seeder = await SharedSpatialSession.open({ worldId: WORLD, databasePath: dbPath, timeoutMs: 5000 });
+    seeder.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    seeder.observe([observation(0, 0, 1), observation(16, 0, 2)]);
+    await seeder.checkpoint();
+    (await seeder.shutdown()).close;
+
+    shared = await SharedSpatialSession.open({
+      worldId: WORLD,
+      databasePath: dbPath,
+      voxelLoading: 'manual',
+      residencyLimits: { maxResidentSections: 3 },
+      timeoutMs: 5000,
+    });
+    shared.beginSession({ worldId: WORLD, dim: DIM, sessionId: SESSION });
+    shared.observe([observation(0, 0, 500), observation(16, 0, 501)]);
+    await shared.drainObservations({ deadline: Date.now() + 5000 });
+    await shared.checkpoint();
+    assert.equal(shared.workingSetStats().residentSections, 2);
+
+    // 一批 3 格分别落在 3 个 no_record Section：2 驻留 + 3 新 > 3。
+    shared.observe([observation(48, 0, 900), observation(64, 0, 901), observation(80, 0, 902)]);
+    const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
+    assert.equal(drained.pending.observations, 0, '按本批 Section 数腾位后应完成首观测');
+    assert.equal(shared.observationGap(), null);
+    assert.equal(shared.workingSetStats().residentSections, 3, '三个新 Section 都在驻留');
+    assert.equal(shared.session.sectionResidency(keyAt(0)).residency, 'not_resident', '旧 A 被换出');
+    assert.equal(shared.session.sectionResidency(keyAt(1)).residency, 'not_resident', '旧 B 被换出');
+    assert.equal(shared.session.sectionResidency(keyAt(3)).residency, 'resident');
+    assert.equal(shared.session.sectionResidency(keyAt(4)).residency, 'resident');
+    assert.equal(shared.session.sectionResidency(keyAt(5)).residency, 'resident');
+
+    const shutdown = await shared.shutdown();
+    close = shutdown.close;
+    assert.equal(shutdown.error, null);
+  } catch (error) {
+    failed = true;
+    throw error;
+  } finally {
+    if (shared !== null && close === null) {
+      try { close = (await shared.shutdown()).close; } catch { /* 已在正常路径关闭 */ }
+    }
+    if (!failed && close?.completed === true && close.error === null) {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  }
+});
