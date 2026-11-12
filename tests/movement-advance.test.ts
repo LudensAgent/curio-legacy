@@ -4,6 +4,8 @@ import { VoxelMap } from 'curio-minecraft-3d-memory';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { farthestFrontier } from '../src/skills/movement/frontier.ts';
 import { advance, travelTo } from '../src/skills/movement/index.ts';
+import { feetGoal } from '../src/skills/movement/goal.ts';
+import { runNavigationSegment } from '../src/skills/movement/segment.ts';
 import { runMakeWay, type MakeWayEdit } from '../src/skills/movement/coordinator.ts';
 import { acquireSessionLease, clearMovementSessions, findMovementSession, releaseSessionLease } from '../src/skills/movement/session.ts';
 import type { SkillCtx } from '../src/skills/types.ts';
@@ -122,6 +124,23 @@ test('A1c 实测横向 0.05 偏差不算授权：maxLateralDrift=0 时在第一�
   assert.equal(adapter.actions.filter((action) => action === 'moveTo:feet').length, 1, '超授权后不再发下一段控制');
   assert.ok(Math.abs(adapter.pos.z - 0.15) <= 1e-9, `实测偏差保留：z=${adapter.pos.z}`);
   assert.equal((r.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 1, '已发生位移按实测确认并保留');
+});
+
+test('搜索完成后证据失效：执行用当前加载方块确认，不逐格停在格边', async (t) => {
+  // 搜索看到完整证据；进入执行阶段后全维度证据因自身动作改为 pending_effect。
+  // 执行器应把 walk 的每一步交给当前已加载方块即时确认，而不是在第一个格边停下观察。
+  const map = corridor(12);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const result = await runNavigationSegment(ctx, {
+    goal: feetGoal({ x: 10.5, y: 64, z: 0.5 }),
+    allowed: ['walk', 'step', 'drop'], historical: false,
+    maxTransitions: 12, allowUnknownCorridor: false, deadline: ctx.deadline, searchBudget: 2,
+    onPhase: (phase) => { if (phase === 'executing') map.markStale(DIM, 'pending_effect'); },
+  });
+  assert.equal(result.outcome, 'reached_waypoint', result.detail);
+  assert.ok((result.liveConfirmedCount ?? 0) > 0, `应由实时方块确认过步数：${JSON.stringify({ live: result.liveConfirmedCount, confirmed: result.confirmed.length })}`);
+  assert.ok(result.confirmed.length >= 8);
 });
 
 test('A2 开阔地 50 格：两次调用同一 session 完成，累计预算不重置', async (t) => {

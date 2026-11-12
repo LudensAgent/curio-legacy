@@ -25,6 +25,9 @@ export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) throw new AbortedError(String(signal.reason ?? 'aborted'));
 }
 
+/** 两个 yaw 之间的最小夹角（弧度，0..π）；处理 ±π 环绕。 */
+export const yawDelta = (a: number, b: number): number => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+
 /** 可被取消的 sleep。 */
 export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

@@ -10,7 +10,7 @@ import { simplify } from 'prismarine-nbt';
 import { crystalArrowShot } from '../combat/ballistics.ts';
 import type { Config } from '../config.ts';
 import type { EventBus } from '../events.ts';
-import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError } from '../util.ts';
+import { AbortedError, raceAbort, shortId, sleep, throwIfAborted, TimeoutError, yawDelta } from '../util.ts';
 import { installClientGuard } from './click-guard.ts';
 import { isClimbableBlockName } from './land-rules.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
@@ -1442,11 +1442,20 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     };
     check();
     checkPosition();
-    // 上一段已复验并保留了前进键：方向没变时不再转向、清键，避免每个 transition
-    // 都把速度打断一次。调用方在交接前已用当前证据复验下一段。
+    // 上一段已复验并保留了前进键：同向时不再转向、清键；调用方已确认净空的转弯
+    // 只重新瞄准下一格，不松开前进键，让身体带着速度转过去。调用方在交接前已复验下一段。
+    const aim = (yaw: number) => {
+      if (typeof b.look !== 'function') return;
+      try { b.look(yaw, 0, true); } catch { /* ignore */ }
+    };
     if (!keepControls) {
-      if (typeof b.look === 'function') { try { b.look(heading, 0, true); } catch { /* ignore */ } }
+      aim(heading);
       b.clearControlStates();
+    } else {
+      const yaw = b.entity.yaw;
+      const turn = Number.isFinite(yaw) ? yawDelta(heading, yaw) : Infinity;
+      // 只在实际转弯（≥~10°）时重瞄；路线点的小数偏移造成的细小朝向差不应每格都转一下镜头。
+      if (turn > 0.18) aim(heading);
     }
     b.setControlState('forward', true);
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。

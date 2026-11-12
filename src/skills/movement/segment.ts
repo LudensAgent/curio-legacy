@@ -18,6 +18,7 @@ import { anchorOf, cellReached, feetReached, goalReached } from './goal.ts';
 import type { NavigationGoal } from './goal.ts';
 import type { PrimitiveProblemKind } from './receipt.ts';
 import { descendTo } from './descend.ts';
+import { liveEdgeStatus, liveTurnStatus } from './live-edge.ts';
 import { boundaryProbeCells } from './observation.ts';
 import type { MoveMode } from './session.ts';
 
@@ -98,6 +99,8 @@ export interface TransitionReceipt {
   measuredHorizontal: number;
   measuredVertical: number;
   pathLength: number;
+  /** 共享体素里这一步还不完整，执行前由当前已加载方块即时确认。 */
+  confirmedByLive?: true;
 }
 
 export interface SegmentReceipt {
@@ -122,6 +125,8 @@ export interface SegmentReceipt {
   confirmed: TransitionReceipt[];
   remaining: LandSearchTransition[];
   pathLength: number;
+  /** 这段里有多少步靠当前已加载方块补足了体素证据缺口。 */
+  liveConfirmedCount?: number;
   arrived: boolean;
   directDrop: boolean;
   boundarySummary: LandSearchBoundarySummary;
@@ -171,8 +176,10 @@ export interface SegmentReceipt {
 
 const KINDS: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 const OBSERVATION_RESOLVABLE = new Set(['UNKNOWN', 'STALE', 'INCOMPLETE']);
+/** 共享体素缺证据/过期时，才用当前已加载方块做即时确认；已看到阻挡/不支持仍按体素结论停下。 */
+const LIVE_FALLBACK = OBSERVATION_RESOLVABLE;
 /** 剩余这么多步时开始从路线尾点规划下一窗口。更早开始会在证据尚未到达的尾点上多耗搜索预算。 */
-const PREVIEW_LEAD_STEPS = 3;
+const PREVIEW_LEAD_STEPS = 6;
 /** manual 模式下，一次搜索因未驻留页面最多重试加载几轮；每轮都受 deadline/搜索预算约束。 */
 const MAX_RESIDENCY_ROUNDS = 8;
 /** 这些搜索终态可能仅由未驻留页面造成；prepare 后值得重试。 */
@@ -739,6 +746,7 @@ async function runNavigationSegmentInner(
   let pathLength = 0;
   let last: AgentState = state;
   let executed = 0;
+  let liveConfirmedCount = 0;
   const receipt = (outcome: SegmentOutcome, extra: Partial<SegmentReceipt> = {}): SegmentReceipt => {
     const end = { ...ctx.adapter.state().pos };
     return {
@@ -746,13 +754,14 @@ async function runNavigationSegmentInner(
       chosen, search: strict, searchStatus: strict.status, searchReason: strict.reason, ...historicalAttempt,
       evidenceMode: route.evidenceMode, searches,
       planned, confirmed, remaining: planned.slice(executed), pathLength,
+      ...(liveConfirmedCount === 0 ? {} : { liveConfirmedCount }),
       arrived: false, directDrop: false, boundarySummary,
       ...(route.policy === undefined ? {} : { policy: route.policy }),
       ...extra,
     };
   };
-  // 每段只用当前 VoxelMap 证据复验这一次动作；不读隐藏的已加载客户端方块，
-  // 也不在一次同步调用里重算整条路线。
+  // 每段先用当前 VoxelMap 证据复验这一次动作；该格还没被感知写进来时，
+  // 再用当前已加载方块确认这一小步（见 live-edge.ts），不重新搜索整条路线。
   const currentRequest = {
     worldId: state.worldId, dim: state.dim, sessionId: state.sessionId,
     body: base.body, rules: walkLandRules, ...(request.wade === true ? { wade: true } : {}),
@@ -963,8 +972,11 @@ async function runNavigationSegmentInner(
     preview = task;
   };
 
+  // 计划点带起始小数偏移，连续相减会得到 1±ulp。方向是否相同按容差比较，
+  // 否则一条纯直线也会每隔几十格因为浮点噪声被当成转弯，丢掉速度交接。
   const sharesHeading = (a: LandSearchTransition, b: LandSearchTransition) =>
-    a.to.x - a.from.x === b.to.x - b.from.x && a.to.z - a.from.z === b.to.z - b.from.z;
+    Math.abs((a.to.x - a.from.x) - (b.to.x - b.from.x)) <= 1e-6
+    && Math.abs((a.to.z - a.from.z) - (b.to.z - b.from.z)) <= 1e-6;
   let holding = false;
   let previousCheckpoint = false;
   try {
@@ -972,9 +984,11 @@ async function runNavigationSegmentInner(
     physicalIndex = index;
     if (ctx.signal.aborted) return cancelledHere(index, transition, ctx.adapter.state().pos);
     const previous = transitions[index - 1];
-    // 上一段在 physicsTick 里复验下一步有效并保留了前进键；方向不变时下一段直接接续，
-    // 不再 clearControlStates 重新起步。转向仍按普通起步处理。
-    const keepControls = previousCheckpoint && previous !== undefined && sharesHeading(transition, previous);
+    // 上一段在 physicsTick 里复验下一步有效并保留了前进键：下一段接续，不再
+    // clearControlStates 重新起步。同向直行不需要转向；已确认净空的转弯由身体控制
+    // 在保留前进键的同时重新瞄准下一格（见 mineflayer driveToFeet）。
+    const previousHeld = previousCheckpoint;
+    const keepControls = previousHeld && previous !== undefined;
     // 只有紧邻的上一段能交出控制键；jump/ladder/其它分支不会保留，下一段必须普通起步。
     previousCheckpoint = false;
     if (Date.now() >= request.deadline) {
@@ -991,6 +1005,42 @@ async function runNavigationSegmentInner(
         failureCode: 'PATH_NOT_FOUND', stepIndex: index, transition,
         ...(route.policy === undefined ? {} : { policy: route.policy }),
       });
+    }
+    // 带速度交接后身体可能已经冲进下一格列：这是实测到达，不按“起点漂移”重规划。
+    // 这条边在上一段交接前已确认过（nextMemory/nextLive），这里只用实测位置验收。
+    const lastInTarget = Math.floor(last.pos.x) === Math.floor(transition.to.x)
+      && Math.floor(last.pos.z) === Math.floor(transition.to.z)
+      && Math.abs(last.pos.y - transition.to.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
+    const measuredArrival = previousHeld && previous !== undefined && !lastInTarget
+      && (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop')
+      && current.onGround
+      && Math.floor(current.pos.x) === Math.floor(transition.to.x)
+      && Math.floor(current.pos.z) === Math.floor(transition.to.z)
+      && Math.abs(current.pos.y - transition.to.y) <= FEET_ARRIVAL_TOLERANCE.vertical
+      && Math.hypot(current.pos.x - last.pos.x, current.pos.z - last.pos.z) <= 1.5 + 1e-6
+      && Math.abs(current.pos.y - last.pos.y) <= 1.3 + 1e-6;
+    if (measuredArrival) {
+      const measuredFrom = { ...last.pos };
+      const horizontal = Math.hypot(current.pos.x - measuredFrom.x, current.pos.z - measuredFrom.z);
+      const vertical = Math.abs(current.pos.y - measuredFrom.y);
+      confirmed.push({
+        transition, measuredFrom, measuredTo: { ...current.pos },
+        measuredHorizontal: horizontal, measuredVertical: vertical, pathLength: horizontal + vertical,
+      });
+      pathLength += horizontal + vertical;
+      executed += 1;
+      last = current;
+      // 前进键仍在手上（上一段交接保留），下一段继续接续。
+      previousCheckpoint = true;
+      holding = true;
+      request.onProgress?.();
+      const sighting = request.checkSighting?.();
+      if (sighting !== undefined) return receipt('sighting', { stopCode: 'sighting', detail: sighting });
+      if (directionalFinish) return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点达到冻结方向的 ${request.minimumAlong} 格距离` });
+      if (request.goal.arrival !== undefined && goalReached(request.goal, current.pos, current.onGround)) {
+        return receipt('reached_waypoint', { arrived: true, detail: `已执行 ${executed} 段，实测停点满足原目标的到达范围` });
+      }
+      continue;
     }
     // 身体不会精确停在计划浮点坐标；连续交接时也只保证站进计划格列。步行/台阶/下落
     // 只要实测仍站在计划起点格列、脚高相符，就复验“实测起点 → 原计划落点”的真实几何；
@@ -1012,10 +1062,27 @@ async function runNavigationSegmentInner(
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在动作前耗尽：已执行 ${executed}/${planned.length} 段` });
     }
     // 只对这一次动作做有界当前证据复验（支撑、扫掠、头部空间与现有风险约束）。
+    // 体素里该格还没写全时，用当前已加载方块补一次即时确认：路线本来就是 A* 选的，
+    // 这里只是在“看一眼脚下这一小步”，确认不了才停。
     const verification = verifyLandRoute(voxel, { ...currentRequest, measuredStart: current.pos }, [transition], Date.now());
     const check = verification.transitions[0]!;
-    if (check.status !== 'OPEN') {
-      return refusal(index, transition, check, current);
+    const live = LIVE_FALLBACK.has(check.status) ? liveEdgeStatus(
+      ctx.adapter, current.pos, transition.to, transition.kind, { wade: request.wade === true },
+    ) : undefined;
+    const liveStep = check.status !== 'OPEN' && live?.status === 'open';
+    if (check.status !== 'OPEN' && !liveStep) {
+      // 即时观察已经看到具体阻挡时，按阻挡交回；只是没加载/形状未知时保留体素侧的
+      // UNKNOWN/STALE，让协调器先做边界观察。
+      // 刚看到的阻挡格如果还在当前视线内，补一次真实观测写进共享地图；看不到就只随回执交回。
+      if (live?.status === 'blocked' && live.cell !== undefined) ctx.senses.observeBlocks?.([live.cell]);
+      const effective = live?.status === 'blocked'
+        ? {
+            ...check, status: 'BLOCKED', reason: live.reason ?? check.reason,
+            ...(live.problem === undefined ? {} : { problem: live.problem }),
+            ...(live.cell === undefined ? {} : { obstacle: live.cell }),
+          }
+        : check;
+      return refusal(index, transition, effective, current);
     }
     if (Date.now() >= request.deadline) {
       return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
@@ -1089,38 +1156,58 @@ async function runNavigationSegmentInner(
         return receipt('timeout', { stopCode: 'deadline', detail: `执行期限在发出身体控制前耗尽：已执行 ${executed}/${planned.length} 段` });
       }
       const next = transitions[index + 1];
-      // 已证实的 walk/step/一格内落差链在中间点不停车（含转向、斜向）；多格下落、边界和末点仍停稳。
-      // 同向与落差只要求站进目标格列；转弯仍进入 0.12 格脚位窗，让身体留在本格列内再转向。
-      // 前视用下一段计划几何，交接时仍会以实测起点再次复验，不能跳过未知格。
-      const sameHeading = next !== undefined && sharesHeading(transition, next);
       const afterNext = transitions[index + 2];
-      // 下一段之后要转向：本段不再保留运动键，转弯段按普通起步清键/转向，不把直行速度带进转弯窗口。
-      const nextTurns = next !== undefined && afterNext !== undefined && !sharesHeading(next, afterNext);
       const smallEdge = (edge: LandSearchTransition) => edge.kind === 'walk' || edge.kind === 'step' || edge.kind === 'drop' && edge.drop <= 1;
+      const flatWalkTurn = (a: LandSearchTransition, b: LandSearchTransition) => a.kind === 'walk' && b.kind === 'walk'
+        && Math.abs(a.to.y - a.from.y) <= 0.05 && Math.abs(b.to.y - b.from.y) <= 0.05
+        && Math.abs(a.to.y - b.from.y) <= 0.05;
+      // 已证实的 walk/step/一格内落差链在中间点不停车（含转向、斜向）；多格下落、边界和末点仍停稳。
+      // 同向与落差只要求站进目标格列；转弯先确认切角格净空，确认不了才退回“停在角点再转向”。
+      const sameHeading = next !== undefined && sharesHeading(transition, next);
+      const turn = next !== undefined && !sameHeading && flatWalkTurn(transition, next);
+      const turnCleared = turn && next !== undefined
+        && liveTurnStatus(ctx.adapter, current.pos, transition.to, next.to, { wade: request.wade === true }).status === 'open';
+      // 下一段之后要转向：只有平地 walk 转弯也确认了切角净空才提前保留速度；台阶/落差
+      // 转弯和非平地转弯仍按原来的提前松键处理，不把直行速度带进未确认的转弯窗口。
+      const afterTurn = next !== undefined && afterNext !== undefined && !sharesHeading(next, afterNext);
+      const afterTurnCleared = afterTurn && next !== undefined && afterNext !== undefined
+        && flatWalkTurn(next, afterNext)
+        && liveTurnStatus(ctx.adapter, next.from, next.to, afterNext.to, { wade: request.wade === true }).status === 'open';
+      const nextTurns = afterTurn && !afterTurnCleared;
       const intentEnd = directionalFinish || request.goalMetric !== 'horizontal' && goalReached(request.goal, transition.to, true);
       // 计划窗口的末步不是委托终点：不必精确对准末点，站进目标格列后松键自然停下（由外层 settleMovement 确认），
       // 不做前后点按修正；下一段从实测停点重新规划。
       const windowEnd = ctx.adapter.settleMovement !== undefined && next === undefined && !intentEnd
         && smallEdge(transition) && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
-      // 复用这一次下一步复验结果给 checkpoint，不在 tick 里重复查体素。
-      const nextOpen = ctx.adapter.settleMovement !== undefined && next !== undefined && !directionalFinish && smallEdge(next)
-        && (request.nextWindow !== undefined && request.goalMetric === 'horizontal' || !goalReached(request.goal, transition.to, true))
-        && verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]?.status === 'OPEN';
-      continuous = windowEnd || nextOpen && next !== undefined
-        && [transition, next].every(smallEdge)
+      // 下一步的通行性：优先用共享体素复验；该格还没被感知写全时，用当前已加载方块
+      // 补一次即时确认。两条都看不了才停，而不是一遇到 UNKNOWN 就刹在格边。
+      const handoffAllowed = request.nextWindow !== undefined && request.goalMetric === 'horizontal'
+        || !goalReached(request.goal, transition.to, true);
+      const nextMemory = ctx.adapter.settleMovement !== undefined && next !== undefined && !directionalFinish && smallEdge(next) && handoffAllowed
+        ? verifyLandRoute(voxel, currentRequest, [next], Date.now()).transitions[0]
+        : undefined;
+      const nextLive = nextMemory !== undefined && LIVE_FALLBACK.has(nextMemory.status) && next !== undefined && smallEdge(next)
+        && !directionalFinish && handoffAllowed
+        ? liveEdgeStatus(ctx.adapter, next.from, next.to, next.kind, { wade: request.wade === true })
+        : undefined;
+      const nextExecutable = next !== undefined
+        && (nextMemory?.status === 'OPEN' || nextLive?.status === 'open');
+      continuous = windowEnd || nextExecutable
+        && [transition, next!].every(smallEdge)
         && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
       // 原目标是一个格子时，最后一步只需站进这一格并停稳，不必对准计划里的连续点。
       cellFinish = next === undefined && !directionalFinish && request.goal.kind === 'cell' && smallEdge(transition)
         && goalReached(request.goal, transition.to, true);
       // 台阶与落差有腾空段，落点难精确命中：站进目标格列即交接，下一段从实测位置复验。
-      passColumn = cellFinish || continuous && (sameHeading || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
-      // 连续路线的下一步已在 tick 外复验；到达本点时只读取这个结果，有效就保持运动键，
-      // 由紧接着的下一段身体控制接续。只对同向行走/台阶/一格落差启用；终点仍按原逻辑制动。
+      passColumn = cellFinish || continuous && (sameHeading || turnCleared || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
+      // 连续路线的下一步已在 tick 外确认；到达本点时只读取这个结果，有效就保持运动键，
+      // 由紧接着的下一段身体控制接续。同向、已确认净空的转弯、台阶与一格落差都保留速度；
+      // 终点仍按原逻辑制动。
       let checkpointHeld = false;
-      // 在 physicsTick 之外复用 continuous 的下一步复验；tick 回调只返回这个结果，
+      // 在 physicsTick 之外复用 continuous 的下一步确认；tick 回调只返回这个结果，
       // 不在逐帧路径里做体素查询。证据之后若变化，下一段执行前仍会用实测起点重新复验。
-      const checkpointEligible = continuous && nextOpen && next !== undefined && !directionalFinish
-        && sameHeading && !nextTurns && smallEdge(next);
+      const checkpointEligible = continuous && next !== undefined && !directionalFinish
+        && (sameHeading || turnCleared) && !nextTurns && smallEdge(next);
       const checkpoint = checkpointEligible
         ? () => {
           checkpointHeld = true;
@@ -1173,7 +1260,9 @@ async function runNavigationSegmentInner(
         confirmed.push({
           transition, measuredFrom: partial.from, measuredTo: partial.to,
           measuredHorizontal: partial.horizontal, measuredVertical: partial.vertical, pathLength: path,
+          ...(liveStep ? { confirmedByLive: true as const } : {}),
         });
+        if (liveStep) liveConfirmedCount += 1;
         pathLength += path;
       }
       const code = codeFromError(actionError);
@@ -1245,7 +1334,9 @@ async function runNavigationSegmentInner(
       measuredHorizontal: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z),
       measuredVertical: Math.abs(arrived.pos.y - current.pos.y),
       pathLength: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z) + Math.abs(arrived.pos.y - current.pos.y),
+      ...(liveStep ? { confirmedByLive: true as const } : {}),
     });
+    if (liveStep) liveConfirmedCount += 1;
     pathLength += confirmed.at(-1)!.pathLength;
     last = arrived;
     // 到达精度不是横向授权：实测停点越界时保留这次实测进展，但不再发下一段动作。

@@ -509,3 +509,18 @@ test('水平跳跨 1 格缺口：起点偏在格内靠后 0.2 也先走到边缘
   assert.ok(bot.entity.position.y >= 68.99, `应落在对岸，实测 ${bot.entity.position}`);
   assert.ok(bot.entity.position.x >= 37, `实测 ${bot.entity.position}`);
 });
+
+test('保留前进键的转弯交接会重新瞄准下一格，而不是从静止重新起步', async (t) => {
+  const { bot, controls, looks, timer, from } = continuousBody(0);
+  t.after(() => clearInterval(timer));
+  const adapter = adapterWith(bot);
+  const b = { kind: 'feet' as const, x: from.x + 1, y: from.y, z: from.z };
+  await adapter.moveTo(b, { ...opts(), timeoutMs: 6000, settleAtTarget: false, passColumn: true, onCheckpoint: () => true });
+  assert.equal(controls.forward, true, '交接后前进键保持按下');
+  const before = looks.length;
+  const c = { kind: 'feet' as const, x: from.x + 1, y: from.y, z: from.z + 1 };
+  await adapter.moveTo(c, { ...opts(), timeoutMs: 6000, keepControls: true, settleAtTarget: false, passColumn: true });
+  assert.ok(looks.length > before, '转弯交接重新瞄准下一格');
+  assert.ok(Math.floor(bot.entity.position.x) === Math.floor(c.x) && Math.floor(bot.entity.position.z) === Math.floor(c.z),
+    `到达转弯后的格列: ${bot.entity.position}`);
+});

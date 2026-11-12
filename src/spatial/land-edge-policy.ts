@@ -48,13 +48,17 @@ export function sweptBodyCells(from: { x: number; y: number; z: number }, to: { 
   return cells;
 }
 
-/** 落点脚下被身体脚面覆盖的支撑格（岩浆块等站上去就伤人）。 */
-export function supportCellsUnder(to: { x: number; y: number; z: number }) {
-  const y = Math.floor(to.y + 0.05) - 1;
+/** 某一层里被身体脚面（0.6×0.6）覆盖的格；y 由调用方按整数/分数脚高决定。 */
+export function supportColumnsUnder(to: { x: number; z: number }, y: number) {
   const cells: { x: number; y: number; z: number }[] = [];
   for (let x = Math.floor(to.x - 0.3 + 1e-6); x <= Math.floor(to.x + 0.3 - 1e-6); x++)
     for (let z = Math.floor(to.z - 0.3 + 1e-6); z <= Math.floor(to.z + 0.3 - 1e-6); z++) cells.push({ x, y, z });
   return cells;
+}
+
+/** 落点脚下被身体脚面覆盖的支撑格（岩浆块等站上去就伤人）。 */
+export function supportCellsUnder(to: { x: number; y: number; z: number }) {
+  return supportColumnsUnder(to, Math.floor(to.y + 0.05) - 1);
 }
 
 const recordedName = (read: LandSearchPolicyRead, x: number, y: number, z: number): string | null => {

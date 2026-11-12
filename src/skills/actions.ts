@@ -1,7 +1,7 @@
 import { DIRS } from '../perception/perception.ts';
 import { facingOfYaw } from '../perception/local.ts';
 import { isTreeSaplingItem } from '../perception/surroundings.ts';
-import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
+import { AbortedError, dist3, sleep, throwIfAborted, yawDelta } from '../util.ts';
 import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
 import { cancelledNav, clampInt, codeFromError, fail, isAbort, navReceipt, obj, ok, type NavOutcome, type Skill, type SkillResult } from './types.ts';
@@ -31,8 +31,7 @@ const dirOk = (dir: string | undefined, from: { x: number; z: number }, to: { x:
   if (!dir || !DIRS[dir]) return true;
   const want = yawOfDir(DIRS[dir][0], DIRS[dir][1]);
   const got = Math.atan2(-(to.x - from.x), -(to.z - from.z));
-  const d = Math.abs(Math.atan2(Math.sin(got - want), Math.cos(got - want)));
-  return d <= Math.PI / 3;
+  return yawDelta(got, want) <= Math.PI / 3;
 };
 
 // ------------------------------------------------------------------ use_item

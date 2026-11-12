@@ -199,11 +199,18 @@ for (const surface of [surfaces[1]!, surfaces[3]!]) {
 test('连续路线下一步证据失效后，回执采样实际制动终点而非交接旧位置', async (t) => {
   const { adapter, ctx, timer, controls, stops, from, map, entity } = setup('E');
   t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const originalOptics = adapter.blockOptics.bind(adapter);
+  let liveUnavailable = false;
+  // 本用例验证“证据失效且无法即时确认时”的回执采样：让失效区在当前客户端世界也不可读，
+  // 避免实时确认把陈旧证据补成可走（那是另一个用例的目标）。
+  t.mock.method(adapter, 'blockOptics', (x: number, y: number, z: number) =>
+    liveUnavailable && x >= Math.floor(from.x) + 2 ? null : originalOptics(x, y, z));
   const original = adapter.moveTo.bind(adapter);
   t.mock.method(adapter, 'moveTo', async (target, opts) => {
     assert.equal(opts.settleAtTarget, false);
     await original(target, opts);
     // 下一段起的证据因自身动作效果未确认而陈旧（pending_effect）；时间与会话不使证据老化。
+    liveUnavailable = true;
     const fx = Math.floor(from.x), fz = Math.floor(from.z);
     for (let x = fx + 2; x <= fx + 8; x++) for (let z = fz - 1; z <= fz + 1; z++) for (let y = 60; y <= 68; y++) {
       map.invalidatePendingEffect(adapter.dim, { x, y, z });

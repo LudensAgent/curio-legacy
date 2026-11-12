@@ -134,6 +134,10 @@ function setup(
     override state() { return { ...super.state(), pos: { ...entity.position }, onGround: entity.onGround }; }
     override blockAt(pos: Vec3Like) { return world.getBlock(new Vec3(pos.x, pos.y, pos.z)).name as string; }
     override blockStateAt(pos: Vec3Like) { return { name: world.getBlock(new Vec3(pos.x, pos.y, pos.z)).name as string, properties: {} }; }
+    override blockOptics(x: number, y: number, z: number) {
+      const name = world.getBlock(new Vec3(x, y, z)).name as string;
+      return { name, kind: name === 'air' ? 'clear' as const : name === 'water' ? 'water' as const : name.endsWith('_leaves') ? 'foliage' as const : 'solid' as const };
+    }
     override async moveTo(target: MoveTarget, opts: MoveOpts) {
       assert.equal(target.kind, 'feet');
       const dispatch = dispatches.length;
@@ -271,14 +275,16 @@ function assertStraightRunKeepsControls(
 ) {
   assert.ok(controlEvents.clears < dispatches.length, '直行段不再每个 transition 都清一次控制键');
   assert.ok(controlEvents.forwardOn >= controlEvents.clears, '每次清键后重新按一次前进');
-  assert.equal(controlEvents.looks, controlEvents.clears, '每次重新起步（清键）都重新转向；接续的 transition 不再 look');
-  assert.deepEqual(controlEvents.looksByDispatch, controlEvents.clearsByDispatch, 'look 与 clear 按 transition 一一对应');
+  assert.ok(controlEvents.looks >= controlEvents.clears, '每次重新起步（清键）都重新转向');
   assert.ok(controlEvents.clearsByDispatch.every((count) => count <= 1), '同一 transition 不重复清键');
+  assert.ok(controlEvents.looksByDispatch.every((count) => count <= 1), '同一 transition 最多瞄准一次');
+  assert.ok(dispatches.every((_, index) => (controlEvents.clearsByDispatch[index] ?? 0) === 0
+    || (controlEvents.looksByDispatch[index] ?? 0) >= 1), '每次清键都重新转向');
   assert.ok(dispatches.every((_, index) => controlEvents.forwardHeldAtDispatch[index] === true || (controlEvents.forwardOnByDispatch[index] ?? 0) >= 1),
     '每个 transition 开始时前进键已按住，或本段重新按下');
   assert.ok(dispatches.every((_, index) => controlEvents.forwardHeldAtDispatch[index] !== true
-    || (controlEvents.clearsByDispatch[index] === 0 && controlEvents.looksByDispatch[index] === 0)),
-  '接续的 transition 不清键、不重新转向');
+    || controlEvents.clearsByDispatch[index] === 0),
+  '接续的 transition 不清键；已确认净空的转弯只重新瞄准');
 }
 
 /** 连续路线除末步外都应带 settleAtTarget:false，由下一段接续。 */
@@ -427,7 +433,7 @@ test('连续控制：三次转弯的窄走廊不重规划、不停车', { timeou
   logRun(t, 'corridor3turns', frames, dispatches, controlEvents, result);
   assert.equal(result.data?.replanCount, undefined, `转弯前先松键减速，不因冲过转弯点重规划：${result.summary}`);
   assertStraightRunKeepsControls(dispatches, controlEvents);
-  assert.ok(controlEvents.clearsByDispatch.filter((count) => count > 0).length >= 4, '起步与每个转弯点都重新清键/转向');
+  assert.ok(controlEvents.looksByDispatch.filter((count) => count > 0).length >= 4, '起步与每个转弯点都重新瞄准（转弯不再清键）');
   const { stopped, back } = middle(frames, dispatches);
   assert.equal(stopped, 0, '转弯不产生停车帧');
   assert.equal(back, 0, '转弯不做后退修正');

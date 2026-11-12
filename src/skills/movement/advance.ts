@@ -27,7 +27,7 @@ const DIAGONALS = new Set(['NE', 'NW', 'SE', 'SW']);
  */
 export const advance: Skill<AdvanceArgs> = {
   name: 'advance',
-  description: '朝你指定的四方向之一（N/E/S/W）水平推进指定距离。方向与距离冻结：宿主每次按冻结方向派生中间 waypoint，分段执行已确认 OPEN 的 walk/step/drop，每步用实测位置确认；不挖、不放、不搭柱、不自动切换游泳/船/攀爬，也不因绕路改方向。距离按水平世界格计算，回执分别报告 along（沿方向进度）、lateral（横向偏移）、horizontalNet（水平净位移）与 confirmedRouteLength（实际路径长度）。遇到 UNKNOWN/STALE 只对相关边界做一次有限定向观察，相关证据变化才重搜；已观测 BLOCKED 或横向偏移超出 maxLateralDrift 就停下报事实。分段/搜索/观察/transition 都有硬预算（maxTransitions 是同一 session 的累计上限，续接不重置）；未完成时返回 sessionId 和 continuation，必须原样续接才算同一意图。',
+  description: '朝你指定的四方向之一（N/E/S/W）水平推进指定距离。方向与距离冻结：宿主每次按冻结方向派生中间 waypoint，分段执行已验证的 walk/step/drop（体素证据缺失时用当前已加载方块即时确认，确认不了才停），每步用实测位置确认；不挖、不放、不搭柱、不自动切换游泳/船/攀爬，也不因绕路改方向。距离按水平世界格计算，回执分别报告 along（沿方向进度）、lateral（横向偏移）、horizontalNet（水平净位移）与 confirmedRouteLength（实际路径长度）。遇到 UNKNOWN/STALE 只对相关边界做一次有限定向观察，相关证据变化才重搜；已观测 BLOCKED 或横向偏移超出 maxLateralDrift 就停下报事实。分段/搜索/观察/transition 都有硬预算（maxTransitions 是同一 session 的累计上限，续接不重置）；未完成时返回 sessionId 和 continuation，必须原样续接才算同一意图。',
   argsDoc: '{"direction":"N|E|S|W","distance":20,"maxLateralDrift"?4,"allowed"?["walk","step","drop"],"historical"?true,"maxSegments"?8,"maxStepsPerSegment"?16,"maxTransitions"?(累计硬上限，默认覆盖 distance+16),"maxSearches"?8,"maxObservations"?4,"maxObservedCells"?128,"maxNoProgressSegments"?2,"sessionId"?,"deadlineMs"?}；distance 是水平格数（4–160）；方向只用四方向，对角线需先验证两侧 corner clearance，当前不接受；allowed 只能是 walk/step/drop；sessionId 只用于续接同一冻结意图（目标/方向/距离/允许模式改变必须新建）；deadlineMs 只能缩短当前调用期限；不做 region/until，也不自动施工或切模式。',
   timeoutMs: 60000,
   movement: true,
