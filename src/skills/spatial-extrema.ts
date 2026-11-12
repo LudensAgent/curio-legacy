@@ -150,7 +150,7 @@ function exploredFacts(visits: { cx: number; cz: number; count: number }[], orig
 export const spatialExtrema: Skill<ExtremaArgs> = {
   name: 'spatial_extrema',
   description: '只读统计共享空间记忆：explored 返回已访问区块的八方位范围与边缘；deepest 返回 radius 内身体实际站过的最低脚格（以前走过、挖过的矿道最深处等）；reach 返回八个方位里身体实际站过、离 origin 最远的脚格（以前推到过的最远处）；两者都按体素到访标记读取。返回事实，不代表区块里看全了，也不代表那里现在还能走到。farthest/gaps（历史路径片段几何）已退役，传入会返回 BAD_ARGS。',
-  argsDoc: '{"metric":"explored|deepest","dim"?:"维度（默认当前）","origin"?:{x,y,z}（默认当前脚位；跨维度必须显式给）,"radius"?:128（deepest/reach 的水平半径，1–512；reach 默认 512）}；只读，不选目标、不执行；要去那里用 travel_to。',
+  argsDoc: '{"metric":"explored|deepest|reach","dim"?:"维度（默认当前）","origin"?:{x,y,z}（默认当前脚位；跨维度必须显式给）,"radius"?:128（deepest/reach 的水平半径，1–512；reach 默认 512）}；只读，不选目标、不执行；要去那里用 travel_to。',
   // deepest 可能要从存盘加载区段读到访标记。
   timeoutMs: 20000,
   movement: false,

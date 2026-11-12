@@ -426,3 +426,34 @@ test('查过的资料写入 self 存档，重载后仍在；重新查到同一�
   reloaded.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('提示词给出身边未到访方向，并指向更完整的空间到访查询', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' };
+  const [system, user] = buildMindMessages({ ...base, tier: 'deliberate' });
+  assert.doesNotMatch(user.content, /unexplored_near/, '认真想时已有完整三档到访覆盖，不重复短提示');
+  assert.match(user.content, /"explored_around":/, '保留原有八方向到访覆盖');
+  assert.match(user.content, /32–128 格八个方向各抽 7 个采样环/, '披露抽样范围');
+  assert.match(user.content, /往哪去由你判断/, '只给事实，不指定方向');
+  assert.match(user.content, /spatial_extrema.*metric.*explored/, '指出可以查询更大范围的历史到访记录');
+  assert.match(system.content, /^- spatial_extrema /m, '空间到访查询作为常用动作给出参数');
+  const [, glance] = buildMindMessages({ ...base, tier: 'glance' });
+  assert.match(glance.content, /unexplored_near/, '瞥一眼看到到访记录很少的方向，避免只凭猜');
+  assert.match(glance.content, /不到四分之一，不分地上地下/, '披露抽样口径，不把抽样说成没去过');
+  assert.match(glance.content, /往哪去由你判断/, '只给事实，不指定方向');
+  memory.close();
+});
+
+test('八个方向都有到访记录时，瞥一眼不再提示未探索方向', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
+  memory.setWorld(adapter.worldId);
+  const dirs: [number, number][] = [[0, -1], [0.7071, -0.7071], [1, 0], [0.7071, 0.7071], [0, 1], [-0.7071, 0.7071], [-1, 0], [-0.7071, -0.7071]];
+  for (const [dx, dz] of dirs) for (let r = 32; r <= 128; r += 16) memory.visit('overworld', { x: Math.floor(dx * r), y: 64, z: Math.floor(dz * r) });
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  const [, glance] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+  assert.doesNotMatch(glance.content, /unexplored_near/);
+  memory.close();
+});

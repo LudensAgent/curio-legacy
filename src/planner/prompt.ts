@@ -12,6 +12,8 @@ export interface MySkillInfo {
   success?: string;
 }
 
+/** exploredAround 的“没去过”档位：提示词按同一常量和标签筛选，避免字面量漂移。 */
+export const UNEXPLORED_LABEL = '没去过';
 const DIR8: [string, number, number][] = [['N', 0, -1], ['NE', 0.7071, -0.7071], ['E', 1, 0], ['SE', 0.7071, 0.7071], ['S', 0, 1], ['SW', -0.7071, 0.7071], ['W', -1, 0], ['NW', -0.7071, -0.7071]];
 /**
  * 身边八个方向 128 格内去过多少（来自走过的区块记录）：让模型知道哪边已经搜过、哪边还是新地方，
@@ -22,7 +24,7 @@ export function exploredAround(memory: WorldMemory, dim: string, pos: [number, n
   for (const [d, dx, dz] of DIR8) {
     let seen = 0, n = 0;
     for (let r = 32; r <= 128; r += 16) { n++; if (memory.chunkVisits(dim, pos[0] + dx * r, pos[2] + dz * r) > 0) seen++; }
-    out[d] = seen / n >= 0.6 ? '大多去过' : seen / n >= 0.25 ? '去过一些' : '没去过';
+    out[d] = seen / n >= 0.6 ? '大多去过' : seen / n >= 0.25 ? '去过一些' : UNEXPLORED_LABEL;
   }
   return out;
 }

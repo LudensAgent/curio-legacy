@@ -21,7 +21,7 @@ test('general-purpose actions stay discoverable outside the advanced line', () =
   assert.doesNotMatch(advanced, /building_archive|ranged_defend/, '通用能力不塞进阶提醒');
 });
 
-test('导航执行用 navigate_to/advance；plan_route 只做只读体素预览', () => {
+test('导航执行用 navigate_to/advance；plan_route 只读；空间到访查询参数内联', () => {
   const catalog = movesCatalog(28);
   assert.match(catalog, /navigate_to/);
   assert.match(catalog, /advance/);
@@ -29,7 +29,7 @@ test('导航执行用 navigate_to/advance；plan_route 只做只读体素预览'
   assert.doesNotMatch(catalog, /walk_path/);
   assert.doesNotMatch(catalog, /plan_memory_route/);
   const directory = moveDirectory();
-  assert.match(directory, /- spatial_extrema /);
+  assert.match(catalog, /^- spatial_extrema .*metric.*explored.*deepest.*reach/m, 'spatial_extrema 应作为常用动作内联 metric 选项，便于查询到访覆盖');
   assert.doesNotMatch(directory, /walk_path/);
   assert.doesNotMatch(directory, /plan_memory_route/);
 });

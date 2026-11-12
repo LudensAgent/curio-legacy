@@ -5,7 +5,7 @@ import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
 import { isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS } from '../perception/surroundings.ts';
-import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, type MySkillInfo } from '../planner/prompt.ts';
+import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, UNEXPLORED_LABEL, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
@@ -134,8 +134,10 @@ export interface MindContext {
  * 只保留高频且参数易错、或静态说明直接依赖的动作（移动原语、导航、合成/建筑、容器存取）。
  * 参数简单、看名字和用途就能正确调用的动作（吃、睡、打猎、等待、查方块等）降到按需列表；
  * 它们正在被使用时，完整参数仍会作为 user 提醒送达，不依赖模型自己想起来查。
+ * 例外：spatial_extrema 是一次只读到访/最深点查询，参数少且直接支撑提示词里的到访覆盖事实，
+ * 放进核心目录是为了让 Agent 知道“可以查更大范围”，不是因为它高频。
  */
-export const COMMON_MOVES = ['travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
+export const COMMON_MOVES = ['travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'spatial_extrema', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
 
 /**
  * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
@@ -145,7 +147,7 @@ export const COMMON_MOVES = ['travel_to', 'explore_toward', 'approach_visible', 
  */
 const ADVANCED = /portal|dragon|stronghold|search_structure|end_gateway/;
 
-/** 空间记忆查询/回程规划：不进静态 system 目录（预算不够且不是每念都用），按情境作为 user 提醒出现。 */
+/** spatial_query 契约参数很大且不是每念都用，留在按需目录；到访覆盖用的 spatial_extrema 已在核心目录。 */
 
 /** 描述取第一句话，太长就在标点处截断（不截进半个括号或半个英文词） */
 function briefOf(d: string, n: number): string {
@@ -780,6 +782,9 @@ function surroundingsOf(p: Percept, tier: 'glance' | 'deliberate', memory: World
 function worldKnowledge(ctx: MindContext) {
   const p = ctx.percept, s = ctx.state, m = ctx.memory;
   const here = { x: p.self.pos[0], y: p.self.pos[1], z: p.self.pos[2] };
+  // 八个方向身边到访覆盖；瞥一眼也给“没进过区块”的方向，移动中就不用靠猜往回走。
+  const around = exploredAround(m, p.self.dim, p.self.pos);
+  const untouched = Object.entries(around).filter(([, seen]) => seen === UNEXPLORED_LABEL).map(([dir]) => dir);
   // 相对自己的方位、水平距离与高差：坐标换算方向容易算反，直接给出
   const bearing = (pos: Vec3Like) => {
     const d = Math.round(Math.hypot(pos.x - here.x, pos.z - here.z)), dy = Math.round(pos.y - here.y);
@@ -871,7 +876,9 @@ function worldKnowledge(ctx: MindContext) {
     ...(remember.length ? { resources_seen_before: remember } : {}),
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: exploredAround(m, p.self.dim, p.self.pos), ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
+    ...(ctx.tier === 'glance' && untouched.length ? { unexplored_near: `身边 8 个方向在 32–128 格各抽 7 个采样环，这些方向的到访记录很少（不到四分之一，不分地上地下）：${untouched.join('、')}；只是抽样到访记录，不代表没去过、没有东西、看全或现在能走，往哪去由你判断` } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: around,
+      explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读，往哪去由你判断）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(currentTrip ? { current_trip: currentTrip, current_trip_note: '本趟=当前这段出行；各方向最远是身体站稳过的脚格，最近探索是任务回执的实测推进；现在能否续走未确认，坐标可直接作为移动目标' } : {}),
     ...(ctx.tier === 'deliberate' && tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
     ...(reachLines(ctx, here, 32).length ? { walked_farthest: { from: `(${ctx.reach!.origin.x},${ctx.reach!.origin.y},${ctx.reach!.origin.z}) 起算`, by_direction: reachLines(ctx, here, 32),
