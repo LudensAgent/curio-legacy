@@ -1044,6 +1044,7 @@ export class Mind {
       newChunks: record.exploration?.newChunks ?? null,
       visitedCells: record.exploration?.visitedCells ?? 0,
       maxHorizontal: record.exploration?.maxHorizontal ?? 0,
+      ...(record.exploration ? { from: { ...record.exploration.start }, to: { ...record.exploration.end } } : {}),
       found: record.exploration?.found ?? [],
       located: record.resource?.located ?? false,
       acquired: record.resource?.acquired ?? null,

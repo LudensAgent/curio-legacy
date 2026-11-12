@@ -68,6 +68,9 @@ export interface PlanOutcome {
 export interface PlanAttemptEvidence {
   dug: number; filled: number; openSteps: number;
   newChunks: number | null; visitedCells: number; maxHorizontal: number;
+  /** 这段活动实测的起止位置；用于复盘“这几次是不是沿同一条路线”。 */
+  from?: { x: number; y: number; z: number };
+  to?: { x: number; y: number; z: number };
   found: string[]; located: boolean; acquired: boolean | null;
 }
 /** 计划里的一个做法：可以换、可以停，不因方法变更而删成果。 */

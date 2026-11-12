@@ -596,11 +596,13 @@ const pos3 = (p: [number, number, number]) => [Math.floor(p[0]), Math.floor(p[1]
  * “走 24 格已知通路”会显示 dug0/filled0/open24，而不是只显示 done。
  */
 function attemptEvidenceText(e: PlanAttemptEvidence): string {
+  const coord = (p: { x: number; y: number; z: number }) => `(${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)})`;
+  const route = e.from && e.to ? `路线${coord(e.from)}→${coord(e.to)}；` : '';
   const passage = `挖${e.dug}/补${e.filled}/原通${e.openSteps}`;
   const coverage = `新格${e.newChunks ?? '?'}/覆盖${Math.round(e.maxHorizontal)}格`;
   const target = e.found.length ? `看见${e.found.slice(0, 3).join('、')}` : e.located ? '目标已定位' : '目标未定位';
   const acquired = e.acquired === true ? '已取得' : e.acquired === false ? '未取得' : '取得未知';
-  return `${passage}；${coverage}；${target}，${acquired}`;
+  return `${route}${passage}；${coverage}；${target}，${acquired}`;
 }
 
 /** 【专注】：主目标、清单、手上的活是不是在推进它（放在消息靠后，模型最看得见的地方） */
@@ -622,8 +624,10 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
         ...(Object.keys(m.stopReasons).length ? { stopped: m.stopReasons } : {}),
         ...(m.lastEvidence ? { last_evidence: attemptEvidenceText(m.lastEvidence) } : {}),
       })) } : {}),
-      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
-      checklist_note: '清单是成果；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
+      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
+      // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
+      checklist_note: '清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
+      ...(plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(() => {
         const nextOutcome = plan.steps.find((st) => !st.done);
