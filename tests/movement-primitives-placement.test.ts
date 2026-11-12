@@ -355,6 +355,29 @@ test('真实适配器 sneakPlaceAt：脚下方两格没有同层参照时如实 
   assert.deepEqual(f.equipCalls, []);
 });
 
+test('真实适配器 sneakPlaceAt：从格子后半部起步，按潜行速度也能挪到边缘外侧再放', async (t) => {
+  const f = realAdapterFixture();
+  f.put('stone', new Vec3(0, 63, 0));
+  f.inventory.set('cobblestone', 1);
+  const bot = f.bot;
+  // 身体偏在背离目标的一侧：要潜行约 1.05 格才越过东侧边缘。
+  bot.entity.position = new Vec3(0.05, 64, 0.5);
+  bot.look = async (yaw: number, pitch: number) => { bot.entity.yaw = yaw; bot.entity.pitch = pitch; };
+  let forward = false;
+  bot.setControlState = (name: string, value: boolean) => { if (name === 'forward') forward = value; };
+  bot.clearControlStates = () => { forward = false; };
+  // 潜行速度约 1.3 格/秒。
+  const timer = setInterval(() => {
+    if (!forward) return;
+    const p = bot.entity.position;
+    bot.entity.position = new Vec3(p.x - Math.sin(bot.entity.yaw) * 0.013, p.y, p.z - Math.cos(bot.entity.yaw) * 0.013);
+  }, 10);
+  t.after(() => clearInterval(timer));
+  const r = await f.adapter.sneakPlaceAt({ x: 1, y: 63, z: 0 }, ['cobblestone'], new AbortController().signal);
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(f.bot.blockAt(new Vec3(1, 63, 0)).name, 'cobblestone');
+});
+
 test('真实适配器 sneakPlaceAt advance：放置后朝原目标方向前进，不沿参照面视线倒退', async (t) => {
   const f = realAdapterFixture();
   f.put('stone', new Vec3(0, 63, 0));

@@ -2061,7 +2061,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
       b.setControlState('forward', true);
       let last = { x: b.entity.position.x, z: b.entity.position.z }, still = 0;
-      for (let t = 0; t < 700; t += 50) {
+      // 潜行约 1.3 格/秒：身体从格子后半部起步要走近 1.1 格才到边缘外侧，700ms 不够；
+      // 被挡住或离地仍由下面的静止/离地检查提前结束，预算放宽不会让卡住的情况多等。
+      for (let t = 0; t < 1500; t += 50) {
         await this.afterAction(() => sleep(50, signal), check);
         const q = b.entity.position;
         if (Math.hypot(q.x - cx, q.z - cz) < 0.08) break;
