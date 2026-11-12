@@ -43,7 +43,15 @@ export interface ActivityEnd {
 }
 
 /** 导航目标的概念阶段；只是当前委托的状态模型，不是新的任务存储。 */
-export type NavigationPhase = 'planning' | 'executing' | 'segment_completed' | 'observing' | 'replanning' | 'waiting_for_agent_decision' | 'arrived' | 'failed' | 'cancelled';
+export type NavigationPhase = 'planning' | 'executing' | 'segment_completed' | 'observing' | 'replanning' | 'paused' | 'waiting_for_agent_decision' | 'arrived' | 'failed' | 'cancelled';
+
+/**
+ * 原委托的形状：不是当前 waypoint。travel_to 保留原目标与 range，
+ * explore_toward 保留起点、方向、距离与横向范围；活动层据此说明“还在做哪条委托”。
+ */
+export type NavigationRequest =
+  | { skill: 'travel_to'; target: unknown; range: number }
+  | { skill: 'explore_toward'; direction: string; distance: number; origin: { x: number; y: number; z: number }; maxLateralDrift: number };
 
 /**
  * 放在当前 Activity 里的导航目标：只保留现在这一段委托的目标、进度、失败、来源与策略。
@@ -54,6 +62,20 @@ export interface NavigationProgress {
   delegationId: string;
   /** Agent 最初选择的目的地；不会被最近一段的 waypoint 替换。 */
   destination?: { x: number; y: number; z: number };
+  /** 原委托的形状（坐标/地标/门/方向探索）；只用于展示与归因，不参与执行。 */
+  request?: NavigationRequest;
+  /** 最近一次回执里的实测进展；只留数值，不复制路线。 */
+  progress?: { along?: number; lateral?: number; horizontalNet?: number; remaining?: number; closer?: number; horizontal?: number };
+  /** 本委托最近一次移动会话的编号；用于识别会话累计段数，不写回步骤参数。 */
+  sessionId?: string;
+  /** 换新会话前已确认的段数，把会话累计值换算成活动累计值。 */
+  segmentOffset?: number;
+  /** 最近一次派发新增的确认段数（不是会话累计值），供 afterStep 判断本次是否有进展。 */
+  lastInvocationConfirmed?: number;
+  /** 最近一次结构化停止原因；停因仍由 Agent 判断。 */
+  stop?: { reason?: string; detail?: string };
+  /** 最近一次回执报告的结果类别（如 travel_to 的 PARTIAL / ARRIVED）。 */
+  outcome?: string;
   /** Agent 为这段委托声明的到达条件（done_when 快照）；精确目标格由 destination 表示。 */
   arrivalCondition?: Condition;
   /** 目标所在世界/维度；从实测位置重新规划时更新为新作用域，保留原目的地。 */
@@ -148,6 +170,11 @@ export interface Activity {
   startInventory: Record<string, number>;
   /** 被绕路的事放下的时刻（回来时要先想想还做不做） */
   suspendedAt?: number;
+  /**
+   * 被绕路挂起的长程移动：挂起发生在 `taskId`/`stepId`，实测 sessionId 在取消回执里归还。
+   * 只是执行状态，不写回步骤参数；回来时复核 done_when 再决定是否带 sessionId 续接。
+   */
+  movementPause?: { taskId: string; stepId: string; sessionId?: string };
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
   /**
@@ -229,6 +256,11 @@ export interface ActivityRecord {
     destinationScope?: { worldId: string; dim: string };
     dim: string; completedSegments: number;
     remaining: { x: number; y: number; z: number }[]; phase: NavigationPhase; lastInvalidation?: string;
+    /** 原委托形状与实测进展；地标/方向探索没有坐标目标时仍能复盘。 */
+    request?: NavigationRequest;
+    progress?: NavigationProgress['progress'];
+    sessionId?: string;
+    outcome?: string;
   };
   /** 这段活显式关联的窍门（k_…）；用于把后续实际应用交给对应经验的证据账。 */
   applying?: string;

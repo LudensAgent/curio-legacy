@@ -75,6 +75,50 @@ test('中断记录保留原导航目标/维度/已确认段，不保留可复用
   assert.equal(Object.hasOwn(record.navigation!, 'route'), false);
 });
 
+test('长程移动在 continue_effect 附近说明原委托与 detour/switch 的后果', () => {
+  const a = createActivity({
+    what: '向西探索 64 格', why: '看看西边', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 } }],
+  }, '向西走走', 'llm', state());
+  assert.deepEqual(a.navigation?.request?.skill, 'explore_toward');
+  a.navigation!.progress = { along: 30.84 };
+  a.navigation!.sessionId = 'ms_west';
+  a.navigation!.stop = { reason: 'SUSPENDED', detail: '先去做别的事' };
+  a.navigation!.phase = 'paused';
+  const view = describeActivity(a, state());
+  const movement = (view.continue_effect as Record<string, unknown>).movement_delegation as Record<string, unknown>;
+  assert.match(String(movement.what), /正向西探索 64 格.*已沿原方向推进 30\.84 格/);
+  assert.equal(movement.can_resume, true);
+  assert.equal(movement.session_id, 'ms_west');
+  assert.match(String(movement.continue), /同一移动会话/);
+  assert.match(String(movement.detour), /完成.*恢复/);
+  assert.match(String(movement.switch), /不再.*续接/);
+});
+
+test('已到达或已看见目标的移动不再承诺继续同一会话', () => {
+  const a = createActivity({
+    what: '向西探索', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 } }],
+  }, '', 'llm', state());
+  a.navigation!.phase = 'segment_completed';
+  a.navigation!.stop = { reason: 'UNTIL_SEEN' };
+  assert.equal((describeActivity(a, state()).continue_effect as Record<string, unknown>).movement_delegation, undefined);
+  a.navigation!.phase = 'arrived';
+  delete a.navigation!.stop;
+  assert.equal((describeActivity(a, state()).continue_effect as Record<string, unknown>).movement_delegation, undefined);
+});
+
+test('travel_to 的地标委托保留原目标与 range，不因没有三维坐标目标而丢失', () => {
+  const a = createActivity({
+    what: '回基地', why: '天黑了', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'travel_to', args: { to: { landmark: 'base' }, range: 3 } }],
+  }, '回家', 'llm', state());
+  assert.deepEqual(a.navigation?.request, { skill: 'travel_to', target: { landmark: 'base' }, range: 3 });
+  const view = describeActivity(a, state());
+  const movement = (view.continue_effect as Record<string, unknown>).movement_delegation as Record<string, unknown>;
+  assert.match(String(movement.what), /range 3/);
+});
+
 test('计划关联随活动进入投影，便于把结果记到成果/做法账上', () => {
   const a = createActivity({
     what: '沿旧路走向远处', why: '换一种做法', kind: 'explore', repeat: 1,

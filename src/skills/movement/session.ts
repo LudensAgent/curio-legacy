@@ -1,6 +1,7 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import { shortId } from '../../util.ts';
 import type { NavigationArrival, NavigationTargetKind } from './goal.ts';
+import type { MakeWayOptions } from './make-way.ts';
 
 /**
  * 短期移动委托状态：只保存“一个尚未完成的移动意图”的控制事实。
@@ -64,6 +65,10 @@ export type StopReason =
   | 'BUDGET_EXHAUSTED'
   | 'TIMEOUT'
   | 'CANCELLED'
+  /** 身体被其他活动暂借（如 detour）：保留 session 与实测进展，可用同一 sessionId 续接。 */
+  | 'SUSPENDED'
+  /** 本次委托的施工授权已在前面用尽；普通路线仍可用，新的挖/放需要 Agent 重新授权。 */
+  | 'MAKE_WAY_BUDGET_EXHAUSTED'
   | 'SCOPE_CHANGED'
   | 'INTENT_MISMATCH'
   | 'SUPERSEDED';
@@ -75,6 +80,12 @@ export interface MovementBudget {
   maxObservedCells: number;
   maxNoProgressSegments: number;
   maxLateralDrift: number;
+}
+
+/** 创建 session 时冻结的委托授权；续接不得借旧 sessionId 扩大。 */
+export interface MovementAuthorization {
+  swim: boolean;
+  makeWay?: MakeWayOptions;
 }
 
 export interface MovementCounters {
@@ -141,9 +152,13 @@ export interface MovementSession {
   phase: MovementPhase;
 
   budget: MovementBudget;
+  /** 本次委托冻结的 swim/施工授权；恢复时沿用，不让有效 sessionId 变成扩大权限的依据。 */
+  authorization: MovementAuthorization;
   counters: MovementCounters;
   measured: MovementMeasured;
   progress: MovementProgress;
+  /** 最近一次实际施工改动（跨调用保留），额度耗尽时用来说明停在哪一处。 */
+  lastMakeWayEdit?: { kind: 'dig' | 'place'; pos: Vec3Like; name: string };
 
   lastSegment?: unknown;
   lastSearch?: unknown;
@@ -163,6 +178,18 @@ const LEASE_TTL_MS = 5 * 60_000;
 
 const sessions = new Map<string, MovementSession>();
 
+const inScope = (session: MovementSession, scope: MoveScope) =>
+  session.scope.worldId === scope.worldId && session.scope.dim === scope.dim && session.scope.sessionId === scope.sessionId;
+
+/** 已完成/已取消/已停止的 session 不再参与“同一 scope 只能有一个活动意图”的取代。 */
+const isTerminal = (session: MovementSession) =>
+  session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped';
+
+/** 同一委托的施工改动余额：冻结授权 − 会话累计，恢复不重新获得额度。 */
+export function remainingMakeWayEdits(session: MovementSession): number {
+  return Math.max(0, (session.authorization.makeWay?.maxEdits ?? 0) - session.counters.makeWayEdits);
+}
+
 /** 同一 intent 的稳定指纹（不含预算与单次调用旋钮）。 */
 export function intentKeyOf(intent: MovementIntent): string {
   return JSON.stringify(intent.kind === 'navigate'
@@ -179,7 +206,7 @@ function prune(now: number) {
   }
   if (sessions.size < CAPACITY) return;
   const removable = [...sessions.values()]
-    .filter((session) => session.phase === 'stopped' || session.phase === 'completed' || session.phase === 'cancelled')
+    .filter(isTerminal)
     .sort((a, b) => a.updatedAt - b.updatedAt);
   while (sessions.size >= CAPACITY && removable.length) sessions.delete(removable.shift()!.id);
   // 全是活动 session 时仍要守容量：丢掉最久未更新的一个，绝不让 map 无界增长。
@@ -194,11 +221,23 @@ function prune(now: number) {
 export function supersedeScope(scope: MoveScope, now: number, keep?: string) {
   for (const session of sessions.values()) {
     if (session.id === keep) continue;
-    if (session.scope.worldId !== scope.worldId || session.scope.dim !== scope.dim || session.scope.sessionId !== scope.sessionId) continue;
-    if (session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped') continue;
+    if (!inScope(session, scope) || isTerminal(session)) continue;
     session.phase = 'stopped';
     session.updatedAt = now;
     session.stop = { reason: 'SUPERSEDED', at: now, detail: '同一 scope 出现了新的移动意图，旧 session 不再允许继续执行' };
+  }
+}
+
+/**
+ * 身体被插曲临时借用（detour）：把原 session 标成可续接的 stopped，
+ * 插曲随后创建的新意图只会取代仍在执行的 session，不会把原委托误判成 SUPERSEDED。
+ */
+export function suspendScopeSessions(scope: MoveScope, now = Date.now()) {
+  for (const session of sessions.values()) {
+    if (!inScope(session, scope) || isTerminal(session)) continue;
+    session.phase = 'stopped';
+    session.updatedAt = now;
+    session.stop = { reason: 'SUSPENDED', at: now, detail: '身体被其他活动暂时借走；原移动委托与实测进展保留，可用同一 sessionId 续接' };
   }
 }
 
@@ -208,6 +247,7 @@ export function createMovementSession(opts: {
   bearing?: { x: number; z: number };
   scope: MoveScope;
   budget: MovementBudget;
+  authorization: MovementAuthorization;
   now: number;
 }): MovementSession {
   const now = opts.now;
@@ -225,6 +265,10 @@ export function createMovementSession(opts: {
     expiresAt: now + TTL_MS,
     phase: 'planning',
     budget: { ...opts.budget },
+    authorization: {
+      swim: opts.authorization.swim,
+      ...(opts.authorization.makeWay === undefined ? {} : { makeWay: { ...opts.authorization.makeWay } }),
+    },
     counters: {
       searches: 0, idleSearches: 0, makeWayLegs: 0, makeWayEdits: 0, segments: 0, confirmedTransitions: 0, confirmedRouteLength: 0,
       newChunks: 0, newObservedCells: 0, observations: 0,
@@ -254,9 +298,7 @@ export function findMovementSession(id: string, now = Date.now()): MovementSessi
 }
 
 export function activeMovementSession(scope: MoveScope): MovementSession | undefined {
-  return [...sessions.values()]
-    .filter((session) => session.scope.worldId === scope.worldId && session.scope.dim === scope.dim && session.scope.sessionId === scope.sessionId)
-    .find((session) => session.phase !== 'completed' && session.phase !== 'cancelled' && session.phase !== 'stopped');
+  return [...sessions.values()].find((session) => inScope(session, scope) && !isTerminal(session));
 }
 
 /**

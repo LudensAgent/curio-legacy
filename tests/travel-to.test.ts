@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
-import type { MovementIntent } from '../src/skills/movement/session.ts';
+import { clearMovementSessions, findMovementSession, remainingMakeWayEdits, type MovementIntent } from '../src/skills/movement/session.ts';
+import { AbortedError, SUSPEND_ABORT_REASON } from '../src/util.ts';
 
 const argsOf = (raw: unknown, adapter = new FakeAdapter()) => {
   const result = travelTo.validate(raw, adapter);
@@ -313,6 +315,135 @@ test('无 y 续接使用冻结脚高，不因新站位超出原脚高扫描范�
   assert.equal(second.data?.targetYSource, 'frozen_session');
   assert.deepEqual(second.data?.requestedTarget, target);
 });
+test('挂起后恢复仍在原目的地与原 range 上续接', async (t) => {
+  clearMovementSessions();
+  const { adapter, ctx } = voxelNavigationFixture(48);
+  t.after(() => ctx.memory.close());
+  const move = adapter.moveTo.bind(adapter);
+  const controller = new AbortController();
+  let moves = 0;
+  t.mock.method(adapter, 'moveTo', async (...args: Parameters<FakeAdapter['moveTo']>) => {
+    const result = await move(...args);
+    if (++moves === 3) controller.abort(SUSPEND_ABORT_REASON);
+    return result;
+  });
+  const target = { x: 40, y: 64, z: 0 };
+  const first = await travelTo.run({ ...ctx, signal: controller.signal }, argsOf({ to: target, range: 1 }, adapter));
+  assert.equal(first.status, 'cancelled', first.summary);
+  assert.equal((first.data?.stop as { reason: string }).reason, 'SUSPENDED');
+  assert.deepEqual(first.data?.requestedTarget, target, '挂起不替换原目标');
+  const sessionId = first.data?.sessionId;
+  assert.equal(typeof sessionId, 'string');
+  assert.deepEqual((first.data?.continuation as { canContinue: boolean }).canContinue, true);
+  const pausedAt = adapter.pos.x;
+
+  const resumed = await travelTo.run(ctx, argsOf({ to: target, range: 1, sessionId }, adapter));
+  assert.equal(resumed.status, 'succeeded', resumed.summary);
+  assert.deepEqual(resumed.data?.requestedTarget, target);
+  assert.deepEqual((resumed.data?.intent as Extract<MovementIntent, { kind: 'navigate' }>).arrival, { radius: 1, metric: '3d' });
+  assert.ok(adapter.pos.x > pausedAt);
+  assert.ok(Math.hypot(adapter.pos.x - 40, adapter.pos.z) <= 1);
+});
+
+test('插曲的新移动意图不会把已挂起的原委托标成 SUPERSEDED', async (t) => {
+  clearMovementSessions();
+  const { adapter, ctx } = voxelNavigationFixture(48);
+  t.after(() => ctx.memory.close());
+  const move = adapter.moveTo.bind(adapter);
+  const controller = new AbortController();
+  let moves = 0;
+  t.mock.method(adapter, 'moveTo', async (...args: Parameters<FakeAdapter['moveTo']>) => {
+    const result = await move(...args);
+    if (++moves === 3) controller.abort(SUSPEND_ABORT_REASON);
+    return result;
+  });
+  const target = { x: 40, y: 64, z: 0 };
+  const first = await travelTo.run({ ...ctx, signal: controller.signal }, argsOf({ to: target, range: 1 }, adapter));
+  assert.equal(first.status, 'cancelled');
+  const sessionId = first.data?.sessionId;
+  assert.equal(typeof sessionId, 'string');
+
+  // 插曲借用身体走一小段：新 session 不能取代已挂起的原委托。
+  const detour = await travelTo.run(ctx, argsOf({ to: { x: 5, y: 64, z: 0 }, range: 1 }, adapter));
+  assert.equal(detour.status, 'succeeded', detour.summary);
+  assert.notEqual(detour.data?.sessionId, sessionId);
+  const resumed = await travelTo.run(ctx, argsOf({ to: target, range: 1, sessionId }, adapter));
+  assert.equal(resumed.status, 'succeeded', resumed.summary);
+  assert.equal(resumed.data?.sessionId, sessionId);
+});
+
+test('施工额度按会话累计：恢复后只剩余额，且不能借旧 sessionId 扩大授权', async (t) => {
+  clearMovementSessions();
+  const { adapter, map, ctx } = voxelNavigationFixture(12);
+  t.after(() => ctx.memory.close());
+  // 真实会话会把挖过的格标成“动作效果待确认”；这里只需记录写入成功。
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  let sequence = 10000;
+  // 横跨整条走廊的墙，只能挖穿；y=64/65 两层各一格。
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) {
+    const pos = { x: 6, y, z };
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: 'minecraft:stone', properties: {} }, pos });
+    adapter.blocks.push({ name: 'stone', pos });
+  }
+  const target = { x: 10, y: 64, z: 0 };
+  const first = await travelTo.run(ctx, argsOf({ to: target, range: 1, dig: true, maxEdits: 1 }, adapter));
+  assert.equal(first.status, 'failed', first.summary);
+  assert.equal((first.data?.stop as { reason: string }).reason, 'MAKE_WAY_BUDGET_EXHAUSTED');
+  assert.match(String((first.data?.stop as { detail?: string }).detail), /施工 1\/1/);
+  assert.equal(adapter.actions.filter((action) => action.startsWith('dig:')).length, 1, '只挖开额度允许的第一格');
+  const sessionId = first.data?.sessionId;
+  assert.equal(typeof sessionId, 'string');
+  assert.equal((first.data?.counters as { makeWayEdits: number }).makeWayEdits, 1);
+
+  const widened = await travelTo.run(ctx, argsOf({ to: target, range: 1, dig: true, maxEdits: 2, sessionId }, adapter));
+  assert.equal(widened.status, 'failed');
+  assert.equal(widened.failureCode, 'BAD_ARGS');
+  assert.equal(widened.data?.reason, 'INTENT_MISMATCH', '旧 session 不能获得更多施工授权');
+
+  const digCount = adapter.actions.filter((action) => action.startsWith('dig:')).length;
+  const again = await travelTo.run(ctx, argsOf({ to: target, range: 1, dig: true, maxEdits: 1, sessionId }, adapter));
+  assert.equal(again.status, 'failed');
+  assert.equal((again.data?.stop as { reason: string }).reason, 'MAKE_WAY_BUDGET_EXHAUSTED');
+  assert.match(String((again.data?.stop as { detail?: string }).detail), /施工 1\/1/);
+  assert.equal(adapter.actions.filter((action) => action.startsWith('dig:')).length, digCount, '额度用尽后不再自动开新的施工预算');
+});
+
+test('开路执行中被挂起：已确认的改动计入会话额度，恢复不重新获得预算', async (t) => {
+  clearMovementSessions();
+  const { adapter, map, ctx } = voxelNavigationFixture(12);
+  t.after(() => ctx.memory.close());
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  let sequence = 20000;
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) {
+    const pos = { x: 6, y, z };
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: 'minecraft:stone', properties: {} }, pos });
+    adapter.blocks.push({ name: 'stone', pos });
+  }
+  const controller = new AbortController();
+  const realDig = adapter.dig.bind(adapter);
+  let digs = 0;
+  t.mock.method(adapter, 'dig', async (...args: Parameters<FakeAdapter['dig']>) => {
+    // 第一格挖开并确认后，第二格执行时收到挂起：这一段没有返回 leg，但第一处改动已经发生。
+    if (++digs === 2) { controller.abort(SUSPEND_ABORT_REASON); throw new AbortedError('cancelled'); }
+    return realDig(...args);
+  });
+  const target = { x: 10, y: 64, z: 0 };
+  const result = await travelTo.run({ ...ctx, signal: controller.signal },
+    argsOf({ to: target, range: 1, dig: true, maxEdits: 12 }, adapter));
+  assert.equal(result.status, 'cancelled', result.summary);
+  assert.equal((result.data?.stop as { reason: string }).reason, 'SUSPENDED');
+  const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
+  assert.equal(edits.length, 1, '已确认的一处改动保留在回执里');
+  assert.match(result.summary, /已确认改动 1 处/);
+  const session = findMovementSession(result.data?.sessionId as string);
+  assert.ok(session);
+  assert.equal(remainingMakeWayEdits(session), 11, '挂起前用掉的施工额度不能因回执中断而丢失');
+});
+
 test('开始前取消即使已在范围内，也不翻译为到达', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture();
   t.after(() => ctx.memory.close());
