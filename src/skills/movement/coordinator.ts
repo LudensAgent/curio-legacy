@@ -285,7 +285,8 @@ function sameAuthorization(a: MovementAuthorization, b: MovementAuthorization): 
     && a.makeWay.dig?.tool === b.makeWay.dig?.tool
     && (a.makeWay.place === undefined) === (b.makeWay.place === undefined)
     && a.makeWay.place?.item === b.makeWay.place?.item
-    && a.makeWay.maxEdits === b.makeWay.maxEdits;
+    && a.makeWay.maxEdits === b.makeWay.maxEdits
+    && a.makeWay.allowPlainRoute === b.makeWay.allowPlainRoute;
 }
 
 /** 施工额度耗尽时，优先报告真实推进与最后一次改动，而不是旧的碰撞摘要。 */
@@ -1273,12 +1274,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         const state = view.evidence.observation.state;
         return supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
       },
+    }).finally(() => {
+      // 即使这一段被取消，已经确认的改动也必须计入会话额度；否则恢复后会重新获得预算。
+      session.counters.makeWayEdits += makeWayEdits.length - editsBefore;
+      const lastEdit = makeWayEdits.at(-1);
+      if (lastEdit !== undefined) session.lastMakeWayEdit = { ...lastEdit, pos: { ...lastEdit.pos } };
     });
     makeWayLegs.push(leg);
     session.counters.makeWayLegs += 1;
-    session.counters.makeWayEdits += makeWayEdits.length - editsBefore;
-    const lastEdit = makeWayEdits.at(-1);
-    if (lastEdit !== undefined) session.lastMakeWayEdit = { ...lastEdit, pos: { ...lastEdit.pos } };
     // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
     if (leg.stale) { stop = null; continue; }
     if (leg.executed === 0) {
@@ -1330,6 +1333,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   const finalStop = stop ?? stopOf('ACTION_FAILURE', '协调循环没有产生终止事实');
   const status: SkillStatus = finalStop.reason === 'CANCELLED' || finalStop.reason === 'SUSPENDED' ? 'cancelled'
     : isSuccess(finalStop.reason) ? 'succeeded' : 'failed';
+  const editedText = makeWayEdits.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、');
+  // 一段开路可能在执行中被取消：即使没有完成的 leg，已确认改动也要出现在回执里。
+  const makeWayNote = makeWayEdits.length === 0 && makeWayLegs.length === 0 ? ''
+    : makeWayLegs.length === 0 ? `；代为开路在这一段完成前中止，已确认改动 ${makeWayEdits.length} 处：${editedText}`
+      : `；代为开路 ${makeWayLegs.length} 段：${makeWayEdits.length === 0 ? '没有改动方块' : editedText}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`;
   return {
     ok: true,
     status,
@@ -1338,13 +1346,13 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`)
       + (request.makeWay === undefined && request.makeWayAvailable === true && MAKE_WAY_STOPS.has(finalStop.reason)
         ? '；本次没有授权 dig/place，没有挖也没有放' : '')
-      + (makeWayLegs.length === 0 ? '' : `；代为开路 ${makeWayLegs.length} 段：${makeWayEdits.length === 0 ? '没有改动方块' : makeWayEdits.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、')}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`),
+      + makeWayNote,
     session,
     segments,
     stop: finalStop,
     ...(observation === undefined ? {} : { observation }),
     ...(swimLegs.length === 0 ? {} : { swimLegs }),
-    ...(makeWayLegs.length === 0 ? {} : { makeWay: { edits: makeWayEdits, legs: makeWayLegs } }),
+    ...(makeWayEdits.length === 0 && makeWayLegs.length === 0 ? {} : { makeWay: { edits: makeWayEdits, legs: makeWayLegs } }),
   };
 }
 

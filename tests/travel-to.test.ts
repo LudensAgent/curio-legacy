@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { Vec3Like } from '../src/adapter/types.ts';
 import { travelTo } from '../src/skills/movement/travel-to.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { voxelNavigationFixture } from './voxel-navigation-fixture.ts';
-import { clearMovementSessions, type MovementIntent } from '../src/skills/movement/session.ts';
-import { SUSPEND_ABORT_REASON } from '../src/util.ts';
+import { clearMovementSessions, findMovementSession, remainingMakeWayEdits, type MovementIntent } from '../src/skills/movement/session.ts';
+import { AbortedError, SUSPEND_ABORT_REASON } from '../src/util.ts';
 
 const argsOf = (raw: unknown, adapter = new FakeAdapter()) => {
   const result = travelTo.validate(raw, adapter);
@@ -407,6 +408,40 @@ test('施工额度按会话累计：恢复后只剩余额，且不能借旧 sess
   assert.equal((again.data?.stop as { reason: string }).reason, 'MAKE_WAY_BUDGET_EXHAUSTED');
   assert.match(String((again.data?.stop as { detail?: string }).detail), /施工 1\/1/);
   assert.equal(adapter.actions.filter((action) => action.startsWith('dig:')).length, digCount, '额度用尽后不再自动开新的施工预算');
+});
+
+test('开路执行中被挂起：已确认的改动计入会话额度，恢复不重新获得预算', async (t) => {
+  clearMovementSessions();
+  const { adapter, map, ctx } = voxelNavigationFixture(12);
+  t.after(() => ctx.memory.close());
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  let sequence = 20000;
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) {
+    const pos = { x: 6, y, z };
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: 'minecraft:stone', properties: {} }, pos });
+    adapter.blocks.push({ name: 'stone', pos });
+  }
+  const controller = new AbortController();
+  const realDig = adapter.dig.bind(adapter);
+  let digs = 0;
+  t.mock.method(adapter, 'dig', async (...args: Parameters<FakeAdapter['dig']>) => {
+    // 第一格挖开并确认后，第二格执行时收到挂起：这一段没有返回 leg，但第一处改动已经发生。
+    if (++digs === 2) { controller.abort(SUSPEND_ABORT_REASON); throw new AbortedError('cancelled'); }
+    return realDig(...args);
+  });
+  const target = { x: 10, y: 64, z: 0 };
+  const result = await travelTo.run({ ...ctx, signal: controller.signal },
+    argsOf({ to: target, range: 1, dig: true, maxEdits: 12 }, adapter));
+  assert.equal(result.status, 'cancelled', result.summary);
+  assert.equal((result.data?.stop as { reason: string }).reason, 'SUSPENDED');
+  const edits = (result.data?.makeWay as { edits: { kind: string; pos: Vec3Like }[] } | undefined)?.edits ?? [];
+  assert.equal(edits.length, 1, '已确认的一处改动保留在回执里');
+  assert.match(result.summary, /已确认改动 1 处/);
+  const session = findMovementSession(result.data?.sessionId as string);
+  assert.ok(session);
+  assert.equal(remainingMakeWayEdits(session), 11, '挂起前用掉的施工额度不能因回执中断而丢失');
 });
 
 test('开始前取消即使已在范围内，也不翻译为到达', async (t) => {

@@ -1458,7 +1458,9 @@ export class Mind {
   private onDone(o: TaskOutcome) {
     if (this.stepExpiry?.taskId === o.task.id) this.clearStepExpiry();
     if (o.task.source === 'filler') return;
-    if (o.result.status === 'cancelled' && o.suspended === true) { this.noteSuspendedMovement(o); return; }
+    // 挂起任务可能落定为 cancelled，也可能在观察到中止前自然停止（failed）；两者都要归还会话，
+    // 不能因为状态不是 cancelled 就把回执丢给插曲活动。
+    if (o.suspended === true) { this.noteSuspendedMovement(o); return; }
     const owner = this.activity?.id === o.task.planId ? this.activity : null;
     const observationMiss = softMiss(owner, { skill: o.task.skill, args: o.task.args }, o.result);
     // 长程移动没走到终点但有实测位移、实际施工或停在待决策/待授权的停点，不是“整段失败”；
@@ -1488,6 +1490,10 @@ export class Mind {
     }
     const a = this.activity;
     if (!a || o.task.planId !== a.id) return;
+    // 被挂起的那一步已经重新跑出结果（成功/失败/反射取消）：续接凭据只用一次。
+    // 必须先清掉，否则反射取消后重放会再次注入已经失效的旧 sessionId。
+    const own = a.steps[Math.max(0, a.index - 1)];
+    if (a.movementPause !== undefined && own?.id === a.movementPause.stepId && own.skill === o.task.skill) delete a.movementPause;
     if (o.result.status === 'cancelled') {
       // 被反射打断：等身体安全了把这一步再做一遍
       if (o.preemptedBy === 'reflex') {
@@ -1509,9 +1515,6 @@ export class Mind {
       }
       return;
     }
-    // 被挂起的那一步已经重新跑出结果：续接凭据只用一次；下一次中断会重新归还新的回执。
-    const own = a.steps[Math.max(0, a.index - 1)];
-    if (a.movementPause !== undefined && own?.id === a.movementPause.stepId && own.skill === o.task.skill) delete a.movementPause;
     this.handleStepResult({ skill: o.task.skill, args: o.task.args }, o.result, o.durationMs, o.task.id);
   }
 

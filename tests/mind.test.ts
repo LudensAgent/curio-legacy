@@ -420,6 +420,36 @@ test('挂起回执晚于插曲开始/续接时，按 taskId 与步骤实例归�
   assert.equal(w.mind.suspended.length, 0);
 });
 
+test('挂起任务以 failed 自然落定时也归还 session，不丢给插曲活动', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.explore_toward;
+  SKILLS.explore_toward = {
+    name: 'explore_toward', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: (raw: any) => ({ ok: true as const, args: { direction: 'W', distance: 64, ...(raw?.sessionId ? { sessionId: raw.sessionId } : {}) } }),
+    run: async (ctx) => new Promise<SkillResult>((resolve) => {
+      const stop = () => resolve(fail('PATH_NOT_FOUND', '挂起前搜索自然停止', { sessionId: 'ms_failed', stop: { reason: 'NO_PATH' } }));
+      if (ctx.signal.aborted) return stop();
+      ctx.signal.addEventListener('abort', stop, { once: true });
+    }),
+  };
+  t.after(() => { if (previous) SKILLS.explore_toward = previous; else delete SKILLS.explore_toward; });
+
+  await w.tick();
+  await w.reply(0, { monologue: '向西走', decision: 'new', activity: { what: '向西探索', steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64 } }] } });
+  await w.tick();
+  const original = w.mind.activity!;
+
+  w.mind.attention.notice('hungry', '饿了', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  const detourAt = w.pending.length - 1;
+  await w.reply(detourAt, { monologue: '先捡点东西', decision: 'detour', activity: { what: '捡东西', steps: [step(9)] } });
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '捡东西');
+  assert.equal(original.movementPause?.sessionId, 'ms_failed', 'failed 回执同样归还 session');
+  assert.equal(w.mind.activity?.what, '捡东西', '原任务的 failed 回执没有结束插曲');
+});
+
 test('绕路回来时原活动收工条件已满足：复核后收工，不重新派发移动步', async (t) => {
   const w = fixture(t);
   const previous = SKILLS.explore_toward;
