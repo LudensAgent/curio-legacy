@@ -1998,7 +1998,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
    * 脚下一格点脚下支撑块的侧面；脚下两格点支撑块下方那一格的侧面（这要求那一格是实心参照方块）。
    * 只处理水平相邻的支撑位；目标格必须为空。几何不允许时如实返回原因，不瞬移、不伪造成功。
    */
-  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & { placedName?: string | null; verified?: boolean; placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
+  async sneakPlaceAt(target: Vec3Like, itemNames: string[], signal: AbortSignal, options: { advance?: boolean } = {}): Promise<ActionResult & { placedName?: string | null; verified?: boolean; placed?: Vec3Like; stance?: Vec3Like; advanced?: boolean; attemptedFaces?: { ref: Vec3Like; face: [number, number, number]; reason?: string }[] }> {
     const check = this.actionCheckpoint(signal);
     throwIfAborted(signal);
     if (!this.ready) return { ok: false, reason: 'NOT_CONNECTED' };
@@ -2068,7 +2068,37 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const evidence = this.placementEvidence(target, itemNames, item.name);
       this.notePlaced({ x: target.x, y: target.y, z: target.z }, item.name, evidence.verified ? 'confirmed' : 'attempted');
       placedOk = true;
-      return { ok: true, placed: { ...target }, stance, attemptedFaces: tried, ...evidence };
+      // 连续搭桥：脚下一格的目标放下后，保持潜行向前迈到新方块靠前一侧的边缘，
+      // 身体仍留在新方块列内。下一次 sneakPlaceAt 从这条边缘直接放下一块，
+      // 不再退回格心、重新转身/潜行。
+      let advanced = false;
+      if (options.advance === true && drop === 1) {
+        const landing = { x: target.x, y: feet.y, z: target.z };
+        let last = { x: b.entity.position.x, z: b.entity.position.z }, still = 0;
+        try {
+          if (ownsControls()) b.setControlState('forward', true);
+          for (let t = 0; t < 1500; t += 50) {
+            await this.afterAction(() => sleep(50, signal), check);
+            if (!ownsControls() || !b.entity.onGround) break;
+            const q = b.entity.position;
+            const progress = dx !== 0 ? (q.x - (landing.x + 0.5)) * dx : (q.z - (landing.z + 0.5)) * dz;
+            if (progress >= 0.45) break;
+            if (Math.hypot(q.x - last.x, q.z - last.z) < 0.01 && ++still >= 3) break;
+            last = { x: q.x, z: q.z };
+          }
+        } catch (error) {
+          // 方块已经放下；前进一步失败只让 advanced 保持 false，不能把放置改报失败。
+          if ((error as Error)?.name === 'AbortedError') throw error;
+        } finally {
+          if (ownsControls()) b.setControlState('forward', false);
+        }
+        const q = b.entity.position;
+        advanced = ownsControls() && b.entity.onGround
+          && Math.floor(q.x) === landing.x && Math.floor(q.z) === landing.z
+          && Math.abs(q.y - landing.y) <= 0.1;
+      }
+      const end = b.entity.position;
+      return { ok: true, placed: { ...target }, stance: { x: end.x, y: end.y, z: end.z }, advanced, attemptedFaces: tried, ...evidence };
     } catch (e) {
       if ((e as Error)?.name === 'AbortedError') throw e;
       const q = b.entity.position;

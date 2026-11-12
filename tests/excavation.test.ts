@@ -88,7 +88,7 @@ test('stairs clear the three-cell transition and verify each real landing; resul
   assert.ok(world.digs.some((pos) => pos.x === 3 && pos.y === 63), 'the descending third step clears its upper transition cell too');
   assert.deepEqual(result.data?.actualOffset, { x: 3, y: -3, z: 0 });
   assert.equal((result.data?.path as unknown[]).length, 4);
-  assert.equal(senses.scans, 4, 'pure excavation peeks the dig direction once per entry and landing, not four-way');
+  assert.equal(senses.scans, 1, 'pure excavation only peeks once at the entry; per-step checks read live blocks and the 700ms loop refreshes vision');
   const next = ctx.memory.landmarks().find((landmark) => landmark.id === result.data?.nextEntryId)!;
   assert.deepEqual(next.pos, { x: 3, y: 61, z: 0 });
   assert.equal(ctx.memory.landmarks().filter((landmark) => landmark.label.startsWith(EXCAVATION_CHECKPOINT_LABEL)).length, 1, 'the call updates one checkpoint rather than inventing intermediate discoveries');
@@ -726,4 +726,27 @@ test('excavate_run 的目录、参数说明与校验用同一个步数上限', a
   assert.ok(excavateRun.argsDoc.includes(shown));
   const line = movesCatalog(28).split(/\r?\n/).find((l) => l.startsWith('- excavate_run '));
   assert.ok(line?.includes(shown), `system 目录里展示的上限要与校验一致：${line}`);
+});
+
+test('直线隧道 + fill：连续搭桥放下后保持前进到新方块边缘，不再重复一次格心移动', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air'); // 下一落点的支撑格是空的，身体两格本来就是空气
+  world.inv.set('netherrack', 3);
+  let seenOptions: { advance?: boolean } | undefined;
+  world.sneakPlaceAt = async (target, _items, _signal, options) => {
+    seenOptions = options;
+    world.setBlock(target, 'netherrack');
+    world.inv.set('netherrack', (world.inv.get('netherrack') ?? 1) - 1);
+    // 潜行迈到新方块靠前一侧、仍在新方块列内。
+    world.pos = { x: 1.95, y: 64, z: 0.5 };
+    return { ok: true, placed: { ...target }, placedName: 'netherrack', verified: true, advanced: options?.advance === true };
+  };
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', direction: 'east', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.deepEqual(seenOptions, { advance: true }, '直线隧道应请求连续搭桥');
+  assert.equal(result.data?.completedSteps, 1);
+  assert.equal(result.data?.filledBlocks, 1);
+  assert.deepEqual(result.data?.fillFacts, [{ at: { x: 1, y: 63, z: 0 }, item: 'netherrack' }]);
+  assert.deepEqual(world.moves, [], '搭桥已经把身体送进落点列，不再走一次格心 moveTo');
+  assert.deepEqual(world.pos, { x: 1.95, y: 64, z: 0.5 });
 });

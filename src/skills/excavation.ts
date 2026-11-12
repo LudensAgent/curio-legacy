@@ -3,6 +3,7 @@ import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
+import { feetCell } from '../perception/local.ts';
 import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
@@ -408,9 +409,12 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     };
     // 结构搜索才需要四向环顾（捕捉任意方向刚挖出的门框）；纯开挖只看挖掘方向一眼刷新工作面，
     // 其余朝向交给 700ms 的感知循环，安全预检本就走 blockAt 实时查询、不依赖这次扫。
-    const observe = async () => {
+    const observe = async (initial = false) => {
       if (!stopOnObservation) {
-        await peek(args.direction);
+        // 纯开挖的支撑/工作面检查读 adapter.blockAt 实时方块，700ms 的感知循环另外刷新视野；
+        // 每格再转头扫一次只会在没有 scan() 的环境里睡 160ms，让 32 格隧道变成一顿一顿。
+        // 入口处看一次方向即可，后面不再停步刷新。
+        if (initial) await peek(args.direction);
         return false;
       }
       for (const direction of ['north', 'east', 'south', 'west'] as const) {
@@ -420,7 +424,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       senses.markSweep();
       return false;
     };
-    if (await observe()) {
+    if (await observe(true)) {
       return ok('在当前实际入口观察到目标，未继续开挖', { ...details(), stoppedByObservation: true });
     }
     const direction = DIRECTIONS[args.direction];
@@ -462,36 +466,52 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       if (supportProblemNow && supportProblemNow.kind !== 'missing_support') throw supportProblemNow;
       // Agent 显式给了 fill：补支撑只替换空气/液体/可替换植物，
       // 不拿 fill 硬盖半砖、火把、沙子/沙砾这类不该当支撑的方块。
-      const fillSupport = async () => {
+      let bridgedThisStep = false;
+      const fillSupport = async (bridgeable = false) => {
         if (!supportProblemNow || !args.fill) return;
         const fillItem = args.fill;
         const supportCell = { x: next.x, y: next.y - 1, z: next.z };
         const supportState = stateAt(ctx.adapter)(supportCell);
         if (supportState && isReplaceable(supportState.name)) {
           fillTried = true;
-          // 补支撑统一交给 place_support：它在内部处理站位/边缘放置并复核可站顶面，避免第二套支撑逻辑。
-          const placed = await placeSupport.run(ctx, { at: [0, 0, 0], xyz: supportCell, facing: FACING[args.direction], item: fillItem });
-          if (placed.status !== 'succeeded') {
-            const data = placed.data as { attempts?: unknown; failureCause?: string } | undefined;
-            const attempts = data?.attempts;
-            // place_support 现在把参照面/站位失败报成 BAD_ARGS；这里按结构化原因或参照面事实
-            // 仍归为“缺支撑”，不能把“没有可点的面”误当成材料/工具能力缺口。
-            const referenceGap = data?.failureCause === 'reference' || /NO_REFERENCE|NO_PLACEMENT_FACE|EDGE_/.test(placed.summary);
-            const failureCode = referenceGap ? 'PATH_NOT_FOUND' : (placed.failureCode ?? 'PATH_NOT_FOUND');
-            // 只有「仍无支撑」才是缺支撑；材料/工具/效果类失败是能力缺口，不能继续报 missing_support。
-            // 把 place_support 的实际原因放在摘要最前面：后面的 cavity 提示会把总长推到
-            // clipFeedback 的上限，原来的“下一落点…没成：…”前缀正好把 edge 原因挤到被截掉的中间。
-            const stop = new ExcavationStop(failureCode,
-              `[${args.direction}] 补支撑失败（fill:"${args.fill}"）：${placed.summary}；下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 仍是 ${supportState.name}`, false, referenceGap ? 'missing_support' : 'capability');
-            if (Array.isArray(attempts)) stop.fillAttempts = attempts as Record<string, unknown>[];
-            stop.nextLanding = { ...next };
-            stop.supportMissing = supportGap(stop.nextLanding, args.direction, args.fill);
-            stop.remediation = { action: 'place_support', at: stop.supportMissing.at, item: stop.supportMissing.item, reason: stop.supportMissing.reason };
-            throw stop;
+          let actual: string | null = null;
+          let advanced = false;
+          // 直线隧道、脚下同层的连续搭桥：直接沿用适配器的贴边放置，并保持潜行向前迈到
+          // 新方块边缘，下一次从这条边缘继续放；不再每块退回格心、重新转身/潜行。
+          // fill:"any" 的材料选择仍交给 place_support；这里只处理 Agent 指定的具体方块。
+          if (bridgeable && args.mode === 'tunnel' && args.fill !== 'any' && adapter.sneakPlaceAt !== undefined) {
+            const raw = await adapter.sneakPlaceAt(supportCell, [fillItem], ctx.signal, { advance: true });
+            if (raw.ok) {
+              actual = raw.placedName ?? fillItem;
+              advanced = raw.advanced === true;
+            }
           }
-          const actual = String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill);
+          if (actual === null) {
+            // 非直线搭桥/边缘放置没成：回退到 place_support 的完整站位与参照面处理。
+            const placed = await placeSupport.run(ctx, { at: [0, 0, 0], xyz: supportCell, facing: FACING[args.direction], item: fillItem });
+            if (placed.status !== 'succeeded') {
+              const data = placed.data as { attempts?: unknown; failureCause?: string } | undefined;
+              const attempts = data?.attempts;
+              // place_support 现在把参照面/站位失败报成 BAD_ARGS；这里按结构化原因或参照面事实
+              // 仍归为“缺支撑”，不能把“没有可点的面”误当成材料/工具能力缺口。
+              const referenceGap = data?.failureCause === 'reference' || /NO_REFERENCE|NO_PLACEMENT_FACE|EDGE_/.test(placed.summary);
+              const failureCode = referenceGap ? 'PATH_NOT_FOUND' : (placed.failureCode ?? 'PATH_NOT_FOUND');
+              // 只有「仍无支撑」才是缺支撑；材料/工具/效果类失败是能力缺口，不能继续报 missing_support。
+              // 把 place_support 的实际原因放在摘要最前面：后面的 cavity 提示会把总长推到
+              // clipFeedback 的上限，原来的“下一落点…没成：…”前缀正好把 edge 原因挤到被截掉的中间。
+              const stop = new ExcavationStop(failureCode,
+                `[${args.direction}] 补支撑失败（fill:"${args.fill}"）：${placed.summary}；下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 仍是 ${supportState.name}`, false, referenceGap ? 'missing_support' : 'capability');
+              if (Array.isArray(attempts)) stop.fillAttempts = attempts as Record<string, unknown>[];
+              stop.nextLanding = { ...next };
+              stop.supportMissing = supportGap(stop.nextLanding, args.direction, args.fill);
+              stop.remediation = { action: 'place_support', at: stop.supportMissing.at, item: stop.supportMissing.item, reason: stop.supportMissing.reason };
+              throw stop;
+            }
+            actual = String((placed.data as { placed?: unknown } | undefined)?.placed ?? args.fill);
+          }
           filled++;
           fillFacts.push({ at: supportCell, item: actual });
+          bridgedThisStep = advanced;
           supportProblemNow = supportProblem(ctx, supportCell, next.y, `[${args.direction}] 下一落点`, ledger, args);
           if (supportProblemNow) {
             const stop = new ExcavationStop(supportProblemNow.code,
@@ -550,7 +570,8 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       // 下一格身体空间已挖开，支撑格的面现在露出来了：有 fill 就补，没有就停下交回缺口，不迈步。
       if (supportProblemNow) {
         if (args.fill) {
-          await fillSupport();
+          // 身体空间已挖开后的补支撑允许直线连续搭桥：放下后保持潜行迈到新方块边缘。
+          await fillSupport(true);
           const still = supportProblemNow as ExcavationStop | null;
           if (still) throw still;
         } else {
@@ -561,17 +582,27 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       workCheck();
       standingCell(ctx, next, ledger, args);
       assertSession(ctx, origin);
-      // 已逐格复核身体空间和支撑；直接迈进这一个落点，停稳条件与下方实测验收一致。
-      await adapter.moveTo({ kind: 'xyz', ...next }, {
-        signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), adjacentStep: { centerRadius: LANDING_CENTER_RADIUS },
-      });
-      const landedBy = Math.min(ctx.deadline, Date.now() + 2500);
+      // 连续搭桥已经把身体送进 next 列并停在新方块边缘：不再退回格心/重新迈这一步。
+      if (bridgedThisStep) {
+        const now = adapter.state();
+        const cell = feetCell(now.pos);
+        bridgedThisStep = now.onGround && cell.x === next.x && cell.z === next.z && Math.abs(now.pos.y - next.y) <= 0.1;
+      }
       let landed: AgentState;
-      while (true) {
-        landed = assertSession(ctx, origin);
-        if (landed.onGround && Math.abs(landed.pos.y - next.y) <= 0.1 && Math.hypot(landed.pos.x - next.x - 0.5, landed.pos.z - next.z - 0.5) <= LANDING_CENTER_RADIUS) break;
-        if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
-        await sleep(50, signal);
+      if (bridgedThisStep) {
+        landed = adapter.state();
+      } else {
+        // 已逐格复核身体空间和支撑；直接迈进这一个落点，停稳条件与下方实测验收一致。
+        await adapter.moveTo({ kind: 'xyz', ...next }, {
+          signal, timeoutMs: Math.max(1, Math.min(10000, ctx.deadline - Date.now())), adjacentStep: { centerRadius: LANDING_CENTER_RADIUS },
+        });
+        const landedBy = Math.min(ctx.deadline, Date.now() + 2500);
+        while (true) {
+          landed = assertSession(ctx, origin);
+          if (landed.onGround && Math.abs(landed.pos.y - next.y) <= 0.1 && Math.hypot(landed.pos.x - next.x - 0.5, landed.pos.z - next.z - 0.5) <= LANDING_CENTER_RADIUS) break;
+          if (Date.now() >= landedBy) throw new ExcavationStop('PATH_NOT_FOUND', '移动回执未对应实际站稳的下一落点');
+          await sleep(50, signal);
+        }
       }
       preflightColumn(ctx, next, height, ledger, args);
       standingCell(ctx, next, ledger, args);
@@ -643,7 +674,7 @@ export const EXCAVATION_ROUTE_NOTE = '按指定方向和模式（stairs/stairs_u
 
 export const excavationSkill: Skill<ExcavationArgs> = {
   name: 'excavate_path',
-  description: `显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多 ${EXCAVATION_MAX_STEPS} 格（遇到下面这些风险随时停，不会因为步数多就硬闯），逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。${EXCAVATION_ROUTE_NOTE}`,
+  description: `显式选择后，从实际当前位置或附近可信入口开挖单条有界下降/上升阶梯或水平通道；每次最多 ${EXCAVATION_MAX_STEPS} 格（遇到下面这些风险随时停，不会因为步数多就硬闯），逐格确认能否挖开、地板、跳跃头部空间、干燥和真实落地。stairs 下行时，下一级支撑格为空但同列 1..4 格内有安全整格楼面，会按实际楼面继续下落，不消耗材料；危险、未知、半格或更大落差才停。工作面自身的沙/沙砾默认可挖并在挖后复核；落点或身体上方的下落方块需要 allowFalling。下一级支撑格是空的时，先挖开下一格的身体空间（否则支撑格的面被挡住、放不上），再按 fill 补或停下报缺口，不迈出这一步。可加 fill 明确授权用哪种方块补下一级支撑（会消耗材料）；补支撑时先在当前站位试，必要时退/侧移一格或潜行到方块边缘再放同一个目标格，补不上就停下并报缺口，不把手工 place_support 的工作推回给你。直线 tunnel 且 fill 写了具体方块时，连续搭桥会保持潜行：放好一块后直接迈到新方块靠前一侧的边缘继续放下一块，不逐块退回格心/重新转身；fill:"any" 仍走通用站位选择。可加 tool 明确本轮用哪件工具（先装备到主手）；指定后不会自动改用别的工具，该工具不在背包时返回 TOOL_MISSING；能挖开但采不到掉落时照样挖开并回报 noDrop，预计耗时超出动作预算才报 HAND_DIG_TIMEOUT。只报告实际路线，不保证覆盖地下、登塔或找到结构。${EXCAVATION_ROUTE_NOTE}`,
   argsDoc: '{"entry":"current|<waypointId>","mode"?:"stairs|stairs_up|tunnel","direction":"north|east|south|west","steps"?:1-32,"tool"?:"物品注册名，如 iron_pickaxe（不掉落也会挖开并回报 noDrop）","fill"?:"<方块名>|any（只用泥土、下界岩、圆石等土石类填充方块）","wet"?:true,"lava"?:true,"allowFalling"?:true}（fill 授权补支撑、耗材料；wet/lava 接受相邻液体流入；allowFalling 接受落点/身体上方的下落方块，工作面自身的沙砾默认可挖并复核；这些都不写时在风险前停下；邻格未加载只跳过、不阻断）', timeoutMs: 180000, movement: true,
   validate(raw, adapter) {
     const value = obj(raw), mode = value.mode ?? 'stairs', steps = value.steps ?? 4, tool = value.tool;

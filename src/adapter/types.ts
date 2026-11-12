@@ -489,8 +489,11 @@ export interface GameAdapter {
    * 脚下两格需要在支撑块下方有实心参照方块；没有时如实返回 EDGE_NO_REFERENCE，不伪造成功。
    * 只用于 place_support 的支撑位；会移动身体到边缘，放完保持站稳。
    * `stance` 是实际尝试放置时的身体位置（潜行到边缘后）；失败前没挪动就不返回。
+   * `options.advance` 只给连续搭桥用：脚下一格的目标放置成功后，保持潜行向前迈到新方块
+   * 靠前一侧的边缘（仍站在新方块列内），让下一次调用可以不再回格心、连续放下一块。
+   * 返回 `advanced` 表示身体是否真的走到了新边缘；没走到不影响已放置的方块。
    */
-  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal): Promise<ActionResult & PlacementEvidence & { placed?: Vec3Like; stance?: Vec3Like; attemptedFaces?: PlacementFaceAttempt[] }>;
+  sneakPlaceAt?(target: Vec3Like, itemNames: string[], signal: AbortSignal, options?: { advance?: boolean }): Promise<ActionResult & PlacementEvidence & { placed?: Vec3Like; stance?: Vec3Like; advanced?: boolean; attemptedFaces?: PlacementFaceAttempt[] }>;
   placeBlockStateAt?(pos: Vec3Like, name: string, properties: BlockState['properties'], signal: AbortSignal): Promise<ActionResult>;
   /** 打开看得见的方块界面（工作站、容器），依次执行操作，返回关之前看到的界面 */
   useGui?(target: GuiTarget, ops: GuiOp[], signal: AbortSignal, opts?: { onContainer?: (observation: GuiContainerObservation) => void }): Promise<GuiResult>;
