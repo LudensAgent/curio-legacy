@@ -508,9 +508,13 @@
           <div class="card">
             <h2>镜头与亮度 <span class="r dim">只在旁观 Bot 时生效</span></h2>
             <div class="hudopt">
-              <label class="full"><input type="checkbox" id="camAuto"> 自动切换视角（空旷处退到第三人称，狭窄处回第一人称）</label>
+              <label class="full"><input type="checkbox" id="camAuto"> 自动切换视角（侧拍 / 追尾 / 第一人称自动选择）</label>
               <span>跟随距离</span><input type="range" id="camDistance" min="1.5" max="6" step="0.1"><span class="v" id="camDistanceV"></span>
               <span>转动平滑</span><input type="range" id="camSmoothing" min="0" max="0.8" step="0.01"><span class="v" id="camSmoothingV"></span>
+              <label class="full"><input type="checkbox" id="camSide"> 工作时侧向跟拍（挖矿、搭桥等，旁边有空间时从侧面看 Agent）</label>
+              <span>侧拍距离</span><input type="range" id="camSideDistance" min="1.5" max="6" step="0.1"><span class="v" id="camSideDistanceV"></span>
+              <span>镜头最短驻留</span><input type="range" id="camDwell" min="0.3" max="4" step="0.1"><span class="v" id="camDwellV"></span>
+              <span class="full hudnote">侧拍只在 Agent 正在挖矿/放置方块或持续停下时启用，且侧面要连续有空间；1 格宽隧道会退到正后方追尾，四面贴墙才回第一人称。切换不会硬切，而是绕 Agent 缓慢平移；「镜头最短驻留」越长，越不容易来回切换。</span>
               <label class="full"><input type="checkbox" id="lightOn"> 暗处增亮（不改游戏设置，只在旁观时生效）</label>
               <span>伽马</span><input type="range" id="lightGamma" min="0" max="15" step="0.1"><span class="v" id="lightGammaV"></span>
               <span class="full hudnote">游戏自带的亮度滑块最高是 1.0（「明亮」）；这里可以调到 15，越高洞里越亮。开光影时改为给光影包「夜视」补光：伽马 3 约一半、5 以上为满（Complementary 有效）。失明、黑暗效果仍然生效。</span>
@@ -2051,6 +2055,9 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     $('camAuto').checked = hud.camera.auto;
     setRange('camDistance', hud.camera.distance, (v) => Number(v).toFixed(1) + ' 格');
     setRange('camSmoothing', hud.camera.smoothing, (v) => Number(v).toFixed(2) + ' 秒');
+    $('camSide').checked = hud.camera.side !== false;
+    setRange('camSideDistance', hud.camera.sideDistance ?? 2.6, (v) => Number(v).toFixed(1) + ' 格');
+    setRange('camDwell', hud.camera.dwell ?? 1.5, (v) => Number(v).toFixed(1) + ' 秒');
     $('lightOn').checked = hud.lighting.brighten;
     setRange('lightGamma', hud.lighting.gamma, (v) => Number(v).toFixed(1));
   }
@@ -2096,6 +2103,9 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
   $('camAuto').addEventListener('change', (e) => change({ camera: { auto: e.target.checked } }));
   $('camDistance').addEventListener('input', (e) => change({ camera: { distance: Number(e.target.value) } }));
   $('camSmoothing').addEventListener('input', (e) => change({ camera: { smoothing: Number(e.target.value) } }));
+  $('camSide').addEventListener('change', (e) => change({ camera: { side: e.target.checked } }));
+  $('camSideDistance').addEventListener('input', (e) => change({ camera: { sideDistance: Number(e.target.value) } }));
+  $('camDwell').addEventListener('input', (e) => change({ camera: { dwell: Number(e.target.value) } }));
   $('lightOn').addEventListener('change', (e) => change({ lighting: { brighten: e.target.checked } }));
   $('lightGamma').addEventListener('input', (e) => change({ lighting: { gamma: Number(e.target.value) } }));
 
