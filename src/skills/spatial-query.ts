@@ -162,6 +162,12 @@ export const spatialQuery: Skill<SpatialQueryArgs> = {
     if (result.status === 'invalid_request') {
       return fail('BAD_ARGS', summaryOf(kindOf(args), result), envelope);
     }
-    return ok(summaryOf(kindOf(args), result), envelope);
+    // 待写/溢出的观测是“已看见但还没写进地图”的事实；查询回执如实附上，避免把
+    // 缺口当成没看过。不构成行动指令，也不改变查询结果本身。
+    const backlog = spatial.backlogNote();
+    return ok(
+      `${summaryOf(kindOf(args), result)}${backlog ? `；${backlog.text}` : ''}`,
+      backlog ? { ...envelope, spatialBacklog: backlog.data } : envelope,
+    );
   },
 };

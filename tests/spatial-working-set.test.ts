@@ -404,11 +404,11 @@ test('post-save free uses a bounded capacity target and preserves pinned hot pag
     const pin = session.pinSections([keyAt(2)]);
     try {
       const freed = coordinator.free();
-      assert.equal(freed.evicted.length, 1, '只淘汰到 75% 容量目标（4 → 3）');
+      assert.equal(freed.evicted.length, 1, '只淘汰到 90% 容量目标（4 → 3）');
       assert.ok(!freed.evicted.some((key) => key.cx === 2), 'pinned 页面不能被淘汰');
       assert.deepEqual(coordinator.lastFreeTarget(), {
         sections: 3,
-        bytes: Math.floor(coordinator.stats().maxResidentBytes * 3 / 4),
+        bytes: Math.floor(coordinator.stats().maxResidentBytes * 9 / 10),
       });
       assert.equal(coordinator.stats().residentSections, 3);
       assert.equal(session.sectionResidency(keyAt(2)).residency, 'resident');

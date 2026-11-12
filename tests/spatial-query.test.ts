@@ -561,3 +561,25 @@ test('spatial_query：库 validator 仍失败关闭非法端口请求；宿主�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('spatial_query：回执带上待写/溢出 backlog 事实，不把缺口当没看过', async () => {
+  const fake = {
+    worldId: WORLD,
+    closing: false,
+    paused: false,
+    observationAdmitted: true,
+    session: { lifecycle: 'open' },
+    query: () => ({ status: 'ok', data: { kind: 'cells', cells: [] } }),
+    backlogNote: () => ({
+      text: '空间记忆还有 3 条观测待写入、2 条在磁盘等待回放（这些格已看见，只是还没写进地图）',
+      data: { pending: 3, spooled: 2, lastGap: { kind: 'queue_full', count: 4 } },
+    }),
+  };
+  const result = await spatialQuery.run(ctxFor(fake), { kind: 'cells', dim: DIM, positions: [point(0)] });
+  assert.equal(result.status, 'succeeded');
+  assert.match(result.summary, /3 条观测待写入、2 条在磁盘等待回放/);
+  const backlog = rec(envelopeOf(result).spatialBacklog);
+  assert.equal(backlog.pending, 3);
+  assert.equal(backlog.spooled, 2);
+  assert.deepEqual(backlog.lastGap, { kind: 'queue_full', count: 4 });
+});

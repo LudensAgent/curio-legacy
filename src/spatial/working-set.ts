@@ -202,9 +202,9 @@ export class WorkingSetCoordinator {
    * 显式释放工作集空间；closing 之后拒绝新操作，其余直接走库内同一 session 门的
    * `WorkingSetManager.free`。不加载、不保存、不关闭会话。
    *
-   * 无显式目标时（例如保存后换出）使用有界容量目标：保留约 75% 的驻留数量/字节
-   * 作为近期热页，只从 LRU 最旧淘汰到上限；不会再把所有 eligible 冷页一次清空。
-   * pinned/dirty/未确认保存仍由库拒绝，导航执行依赖继续用 lease 保护。
+   * 无显式目标时（例如保存后换出）使用有界容量目标：只回收约 10%，保留 90% 的
+   * 驻留数量/字节作为近期热页；75% 会把还热着的区域整批换出、随后又换回，抖动大于
+   * 收益。pinned/dirty/未确认保存仍由库拒绝，导航执行依赖继续用 lease 保护。
    */
   free(target?: { sections?: number; bytes?: number }): FreeResult {
     if (this.closingFlag) {
@@ -221,12 +221,12 @@ export class WorkingSetCoordinator {
     return this.lastFreeTargetValue === null ? null : { ...this.lastFreeTargetValue };
   }
 
-  /** 有界回收目标：驻留上限的 75%（向下取整，至少 1），保留有限近期热页。 */
+  /** 有界回收目标：驻留上限的 90%（向下取整，至少 1），只回收最旧的约一成。 */
   private postSaveTarget(): { sections: number; bytes: number } {
     const limits = this.session.residencyLimits;
     return {
-      sections: Math.max(1, Math.floor(limits.maxResidentSections * 3 / 4)),
-      bytes: Math.max(1, Math.floor(limits.maxResidentBytes * 3 / 4)),
+      sections: Math.max(1, Math.floor(limits.maxResidentSections * 9 / 10)),
+      bytes: Math.max(1, Math.floor(limits.maxResidentBytes * 9 / 10)),
     };
   }
 

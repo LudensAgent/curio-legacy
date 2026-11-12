@@ -43,9 +43,11 @@ import type {
   StaleReason,
   Vec3Like,
 } from 'curio-minecraft-3d-memory';
+import { readFile, rm, stat } from 'node:fs/promises';
 import { capabilityGate, readHostCapabilities } from './capabilities.ts';
 import type { CapabilityDomain, HostCapabilityReport, MemoryWriteCapability } from './capabilities.ts';
 import type { BlockObservation } from '../adapter/types.ts';
+import { HandoffSpool } from './handoff-spool.ts';
 import { MAX_DEADLINE_DELAY_MS, WorkingSetCoordinator } from './working-set.ts';
 import type { WorkingSetPrepareOptions, WorkingSetPrepareOutcome } from './working-set.ts';
 
@@ -71,8 +73,28 @@ export const MAX_PENDING_OBSERVATION_BYTES = 1024 * 1024;
  */
 const CAPACITY_RETRY_BACKOFF_MS = 5000;
 
+/** handoff 换入命中容量后按需保存的冷却；同一会话内不连续触发保存。 */
+const CAPACITY_RECOVERY_COOLDOWN_MS = 10_000;
+
 /** 队列满或加载被 busy 挡住后的自动重试间隔；只在仍有可加载 handoff 时生效。 */
 const HANDOFF_RETRY_MS = 300;
+
+/**
+ * 后台应用 handoff 时每片的观测数。整批一次性写会把主线程按批大小占住（回放积压时
+ * 可达数千格）；分片并在片间让出事件循环，物理帧与其它定时器才能插进来。
+ */
+const APPLY_SLICE = 128;
+
+/** 片间让出一轮事件循环；只调度、不阻塞。 */
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** 内存 handoff 溢出到磁盘 spool 后的字节上限；耗尽才会丢，并把丢弃条数记成缺口。 */
+const SPOOL_BYTE_LIMIT = 64 * 1024 * 1024;
+/** spool 落盘节流：只在有未落盘缓冲时挂一个 unref 定时器，物理帧里不做磁盘 I/O。 */
+const SPOOL_FLUSH_MS = 250;
+/** 一次回放最多读取的 spool 字节 / 送入内存队列的条数。 */
+const SPOOL_READ_BYTES = 1024 * 1024;
+const SPOOL_READ_RECORDS = 4096;
 
 /** 诊断摘要里保留的 Section 键上限；超出只保留总数事实，不累积历史键。 */
 const MAX_DIAGNOSTIC_KEYS = 32;
@@ -232,6 +254,12 @@ export interface SharedSpatialPendingInfo {
   countLimit: number;
   /** 字节上限。 */
   byteLimit: number;
+  /** 已溢出到磁盘 spool、等待回放的观测条数。 */
+  spooled: number;
+  /** spool 中尚未回放的字节数（含尚未落盘的缓冲）。 */
+  spooledBytes: number;
+  /** spool 的磁盘预算；只有耗尽才会丢弃观测。 */
+  spoolByteLimit: number;
   sections: SectionKey[];
   observedAtMin: number | null;
   observedAtMax: number | null;
@@ -425,6 +453,45 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** handoff 的格级身份：同一格的新观测覆盖旧观测，不重复占队列预算。 */
+function cellKeyOf(observation: Observation): string {
+  return `${observation.dim}|${observation.pos.x},${observation.pos.y},${observation.pos.z}`;
+}
+
+/** 一批观测覆盖的去重 Section 键；用于 pin/换出保护与 prepare 请求。 */
+function sectionKeysOf(observations: readonly Observation[]): SectionKey[] {
+  const keys: SectionKey[] = [];
+  const seen = new Set<string>();
+  for (const observation of observations) {
+    const key = sectionKeyOf(observation);
+    const id = sectionKeyId(key);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** spool 行只在回放边界解析一次；字段形状不对就当作不可回放，不猜测、不半写。 */
+function parseSpoolLine(line: string): Observation | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (value === null || typeof value !== 'object') return null;
+  const record = value as Partial<Observation> & { pos?: { x?: unknown; y?: unknown; z?: unknown } };
+  if (typeof record.worldId !== 'string' || typeof record.dim !== 'string' || typeof record.sessionId !== 'string'
+    || typeof record.observedAt !== 'number' || typeof record.sequence !== 'number'
+    || record.state === null || typeof record.state !== 'object'
+    || record.pos === null || typeof record.pos !== 'object'
+    || !Number.isInteger(record.pos.x) || !Number.isInteger(record.pos.y) || !Number.isInteger(record.pos.z)) {
+    return null;
+  }
+  return record as Observation;
+}
+
 /** manual 写入容量拒绝是库内普通 Error；按消息里的上限名归类，不猜私有字节。 */
 function capacityKindOf(error: unknown): 'count_capacity' | 'byte_capacity' | 'capacity' | null {
   if (error instanceof PersistenceError && error.kind === 'capacity') return 'capacity';
@@ -490,6 +557,17 @@ export class SharedSpatialSession {
   private discarded: SharedSpatialDiscarded | null = null;
   /** 已丢弃批次的累计不同 Section 数；用于保留“已存键/总数”事实。 */
   private discardedKeyCount = 0;
+  /** 上次按需容量保存的时间；同会话 10s 冷却，避免每条失败都触发保存。 */
+  private capacityRecoveryAt = 0;
+  /**
+   * 内存队列放不下的观测按到达顺序落到库旁的 spool；懒创建，正常路径不产生磁盘 I/O。
+   * spool 是宿主侧的写后缓冲，不替代库的持久化，也不改变库的 revision 语义。
+   */
+  private spool: HandoffSpool | null = null;
+  private readonly spoolPath: string;
+  private spoolFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 尚未回放或丢弃的 spool 条数（估算；真实内容以 spool 文件为准）。 */
+  private spooledCount = 0;
   /** 异步加载/派发路径保留的原始错误；不静默吞掉，也不改写成排队成功。 */
   private loadFailure: unknown | null = null;
   private loadFailureGeneration = -1;
@@ -519,6 +597,7 @@ export class SharedSpatialSession {
     this.session = session;
     this.worldId = worldId;
     this.databasePath = databasePath;
+    this.spoolPath = `${databasePath}.handoff.jsonl`;
     this.operationTimeoutMs = operationTimeoutMs;
     this.diagnostic = diagnostic;
     this.coordinator = session.voxelLoading === 'manual' ? new WorkingSetCoordinator(session) : null;
@@ -553,7 +632,7 @@ export class SharedSpatialSession {
       timeoutMs,
       snapshotLimits: options.snapshotLimits,
     });
-    return new SharedSpatialSession(
+    const shared = new SharedSpatialSession(
       session,
       options.worldId,
       options.databasePath,
@@ -561,6 +640,22 @@ export class SharedSpatialSession {
       options.onWorkingSetDiagnostic,
       now,
     );
+    await shared.discardLeftoverSpool();
+    return shared;
+  }
+
+  /**
+   * 上一进程遗留的 spool 记录属于旧会话，回放会被作用域拒绝；启动时如实计一次
+   * 丢弃并清掉文件，避免它们被当前进程当成新证据。
+   */
+  private async discardLeftoverSpool(): Promise<void> {
+    const size = await stat(this.spoolPath).then((entry) => entry.size, () => null);
+    if (size === null || size === 0) return;
+    let count = 0;
+    const data = await readFile(this.spoolPath);
+    for (const byte of data) if (byte === 0x0a) count += 1;
+    await rm(this.spoolPath, { force: true });
+    this.recordDiscarded('interrupt', [], count);
   }
 
   /**
@@ -848,6 +943,9 @@ export class SharedSpatialSession {
       bytes: this.pendingBytes(),
       countLimit: MAX_PENDING_OBSERVATIONS,
       byteLimit: MAX_PENDING_OBSERVATION_BYTES,
+      spooled: this.spooledCount,
+      spooledBytes: this.spool?.unreadBytes ?? 0,
+      spoolByteLimit: SPOOL_BYTE_LIMIT,
       sections: fields.keys,
       observedAtMin: fields.observedAtMin,
       observedAtMax: fields.observedAtMax,
@@ -863,6 +961,26 @@ export class SharedSpatialSession {
   /** 最近一次可见的容量/未就绪/队列缺口；没有则为 null。 */
   observationGap(): SharedSpatialGap | null {
     return this.lastGap;
+  }
+
+  /**
+   * 待写/溢出 backlog 的有界事实，供查询回执转述给心智；没有积压时返回 null。
+   * 只陈述“已看见但还没写进地图”，不构成行动指令，也不把积压说成没看见。
+   */
+  backlogNote(): {
+    text: string;
+    data: { pending: number; spooled: number; lastGap: { kind: SharedSpatialGapKind; count: number } | null };
+  } | null {
+    const pending = this.pendingObservations();
+    if (pending.observations === 0 && pending.spooled === 0) return null;
+    return {
+      text: `空间记忆还有 ${pending.observations} 条观测待写入、${pending.spooled} 条在磁盘等待回放（这些格已看见，只是还没写进地图）`,
+      data: {
+        pending: pending.observations,
+        spooled: pending.spooled,
+        lastGap: this.lastGap === null ? null : { kind: this.lastGap.kind, count: this.lastGap.count },
+      },
+    };
   }
 
   /** 当前离线代最近一次真实加载失败；成功或作用域变化后不再报告旧错误。 */
@@ -986,6 +1104,7 @@ export class SharedSpatialSession {
     if (this.shutdownPromise !== null) return this.shutdownPromise;
     this.closingFlag = true;
     this.cancelHandoffRetry();
+    this.cancelSpoolFlush();
     this.shutdownPromise = this.doShutdown();
     return this.shutdownPromise;
   }
@@ -1022,7 +1141,14 @@ export class SharedSpatialSession {
           capture(err);
         }
         try {
-          this.applyReadyPending();
+          // 关停前做一轮有界回放：spool 里的溢出证据有机会在最终保存前写进地图。
+          await this.fillPendingFromSpool(true);
+          await this.applyReadyPending();
+        } catch (err) {
+          capture(err);
+        }
+        try {
+          await this.spool?.flush();
         } catch (err) {
           capture(err);
         }
@@ -1072,15 +1198,18 @@ export class SharedSpatialSession {
         capture(err);
       }
 
-      // 仍未处理的 handoff 是真实缺口：保留原始条数与观测时间范围，绝不声称已保存。
+      // 仍未处理的 handoff 是真实缺口：保留原始条数（含 spool 溢出）与观测时间范围，
+      // 绝不声称已保存。spool 记录属于本次会话，关闭后不能回放，随后清掉文件。
       const pending = this.pendingObservations();
-      if (pending.observations > 0) {
+      const unapplied = pending.observations + this.spooledCount;
+      if (unapplied > 0) {
         const range = pending.observedAtMin === null
           ? ''
           : ` (observedAt ${pending.observedAtMin}..${pending.observedAtMax})`;
+        const spoolNote = this.spooledCount > 0 ? `, ${this.spooledCount} still in spool` : '';
         capture(new PersistenceError(
           'data',
-          `shutdown left ${pending.observations} pending observation(s) unapplied${range}`,
+          `shutdown left ${unapplied} pending observation(s) unapplied${range}${spoolNote}`,
         ));
       }
     } catch (err) {
@@ -1091,6 +1220,12 @@ export class SharedSpatialSession {
         close = await this.session.close();
       } catch (err) {
         closeError = err;
+      }
+      this.spooledCount = 0;
+      try {
+        await this.spool?.clear();
+      } catch (err) {
+        if (closeError === null) closeError = err;
       }
     }
 
@@ -1160,14 +1295,20 @@ export class SharedSpatialSession {
       // 先等待已接受 checkpoint；取消/期限只结束等待，不伪造完成。
       await Promise.race([flush, cancelledPromise]);
       if (state.reason === null) {
-        this.applyReadyPending();
+        await this.applyReadyPending();
         // 已有真实 load 在跟踪时只等这一批结算，不另起并发批次。
         if (this.loadTask !== null) {
           await Promise.race([this.loadTask, cancelledPromise]);
-          this.applyReadyPending();
+          await this.applyReadyPending();
         }
-        // 显式 drain 最多对上次容量/未就绪/忙碌结果再试一次；没有循环轮询。
-        if (!this.closingFlag && state.reason === null && this.hasLoadablePending()) {
+        // 显式 drain：对上次容量/未就绪/忙碌结果再试，并把 spool 溢出按轮回填。
+        // 轮数有界（每轮回填 ≤1MiB/4096 条），剩下的交给自动重试；不在这里无限轮询。
+        let attempted = false;
+        for (let round = 0; round < 8 && !this.closingFlag && state.reason === null; round++) {
+          await this.fillPendingFromSpool();
+          if (!this.hasPendingWork()) break;
+          if (deadline !== undefined && Date.now() >= deadline) break;
+          attempted = true;
           this.loadBlocked = false;
           this.loadRetryNotBefore = 0;
           if (this.session.busy) {
@@ -1178,11 +1319,13 @@ export class SharedSpatialSession {
               `session is busy; ${current.length} pending observation(s) were not loaded by this drain`,
             );
             this.loadBlocked = true;
-          } else {
-            this.requestLoadAttempt();
-            if (this.loadTask !== null) await Promise.race([this.loadTask, cancelledPromise]);
+            break;
           }
-        } else if (state.reason === null && this.reportNotReadyGap()) {
+          this.requestLoadAttempt();
+          if (this.loadTask !== null) await Promise.race([this.loadTask, cancelledPromise]);
+          await this.applyReadyPending();
+        }
+        if (!attempted && state.reason === null && this.reportNotReadyGap()) {
           this.loadBlocked = true;
         }
         if (this.pending.length === 0) this.clearLoadFailure();
@@ -1201,7 +1344,11 @@ export class SharedSpatialSession {
     };
   }
 
-  /** manual 观测分流：resident 同步写、no_record 单独首写、saved 未驻留有界排队。 */
+  /**
+   * manual 观测分流：先同步写能写的，写不下的交回后台 handoff。
+   * 物理帧/视野回调里不做换出、保存或重试；那些是后台 drain 的职责，
+   * 这里只保证观测不因为一次容量拒绝被丢掉（§WS-1）。
+   */
   private observeManual(observations: readonly Observation[]): ChangeReport {
     const residency = new Map<string, SectionResidency>();
     const residencyOf = (key: SectionKey): SectionResidency => {
@@ -1224,63 +1371,78 @@ export class SharedSpatialSession {
     }
 
     const reports: ChangeReport[] = [];
+    const unapplied: Observation[] = [];
     // resident 支持失效必须先派发；后面 no_record 的容量拒绝不能回滚这次报告。
     if (resident.length > 0) {
-      const applied = this.applyResident(resident);
+      const applied = this.applyResident(resident, false);
       if (applied.accepted) {
         this.clearLoadFailure();
         reports.push(this.dispatch(applied.report, resident.length));
+      } else {
+        unapplied.push(...resident);
       }
     }
     if (first.length > 0) {
-      const applied = this.applyFirstObservation(first);
+      const applied = this.applyFirstObservation(first, false);
       if (applied.accepted) {
         this.clearLoadFailure();
         reports.push(this.dispatch(applied.report, first.length));
+      } else {
+        unapplied.push(...first);
       }
     }
-    if (deferred.length > 0) this.enqueueHandoff(deferred);
+    unapplied.push(...deferred);
+    if (unapplied.length > 0) this.enqueueHandoff(unapplied);
     return { sections: reports.flatMap((report) => report.sections) };
   }
 
-  /** resident 写入；字节增长超限时留下缺口并只取消受影响的当前 owner。 */
-  private applyResident(observations: readonly Observation[]): ObservedBatch {
-    try {
-      return {
-        accepted: true,
-        report: this.session.voxel.observeBatch({ observations: [...observations], unobserved: [] }),
-      };
-    } catch (error) {
-      if (error instanceof VoxelResidencyError) {
-        this.recordGap('not_ready', observations, error.message);
-        return { accepted: false, report: { sections: [] } };
-      }
-      const kind = capacityKindOf(error);
-      if (kind === null) throw error;
-      const gap = this.recordGap(kind, observations, messageOf(error));
-      this.cancelOwnerFor(gap.keys);
-      return { accepted: false, report: { sections: [] } };
-    }
-  }
-
   /**
-   * no_record 是真实首次观测，不是已观察空气。若真实 count/byte 容量拒绝，
-   * 只调用一次公开的有界 free，然后原样重交同一载荷一次；仍失败则留下缺口。
+   * resident 写入。`recover` 只在后台 drain 里为 true：命中容量时按本批需要换出
+   * 一次并重试同一批一次，仍失败才留缺口并取消受影响的 owner。同步路径（物理帧）
+   * 不换出、不重试，直接交回调用方入队，由后台恢复。
    */
-  private applyFirstObservation(observations: readonly Observation[]): ObservedBatch {
+  private applyResident(observations: readonly Observation[], recover: boolean): ObservedBatch {
     const batch = { observations: [...observations], unobserved: [] };
     try {
       return { accepted: true, report: this.session.voxel.observeBatch(batch) };
     } catch (error) {
       if (error instanceof VoxelResidencyError) {
-        this.recordGap('not_ready', observations, error.message);
+        if (recover) this.recordGap('not_ready', observations, error.message);
         return { accepted: false, report: { sections: [] } };
       }
       const kind = capacityKindOf(error);
       if (kind === null) throw error;
-      const free = this.freeOnce();
+      if (!recover) return { accepted: false, report: { sections: [] } };
+      return this.evictAndRetry(observations, batch, error, kind, true);
+    }
+  }
+
+  /**
+   * 容量拒绝后的恢复：先钉住本批 Section（否则换出会把正要写的页一起淘汰，
+   * 重试只会得到 requires_load），按本批需要换出一次，再原样重交同一批一次。
+   * 失败保留原始错误与换出事实并留下可见缺口；`cancelOwner` 只取消保护了
+   * 受影响 Section 的当前 owner。
+   */
+  private evictAndRetry(
+    observations: readonly Observation[],
+    batch: ObservationBatch,
+    original: unknown,
+    kind: SharedSpatialGapKind,
+    cancelOwner: boolean,
+  ): ObservedBatch {
+    let pin: { token: string } | null = null;
+    try {
+      pin = this.session.pinSections(sectionKeysOf(observations));
+    } catch (error) {
+      const gap = this.recordGap(kind, observations, `${messageOf(original)}; free skipped: ${messageOf(error)}`);
+      if (cancelOwner) this.cancelOwnerFor(gap.keys);
+      return { accepted: false, report: { sections: [] } };
+    }
+    try {
+      const free = this.freeOnce(this.capacityFreeTarget(observations.length));
       if (free.kind === 'error') {
-        this.recordGap(kind, observations, `${messageOf(error)}; free refused: ${messageOf(free.error)}`);
+        const gap = this.recordGap(kind, observations, `${messageOf(original)}; free refused: ${messageOf(free.error)}`);
+        if (cancelOwner) this.cancelOwnerFor(gap.keys);
         return { accepted: false, report: { sections: [] } };
       }
       const freeFact = freeSummary(free.result);
@@ -1293,21 +1455,74 @@ export class SharedSpatialSession {
         }
         const retryKind = capacityKindOf(retryError);
         if (retryKind === null) throw retryError;
-        this.recordGap(retryKind, observations, `${messageOf(retryError)}; ${freeFact}`);
+        const gap = this.recordGap(retryKind, observations, `${messageOf(retryError)}; ${freeFact}`);
+        if (cancelOwner) this.cancelOwnerFor(gap.keys);
         return { accepted: false, report: { sections: [] } };
       }
+    } finally {
+      this.session.releasePins([pin.token]);
+    }
+  }
+
+  /**
+   * no_record 是真实首次观测，不是已观察空气。`recover` 为 true 时（后台 drain）
+   * 若真实 count/byte 容量拒绝，换出一批空间后原样重交一次；仍失败则留下缺口。
+   * 同步路径直接交回调用方入队。
+   */
+  private applyFirstObservation(observations: readonly Observation[], recover: boolean): ObservedBatch {
+    const batch = { observations: [...observations], unobserved: [] };
+    try {
+      return { accepted: true, report: this.session.voxel.observeBatch(batch) };
+    } catch (error) {
+      if (error instanceof VoxelResidencyError) {
+        if (recover) this.recordGap('not_ready', observations, error.message);
+        return { accepted: false, report: { sections: [] } };
+      }
+      const kind = capacityKindOf(error);
+      if (kind === null) throw error;
+      if (!recover) return { accepted: false, report: { sections: [] } };
+      return this.evictAndRetry(observations, batch, error, kind, false);
     }
   }
 
   /** 有界 free 一次：成功保留库的真实淘汰/拒绝字段，失败保留原始错误。 */
-  private freeOnce(): { kind: 'result'; result: FreeResult } | { kind: 'error'; error: unknown } {
+  private freeOnce(target?: { sections?: number; bytes?: number }): { kind: 'result'; result: FreeResult } | { kind: 'error'; error: unknown } {
     if (this.coordinator === null) {
       return { kind: 'error', error: new PersistenceError('invalid_argument', 'manual working set is not enabled') };
     }
     try {
-      return { kind: 'result', result: this.coordinator.free() };
+      return { kind: 'result', result: this.coordinator.free(target) };
     } catch (error) {
       return { kind: 'error', error };
+    }
+  }
+
+  /**
+   * 为一批观测腾出的字节：按本批格数估算（实测约 857B/格，向上取 1KiB），
+   * 至少 1MiB，只把驻留集降到“刚好够这一批”的位置，不按 75% 一次倒空热缓存。
+   * 用 `residentSize()` 而不是 `stats()`：后者会做脏页计量，代价与目录大小相关。
+   */
+  private capacityFreeTarget(cells: number): { bytes: number } {
+    const need = Math.max(1 << 20, cells * 1024);
+    return { bytes: Math.max(1, this.session.voxel.residentSize().bytes - need) };
+  }
+
+  /**
+   * handoff 换入命中容量时的按需恢复：保存一次，让 dirty/未提交的 section 变成
+   * 可换出（它们在此之前不可能被 free 淘汰），再由调用方重试同一批换入。
+   * 同会话 10s 冷却；保存失败（busy/关闭/IO）保留原始结果，交给常规退避重试。
+   * 这是后台任务里的异步 I/O，不占物理帧。
+   */
+  private async recoverCapacity(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.capacityRecoveryAt < CAPACITY_RECOVERY_COOLDOWN_MS) return false;
+    this.capacityRecoveryAt = now;
+    try {
+      await this.checkpoint();
+      return true;
+    } catch {
+      // 保存失败的原因已在 checkpoint 的返回值/事件里；这里只决定是否马上重试。
+      return false;
     }
   }
 
@@ -1344,18 +1559,21 @@ export class SharedSpatialSession {
   private recordDiscarded(
     reason: SharedSpatialDiscarded['reason'],
     observations: readonly Observation[],
+    spooledCount = 0,
   ): void {
     const fields = observationFields(observations);
+    const discarded = fields.count + spooledCount;
+    const spoolNote = spooledCount > 0 ? ` (${spooledCount} from spool)` : '';
     const next: SharedSpatialDiscarded = {
       kind: 'discarded',
       reason,
       message: boundedDiagnosticMessage(
-        `discarded ${fields.count} pending observation(s) on ${reason}`,
+        `discarded ${discarded} pending observation(s) on ${reason}${spoolNote}`,
         fields.keys.length,
         fields.keyCount,
       ),
       keys: fields.keys,
-      count: fields.count,
+      count: discarded,
       observedAtMin: fields.observedAtMin,
       observedAtMax: fields.observedAtMax,
     };
@@ -1393,60 +1611,159 @@ export class SharedSpatialSession {
     this.diagnosticFailure = null;
     this.cancelFailure = null;
     this.loadBlocked = false;
+    this.loadRetryNotBefore = 0;
+    this.capacityRecoveryAt = 0;
     this.cancelHandoffRetry();
-    if (this.pending.length === 0) return;
+    this.cancelSpoolFlush();
+    // 旧作用域的 spool 记录回放时也会被作用域拒绝；直接作废并计一次丢弃事实。
+    const spooled = this.spooledCount;
+    this.spooledCount = 0;
+    if (this.spool !== null) void this.spool.clear().catch((error: unknown) => this.setLoadFailure(error));
+    if (this.pending.length === 0 && spooled === 0) return;
     const observations = this.pending.map((record) => record.observation);
     this.pending = [];
-    this.recordDiscarded(reason, observations);
+    this.recordDiscarded(reason, observations, spooled);
   }
 
   /**
-   * 有界接收；预算按到达顺序严格截断：一旦某条超限，它和本批其后所有条目都
-   * 被拒绝，后面的小载荷不能插队。拒绝事实进入可见 gap，包含已接受/拒绝条数。
+   * 有界接收 + 同格合并：同一格的旧 handoff 被新观测原地替换（地图只关心最新证据），
+   * 不重复占用预算。内存预算之外的观测不再丢弃，按到达顺序交给 spool 回放；
+   * 只有 spool 的磁盘预算耗尽才丢，并把丢弃条数记成缺口。
    */
   private enqueueHandoff(observations: readonly Observation[]): void {
     const scope = this.scope;
     if (scope === null) return;
+    const byCell = new Map<string, PendingHandoff>();
+    for (const record of this.pending) {
+      if (this.isCurrent(record)) byCell.set(cellKeyOf(record.observation), record);
+    }
     let bytes = this.pendingBytes();
-    let full = false;
+    let count = this.pending.length;
     const accepted: PendingHandoff[] = [];
-    const rejected: Observation[] = [];
+    const overflow: Observation[] = [];
+    let progress = false;
     for (const observation of observations) {
       const size = utf8JsonBytes(observation);
-      if (
-        full
-        || this.pending.length + accepted.length >= MAX_PENDING_OBSERVATIONS
-        || bytes + size > MAX_PENDING_OBSERVATION_BYTES
-      ) {
-        full = true;
-        rejected.push(observation);
+      const existing = byCell.get(cellKeyOf(observation));
+      if (existing !== undefined) {
+        // 同格替换：位置不变，载荷换成更新的观测；旧字节退回预算。
+        bytes += size - existing.bytes;
+        existing.observation = observation;
+        existing.bytes = size;
+        progress = true;
         continue;
       }
-      accepted.push({
+      if (count >= MAX_PENDING_OBSERVATIONS || bytes + size > MAX_PENDING_OBSERVATION_BYTES) {
+        overflow.push(observation);
+        continue;
+      }
+      const record: PendingHandoff = {
         observation,
         bytes: size,
         generation: this.pendingGeneration,
         sessionId: scope.sessionId,
         dim: scope.dim,
-      });
+      };
+      byCell.set(cellKeyOf(observation), record);
+      accepted.push(record);
       bytes += size;
+      count += 1;
+      progress = true;
     }
     this.pending.push(...accepted);
-    if (rejected.length > 0) {
-      this.recordGap(
-        'queue_full',
-        rejected,
-        `pending handoff budget exceeded (${MAX_PENDING_OBSERVATIONS} observations / ${MAX_PENDING_OBSERVATION_BYTES} bytes); accepted prefix ${accepted.length}, rejected ${rejected.length} observation(s)`,
-      );
-      // 队列满时 accepted 可能是 0，不能再依赖“新证据”唤醒加载；排一次自动重试，
-      // 等 busy/容量退避结束后把已有 handoff 写进去，避免永久卡满。
+    if (overflow.length > 0) {
+      this.spillObservations(overflow);
+      // 内存队列满时也可能没有 accepted，不能再依赖“新证据”唤醒加载；
+      // 排一次自动重试，把已有 handoff 和 spool 回放推进下去。
       this.scheduleHandoffRetry();
     }
-    if (accepted.length > 0) {
+    if (progress) {
       // 新证据允许一次有限尝试；若已有 load 在跑，等这一批结束后留待显式 drain/新证据。
       this.noteHandoffProgress();
       this.requestLoadAttempt();
     }
+  }
+
+  /** 内存队列放不下的观测按到达顺序落盘；只有磁盘预算耗尽才丢并留缺口。 */
+  private spillObservations(observations: readonly Observation[]): void {
+    const spool = this.ensureSpool();
+    const dropped = spool.append(observations.map((observation) => JSON.stringify(observation)));
+    this.spooledCount += observations.length - dropped;
+    if (dropped > 0) {
+      this.recordGap(
+        'queue_full',
+        observations.slice(observations.length - dropped),
+        `spool budget exhausted (${SPOOL_BYTE_LIMIT} bytes); ${dropped} observation(s) dropped`,
+      );
+    }
+    this.scheduleSpoolFlush();
+  }
+
+  private ensureSpool(): HandoffSpool {
+    this.spool ??= new HandoffSpool(this.spoolPath, SPOOL_BYTE_LIMIT);
+    return this.spool;
+  }
+
+  /** 节流落盘：只在有未落盘缓冲时挂一个 unref 定时器；物理帧里不碰磁盘。 */
+  private scheduleSpoolFlush(delay = SPOOL_FLUSH_MS): void {
+    if (this.spoolFlushTimer !== null || this.spool === null || this.closingFlag) return;
+    this.spoolFlushTimer = setTimeout(() => {
+      this.spoolFlushTimer = null;
+      const spool = this.spool;
+      if (spool === null || this.closingFlag) return;
+      void spool.flush().catch((error: unknown) => {
+        // 数据仍在 spool 的内存缓冲里；排一次稍后重试，不静默丢。
+        this.setLoadFailure(error);
+        this.scheduleSpoolFlush(SPOOL_FLUSH_MS * 4);
+      });
+    }, delay);
+    this.spoolFlushTimer.unref?.();
+  }
+
+  private cancelSpoolFlush(): void {
+    if (this.spoolFlushTimer === null) return;
+    clearTimeout(this.spoolFlushTimer);
+    this.spoolFlushTimer = null;
+  }
+
+  /**
+   * 从 spool 按到达顺序回填内存队列；只回填放得下的部分，其余留到下一轮。
+   * 旧作用域/损坏行不进入当前地图，按作用域丢弃并留下事实。
+   */
+  private async fillPendingFromSpool(allowClosing = false): Promise<number> {
+    const spool = this.spool;
+    const scope = this.scope;
+    if (spool === null || scope === null || this.pausedFlag || (!allowClosing && this.closingFlag)) return 0;
+    const freeCount = MAX_PENDING_OBSERVATIONS - this.pending.length;
+    const freeBytes = MAX_PENDING_OBSERVATION_BYTES - this.pendingBytes();
+    if (freeCount <= 0 || freeBytes <= 0) return 0;
+    const lines = await spool.readChunk(Math.min(freeBytes, SPOOL_READ_BYTES), Math.min(freeCount, SPOOL_READ_RECORDS));
+    if (lines.length === 0) {
+      await spool.compact();
+      return 0;
+    }
+    const admitted: PendingHandoff[] = [];
+    let unusable = 0;
+    for (const line of lines) {
+      const parsed = parseSpoolLine(line);
+      if (parsed === null || parsed.worldId !== this.worldId || parsed.dim !== scope.dim || parsed.sessionId !== scope.sessionId) {
+        unusable += 1;
+        continue;
+      }
+      admitted.push({
+        observation: parsed,
+        bytes: Buffer.byteLength(line, 'utf8') + 1,
+        generation: this.pendingGeneration,
+        sessionId: scope.sessionId,
+        dim: scope.dim,
+      });
+    }
+    this.spooledCount = Math.max(0, this.spooledCount - lines.length);
+    if (unusable > 0) this.recordDiscarded('scope', [], unusable);
+    this.pending.push(...admitted);
+    if (admitted.length > 0) this.noteHandoffProgress();
+    await spool.compact();
+    return admitted.length;
   }
 
   private pendingBytes(): number {
@@ -1467,11 +1784,12 @@ export class SharedSpatialSession {
   }
 
   /**
-   * 已有当前 scope、尚未应用、可直接写入的 resident/no_record handoff。
-   * 只有 observeBatch 真正接受后才移除对应原始载荷；容量拒绝或未就绪重抛时
-   * 保留原记录，绝不因为空变化报告而误判为已写入。
+   * 在后台应用已有当前 scope、尚未应用的 resident/no_record handoff。
+   * 按片写入并在片间让出事件循环；容量恢复（换出+重试）只在这里做。
+   * 只有 observeBatch 真正接受后才移除对应原始载荷；拒绝时保留原记录，
+   * 绝不因为空变化报告而误判为已写入。
    */
-  private applyReadyPending(): void {
+  private async applyReadyPending(): Promise<void> {
     if (this.pending.length === 0) return;
     const residentRecords: PendingHandoff[] = [];
     const firstRecords: PendingHandoff[] = [];
@@ -1482,21 +1800,19 @@ export class SharedSpatialSession {
       else if (residency === 'no_record') firstRecords.push(record);
     }
 
-    if (residentRecords.length > 0) {
-      const applied = this.applyResident(residentRecords.map((record) => record.observation));
-      if (applied.accepted) {
+    for (const group of [residentRecords, firstRecords]) {
+      for (let start = 0; start < group.length; start += APPLY_SLICE) {
+        const chunk = group.slice(start, start + APPLY_SLICE);
+        const observations = chunk.map((record) => record.observation);
+        const applied = group === residentRecords
+          ? this.applyResident(observations, true)
+          : this.applyFirstObservation(observations, true);
+        if (!applied.accepted) break; // 这一片写不进去，后续同类记录也先留着，避免空转
         // 先移除已应用记录：receiver 之后再抛错也只能算回调失败，不能回退证据。
-        this.removePending(residentRecords);
+        this.removePending(chunk);
         this.clearLoadFailure();
-        this.dispatch(applied.report, residentRecords.length);
-      }
-    }
-    if (firstRecords.length > 0) {
-      const applied = this.applyFirstObservation(firstRecords.map((record) => record.observation));
-      if (applied.accepted) {
-        this.removePending(firstRecords);
-        this.clearLoadFailure();
-        this.dispatch(applied.report, firstRecords.length);
+        this.dispatch(applied.report, chunk.length);
+        await yieldToEventLoop();
       }
     }
   }
@@ -1506,10 +1822,15 @@ export class SharedSpatialSession {
     this.pending = this.pending.filter((record) => !remove.has(record));
   }
 
-  private hasLoadablePending(): boolean {
-    return this.pending.some(
-      (record) => this.isCurrent(record) && this.session.sectionResidency(sectionKeyOf(record.observation)).residency === 'not_resident',
-    );
+  /** 还有当前作用域内可应用、可换入或可回放的 handoff。 */
+  private hasPendingWork(): boolean {
+    if (this.spooledCount > 0) return true;
+    return this.pending.some((record) => {
+      if (!this.isCurrent(record)) return false;
+      const residency = this.session.sectionResidency(sectionKeyOf(record.observation)).residency;
+      return residency === 'resident' || residency === 'no_record'
+        || residency === 'not_resident' || residency === 'load_failed';
+    });
   }
 
   /**
@@ -1520,15 +1841,15 @@ export class SharedSpatialSession {
     if (this.coordinator === null || this.closingFlag) return;
     if (this.loadTask !== null || this.loadBlocked) return;
     if (Date.now() < this.loadRetryNotBefore) return;
-    if (!this.hasLoadablePending()) return;
+    if (!this.hasPendingWork()) return;
 
     const task = this.runLoadAttempt();
     this.loadTask = task;
     const settle = () => {
       if (this.loadTask === task) this.loadTask = null;
-      // 仍被挡住且还有可加载证据：安排一次有界重试。否则队列满后新观测被拒，
-      // 不会再有 accepted 观测来唤醒加载，会一直卡在 queue_full。
-      if (this.loadBlocked && this.hasLoadablePending()) this.scheduleHandoffRetry();
+      // 仍被挡住或 spool 里还有溢出：安排一次有界重试。否则队列满后新观测不再
+      // 触发 accepted，队列/spool 会永久卡住、只重复报 gap。
+      if ((this.loadBlocked || this.spooledCount > 0) && this.hasPendingWork()) this.scheduleHandoffRetry();
     };
     task.then(
       settle,
@@ -1539,14 +1860,14 @@ export class SharedSpatialSession {
         this.setLoadFailure(error);
         const current = this.currentObservations();
         if (current.length > 0) this.recordGap('observe_failed', current, messageOf(error));
-        if (this.hasLoadablePending()) this.scheduleHandoffRetry();
+        if (this.hasPendingWork()) this.scheduleHandoffRetry();
       },
     );
   }
 
   /** 安排一次 handoff 重试；容量退避未到时就等退避结束。 */
   private scheduleHandoffRetry(): void {
-    if (this.closingFlag || this.handoffRetryTimer !== null || !this.hasLoadablePending()) return;
+    if (this.closingFlag || this.handoffRetryTimer !== null || !this.hasPendingWork()) return;
     const delay = Math.max(this.handoffRetryDelayMs, this.loadRetryNotBefore - Date.now());
     this.handoffRetryTimer = setTimeout(() => {
       this.handoffRetryTimer = null;
@@ -1583,15 +1904,19 @@ export class SharedSpatialSession {
    */
   private async runLoadAttempt(): Promise<void> {
     try {
+      await this.fillPendingFromSpool();
       const pendingBefore = this.pending.length;
-      this.applyReadyPending();
+      await this.applyReadyPending();
       if (this.pending.length < pendingBefore) this.noteHandoffProgress();
       if (this.closingFlag) return;
 
-      const loadable = this.pending.filter(
-        (record) => this.isCurrent(record)
-          && this.session.sectionResidency(sectionKeyOf(record.observation)).residency === 'not_resident',
-      );
+      // load_failed 也允许新的显式请求重试：库把上一次容量/IO 失败当作可重试，
+      // 宿主的退避与恢复冷却负责频率；否则一次可恢复的容量失败会永久挡住该 Section。
+      const loadable = this.pending.filter((record) => {
+        if (!this.isCurrent(record)) return false;
+        const residency = this.session.sectionResidency(sectionKeyOf(record.observation)).residency;
+        return residency === 'not_resident' || residency === 'load_failed';
+      });
       if (loadable.length === 0) {
         if (this.reportNotReadyGap()) this.loadBlocked = true;
         return;
@@ -1608,27 +1933,28 @@ export class SharedSpatialSession {
         return;
       }
 
-      const keys: SectionKey[] = [];
-      const seen = new Set<string>();
-      for (const record of loadable) {
-        const key = sectionKeyOf(record.observation);
-        const id = sectionKeyId(key);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        keys.push(key);
-      }
+      const keys = sectionKeysOf(loadable.map((record) => record.observation));
 
-      const outcome = await this.coordinator!.prepare(keys).then(
+      const prepareOnce = () => this.coordinator!.prepare(keys).then(
         (result) => ({ kind: 'result' as const, result }),
         (error: unknown) => ({ kind: 'error' as const, error }),
       );
+      let outcome = await prepareOnce();
+      // 容量失败不是永久失败：保存一次让 dirty 可换出，再对同一组 Section 重试一次。
+      // load_failed 在库侧允许新的显式请求重试，所以这次重试不会撞上上一轮的否决。
+      if (outcome.kind === 'result'
+        && outcome.result.status === 'failed'
+        && (outcome.result.result.capacity?.kind === 'byte_capacity' || outcome.result.result.capacity?.kind === 'count_capacity')
+        && await this.recoverCapacity()) {
+        outcome = await prepareOnce();
+      }
 
       const readyLease = outcome.kind === 'result' && outcome.result.status === 'ready'
         ? outcome.result.lease
         : null;
       if (readyLease !== null) {
         try {
-          this.applyReadyPending();
+          await this.applyReadyPending();
         } finally {
           // ready lease 属于本次 prepare；即使 receiver/diagnostic/apply 抛错也必须释放。
           this.coordinator!.release(readyLease.token);
@@ -1639,7 +1965,7 @@ export class SharedSpatialSession {
       }
 
       const pendingAfterReady = this.pending.length;
-      this.applyReadyPending();
+      await this.applyReadyPending();
       if (this.pending.length < pendingAfterReady) this.noteHandoffProgress();
 
       if (outcome.kind === 'error') {

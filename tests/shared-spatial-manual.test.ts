@@ -292,7 +292,7 @@ test('post-save eviction keeps recent hot pages up to the capacity target', { ti
     await shared.checkpoint();
     const eviction = shared.lastPostSaveEviction();
     assert.equal(eviction?.status, 'evicted');
-    assert.equal(eviction?.evictedSections, 1, '只淘汰到 75% 容量目标（4 → 3），不清空全部热页');
+    assert.equal(eviction?.evictedSections, 1, '只淘汰到 90% 容量目标（4 → 3），不清空全部热页');
     assert.equal(shared.workingSetStats().residentSections, 3);
     assert.equal([0, 1, 2, 3].filter((cx) => shared!.session.sectionResidency(keyAt(cx, 0)).residency === 'resident').length, 3);
     assert.equal([0, 1, 2, 3].filter((cx) => shared!.session.sectionResidency(keyAt(cx, 0)).residency === 'not_resident').length, 1);
@@ -448,7 +448,7 @@ test('a refused queued byte growth retains the original evidence and shutdown re
   }
 });
 
-test('byte budget is a strict arrival prefix; a smaller later observation is not admitted', { timeout: 20_000 }, async () => {
+test('byte budget overflow spills to spool; later small observations are still admitted', { timeout: 20_000 }, async () => {
   const { dir, dbPath } = makeTempDb();
   let shared: SharedSpatialSession | null = null;
   let close: CloseResult | null = null;
@@ -475,21 +475,16 @@ test('byte budget is a strict arrival prefix; a smaller later observation is not
     await gate.started;
 
     const pending = shared.pendingObservations();
-    assert.equal(pending.observations, 1);
-    assert.equal(pending.bytes, payloadBytes(smallFirst));
+    assert.equal(pending.observations, 2, '超预算条目不再毒化后续小载荷：smallFirst 与 smallLater 都在内存队列');
+    assert.equal(pending.spooled, 1, '单条超预算的观测落到 spool，而不是被丢弃');
     assert.equal(pending.byteLimit, MAX_PENDING_OBSERVATION_BYTES);
-
-    const gap = shared.observationGap();
-    assert.equal(gap?.kind, 'queue_full');
-    assert.equal(gap?.count, 2);
-    assert.equal(gap?.observedAtMin, 2001);
-    assert.equal(gap?.observedAtMax, 2002);
-    assert.match(gap?.message ?? '', /accepted prefix 1/);
-    assert.match(gap?.message ?? '', /rejected 2/);
-    assert.ok(Buffer.byteLength(gap?.message ?? '', 'utf8') <= 512);
+    assert.equal(shared.observationGap(), null, '溢出到 spool 不是丢失，不应记缺口');
+    assert.ok(pending.spooledBytes > 0);
 
     shared.setPaused(true);
     assert.equal(shared.pendingObservations().observations, 0);
+    assert.equal(shared.pendingObservations().spooled, 0);
+    assert.equal(shared.discardedObservations()?.count, 3, '暂停作废内存与 spool 的全部待写证据');
     shared.setPaused(false);
     gate.release();
     const drained = await shared.drainObservations({ deadline: Date.now() + 5000 });
@@ -895,7 +890,11 @@ test('queue full + busy 后，队列满也要自动重试并清空，不依赖�
 
     shared.session.releaseWorkingSetOperation();
     // 不调用 drainObservations：队列满的拒绝本身必须排重试，否则这里会一直卡在 256。
-    await waitFor(() => shared!.pendingObservations().observations === 0, 8000);
+    // 后台应用按片让出事件循环：pending 先清零、loadTask 稍后才结算，两件事都等。
+    await waitFor(() => {
+      const pending = shared!.pendingObservations();
+      return pending.observations === 0 && pending.loading === false;
+    }, 8000);
     assert.equal(shared.pendingObservations().loading, false);
     assert.equal(shared.session.sectionResidency(keyAt()).residency, 'resident');
 
