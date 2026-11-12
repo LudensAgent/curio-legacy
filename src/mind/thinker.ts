@@ -251,6 +251,7 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   // 这一段如果在按某条窍门做，写 stable id；是否存在由 Mind 在开工时核对，不在这里猜。
   const applying = str(o.applying, 80);
   if (o.applying !== undefined && !/^k_[A-Za-z0-9_-]{1,64}$/.test(applying)) notes.push(`${label}.applying 需要现有窍门 id（k_…），已忽略`);
+  const outcomeId = str(o.outcome_id ?? o.outcomeId, 80), methodId = str(o.method_id ?? o.methodId, 80);
   return {
     what, why: str(o.why, 120), kind, steps, repeat, ...(facing ? { facing } : {}),
     ...(doneWhen ? { doneWhen } : {}),
@@ -258,6 +259,8 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(str(o.if_stuck, 120) ? { ifStuck: str(o.if_stuck, 120) } : {}),
     ...(typeof o.agenda_id === 'string' ? { agendaId: o.agenda_id } : {}),
     ...(/^k_[A-Za-z0-9_-]{1,64}$/.test(applying) ? { applying } : {}),
+    ...(/^po_[A-Za-z0-9_-]{1,64}$/.test(outcomeId) ? { outcomeId } : {}),
+    ...(/^pm_[A-Za-z0-9_-]{1,64}$/.test(methodId) ? { methodId } : {}),
     ...(dropped.length ? { dropped } : {}),
   };
 }
@@ -395,9 +398,21 @@ export function parsePlan(raw: unknown, condition?: (c: unknown, i: number) => i
   const conditions = items.map((x: { when: unknown }, i: number) => x.when !== undefined && x.when !== null && condition ? condition(x.when, i) : null);
   const done = (Array.isArray(o.done) ? o.done : o.done !== undefined ? [o.done] : [])
     .filter((x: unknown) => Number.isInteger(x) && (x as number) >= 0 && (x as number) < 8 || typeof x === 'string' && x.trim()).slice(0, 8);
+  // 做法与成果分开：methods 只表示当前做法，换方法不删成果；method_drop 明确停用某个做法 id。
+  const methods = o.methods === undefined ? undefined : (Array.isArray(o.methods) ? o.methods : [])
+    .flatMap((x: unknown) => {
+      const text = cleanPlanStep(str(typeof x === 'string' ? x : (x as any)?.text, 80));
+      if (!text) return [];
+      const outcome = Number((x as any)?.outcome);
+      return [Number.isInteger(outcome) && outcome >= 0 && outcome < 8 ? { text, outcome } : { text }];
+    })
+    .slice(0, 8);
+  const methodDrop = (Array.isArray(o.method_drop) ? o.method_drop : o.method_drop !== undefined ? [o.method_drop] : [])
+    .filter((x: unknown): x is string => typeof x === 'string' && /^pm_[A-Za-z0-9_-]{1,64}$/.test(x)).slice(0, 8);
   const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100), switchReason = str(o.switch_reason, 120);
-  if (!steps.length && !done.length) return null;
+  if (!steps.length && !done.length && methods === undefined && !methodDrop.length) return null;
   return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(conditions.some(Boolean) ? { conditions } : {}), ...(done.length ? { done } : {}),
+    ...(methods !== undefined ? { methods } : {}), ...(methodDrop.length ? { methodDrop } : {}),
     ...(switchReason ? { switchReason } : {}) };
 }
 

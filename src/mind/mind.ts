@@ -925,9 +925,23 @@ export class Mind {
     if (SKILLS.glance) this.d.arbiter.start({ skill: 'glance', args: { seconds: 120 } }, 'filler');
   }
 
+  /** 计划关联只在当前计划里存在时保留；对不上就丢掉关联并说明，不把结果记到猜出来的账上。 */
+  private linkPlan(a: Activity) {
+    const plan = this.d.self.plan();
+    if (a.outcomeId && !plan?.steps.some((st) => st.id === a.outcomeId)) {
+      this.d.bus.publish('decision_normalized', 'P3', `activity.outcome_id "${a.outcomeId}" 不是当前计划的成果 id；已忽略关联`);
+      delete a.outcomeId;
+    }
+    if (a.methodId && !plan?.methods?.some((m) => m.id === a.methodId)) {
+      this.d.bus.publish('decision_normalized', 'P3', `activity.method_id "${a.methodId}" 不是当前计划的做法的 id；已忽略关联`);
+      delete a.methodId;
+    }
+  }
+
   private beginActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], how: string, hypothesis?: string) {
     const state = this.d.adapter.state();
     const a = createActivity(draft, monologue, source, state);
+    this.linkPlan(a);
     const appliedKnowHow = a.applying ? this.d.self.data.knowHow.find((k) => k.id === a.applying) : undefined;
     if (a.applying && !appliedKnowHow) {
       // 保留 Agent 明确写下的 id，但不设开工快照：记录时不能给任何窍门计数，也不能回退签名。
@@ -1016,6 +1030,14 @@ export class Mind {
     this.recentEnds = [...this.recentEnds.filter((r) => Date.now() - r.at <= EXPERIENCE_MS),
       { pos: { ...state.pos }, outcome, skill: failed?.skill, failureCode: failed?.failureCode, what: `${a.what}（${signatureOf(a.steps)}）`, summary, at: record.at }].slice(-256);
     this.d.self.record(record);
+    // 计划账：这段活明确关联了成果/做法时，把实际结局与停因记到对应账上；归因仍由 Agent 判断。
+    if (a.outcomeId || a.methodId) {
+      this.d.self.recordPlanAttempt({
+        outcomeId: a.outcomeId, methodId: a.methodId, where: { ...state.pos },
+        whatHappened: `${a.what} → ${outcome}：${summary}`,
+        whyStopped: failed?.failureCode ?? outcome,
+      });
+    }
     // 物品、清单或新区块都没动：记一笔无进展。整条链只在这里观察，不替 Agent 判断原因。
     const planAfter = this.d.self.plan()?.progressAt;
     // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。
@@ -1279,9 +1301,17 @@ export class Mind {
   }
 
   private dropActivity(outcome: ActivityOutcome, why: string) {
-    if (!this.activity) return;
-    if (this.d.arbiter.info()?.planId === this.activity.id) this.d.arbiter.cancel(why);
-    this.finishActivity(outcome, why);
+    const a = this.activity;
+    if (!a) return;
+    const running = this.d.arbiter.info();
+    // 换掉/放下时正在跑的这一步没有完成：把已确认的段与剩余目标随结束事实一起留下，
+    // 不把它算作完成，也不假装它还能自动续跑。
+    const nav = running?.planId === a.id ? a.navigation : undefined;
+    const partial = running?.planId === a.id
+      ? `；取消时 ${running.skill} 尚未完成${nav ? `（已确认 ${nav.completedSegments} 个导航段${nav.remaining.length ? `、剩余 ${nav.remaining.length} 个目标点` : ''}，实测位置 ${nav.measured.pos.x.toFixed(1)},${nav.measured.pos.y.toFixed(1)},${nav.measured.pos.z.toFixed(1)}）` : ''}`
+      : '';
+    if (running?.planId === a.id) this.d.arbiter.cancel(why);
+    this.finishActivity(outcome, partial ? `${why}${partial}` : why);
   }
 
   // ---------------------------------------------------------------- 动作结果
@@ -2017,6 +2047,9 @@ export class Mind {
         monologue: decision.monologue || a.monologue });
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
+      if (draft.outcomeId) a.outcomeId = draft.outcomeId; else delete a.outcomeId;
+      if (draft.methodId) a.methodId = draft.methodId; else delete a.methodId;
+      this.linkPlan(a);
       // 显式的 adjust 才能改写导航目的地；路线回执里的 waypoint 永远不替换原目的地。
       retargetNavigation(a, a.steps);
       if (draft.expect) a.expect = draft.expect;
@@ -2123,6 +2156,13 @@ export class Mind {
     const p = decision.plan;
     if (!p) return;
     const cur = this.d.self.plan();
+    // 只改做法：成果清单原样保留，不触发清单改写保护，也不重置停滞计时。
+    if (!p.steps?.length && cur && (p.methods !== undefined || p.methodDrop?.length)) {
+      const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
+      const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];
+      this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
+      return this.applyPlanDone(decision);
+    }
     let autonomousRevision = false;
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
@@ -2139,7 +2179,15 @@ export class Mind {
       const same = !!cur && (focus === cur.agendaId || focus === cur.goal);
       if (same && cur) {
         const next = p.steps.map((t) => cleanPlanStep(t)).filter(Boolean);
-        if (next.join('|') === cur.steps.map((st) => st.text).join('|')) return this.applyPlanDone(decision); // 原样重写：什么都不用做
+        if (next.join('|') === cur.steps.map((st) => st.text).join('|')) {
+          // 成果没变、只换做法：做法不受清单保护，直接更新。
+          if (p.methods !== undefined || p.methodDrop?.length) {
+            this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
+            const active = this.d.self.plan()?.methods?.filter((m) => m.status === 'active') ?? [];
+            this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
+          }
+          return this.applyPlanDone(decision); // 原样重写：成果没变
+        }
         const dropped = cur.steps.filter((st) => !st.done && !next.includes(st.text)).map((st) => st.text);
         if (dropped.length) {
           // 主目标不变；清单是执行计划。停滞后由 agent 按实际结果自主增删，不再强制 switch_reason；
@@ -2169,7 +2217,7 @@ export class Mind {
         }
       }
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
-      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus }) : null;
+      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus, methods: p.methods, methodDrop: p.methodDrop }) : null;
       if (set && same && p.switchReason) this.d.self.think(`改了「${set.goal}」的清单：${p.switchReason}`, 'monologue');
       if (set) {
         // 认真写了新计划（换清单或换主目标）就是对无进展循环的回应：闸门放行。

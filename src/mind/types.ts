@@ -107,6 +107,9 @@ export interface Activity {
   ifStuck?: string;
   hypothesis?: string;
   agendaId?: string;
+  /** 这段活推进的计划成果/做法（po_… / pm_…）；结束时把尝试与停因记到对应账上。 */
+  outcomeId?: string;
+  methodId?: string;
   source: 'llm' | 'rule' | 'habit';
   monologue: string;
   startedAt: number;
@@ -192,6 +195,13 @@ export interface ActivityRecord {
   exploration?: { start: { x: number; y: number; z: number }; end: { x: number; y: number; z: number }; maxHorizontal: number; visitedCells: number; newChunks: number | null; searchIntent: boolean; localOnly: boolean };
   gained: Record<string, number>; lost: Record<string, number>; expect?: string; hypothesis?: string; at: number;
   signature: string; failures: number;
+  /** 这段活关联的计划成果/做法（po_… / pm_…）；旧记录没有该字段时不猜。 */
+  outcomeId?: string; methodId?: string;
+  /** 导航委托中断时的目标/维度/已确认段快照；route handle 已作废，下一段必须从实测位置重规划。 */
+  navigation?: {
+    destination?: { x: number; y: number; z: number }; dim: string; completedSegments: number;
+    remaining: { x: number; y: number; z: number }[]; phase: NavigationPhase; lastInvalidation?: string;
+  };
   /** 这段活显式关联的窍门（k_…）；用于把后续实际应用交给对应经验的证据账。 */
   applying?: string;
   /** 开工时那条窍门的原文快照：同一 id 后来被改写时，旧活动不能替新结论记成功。 */
@@ -310,8 +320,16 @@ export interface MindDecision {
   habits?: Habits;
   /** 写下的技能（原始对象，交给行为引擎/技能书校验）：带 steps 的写下就生效 */
   skill?: Record<string, unknown>;
-  /** 主目标的清单：定下/改写（focus + steps），或勾掉做完的项（done） */
-  plan?: { focus?: string; goal?: string; steps?: string[]; done?: (number | string)[]; conditions?: (import('../projects/types.ts').Condition | null)[]; switchReason?: string };
+  /** 主目标：成果清单（steps）与做法（methods）分开；勾掉做完的成果用 done。 */
+  plan?: {
+    focus?: string; goal?: string;
+    steps?: string[]; done?: (number | string)[]; conditions?: (import('../projects/types.ts').Condition | null)[];
+    /** 当前做法；带 outcome 序号时表示它在服务哪个成果。 */
+    methods?: { text: string; outcome?: number }[];
+    /** 明确停用的做法 id（pm_…）。 */
+    methodDrop?: string[];
+    switchReason?: string;
+  };
   /** 整个换掉手上的事的理由（有主目标时 switch 必须写） */
   switchReason?: string;
   /** 刚才的事值得练成技能：哪里出了问题、想学会什么（后台据此写技能） */
@@ -333,6 +351,8 @@ export interface ActivityDraft {
   facing?: Facing;
   /** 这段活在按哪条已学窍门做（k_…）；只作为应用证据，不自动验证结论。 */
   applying?: string;
+  /** 这段活在推进哪个计划成果（po_…）与哪个做法（pm_…）；只用于把结果记到对应账上。 */
+  outcomeId?: string; methodId?: string;
   doneWhen?: Condition; expect?: string; ifStuck?: string; agendaId?: string;
   /** 写了但没法执行、被丢掉的步骤（让心智知道它们根本没做） */
   dropped?: string[];

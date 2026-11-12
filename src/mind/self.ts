@@ -51,7 +51,28 @@ export interface ObservedProgress {
   planObservedSince: number | null;
 }
 
-export interface FocusPlan { agendaId: string; goal: string; steps: { text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean }[]; setAt: number; updatedAt: number;
+/** 计划里的一个成果：要拿到的东西，不是做法。 */
+export interface PlanOutcome {
+  /** 稳定 id：改写清单时按文字保留，供活动/尝试引用。 */
+  id: string; text: string; done: boolean; doneWhen?: import('../projects/types.ts').Condition; auto?: boolean;
+}
+/** 计划里的一个做法：可以换、可以停，不因方法变更而删成果。 */
+export interface PlanMethod {
+  id: string; text: string; outcomeId?: string;
+  status: 'active' | 'paused' | 'dropped';
+  attempts: number; stopReasons: Record<string, number>;
+  addedAt: number; updatedAt: number;
+}
+/** 一次具体尝试：做了什么、在哪儿停的；归因仍由 Agent 判断。 */
+export interface PlanAttempt {
+  at: number; methodId?: string; outcomeId?: string;
+  where?: { x: number; y: number; z: number };
+  whatHappened: string; whyStopped?: string;
+}
+
+export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[]; setAt: number; updatedAt: number;
+  /** 做法与尝试记录；旧存档没有这两个字段时按空列表处理。 */
+  methods?: PlanMethod[]; attempts?: PlanAttempt[];
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
   progressAt?: number;
   /** 清单内容被改写的时刻（只记文字真的变了的那几次，保留最近 20 次）；不算推进 */
@@ -374,7 +395,7 @@ export class SelfModel {
    * 定下（或改写）主目标的清单。focus 是议程 ID 或一句话（一句话就新建一个今天的目标）。
    * 旧清单里同名、已经勾掉的项保持勾掉。
    */
-  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = [], opts: { promote?: boolean } = {}): FocusPlan | null {
+  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = [], opts: { promote?: boolean; methods?: { text: string; outcome?: number }[]; methodDrop?: string[] } = {}): FocusPlan | null {
     const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
     // 主目标只能是“想做的事”：随手记下的点子、疑问不会自己变成要一直推进的目标；
@@ -385,12 +406,18 @@ export class SelfModel {
     const old = this.data.plan?.agendaId === item.id ? this.data.plan : undefined;
     if (!old) this.feel({ type: 'goal_set' });
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
+    const idBefore = new Map(old?.steps.map((st) => [st.text, st.id] as const) ?? []);
     const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
+    const outcomes: PlanOutcome[] = cleaned.map(({ text, cond }) => ({
+      id: idBefore.get(text) ?? shortId('po_'), text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}),
+    }));
     const rewritten = !!old && old.steps.map((st) => st.text).join('|') !== cleaned.map((c) => c.text).join('|');
     const revisedAt = rewritten ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
-    this.data.plan = { agendaId: item.id, goal: item.text, steps: cleaned.map(({ text, cond }) => ({ text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}) })), setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
+    this.data.plan = { agendaId: item.id, goal: item.text, steps: outcomes, setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
       progressAt: old ? old.progressAt ?? old.setAt : Date.now(),
+      ...(old?.methods !== undefined || opts.methods !== undefined ? { methods: this.mergeMethods(old?.methods, opts.methods, outcomes, opts.methodDrop) } : {}),
+      ...(old?.attempts?.length ? { attempts: old.attempts } : {}),
       ...(revisedAt?.length ? { revisedAt } : {}),
       ...(old?.stalledObservedSince !== undefined ? { stalledOnlineMs: old.stalledOnlineMs, stalledObservedSince: old.stalledObservedSince, stalledHistoryUnknown: old.stalledHistoryUnknown } : {}),
       ...(old?.setDay !== undefined ? { setDay: old.setDay } : {}),
@@ -398,6 +425,62 @@ export class SelfModel {
     if (!old) this.resetPlanStall(this.data.plan, this.data.plan.progressAt!);
     this.touch();
     return this.data.plan;
+  }
+
+  /**
+   * 做法清单按文字保留 id 与尝试账；没写过的做法才新建。null 表示这次没提供做法清单（沿用旧的）。
+   * 做法不参与成果保护和清单改写计时：换做法是正常执行选择，不是改目标。
+   */
+  private mergeMethods(old: PlanMethod[] | undefined, incoming: { text: string; outcome?: number }[] | undefined,
+    outcomes: PlanOutcome[], dropped: string[] = []): PlanMethod[] {
+    const now = Date.now();
+    const previous = old ?? [];
+    const byText = new Map(previous.map((m) => [m.text, m] as const));
+    const next = incoming === undefined ? previous
+      : incoming.flatMap((x) => {
+        const text = cleanPlanStep(x.text);
+        if (!text) return [];
+        const outcome = typeof x.outcome === 'number' ? outcomes[x.outcome] : undefined;
+        const prev = byText.get(text);
+        return [{ ...(prev ?? { id: shortId('pm_'), status: 'active' as const, attempts: 0, stopReasons: {}, addedAt: now }),
+          text, ...(outcome ? { outcomeId: outcome.id } : prev?.outcomeId ? { outcomeId: prev.outcomeId } : {}), updatedAt: now }];
+      }).slice(0, 8);
+    const seen = new Set(next.map((m) => m.id));
+    // 新列表没再列出的旧做法先收起（paused），保留尝试账；明确 method_drop 的才标 dropped。
+    // 不静默删除，也不让它继续以“启用中”出现在专注块里。
+    return [...next, ...previous.filter((m) => !seen.has(m.id)).map((m) => dropped.includes(m.id)
+      ? { ...m, status: 'dropped' as const, updatedAt: now }
+      : m.status === 'active' ? { ...m, status: 'paused' as const, updatedAt: now } : m)];
+  }
+
+  /** 只改做法，不动成果清单、不改写计时。 */
+  updatePlanMethods(methods: { text: string; outcome?: number }[] | undefined, drop: string[] = []): FocusPlan | null {
+    const p = this.plan();
+    if (!p) return null;
+    p.methods = this.mergeMethods(p.methods, methods, p.steps, drop);
+    p.updatedAt = Date.now();
+    this.touch();
+    return p;
+  }
+
+  /** 把一段活的结局记到做法/成果的尝试账上；不判断成败原因，只记事实。 */
+  recordPlanAttempt(input: { outcomeId?: string; methodId?: string; where?: { x: number; y: number; z: number }; whatHappened: string; whyStopped?: string; at?: number }) {
+    const p = this.plan();
+    if (!p || (!input.outcomeId && !input.methodId)) return null;
+    const at = input.at ?? Date.now();
+    const attempt: PlanAttempt = {
+      at, ...(input.outcomeId ? { outcomeId: input.outcomeId } : {}), ...(input.methodId ? { methodId: input.methodId } : {}),
+      ...(input.where ? { where: { ...input.where } } : {}), whatHappened: input.whatHappened.slice(0, 240), ...(input.whyStopped ? { whyStopped: input.whyStopped } : {}),
+    };
+    p.attempts = [...(p.attempts ?? []), attempt].slice(-40);
+    const method = input.methodId ? p.methods?.find((m) => m.id === input.methodId) : undefined;
+    if (method) {
+      method.attempts += 1; method.updatedAt = at;
+      if (input.whyStopped) method.stopReasons[input.whyStopped] = (method.stopReasons[input.whyStopped] ?? 0) + 1;
+    }
+    p.updatedAt = at;
+    this.touch();
+    return attempt;
   }
   /**
    * 主目标是这一阶段要拿到的成果，不随眼前的事换：

@@ -224,11 +224,11 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
- "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）"},
+ "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）","outcome_id":"po_…（可选：推进哪项计划成果）","method_id":"pm_…（可选：采用哪条计划做法）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
-operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标清单：定下 {"focus":"a_…或一句话","steps":["…"]}，做完一项 {"done":[0]}）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}]}；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
@@ -236,8 +236,8 @@ const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
 
-/** 专注：主目标 + 清单，插曲用 detour */
-const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。清单 3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾；依次推进；实际情况变了可以改清单（补项、拆项、合并或删项），有【阶段回顾】时可换目标（写 switch_reason）。`;
+/** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
+const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停，换做法不删成果。给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。删掉没做完的成果要写 steps 并在 plan 里写 switch_reason 说明为什么；有【阶段回顾】时可换主目标。`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
@@ -603,8 +603,14 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
     goal, agenda_id: plan?.agendaId ?? item!.id,
     ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => {
       const held = !st.done ? gearAlreadyHeldInText(st.text, ctx.state.inventory, ctx.state.equipment) : null;
-      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${held ? `（其实不用做：${held}）` : ''}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`;
+      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.id ? ` ${st.id}` : ''}${held ? `（其实不用做：${held}）` : ''}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`;
     }), ...(next >= 0 ? { next_item: next } : {}),
+      ...(plan.methods?.some((m) => m.status === 'active') ? { methods: plan.methods.filter((m) => m.status === 'active').map((m) => ({
+        id: m.id, text: m.text, ...(m.outcomeId ? { outcome: m.outcomeId } : {}), attempts: m.attempts,
+        ...(Object.keys(m.stopReasons).length ? { stopped: m.stopReasons } : {}),
+      })) } : {}),
+      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}`) } : {}),
+      checklist_note: '清单是成果；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
       activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,

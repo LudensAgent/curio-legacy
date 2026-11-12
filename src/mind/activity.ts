@@ -461,6 +461,7 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     ...(draft.doneWhen ? { doneWhen: draft.doneWhen } : {}), ...(draft.expect ? { expect: draft.expect } : {}),
     ...(draft.ifStuck ? { ifStuck: draft.ifStuck } : {}), ...(draft.agendaId ? { agendaId: draft.agendaId } : {}),
     ...(draft.applying ? { applying: draft.applying } : {}),
+    ...(draft.outcomeId ? { outcomeId: draft.outcomeId } : {}), ...(draft.methodId ? { methodId: draft.methodId } : {}),
     source, monologue, startedAt: Date.now(), startPos: { ...state.pos }, failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
@@ -1043,6 +1044,13 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
+    ...(a.outcomeId ? { outcomeId: a.outcomeId } : {}), ...(a.methodId ? { methodId: a.methodId } : {}),
+    ...(a.navigation ? { navigation: {
+      ...(a.navigation.destination ? { destination: { ...a.navigation.destination } } : {}),
+      dim: a.navigation.dim, completedSegments: a.navigation.completedSegments,
+      remaining: a.navigation.remaining.map((p) => ({ ...p })), phase: a.navigation.phase,
+      ...(a.navigation.lastInvalidation ? { lastInvalidation: a.navigation.lastInvalidation.reason } : {}),
+    } } : {}),
     completion: attemptOnly ? 'attempt' as const
       : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
         : outcome === 'unmet' ? 'unmet' as const : undefined,
@@ -1111,19 +1119,40 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
         remaining_rounds: roundsLeft,
         done_when_can_stop_early: !!a.doneWhen,
       };
+  // 正在执行的这一步被取消/换掉时会发生什么：如实说明会失去什么、哪些已确认的进展会保留。
+  // 这不是建议，也不自动续跑；只把停下来的代价交给 Agent。
+  const stopEffect = running && running.source !== 'filler' && running.source !== 'reflex' ? {
+    cancels_running_step: true,
+    running_step: `${running.skill} ${argsLabel({ skill: running.skill, args: running.args })}`,
+    ...(a.navigation ? {
+      confirmed_navigation_segments: a.navigation.completedSegments,
+      measured_pos: a.navigation.measured.pos,
+      remaining_targets: a.navigation.remaining.length,
+    } : {}),
+    partial_progress_recorded: true,
+    not_counted_as_completed: '被取消的这一步不会记为完成，也不会自动续跑到原目标',
+  } : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
+    ...(a.outcomeId ? { outcome_id: a.outcomeId } : {}), ...(a.methodId ? { method_id: a.methodId } : {}),
     routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.id ? ` #${s.id}` : ''}${s.optional ? '（顺手）' : ''}`),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(running ? { running_step: { skill: running.skill, args: running.args, source: running.source, elapsed_real_s: Math.round((Date.now() - running.startedAt) / 1000) } } : {}),
     continue_effect: continueEffect,
+    ...(stopEffect ? { stop_effect: stopEffect } : {}),
     ...(lastCollection ? { last_collection: lastCollection } : {}),
     ...(a.applying ? { applying: a.applying, applying_at_start: a.applyingText ?? 'unknown' } : {}),
     ...(a.interruptions ? { interruptions: a.interruptions } : {}),
     ...(a.lastInterruption ? { last_interruption: { at: new Date(a.lastInterruption.at).toISOString(), kind: a.lastInterruption.kind, skill: a.lastInterruption.skill, reason: a.lastInterruption.reason, ...(a.lastInterruption.pos ? { pos: a.lastInterruption.pos } : {}) } } : {}),
-    ...(done ? { done_when: { status: done.status, actual: done.actual } } : {}),
+    ...(done ? { done_when: {
+      status: done.status, actual: done.actual, evaluated_at: 'between_steps', stops_running_step: false,
+      // 只证明这段活声明的条件，不证明原委托完成；运行中的步照自己的原参数继续，除非 Agent 明确停/换。
+      note: done.status === 'satisfied'
+        ? `收工条件成立只在步骤之间结束这段活，不会取消正在执行的 ${running && running.source !== 'filler' && running.source !== 'reflex' ? running.skill : '动作'}；它也不证明原委托的其他目标已完成`
+        : '收工条件只在步骤之间检查，不会取消正在执行的动作',
+    } } : {}),
     ...(a.attemptOnly ? { attempt_only: a.attemptOnly.reason, original_done_when: a.attemptOnly.originalDoneWhen } : {}),
     ...(a.planCoverageGap ? { plan_coverage_gap: a.planCoverageGap } : {}),
     ...(a.navigation ? { navigation: describeNavigation(a.navigation) } : {}),
