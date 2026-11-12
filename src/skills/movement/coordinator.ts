@@ -1,6 +1,7 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
+import { feetCell } from '../../perception/local.ts';
 import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, isDangerPolicyRejection, isFirePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { isSuspendAbort, shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
@@ -157,13 +158,15 @@ export async function runMakeWay(
     if (first.kind === 'move') {
       const top = supportTopAt({ x: first.to.x, y: first.to.y - 1, z: first.to.z });
       const footY = top !== null && top > 0 && top <= 1 ? first.to.y - 1 + top : first.to.y;
+      // 计划按格排步（落点格 = 支撑格 + 1）：同层/±1 按格比。灵魂沙这类 0.875 顶面上一格落差的连续高差是 1.125，不能按连续高度卡 1.01。
       const dy = footY - from.y;
-      if (dy < -1.01 || dy > 1.01) {
+      const cells = first.to.y - feetCell(from).y;
+      if (cells < -1 || cells > 1) {
         return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
           failure: `规划完成时身体脚高 ${from.y.toFixed(2)}，计划第一步落点脚高 ${footY.toFixed(2)}（相差 ${dy.toFixed(2)} 格）；move_step 只处理同层/±1，旧计划不再适用` };
       }
     } else {
-      const footCell = Math.floor(from.y + 0.05);
+      const footCell = feetCell(from).y;
       if (first.to.y !== footCell + 1) {
         return { from, to: { ...from }, planned: steps.length, executed: 0, stale: true,
           failure: `规划完成时身体脚高 ${from.y.toFixed(2)}（脚下格 ${footCell}），计划原地垫高到 ${first.to.y}；起点高度已变，旧计划不再适用` };
@@ -1354,7 +1357,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const ahead = Math.min(24, Math.max(1, session.intent.distance - progressOf(session, here, 0).along));
       return { x: here.x + bearing.x * ahead, y: here.y, z: here.z + bearing.z * ahead };
     })();
-    const start = { x: Math.floor(here.x), y: Math.floor(here.y + 0.05), z: Math.floor(here.z) };
+    const start = feetCell(here);
     // 普通搜索已经失败，这里也接受“不改方块、但确实走到目标附近”的纯移动路线；
     // 否则会把一条真实存在的通路丢掉，误报“找不到路线”。
     const steps = await planMakeWay(voxel, scope.dim, start, target, { ...makeWay, allowPlainRoute: true }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),

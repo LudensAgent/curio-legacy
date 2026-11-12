@@ -315,7 +315,7 @@ test('move_step 绝对 xyz 的 y 是脚高：分数脚高按脚所在格解析�
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(w.pos.y, 63.5, '按实测脚高验收，不取整');
   assert.equal(Math.floor(w.pos.x), 1);
-  assert.deepEqual(r.data?.targetCell, { x: 1, y: 63, z: 0 }, '回执的目标格是脚所在方块格');
+  assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 }, '回执的目标格是身体所在格（半砖上面那格），不是半砖本身');
   assert.match(r.summary, /63\.50/);
 });
 
@@ -673,6 +673,28 @@ test('mine_cell：只挖指定格，液体邻格默认拒绝，wet 显式接受'
   const wet = await mineCell.run(ctx, { at: [2, 0, 0], facing: 'N' });
   assert.equal(wet.status, 'failed');
   assert.match(wet.summary, /water/);
+});
+
+test('灵魂沙上的相对坐标以身体所在格为原点：[1,1,0] 是前方头格，不会去挖脚下的灵魂沙', async (t) => {
+  assert.deepEqual(feetCell({ x: 0.5, y: 60.875, z: 0.5 }), { x: 0, y: 61, z: 0 }, '灵魂沙顶面 60.875 上，脚格是 61');
+  assert.deepEqual(feetCell({ x: 0.5, y: 61, z: 0.5 }), { x: 0, y: 61, z: 0 }, '整格方块上不变');
+  assert.deepEqual(feetCell({ x: 0.5, y: 60.0625, z: 0.5 }), { x: 0, y: 60, z: 0 }, '地毯这类薄层仍在自身格');
+  const w = new FakeAdapter();
+  w.groundY = 59;
+  w.pos = { x: 0.5, y: 60.875, z: 0.5 };
+  for (const x of [0, 1]) w.blocks.push({ name: 'soul_sand', pos: { x, y: 60, z: 0 } });
+  // 站上前方灵魂沙时身体占 60.875–62.675，挡路的是 (1,62,0)。
+  w.blocks.push({ name: 'netherrack', pos: { x: 1, y: 62, z: 0 } });
+  const ctx = makeCtx(w, { senses: { observeBlocks: observeAllBlocks(w) } });
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.equal(w.blockAt({ x: 1, y: 62, z: 0 }), 'air', '挖开的是真正挡头的那格');
+  assert.equal(w.blockAt({ x: 1, y: 60, z: 0 }), 'soul_sand', '前方脚下的灵魂沙保留');
+  const step = await moveStep.run(ctx, { at: [1, 0, 0], facing: 'E' });
+  assert.equal(step.status, 'succeeded', step.summary);
+  assert.equal(w.pos.y, 60.875);
+  assert.equal(Math.floor(w.pos.x), 1);
 });
 
 class UnloadedTarget extends FakeAdapter {

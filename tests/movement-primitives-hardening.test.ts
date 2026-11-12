@@ -404,7 +404,7 @@ test('move_step 绝对 xyz 的 y 是脚高：回执目标格是脚所在方块�
   const r = await moveStep.run(ctx, { at: [0, 0, 0], facing: 'E', xyz: { x: 1, y: 63.5, z: 0 } });
   assert.equal(r.status, 'succeeded', r.summary);
   assert.equal(w.pos.y, 63.5);
-  assert.deepEqual(r.data?.targetCell, { x: 1, y: 63, z: 0 }, '目标格是脚所在方块格，不是分数脚高');
+  assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 }, '目标格是身体所在格（半砖上面那格），不是分数脚高');
   assert.equal(r.data?.targetFoot, 63.5);
 });
 

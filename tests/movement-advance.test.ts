@@ -758,6 +758,23 @@ test('开路迈步前身体偏在格边、扫掠会擦到斜角方块时，先�
   assert.equal(adapter.blockAt({ x: 1, y: 64, z: 1 }), 'stone', '没有替计划多挖斜角方块');
 });
 
+test('开路第一步下到灵魂沙上（连续高差 1.125）按一格落差执行，不判旧计划失效', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  // 前方一列下沉一格，脚下是灵魂沙（顶面 62.875）：计划格是 (1,63,0)，连续脚高从 64 到 62.875。
+  adapter.removed.add('1,63,0');
+  adapter.blocks.push({ name: 'soul_sand', pos: { x: 1, y: 62, z: 0 } });
+  const leg = await runMakeWay(ctx, {
+    steps: [{ kind: 'move' as const, to: { x: 1, y: 63, z: 0 }, dig: [] }],
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits: [], deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: (cell) => cell.x === 1 && cell.y === 62 ? 0.875 : null, onProgress: () => {},
+  });
+  assert.equal(leg.stale, undefined, JSON.stringify(leg));
+  assert.equal(leg.executed, 1, JSON.stringify(leg));
+  assert.equal(adapter.pos.y, 62.875);
+});
+
 test('开路迈步确认不了当前方块时停下，不把未加载格当成可走', async (t) => {
   const { adapter, ctx } = setup(corridor(8));
   t.after(() => ctx.memory.close());

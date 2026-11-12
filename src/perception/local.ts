@@ -19,7 +19,12 @@ export function facingOfYaw(yaw: number): Facing {
   return (['N', 'W', 'S', 'E'] as Facing[])[i];
 }
 
-export const feetCell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.05), z: Math.floor(pos.z) });
+/**
+ * 身体所在的脚格：按脚高离哪条格线近取整。站在灵魂沙（顶面 0.875）、土径/耕地（0.9375）、半砖（0.5）
+ * 这类高支撑面上时，身体占的是支撑方块上面那两格，脚格就是上面那格；整格方块与地毯、薄雪这类贴地薄层不受影响。
+ * 以前用 floor(y+0.05)，灵魂沙上会把支撑方块本身当脚格，相对坐标整体低一格（挖脚下支撑、漏掉真正挡头的格）。
+ */
+export const feetCell = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y + 0.5), z: Math.floor(pos.z) });
 
 /**
  * 脚下实际支撑的那一格：半砖、耕地、床这类高度不足一格的方块，支撑就在脚所在那格本身（脚高是 x.5 之类），
