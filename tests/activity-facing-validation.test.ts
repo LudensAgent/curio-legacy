@@ -184,3 +184,48 @@ test('done_when 需要物品/位置时，只有只读步骤的活整段拒绝', 
   }, adapter, memory, []);
   assert.ok(!('error' in ok), 'error' in ok ? ok.error : '');
 });
+
+test('只写 exploration.min_distance 的收工条件带事实提醒，但条件和步骤保持原样', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  const draft = {
+    what: '朝一个方向找下界要塞',
+    steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 64 } }],
+    done_when: { type: 'exploration', min_distance: 16 },
+  };
+  const notes: string[] = [];
+  const activity = validateDraft(draft, adapter, memory, notes);
+  assert.ok(!('error' in activity), JSON.stringify(activity));
+  assert.match(notes.join('；'), /有个只按 exploration\.min_distance=16 判断的分支.*离起点至少 16 格或进了新区块/);
+  assert.deepEqual(activity.doneWhen, { type: 'exploration', min_distance: 16 }, '提醒不改写 Agent 的条件');
+  assert.equal(activity.steps[0]!.skill, 'explore_toward');
+});
+
+test('plan 成果只写 min_distance 也带事实提醒，成果条件不被改写', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  const d = parseDecision({
+    decision: 'new', monologue: '找下界要塞',
+    plan: { focus: '在下界找要塞', steps: [{ text: '找到下界要塞', done_when: { type: 'exploration', min_distance: 32 } }] },
+    activity: { what: '朝北探路', steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 32 } }] },
+  }, adapter, memory, false);
+  assert.ok(!('error' in d), JSON.stringify(d));
+  assert.match(d.notes.join('；'), /plan\.steps\[0\]\.done_when 用了 exploration.*min_distance 或 find）都不会自动勾/);
+  assert.deepEqual(d.plan?.conditions?.[0], { type: 'exploration', min_distance: 32 }, '提醒不改写成果条件');
+});
+
+test('any_of 里只按 min_distance 的分支也会提醒；提醒本身不会触发返工', (t) => {
+  const adapter = new TestWorld(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  const notes: string[] = [];
+  const activity = validateDraft({
+    what: '朝北探路，顺便看看要塞',
+    steps: [{ skill: 'explore_toward', args: { direction: 'N', distance: 32 } }],
+    done_when: { type: 'any_of', conditions: [{ type: 'exploration', min_distance: 16 }, { type: 'exploration', find: 'nether_bricks' }] },
+  }, adapter, memory, notes);
+  assert.ok(!('error' in activity), JSON.stringify(activity));
+  const note = notes.find((n) => /min_distance=16/.test(n));
+  assert.ok(note, notes.join('；'));
+  assert.doesNotMatch(note, /done_when 无效|丢掉了不能执行的步骤|next 已忽略/, '事实提醒不属于可返工问题');
+  assert.deepEqual(activity.doneWhen, { type: 'any_of', conditions: [{ type: 'exploration', min_distance: 16 }, { type: 'exploration', find: 'nether_bricks' }] });
+});

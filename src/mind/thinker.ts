@@ -131,6 +131,19 @@ const NON_MOVING_STEPS = new Set([
   'spatial_query', 'spatial_extrema', 'sign_text', 'edit_book',
 ]);
 
+/** 只按 min_distance 收口的分支只证明推进量，不证明找到目标：返回距离用于事实提醒，不改条件。
+ *  any_of 的任一分支单独成立就会收工，所以任一分支只写 min_distance 都要提醒；all_of 要所有分支都成立，单靠它不算。 */
+const minDistanceOnly = (condition: Condition): number | null => {
+  if (condition.type === 'exploration') return condition.find === undefined ? condition.min_distance ?? null : null;
+  if (condition.type === 'any_of') return condition.conditions.map(minDistanceOnly).find((distance): distance is number => distance !== null) ?? null;
+  if (condition.type === 'all_of' && condition.conditions.length === 1) return minDistanceOnly(condition.conditions[0]);
+  return null;
+};
+
+/** 只陈述这条条件证明了什么；不改写法、不催着换条件。 */
+const minDistanceNote = (label: string, distance: number) =>
+  `${label}.done_when 有个只按 exploration.min_distance=${distance} 判断的分支：这个分支只证明本段离起点至少 ${distance} 格或进了新区块；若这段目标是找到或到达某个目标，单靠它不能证明。`;
+
 /**
  * 只做“逻辑上不可能完成”的检查：done_when 要物品/位置，但这段 steps 全是已知不会产生物品/不会移动的动作。
  * 未知技能（自学/代码技能）一律放行，不判断具体策略，也不替 Agent 选动作。
@@ -255,6 +268,10 @@ export function validateDraft(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (doneWhen && evaluateCondition(doneWhen, adapter.state()).status !== 'satisfied') {
     const gap = doneWhenGap(doneWhen, new Set(steps.map((step) => step.skill)));
     if (gap) return { error: `${label}.${gap}` };
+  }
+  if (doneWhen) {
+    const distance = minDistanceOnly(doneWhen);
+    if (distance !== null) notes.push(minDistanceNote(label, distance));
   }
   const repeatRaw = o.repeat === 'until_done' ? (doneWhen ? 8 : 1) : Math.round(Number(o.repeat ?? 1));
   const repeat = Number.isFinite(repeatRaw) ? Math.max(1, Math.min(12, repeatRaw)) : 1;
@@ -387,7 +404,12 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? { skill: o.skill as Record<string, unknown> } : {}),
     ...(() => {
       const plan = parsePlan(o.plan, (c, i) => {
-        try { return validateCondition(normalizeDoneWhen(c), adapter, memory, adapter.state()); }
+        try {
+          const condition = validateCondition(normalizeDoneWhen(c), adapter, memory, adapter.state());
+          // 清单勾选按当时状态核对，没有段活动的探索回执：exploration（min_distance/find）都不会自动勾。
+          if (containsExploration(condition)) notes.push(`plan.steps[${i}].done_when 用了 exploration：清单勾选时按当前状态核对、没有本段探索回执，exploration（min_distance 或 find）都不会自动勾；要用能按当前状态核对的条件（location_near、self_state、inventory_min 等），或不写，做完由你判断。`);
+          return condition;
+        }
         catch (e) { notes.push(`plan.steps[${i}].done_when 无效已忽略：${e instanceof Error ? e.message : String(e)}`); return null; }
       });
       return plan ? { plan } : {};
