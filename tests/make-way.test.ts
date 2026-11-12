@@ -128,11 +128,12 @@ test('紧挨液体的墙不挖；已知可绕行时不挖', async () => {
 
 test('parseMakeWay：只有写了 dig/place 才授权；参数非法时拒绝', () => {
   assert.deepEqual(parseMakeWay({}), { ok: true, value: undefined });
-  assert.deepEqual(parseMakeWay({ dig: true }), { ok: true, value: { dig: {}, maxEdits: 16 } });
+  assert.deepEqual(parseMakeWay({ dig: true }), { ok: true, value: { dig: {}, maxEdits: 512 } });
   assert.deepEqual(parseMakeWay({ dig: 'iron_pickaxe', place: 'cobblestone', maxEdits: 8 }), { ok: true, value: { dig: { tool: 'iron_pickaxe' }, place: { item: 'cobblestone' }, maxEdits: 8 } });
   assert.equal(parseMakeWay({ place: '' }).ok, false);
   assert.equal(parseMakeWay({ maxEdits: 4 }).ok, false);
-  assert.equal(parseMakeWay({ dig: true, maxEdits: 99 }).ok, false);
+  assert.equal(parseMakeWay({ dig: true, maxEdits: 512 }).ok, true, '长距离探索的施工额度上限是 512');
+  assert.equal(parseMakeWay({ dig: true, maxEdits: 513 }).ok, false);
 });
 
 test('坑底长着树苗：同时授权 dig 时先打掉树苗再垫高；只授权 place 时不在这格垫高', async () => {

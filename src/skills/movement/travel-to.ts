@@ -5,7 +5,7 @@ import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSki
 import { navigateTo } from './navigate.ts';
 import type { SegmentReceipt } from './segment.ts';
 import { findMovementSession } from './session.ts';
-import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, MAKE_WAY_MAX_EDITS, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
 import type { MakeWayEdit } from './coordinator.ts';
 
 type TravelTarget =
@@ -92,7 +92,7 @@ function parseTarget(raw: unknown): TravelTarget | string {
 export const travelTo: Skill<TravelToArgs> = {
   name: 'travel_to',
   description: '走向你给的具体位置：坐标、记得的地标/base/死亡点/已记录传送门。后端是共享 VoxelMap A*（委托 navigate_to），按已记录体素做有界 3D 搜索与实测验收，walk/step/drop 每一步体素证据缺失时用当前已加载方块即时确认（确认不了才停；jump 仍只认体素证据）；没有 VoxelMap 或需要移动但目标列缺证据时如实报缺口。无 y 且尚未在到达范围内时，用 VoxelMap 同列观测解析真实脚高，解析不到就要求补 y 或先观察，不猜落脚高度。range 保持原到达条件（无 y 按水平格距、有 y 按三维格距），实测站稳并进入范围即停止；路线目标仍是原坐标，不会把范围目标改成更近的点。默认不下水，swim:true 时才涉水并代为游泳。' + MAKE_WAY_DOC + '。只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits（以及通用 make），其他参数一律拒绝。',
-  catalog: '{"to":{x,y,z}|{x,z}|"地标名"|"base"|"death"|"portal:<id>","range"?:2,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:16,"sessionId"?}：去一个确定的位置（坐标、地标、死亡点、已登记的门）；按已记录体素寻路走过去，默认不挖不放，写 dig/place 才在走不通时代为挖开挡路格、补支撑或垫高',
+  catalog: `{"to":{x,y,z}|{x,z}|"地标名"|"base"|"death"|"portal:<id>","range"?:2,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（搭桥/开路约每格一次改动）,"sessionId"?}：去一个确定的位置（坐标、地标、死亡点、已登记的门）；按已记录体素寻路走过去，默认不挖不放，写 dig/place 才在走不通时代为挖开挡路格、补支撑或垫高`,
   argsDoc: '{"to": {"x":0,"y":64,"z":0} | {"x":0,"z":0} | "x,y,z" | "x,z" | "地标名" | "base" | "death" | "portal:<id>", "range"?:2（1–16；无 y 按水平格距、有 y 按三维格距） "timeoutMs"?:180000（10000–600000）,"sessionId"?:"原回执里的编号","swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,' + MAKE_WAY_ARGS_DOC + '}；只接受 to/range/timeoutMs/sessionId/swim/dig/place/maxEdits/make，未知参数会被拒绝。',
   timeoutMs: 600000,
   movement: true,
@@ -244,12 +244,13 @@ export const travelTo: Skill<TravelToArgs> = {
       historical: true,
       maxSteps,
       maxStepsPerSegment: Math.min(TRAVEL_SEGMENT_STEPS, maxSteps),
-      maxSegments: MAX_SEGMENTS,
-      // 边走边规划时每接一段窗口、每次绕路都要搜索：预算约每格一次，只防无限循环，不截断长途委托。
-      maxSearches: Math.min(128, 16 + Math.ceil(direct)),
+      // 分段/搜索/观察都随距离放大：搭桥时每处施工都会交回并重搜一次，固定上限会先把长途截断。
+      maxSegments: Math.min(1024, MAX_SEGMENTS + Math.ceil(direct / 2)),
+      // 边走边规划时每接一段窗口、每次绕路都要搜索：预算约每格两次，只防无限循环，不截断长途委托。
+      maxSearches: Math.min(2048, 64 + Math.ceil(direct) * 2),
       // 观察次数同理：长途上每遇到一段证据边界都可能要看一眼，默认 2 次会截断委托。
-      maxObservations: Math.min(64, 8 + Math.ceil(direct / 4)),
-      maxObservedCells: Math.min(4096, 512 + Math.ceil(direct) * 16),
+      maxObservations: Math.min(256, 32 + Math.ceil(direct / 4)),
+      maxObservedCells: Math.min(8192, 2048 + Math.ceil(direct) * 16),
       deadlineMs: deadline,
       ...(args.sessionId === undefined ? {} : { sessionId: args.sessionId }),
     }, adapter);

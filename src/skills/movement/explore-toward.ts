@@ -3,7 +3,7 @@ import { lookAround, sighted } from '../movement.ts';
 import { fail, isAbort, obj, ok, runSkill, type Skill, type SkillResult } from '../types.ts';
 import { coordinatorResult, runMovementCoordinator } from './coordinator.ts';
 import { CARDINAL_DIRECTIONS, type CardinalDirection } from './session.ts';
-import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, MAKE_WAY_MAX_EDITS, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
 
 type ExploreArgs = {
   direction: CardinalDirection;
@@ -29,7 +29,7 @@ const EXPLORE_SEGMENT_STEPS = 48;
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
   description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已验证的 walk/step/drop（体素证据缺失时用当前已加载方块即时确认，确认不了才停）与跨越 1 格缺口的 jump（走到起点边缘起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
-  catalog: '{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","maxLateralDrift"?:16,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:16,"sessionId"?}：没有具体目的地时，朝一个方向去没去过的地方、边走边看，until 本轮看见就停；dig/place 同 travel_to',
+  catalog: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","maxLateralDrift"?:16,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（搭桥/开路约每格一次改动）,"sessionId"?}：没有具体目的地时，朝一个方向去没去过的地方、边走边看，until 本轮看见就停；dig/place 同 travel_to`,
   argsDoc: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多${EXPLORE_SEGMENT_STEPS}步）,"maxLateralDrift"?:16（0-64，0 只直行）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,` + MAKE_WAY_ARGS_DOC + '}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/swim/dig/place/maxEdits/make，未知参数会被拒绝；until 只认本次实际看见的目标。',
   timeoutMs: 600000,
   movement: true,
@@ -68,7 +68,9 @@ export const exploreToward: Skill<ExploreArgs> = {
       return fail('BAD_ARGS', '身体已离开冻结起点；续接原方向请带原 sessionId，不会从新位置重解释目标', { originalRequest: args, position: { ...start }, reason: 'INTENT_MISMATCH' });
     }
     const deadline = Math.min(ctx.deadline, Date.now() + args.timeoutMs);
-    const maxTransitions = Math.min(1024, args.distance * 2 + 16);
+    // 协调预算按请求距离缩放：这些数只防失控，不该先于委托距离截断。搭桥时每处施工
+    // 都会交回并重搜一次，所以搜索/分段预算要按距离留足，否则长距离探索会走一半就停。
+    const maxTransitions = Math.min(4096, args.distance * 2 + 16);
     const until = args.until;
     let sighting: Record<string, unknown> | undefined;
     const checkSighting = until === undefined ? undefined : () => {
@@ -85,9 +87,12 @@ export const exploreToward: Skill<ExploreArgs> = {
     try {
       const outcome = await runMovementCoordinator({ ...ctx, deadline }, {
         intent: { kind: 'advance', direction: args.direction, distance: args.distance, maxLateralDrift: args.maxLateralDrift, allowed: ['walk', 'step', 'drop', 'jump'], historical: true },
-        rolling: true, checkSighting, maxSegments: 32, maxStepsPerSegment: Math.min(EXPLORE_SEGMENT_STEPS, args.segment),
-        invocationMaxTransitions: maxTransitions, maxTransitions, maxSearches: 32,
-        maxObservations: 32, maxObservedCells: 2048, maxNoProgressSegments: 4,
+        rolling: true, checkSighting, maxSegments: Math.min(1024, 32 + Math.ceil(args.distance / 2)),
+        maxStepsPerSegment: Math.min(EXPLORE_SEGMENT_STEPS, args.segment),
+        invocationMaxTransitions: maxTransitions, maxTransitions,
+        maxSearches: Math.min(2048, 32 + args.distance * 2),
+        maxObservations: Math.min(256, 32 + Math.ceil(args.distance / 4)),
+        maxObservedCells: Math.min(8192, 2048 + args.distance * 16), maxNoProgressSegments: 4,
         sessionId: args.sessionId, deadlineMs: deadline, allowUnknownCorridor: false, observeFrontierBeyondSegments: true,
         ...(args.swim === true ? { swim: true } : {}),
         ...makeWayRequest(args), makeWayAvailable: true,

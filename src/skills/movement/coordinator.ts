@@ -15,7 +15,7 @@ import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
 import { supportTop } from '../../perception/geometry.ts';
 import { liveEdgeStatus } from './live-edge.ts';
-import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
+import { MAKE_WAY_MAX_EDITS, planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
 import { mineCell, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
@@ -110,8 +110,8 @@ export type MakeWayLegReceipt = {
 };
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
-/** 一次调用最多开路几段（每段只做到第一处改动）；总改动数另受 maxEdits 约束。 */
-const MAX_MAKE_WAY_LEGS = 64;
+/** 一次调用最多开路几段（每段只做到第一处改动，因此一段至多一次改动）；与施工上限一致，避免段数先于额度截断长距离搭桥。 */
+const MAX_MAKE_WAY_LEGS = MAKE_WAY_MAX_EDITS;
 /** 所需区段暂时加载不了（存档正在写盘等）时，等这么久再重试，最多这么多次。 */
 const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
 /** 同一站位、同一相关证据、同一搜索终态最多重搜几次；再多就是搜索/复验矛盾，交回 Agent。 */
@@ -353,7 +353,7 @@ function makeWayBudgetDetail(session: MovementSession, originalStop: StopReceipt
     : `最后${last.kind === 'dig' ? '挖开' : '放置'} ${last.name}${cellText(last.pos)}`;
   const allowed = session.authorization.makeWay?.maxEdits ?? 0;
   // 先给本次真正触发停止的事实；旧的碰撞证据放后面，不抢走额度与进度。
-  return `${progressed}；施工 ${session.counters.makeWayEdits}/${allowed}，${lastText}；${originalStop.detail}；施工额度已用尽，同一 sessionId 不能增加额度；需要更多挖/放请新建移动委托并写更大的 maxEdits（每次最多 64）`;
+  return `${progressed}；施工 ${session.counters.makeWayEdits}/${allowed}，${lastText}；${originalStop.detail}；施工额度已用尽，同一 sessionId 不能增加额度；需要更多挖/放请新建移动委托并写更大的 maxEdits（每次最多 ${MAKE_WAY_MAX_EDITS}）`;
 }
 
 function stateFacts(session: MovementSession) {
@@ -395,7 +395,7 @@ function continuationOf(session: MovementSession) {
               : reason === 'SUSPENDED' ? ['身体被其他活动暂借；原目标、实测进展与累计预算保留，回来时用同一 sessionId 续接']
                 : ['用同一 sessionId 续接；累计预算不会重置']
       : reason === 'MAKE_WAY_BUDGET_EXHAUSTED'
-        ? ['施工改动额度已用尽；同一 sessionId 不能增加 maxEdits，需要更多挖/放时新建移动委托并写更大的 maxEdits（每次最多 64）']
+        ? [`施工改动额度已用尽；同一 sessionId 不能增加 maxEdits，需要更多挖/放时新建移动委托并写更大的 maxEdits（每次最多 ${MAKE_WAY_MAX_EDITS}）`]
         : budgetExhausted && reason !== undefined && canResume(reason)
           ? ['累计 transition 或搜索预算已用尽；同一 session 不能增加预算，若仍要推进需明确新建移动委托']
           : [],

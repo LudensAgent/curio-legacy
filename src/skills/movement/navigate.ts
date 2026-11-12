@@ -123,7 +123,7 @@ export const navigateTo: Skill<NavigateArgs> = {
   name: 'navigate_to',
   description: '按你指定的目的地和允许的 walk/step/drop/jump/ladder 执行 3D 路线；jump 与 ladder 默认关闭，必须显式列入 allowed；jump 是先走到起点边缘再起跳（不疾跑），只跨 1 格宽缺口，缺口下方若是火/岩浆等危险格不走；落点脚底中心那列必须有可站立支撑（搜索按已记录体素；执行时体素缺口可由当前已加载方块即时确认），不站在邻格边缘。宿主用已记录体素做有界搜索（当前证据优先，可用历史体素作候选），并按每段连续脚位执行、实测核实；不挖、不放、不搭、不换目标，遇阻挡、落点不可见或历史路线失效就停下报事实。目标写法决定语义：整数 x/z 表示走到那一格（完成条件是脚在格内且脚高在 0.01 格容差内）；分数 x/z 表示精确连续脚位（完成条件是身体中心水平 0.12 / 垂直 0.05 格内），不会用工整格心或附近格顶替。没有完整路线时，若当前证据确认了一段可达前缀，会沿该前缀自动走到边界（最多 maxSteps 段）再停下；执行每一步前先用共享体素复验，walk/step/drop 的该格还没被感知写全时用当前已加载方块的即时几何补确认（jump/ladder 仍只认体素证据），仍确认不了才停在边界，不凭计划点穿过未加载或被阻挡的格子，也不声称到达。预算省略时按距离给分段预算（maxSegments 约每 8 格一段，实际每段最多 64 个 transition），每段从实测位置重新派生、验证，原目标不变；只要还在推进就不停，停下前会先绕向未探索的前沿点；回执带 sessionId，未完成时可原样续接（目标/允许模式/目标类型改变必须新建）。回执带原目的地、可达前缀端点、UNKNOWN/STALE/BLOCKED 边界（位置/方向/状态/原因）、搜索终态（INSUFFICIENT_EVIDENCE/NO_PATH_IN_MEMORY/UNSUPPORTED/INVALIDATED/BUDGET_EXHAUSTED）与未驻留 Section、额外观察是否可能解决、是否需要显式动作或其他移动能力。不自动挖；清障由你显式 mine_cell 后再观察/规划。',
   catalog: '{"to":{"x":…,"y":脚高,"z":…},"allowed"?:["walk","step","drop","jump","ladder"]}：走到一个确切的格（整数 x/z）或精确连续脚位（分数 x/z）；不挖不放，jump/ladder 要显式列入 allowed',
-  argsDoc: '{"to":{"x":整数或分数,"y":脚高,"z":整数或分数},"allowed"?":["walk","step","drop","jump","ladder"],"historical"?true,"maxSteps"?（默认按距离约每格 3 步，最多 1024）,"allowUnknownCorridor"?false,"maxSegments"?（默认按距离约每 8 格一段）,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"maxNodes"?,"maxEdges"?（单次搜索预算；省略时随距离缩放，近目标更小）,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收（水平 0.12 / 垂直 0.05 格），不会自动改写成格心；historical 默认 true（当前证据没路时用历史体素候选，结果标 historical 并逐段当前证据复验）；没有完整路线时会自动执行当前证据/即时几何确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限，maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），预算省略时按到目标的直线距离给出，只防失控、不截断正常长途；sessionId 只用于续接同一冻结目标/目标类型；不自动施工，不自动切换游泳/船/攀爬。',
+  argsDoc: '{"to":{"x":整数或分数,"y":脚高,"z":整数或分数},"allowed"?":["walk","step","drop","jump","ladder"],"historical"?true,"maxSteps"?（默认按距离约每格 3 步，最多 4096）,"allowUnknownCorridor"?false,"maxSegments"?（默认按距离约每 8 格一段）,"maxStepsPerSegment"?,"maxTransitions"?,"maxSearches"?,"maxObservations"?,"maxObservedCells"?,"maxNoProgressSegments"?,"maxNodes"?,"maxEdges"?（单次搜索预算；省略时随距离缩放，近目标更小）,"sessionId"?:,"deadlineMs"?}；to 是站立脚位/方块格，不是箱子/门方块本身；整数 x/z 按目标格验收，分数 x/z 按精确连续脚位验收（水平 0.12 / 垂直 0.05 格），不会自动改写成格心；historical 默认 true（当前证据没路时用历史体素候选，结果标 historical 并逐段当前证据复验）；没有完整路线时会自动执行当前证据/即时几何确认的前缀并在边界停止（不超过 maxSteps），前缀不是到达；maxSteps 是本次调用总 transition 上限，maxTransitions 是同一 session 的累计上限（默认 maxSteps×maxSegments），预算省略时按到目标的直线距离给出，只防失控、不截断正常长途；sessionId 只用于续接同一冻结目标/目标类型；不自动施工，不自动切换游泳/船/攀爬。',
   timeoutMs: 30000,
   movement: true,
   outcomeBoundary: true,
@@ -135,15 +135,17 @@ export const navigateTo: Skill<NavigateArgs> = {
       return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop、jump、ladder' };
     }
     if (a.historical !== undefined && typeof a.historical !== 'boolean') return { ok: false, error: 'historical 需要布尔值' };
-    if (a.maxSteps !== undefined && (!Number.isInteger(a.maxSteps) || a.maxSteps < 1 || a.maxSteps > 1024)) {
-      return { ok: false, error: 'maxSteps 需要 1–1024 的整数' };
+    if (a.maxSteps !== undefined && (!Number.isInteger(a.maxSteps) || a.maxSteps < 1 || a.maxSteps > 4096)) {
+      return { ok: false, error: 'maxSteps 需要 1–4096 的整数' };
     }
     if (a.allowUnknownCorridor !== undefined && typeof a.allowUnknownCorridor !== 'boolean') {
       return { ok: false, error: 'allowUnknownCorridor 需要布尔值' };
     }
+    // 长途委托（尤其搭桥时每处施工后重搜）需要更大的分段/搜索预算；上限只防失控，
+    // 实际消耗仍受原 deadline 与 maxTransitions 约束。
     const ints: [string, number, number][] = [
-      ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 64], ['maxTransitions', 1, 1024],
-      ['maxSearches', 1, 128], ['maxObservations', 0, 64], ['maxObservedCells', 0, 4096],
+      ['maxSegments', 1, 1024], ['maxStepsPerSegment', 1, 64], ['maxTransitions', 1, 4096],
+      ['maxSearches', 1, 2048], ['maxObservations', 0, 256], ['maxObservedCells', 0, 8192],
       ['maxNoProgressSegments', 1, 8],
     ];
     for (const [key, min, max] of ints) {
