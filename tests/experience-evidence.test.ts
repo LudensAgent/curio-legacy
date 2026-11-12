@@ -119,3 +119,16 @@ test('召回给每条标注当前目标/执行缺口/历史，不再混成一个
   assert.ok(hits.some((hit) => hit.match === 'execution_gap'), '执行缺口匹配有标注');
   assert.ok(hits.some((hit) => hit.match === 'historical'), '历史经历仍是历史');
 });
+
+test('近似反例（同原因、同摘要前缀）合并为最新一条，不同原因保留', () => {
+  const self = new SelfModel(null);
+  const k = self.learn('走远找树时沿北开巷', { source: 'reflection' })!;
+  const apply = (summary: string, reason: string) => self.record(record({
+    id: `a${Math.random()}`, applying: k.id, applyingText: k.text, outcome: 'stuck', summary, stop: { reason },
+  }));
+  apply('同一站位搜索与复验矛盾：东侧边界', 'CONFLICT');
+  apply('同一站位搜索与复验矛盾：西侧边界', 'CONFLICT');
+  apply('开巷后没有落脚点', 'UNKNOWN_BOUNDARY');
+  assert.equal(k.counterexamples?.length, 2, '同原因同前缀合并，不同原因保留');
+  assert.match(k.counterexamples![0]!.summary, /西侧边界/, '合并保留最新一条');
+});

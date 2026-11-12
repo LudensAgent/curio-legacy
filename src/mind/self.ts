@@ -193,6 +193,18 @@ export function keywords(text: string): Set<string> {
 
 const overlap = (a: Set<string>, b: Set<string>) => { let n = 0; for (const k of a) if (b.has(k)) n++; return n; };
 
+/** 近似反例（同原因、摘要前缀相同）只留最新一条；不按自由文字猜语义，保留不同原因。 */
+const dedupeCounterexamples = <T extends { reason: string; summary: string }>(list: readonly T[]): T[] => {
+  const seen = new Set<string>();
+  return [...list].reverse().filter((item) => {
+    // 同原因且第一句相同（冒号/逗号前的部分）视为近似失败；不把不同原因或不同结论合并。
+    const key = `${item.reason}|${(item.summary.split(/[：:，,。；;]/)[0] ?? '').slice(0, 40)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).reverse();
+};
+
 /** 成败统计是独立元数据，不能被模型抄回窍门正文。 */
 export function cleanLesson(text: string): string {
   return text.trim().replace(/(?:\s*[（(]\s*(?:成|成功)\s*\d+\s*[/／]\s*(?:败|失败)\s*\d+\s*(?:[，,]\s*累计\s*\d+\s*次\s*)?[）)])+\s*$/u, '').trim().slice(0, 160);
@@ -586,12 +598,12 @@ export class SelfModel {
       if (r.outcome === 'done' && r.completion !== 'condition' && r.completion !== 'attempt' && !localOnlySearch && !searchUnconfirmed) k.wins++;
       else if (r.outcome === 'stuck') k.losses++;
       if (applied && (r.outcome === 'stuck' || searchUnconfirmed)) {
-        k.counterexamples = [...(k.counterexamples ?? []), {
+        k.counterexamples = dedupeCounterexamples([...(k.counterexamples ?? []), {
           at: r.at, activityId: r.id, outcome: r.outcome,
           reason: r.stop?.reason ?? r.failure?.code ?? (searchUnconfirmed ? 'TARGET_NOT_FOUND' : 'stuck'),
           summary: (searchUnconfirmed && r.outcome === 'done' ? `做了动作但没有确认目标：${r.summary}` : r.summary).slice(0, 160),
           ...(r.failure?.pos ? { pos: { ...r.failure.pos } } : r.navigation?.destination ? { pos: { ...r.navigation.destination } } : {}),
-        }].slice(-8);
+        }]).slice(-8);
         this.data.counterexamplesSinceReflect = (this.data.counterexamplesSinceReflect ?? 0) + 1;
       }
       k.updatedAt = Date.now();
@@ -782,7 +794,7 @@ export class SelfModel {
       // 回想可能添加了新的结论：旧做法的成败不能证明改写后的整句话。
       const unchanged = parts.every((k) => cleanLesson(k.text) === cleanLesson(m.text) && k.signature === keep.signature);
       // 反例和适用边界是历史事实：合并/改写只让结论重新验证，不删除这些证据。
-      const counterexamples = parts.flatMap((k) => k.counterexamples ?? []).sort((a, b) => a.at - b.at).slice(-8);
+      const counterexamples = dedupeCounterexamples(parts.flatMap((k) => k.counterexamples ?? []).sort((a, b) => a.at - b.at)).slice(-8);
       const limits = [...new Set(parts.flatMap((k) => k.limits ?? []))].slice(0, 12);
       // 措辞变了：新说法从零计，旧说法（含被并入的几条）累计的成败记到 prior 里。
       if (!unchanged) keep.prior = {
