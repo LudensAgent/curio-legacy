@@ -26,7 +26,7 @@ export type MakeWayStep = { kind: 'move' | 'pillar'; to: Cell; dig: Cell[]; plac
 /** 各动作的代价：能少挖少放就少挖少放，已知可走的格优先。 */
 const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4, unknown: 2 } as const;
 const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16;
-/** 开路步由 move_step 执行，它只处理同层/±1；更深的落差不在开路计划里，交回 Agent 选 descend_to 或允许 drop 的路线。 */
+/** 开路步由连续脚位身体控制执行，它只处理同层/±1；更深的落差不在开路计划里，交回 Agent 选 descend_to 或允许 drop 的路线。 */
 const MAX_DROP = 1;
 /** 每扫这么久让出一次主线程。 */
 const SLICE_MS = 5;
@@ -252,7 +252,7 @@ export const MAKE_WAY_DEFAULT_EDITS = 16, MAKE_WAY_MAX_EDITS = 64;
 /** 开路参数的说明片段，三个入口共用，与 parseMakeWay 一致。 */
 export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把；火/灵魂火也在这项授权内直接打掉）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-64（默认 16；本次调用最多挖开+放置这么多格。搭桥/长距离开路通常每格约一次改动，长距离目标要按距离留足额度，或分多次新建委托；续接只能收窄，不退还同一移动委托已经用掉的累计施工额度）';
 /** 开路参数的行为说明，三个入口共用。 */
-export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展，或路线只被火/灵魂火挡住）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、其余危险格、上方压着沙砾的格不挖；dig 授权时火/灵魂火可以打掉），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one/move_step 执行；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
+export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展，或路线只被火/灵魂火挡住）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、其余危险格、上方压着沙砾的格不挖；dig 授权时火/灵魂火可以打掉），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one 施工，迈步用连续脚位身体控制；每一步迈出前都用当前已加载方块确认落点支撑、扫掠与危险格，确认不了或看到阻挡就停下交回，不会先迈出去再报错；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
 
 /** 从委托参数解析开路授权；没有写 dig/place 返回 undefined。参数非法返回错误。 */
 export function parseMakeWay(a: Record<string, unknown>): { ok: true; value: MakeWayOptions | undefined } | { ok: false; error: string } {

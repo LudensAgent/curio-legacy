@@ -14,8 +14,9 @@ import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
 import { supportTop } from '../../perception/geometry.ts';
+import { liveEdgeStatus } from './live-edge.ts';
 import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
-import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
+import { mineCell, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, makeWayEditBudget as makeWayEditBudgetOf, releaseSessionLease,
@@ -118,8 +119,9 @@ const MAX_SAME_EVIDENCE_SEARCHES = 1;
 
 /**
  * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell，只用授权工具或当前手持），再补支撑（place_support）
- * 或原地垫高（pillar_one，只用授权方块），然后迈到下一格（move_step）。每个基础动作照常做自己的安全检查；
- * 任一步失败就停下，把原因交回。改动逐条记入 edits。
+ * 或原地垫高（pillar_one，只用授权方块），然后迈到下一格（连续脚位身体控制）。迈出前用当前已加载方块
+ * 再确认落点支撑、扫掠与危险格：计划里按“未知格大概有支撑”排出来的步骤不能直接当真，确认不了就停下交回。
+ * 每个基础动作照常做自己的安全检查；任一步失败就停下，把原因交回。改动逐条记入 edits。
  */
 export async function runMakeWay(
   ctx: SkillCtx,
@@ -135,6 +137,8 @@ export async function runMakeWay(
     supportTopAt: (cell: Vec3Like) => number | null;
     /** 每完成一步开路动作后按实测位置上报进度；施工期间进度条也要动。 */
     onProgress: () => void;
+    /** 原委托允许涉水（swim:true）：浅水脚格不算阻挡，与执行段 liveEdgeStatus 同一口径。 */
+    wade?: boolean;
   },
 ): Promise<MakeWayLegReceipt> {
   const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt, onProgress } = job;
@@ -217,6 +221,15 @@ export async function runMakeWay(
         // 落点按脚下已记录方块的真实顶面给脚高（灵魂沙、半砖等不是整格）。
         const top = supportTopAt({ x: step.to.x, y: step.to.y - 1, z: step.to.z });
         const footY = top !== null && top > 0 && top <= 1 ? step.to.y - 1 + top : step.to.y;
+        // 计划可以按“未观察格大概有支撑”排路线，但迈出前必须用当前已加载方块再确认这一步：
+        // 落点支撑、身体扫掠与危险格都由 liveEdgeStatus 按真实碰撞形状看。确认不了（未加载/形状未知）
+        // 或看到阻挡/缺支撑就停下交回，不先迈出去再等落地失败——1 格宽的桥/岩浆边没有第二次机会。
+        const live = liveEdgeStatus(ctx.adapter, now, { x: step.to.x + 0.5, y: footY, z: step.to.z + 0.5 },
+          footY - now.y > 0.05 ? 'step' : footY - now.y < -0.05 ? 'drop' : 'walk', { wade: job.wade === true });
+        if (live.status !== 'open') {
+          failure = `落点 (${step.to.x},${step.to.y},${step.to.z}) 的当前已加载方块不能确认这一步可以走（${live.status}${live.reason === undefined ? '' : `：${live.reason}`}）；没有迈出，交回重规划`;
+          break;
+        }
         const next = steps[stepIndex + 1];
         const currentFrom = stepIndex === 0 ? feetStart : steps[stepIndex - 1]!.to;
         const chain = step.dig.length === 0 && step.place === undefined
@@ -1340,6 +1353,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     const editsBefore = makeWayEdits.length;
     const leg = await runMakeWay(ctx, {
       steps, opts: makeWay, remainingEdits: makeWayEditBudget, edits: makeWayEdits, deadline, onProgress: reportProgress,
+      wade: request.swim === true,
       nameAt: (cell) => {
         const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
         return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';

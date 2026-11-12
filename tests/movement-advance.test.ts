@@ -711,6 +711,45 @@ test('代为开路每完成一步动作就按实测位置上报进度，不是�
   assert.deepEqual(reportedX, [1.5, 2.5, 3.5], '每一步迈完就上报当时的实测位置');
 });
 
+test('开路迈步前用当前已加载方块确认落点支撑：落点是空腔就不迈出', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  // 体素计划里 x=2 仍有地面；世界里这一格脚下已经是空腔。
+  adapter.removed.add('2,63,0');
+  const moves: MoveTarget[] = [];
+  const original = adapter.moveTo.bind(adapter);
+  adapter.moveTo = async (target, opts) => {
+    moves.push(target);
+    return original(target, opts);
+  };
+  const leg = await runMakeWay(ctx, {
+    steps: [1, 2, 3].map((x) => ({ kind: 'move' as const, to: { x, y: 64, z: 0 }, dig: [] })),
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits: [], deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: () => null, onProgress: () => {},
+  });
+  assert.equal(leg.executed, 1, JSON.stringify(leg));
+  assert.match(leg.failure ?? '', /落点 \(2,64,0\) 的当前已加载方块不能确认这一步可以走（blocked：落点脚下没有与计划脚高相符的可站立面）；没有迈出/);
+  assert.equal(moves.length, 1, '只迈了确认过的那一步');
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 }, '没有走进空腔');
+});
+
+test('开路迈步确认不了当前方块时停下，不把未加载格当成可走', async (t) => {
+  const { adapter, ctx } = setup(corridor(8));
+  t.after(() => ctx.memory.close());
+  const optics = adapter.blockOptics.bind(adapter);
+  adapter.blockOptics = (x, y, z) => (y === 64 && Math.floor(x) === 2 ? null : optics(x, y, z));
+  const leg = await runMakeWay(ctx, {
+    steps: [1, 2, 3].map((x) => ({ kind: 'move' as const, to: { x, y: 64, z: 0 }, dig: [] })),
+    opts: { maxEdits: 0 },
+    remainingEdits: 0, edits: [], deadline: Date.now() + 60_000,
+    nameAt: () => 'air', supportTopAt: () => null, onProgress: () => {},
+  });
+  assert.equal(leg.executed, 1, JSON.stringify(leg));
+  assert.match(leg.failure ?? '', /落点 \(2,64,0\) 的当前已加载方块不能确认这一步可以走（unknown：/);
+  assert.deepEqual(adapter.pos, { x: 1.5, y: 64, z: 0.5 });
+});
+
 test('代为开路的连续直行 move 使用连续交接，不是每格 move_step 起停', async (t) => {
   const { adapter, ctx } = setup(corridor(8));
   t.after(() => ctx.memory.close());
@@ -720,7 +759,7 @@ test('代为开路的连续直行 move 使用连续交接，不是每格 move_st
     calls.push(opts);
     await original(target, opts);
     // 模拟真实 physicsTick 交接：直行段在到点时保留前进键。
-    opts.onCheckpoint?.({ x: target.x, y: target.y, z: target.z });
+    if (target.kind === 'feet') opts.onCheckpoint?.({ x: target.x, y: target.y, z: target.z });
   };
   const leg = await runMakeWay(ctx, {
     steps: [1, 2, 3].map((x) => ({ kind: 'move' as const, to: { x, y: 64, z: 0 }, dig: [] })),
