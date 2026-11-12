@@ -1,7 +1,7 @@
 import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
-import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, isDangerPolicyRejection, isFirePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { isSuspendAbort, shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressMeterOf, progressOf, summaryOf, waypointOf } from './intent.ts';
@@ -1048,12 +1048,15 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         const policyLead = segment.search.policy?.firstRejection === undefined ? ''
           : `被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}；`;
         const policyDetail = policyLead === '' ? '' : `；${policyLead.slice(0, -1)}`;
+        const dangerNote = segment.search.policy?.firstRejection !== undefined
+          && isDangerPolicyRejection(segment.search.policy.firstRejection.reason)
+          ? '本次委托没有授权踩过危险格（火/岩浆等）；' : '';
         stop = modeGap
           ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式${policyDetail}`, { modeGap: { problem: segment.problemKind } })
           : segment.failure === 'DELEGATION_RESTRICTION'
             // 具体哪条策略拒绝了哪条边，比库的泛化 UNSUPPORTED 说明更能让心智决定
             // 换方向、授权施工还是接受风险；放在最前面，避免被长摘要截掉。
-            ? stopOf('DELEGATION_RESTRICTION', `${policyLead}${segment.detail ?? '授权/策略拒绝可走边'}`)
+            ? stopOf('DELEGATION_RESTRICTION', `${policyLead}${dangerNote}${segment.detail ?? '授权/策略拒绝可走边'}`)
             : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${policyDetail}`);
         break;
       }
@@ -1255,7 +1258,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       && stop?.reason === 'DELEGATION_RESTRICTION'
       && lastSegment?.search.policy?.firstRejection !== undefined
       && isConstructionFixablePolicyRejection(lastSegment.search.policy.firstRejection.reason);
-    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable)) break;
+    // 火/灵魂火不是不可绕过的世界结论：授权 dig 时先打掉再走，不把它当成整趟委托的终点。
+    const fireFixable = makeWay?.dig !== undefined
+      && stop?.reason === 'DELEGATION_RESTRICTION'
+      && lastSegment?.search.policy?.firstRejection !== undefined
+      && isFirePolicyRejection(lastSegment.search.policy.firstRejection.reason);
+    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable || fireFixable)) break;
     // 同一委托的施工额度已在前面用掉：普通路线仍可走；若又停在只有施工能解决的原因上，
     // 如实报告额度耗尽，不重新开一份预算。
     if (makeWayEdits.length >= makeWayEditBudget) {

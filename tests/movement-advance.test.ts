@@ -247,6 +247,31 @@ test('A4 两格高墙：停在墙前报 BLOCKED，不挖、不改目标', async 
   assert.equal(typeof (r.data?.continuation as { canContinue: boolean }).canContinue, 'boolean', '回执说明能否续接');
 });
 
+test('A4a2 dig 授权会打掉挡路的火，继续走到目标', async (t) => {
+  const body = (x: number, y: number) => (x === 6 || x === 7) && (y === 64 || y === 65);
+  const map = corridor(14, -1, [-1, 1], (x, y) => body(x, y));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const fire = [6, 7].flatMap((x) => [-1, 0, 1].flatMap((z) => [64, 65].map((y) => ({ x, y, z }))));
+  fill(map, 'minecraft:fire', fire);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  adapter.blocks.push(...fire.map((pos) => ({ name: 'fire', pos })));
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  const realDig = adapter.dig.bind(adapter);
+  adapter.dig = async (pos, signal) => {
+    const r = await realDig(pos, signal);
+    if (r.ok) fill(map, 'minecraft:air', [pos]);
+    return r;
+  };
+  const validated = travelTo.validate({ to: { x: 12, y: 64, z: 0 }, range: 1, dig: true, maxEdits: 16 }, adapter);
+  assert.ok(validated.ok, validated.ok ? '' : validated.error);
+  const result = await travelTo.run(ctx, validated.args);
+
+  assert.equal(result.status, 'succeeded', result.summary);
+  assert.ok(adapter.pos.x >= 11, `穿过火墙到目标：x=${adapter.pos.x}`);
+  assert.ok(adapter.actions.filter((a) => a === 'dig:fire').length >= 4, `实际打掉挡路的火：${adapter.actions.join(',')}`);
+});
+
 test('A4b 单格宽阻挡：在 maxLateralDrift 内选择已验证的横向绕行', async (t) => {
   // 只堵住 z=0 的直行车道，z=±1 仍可走；air/ground 在同一格不能先记空气再记石头。
   const wall = (x: number, _y: number, z: number) => x >= 6 && x <= 8 && z === 0;

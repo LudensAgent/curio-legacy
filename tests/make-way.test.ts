@@ -38,6 +38,18 @@ test('正前方是已知的墙：允许挖时规划挖开脚、头两格穿过�
   assert.equal(await planMakeWay(w.map, D, { x: 0, y: 64, z: 0 }, { x: 8.5, y: 64, z: 0.5 }, { maxEdits: 16 }, any), null);
 });
 
+test('授权 dig 时火/灵魂火可以打掉再走；没授权时火仍然是拒绝格', async () => {
+  const w = corridor(8);
+  for (const y of [64, 65]) { w.put(4, y, 0, 'fire'); w.put(5, y, 0, 'soul_fire'); }
+  const start = { x: 0, y: 64, z: 0 }, target = { x: 8.5, y: 64, z: 0.5 };
+  const dig = await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any);
+  assert.ok(dig !== null);
+  const dug = dig.flatMap((step) => step.dig).map((c) => `${c.x},${c.y},${c.z}`).sort();
+  assert.deepEqual(dug, ['4,64,0', '4,65,0', '5,64,0', '5,65,0'], JSON.stringify(dig));
+  assert.equal(dig.at(-1)!.to.x >= 7, true);
+  assert.equal(await planMakeWay(w.map, D, start, target, { maxEdits: 16 }, any), null, '没授权 dig 时不规划穿火');
+});
+
 test('父任务取消或期限已到时，开路规划不再继续搜索', async () => {
   const w = corridor(8);
   for (const y of [64, 65]) w.put(4, y, 0, 'stone');

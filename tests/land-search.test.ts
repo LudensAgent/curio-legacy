@@ -4,6 +4,7 @@ import { VoxelMap } from 'curio-minecraft-3d-memory';
 import { walkLandRules } from '../src/adapter/land-rules.ts';
 import { feetGoal, goalOf } from '../src/skills/movement/goal.ts';
 import { searchLandRoute, searchLandRouteAsync, summarizeBoundaries, verifyLandRoute, verifyLandRouteBounded, type LandSearchRequest } from '../src/spatial/land-search.ts';
+import { isDangerPolicyRejection, isFirePolicyRejection } from '../src/spatial/land-edge-policy.ts';
 
 const WORLD = 'world', DIM = 'overworld', SESSION = 's1';
 let sequence = 0;
@@ -467,4 +468,15 @@ test('危险策略检查身体扫过的全部格子：斜向不擦过拐角的�
   ], 2000);
   assert.equal(verification.transitions[0]!.status, 'BLOCKED');
   assert.match(verification.transitions[0]!.reason ?? '', /fire/);
+});
+
+test('策略拒绝分类：火/灵魂火可被 dig 授权覆盖，其余危险格与涉水拒绝不算', () => {
+  assert.equal(isDangerPolicyRejection('host policy rejects recorded dangerous block fire at the destination feet cell'), true);
+  assert.equal(isDangerPolicyRejection('host policy rejects geometric lava_contact hazard; only fall is allowed'), true);
+  assert.equal(isDangerPolicyRejection('host policy rejects recorded water water at the destination feet cell; wading was not delegated'), false);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block fire at the destination feet cell'), true);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block soul_fire at (1,2,3) in the swept body'), true);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block lava at the destination feet cell'), false);
+  assert.equal(isFirePolicyRejection('host policy rejects geometric lava_contact hazard; only fall is allowed'), false);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded water water at the destination head cell (submersion)'), false);
 });

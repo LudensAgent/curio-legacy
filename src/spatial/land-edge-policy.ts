@@ -158,6 +158,18 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
   },
 });
 
+/** 策略拒绝是否来自火/岩浆等会伤人的格，而不是涉水未授权或支撑/跳跃能力限制。 */
+export function isDangerPolicyRejection(reason: string): boolean {
+  return reason.includes('recorded dangerous block')
+    || reason.includes('gap jump whose miss would land in recorded')
+    || reason.includes('lava_contact');
+}
+
+/** 策略拒绝是否由火/灵魂火引起：授权 dig 时它们可以被打掉，其余危险格不行。 */
+export function isFirePolicyRejection(reason: string): boolean {
+  return /(recorded dangerous block|gap jump whose miss would land in recorded) (fire|soul_fire)\b/.test(reason);
+}
+
 /**
  * 这个拒绝原因是否能由显式授权的 place 修复（补脚下支撑 / 搭桥跨过缺口），
  * 而不是液体、涉水未授权或危险格这类不能靠“垫一块”改变的安全/模式限制。

@@ -34,15 +34,18 @@ const SLICE_MS = 5;
 const UNDIGGABLE = /^(bedrock|barrier|end_portal_frame|end_portal|nether_portal|end_gateway|command_block|chain_command_block|repeating_command_block|structure_block|jigsaw|obsidian|crying_obsidian|reinforced_deepslate|respawn_anchor|ancient_debris|spawner)$/;
 /** 头顶压着会落下来的方块：挖开下面的格会让它掉下来砸进身体所在格。 */
 const FALLING = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|anvil|chipped_anvil|damaged_anvil|pointed_dripstone|scaffolding)$|_concrete_powder$/;
+/** 授权 dig 时可以直接打掉的火：没有碰撞，打掉后身体格就是空气；岩浆等其余危险格仍不可挖。 */
+const DIGGABLE_FIRE = /^(fire|soul_fire)$/;
 
 const keyOf = (c: Cell) => `${c.x},${c.y},${c.z}`;
 const stem = (name: string) => name.replace(/^minecraft:/, '');
 
-type Kind = 'unknown' | 'clear' | 'standable' | 'solid' | 'liquid' | 'danger';
+type Kind = 'unknown' | 'clear' | 'standable' | 'solid' | 'liquid' | 'danger' | 'fire';
 
 /**
  * 在已记录体素上找一条允许挖开/补支撑/垫高的路线，走向 target。未观察、待重新确认的格一律不当可走/可挖；
- * 危险格、液体、紧挨已记录液体的格不挖，上方压着沙砾的格不挖；授权了 dig 时墙后未知的格按可挖岩石规划（另加代价）。到不了时返回离目标最近（至少近 3 格）的部分路线。
+ * 危险格、液体、紧挨已记录液体的格不挖，上方压着沙砾的格不挖；授权了 dig 时火/灵魂火可以打掉，
+ * 墙后未知的格按可挖岩石规划（另加代价）。到不了时返回离目标最近（至少近 3 格）的部分路线。
  * 只读体素，不动身体；返回 null 表示没有可用路线。
  */
 export async function planMakeWay(
@@ -62,7 +65,8 @@ export async function planMakeWay(
         const name = stem(raw);
         hit = {
           name,
-          kind: isDangerousBlock(name) ? 'danger'
+          kind: isDangerousBlock(name)
+            ? (opts.dig !== undefined && DIGGABLE_FIRE.test(name) ? 'fire' : 'danger')
             : name === 'lava' || isWaterBlock(name) ? 'liquid'
               : supportTop(name, properties) !== null ? 'standable'
                 : hasAnyCollision(name, properties) ? 'solid' : 'clear',
@@ -78,6 +82,8 @@ export async function planMakeWay(
   const clearing = (c: Cell): Cell[] | null => {
     const here = look(c.x, c.y, c.z);
     if (here.kind === 'clear') return [];
+    // 火没有碰撞，也不会作为支撑：授权 dig 时先打掉再占这一格。
+    if (here.kind === 'fire') return [c];
     if (here.kind === 'unknown' && opts.dig === undefined) return null;
     if (here.kind !== 'standable' && here.kind !== 'solid' && here.kind !== 'unknown') return null;
     if (opts.dig === undefined || UNDIGGABLE.test(here.name)) return null;
@@ -212,6 +218,11 @@ export async function planMakeWay(
       if (Math.abs(to.x - start.x) > MAX_RADIUS || Math.abs(to.z - start.z) > MAX_RADIUS || Math.abs(to.y - start.y) > MAX_RISE) continue;
       if (!allowed(to)) continue;
       if (look(to.x, to.y, to.z).kind === 'danger' || look(to.x, to.y + 1, to.z).kind === 'danger') continue;
+      // 落点身体两格里若有本步没打掉的火，执行时仍会被 move_step 拒绝：这种候选不成立。
+      const dug = (cell: Cell) => step.dig.some((d) => d.x === cell.x && d.y === cell.y && d.z === cell.z);
+      const unDugFire = [to, { x: to.x, y: to.y + 1, z: to.z }]
+        .some((cell) => look(cell.x, cell.y, cell.z).kind === 'fire' && !dug(cell));
+      if (unDugFire) continue;
       // 与 move_step 的危险检查同口径：落点身体两格的水平邻格或头顶是已记录的岩浆（可能流入）时，它默认不迈；
       // 规划时就避开，不规划一条执行时注定被拒的路线。
       const flowIn = [to.y, to.y + 1].some((y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => look(to.x + dx!, y, to.z + dz!).name === 'lava'))
@@ -239,9 +250,9 @@ export async function planMakeWay(
 /** 默认与上限：一次调用最多为开路改动这么多格（挖开 + 放置合计）。 */
 export const MAKE_WAY_DEFAULT_EDITS = 16, MAKE_WAY_MAX_EDITS = 64;
 /** 开路参数的说明片段，三个入口共用，与 parseMakeWay 一致。 */
-export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-64（默认 16，挖开+放置合计）';
+export const MAKE_WAY_ARGS_DOC = '"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 用当前手持，写工具名只用那一把；火/灵魂火也在这项授权内直接打掉）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-64（默认 16，挖开+放置合计）';
 /** 开路参数的行为说明，三个入口共用。 */
-export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、危险格、上方压着沙砾的格不挖），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one/move_step 执行；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
+export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展，或路线只被火/灵魂火挡住）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、其余危险格、上方压着沙砾的格不挖；dig 授权时火/灵魂火可以打掉），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one/move_step 执行；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
 
 /** 从委托参数解析开路授权；没有写 dig/place 返回 undefined。参数非法返回错误。 */
 export function parseMakeWay(a: Record<string, unknown>): { ok: true; value: MakeWayOptions | undefined } | { ok: false; error: string } {
