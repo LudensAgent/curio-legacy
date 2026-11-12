@@ -307,7 +307,7 @@ function makeWayBudgetDetail(session: MovementSession, originalStop: StopReceipt
     : `最后${last.kind === 'dig' ? '挖开' : '放置'} ${last.name}${cellText(last.pos)}`;
   const allowed = session.authorization.makeWay?.maxEdits ?? 0;
   // 先给本次真正触发停止的事实；旧的碰撞证据放后面，不抢走额度与进度。
-  return `${progressed}；施工 ${session.counters.makeWayEdits}/${allowed}，${lastText}；${originalStop.detail}；下一步需要更多施工授权（新的明确委托）`;
+  return `${progressed}；施工 ${session.counters.makeWayEdits}/${allowed}，${lastText}；${originalStop.detail}；施工额度已用尽，同一 sessionId 不能增加额度；需要更多挖/放请新建移动委托并写更大的 maxEdits（每次最多 64）`;
 }
 
 function stateFacts(session: MovementSession) {
@@ -333,7 +333,10 @@ function continuationOf(session: MovementSession) {
   const reason = session.stop?.reason;
   const budgetExhausted = session.counters.confirmedTransitions >= session.budget.maxTransitions
     || session.counters.idleSearches >= session.budget.maxSearches;
-  const canContinue = reason !== undefined && canResume(reason) && !budgetExhausted && Date.now() <= session.expiresAt;
+  // 施工额度用尽时，同一 session 的授权已经封顶，续接只会再次停在同一处；
+  // 需要更多挖/放必须新建移动委托（可带更大的 maxEdits），不能把 sessionId 当作扩容入口。
+  const canContinue = reason !== undefined && canResume(reason) && reason !== 'MAKE_WAY_BUDGET_EXHAUSTED'
+    && !budgetExhausted && Date.now() <= session.expiresAt;
   return {
     canContinue,
     ...(canContinue ? { sessionId: session.id } : {}),
@@ -344,11 +347,12 @@ function continuationOf(session: MovementSession) {
             : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
             : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
               : reason === 'SUSPENDED' ? ['身体被其他活动暂借；原目标、实测进展与累计预算保留，回来时用同一 sessionId 续接']
-                : reason === 'MAKE_WAY_BUDGET_EXHAUSTED' ? ['普通路线仍可继续；施工改动额度已用尽，需要更多挖/放时新建明确的移动委托并重新授权']
-                  : ['用同一 sessionId 续接；累计预算不会重置']
-      : budgetExhausted && reason !== undefined && canResume(reason)
-        ? ['累计 transition 或搜索预算已用尽；同一 session 不能增加预算，若仍要推进需明确新建移动委托']
-        : [],
+                : ['用同一 sessionId 续接；累计预算不会重置']
+      : reason === 'MAKE_WAY_BUDGET_EXHAUSTED'
+        ? ['施工改动额度已用尽；同一 sessionId 不能增加 maxEdits，需要更多挖/放时新建移动委托并写更大的 maxEdits（每次最多 64）']
+        : budgetExhausted && reason !== undefined && canResume(reason)
+          ? ['累计 transition 或搜索预算已用尽；同一 session 不能增加预算，若仍要推进需明确新建移动委托']
+          : [],
     expiresAt: session.expiresAt,
   };
 }
