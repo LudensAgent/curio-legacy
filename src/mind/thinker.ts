@@ -569,7 +569,25 @@ export class Thinker {
    */
   async reflect(self: SelfModel, persona: string, signal: AbortSignal, strategy: string[] = []): Promise<Consolidation | null> {
     if (!this.planner.autonomous) return null;
-    const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? [], strategy, this.memory);
+    // 反思只带与当前目标/最近经历相关的知识摘录（最多 3 条），不把整个知识库塞进提示词。
+    const knowledgeQuery = [
+      ...self.agenda().map((entry) => entry.text).slice(0, 3),
+      ...self.history(6).map((entry) => entry.what),
+    ].filter(Boolean).join(' ').slice(0, 300);
+    const base = this.knowledge;
+    const found = base && knowledgeQuery ? base.query({ query: knowledgeQuery, limit: 3 }) : null;
+    // 操作手册讲接口，不是世界机制；反思要的是游戏事实，只留机制/教程类摘录。
+    const matches = found && 'matches' in found ? found.matches.filter((match) => match.kind !== 'control') : [];
+    const knowledge = matches.length ? {
+      query: knowledgeQuery,
+      matches: matches.map((match) => ({
+        id: match.id, title: match.title,
+        ...(match.section === undefined ? {} : { section: match.section }),
+        ...(match.sectionTitle === undefined ? {} : { sectionTitle: match.sectionTitle }),
+        excerpt: match.excerpt,
+      })),
+    } : null;
+    const messages = buildReflectionMessages(self, persona, this.book?.list().filter((k) => k.source === 'self').map((k) => `${k.name}：${k.description}`) ?? [], strategy, this.memory, knowledge);
     for (let attempt = 0; attempt < 2; attempt++) {
       const c = await this.planner.complete(messages, { label: 'mind:回想', tier: 'full', signal, attempt });
       try {

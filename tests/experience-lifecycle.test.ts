@@ -5,6 +5,9 @@ import { KNOW_HOW_LESSON_KEY_PREFIX, WorldMemory } from '../src/memory/store.ts'
 import { buildMindMessages, buildReflectionMessages } from '../src/mind/prompt.ts';
 import { RECALL_LABEL, recallLocal } from '../src/mind/recall.ts';
 import { SelfModel } from '../src/mind/self.ts';
+import { Thinker } from '../src/mind/thinker.ts';
+import type { KnowledgeBase } from '../src/knowledge/library.ts';
+import type { Planner } from '../src/planner/planner.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import type { ActivityRecord } from '../src/mind/types.ts';
@@ -302,4 +305,40 @@ test('改写或合并换了措辞：新说法从零计，旧说法的成败累�
   assert.equal(rule.prior?.revisions, 2);
   const [, user] = buildReflectionMessages(self, 'P');
   assert.match(user.content, /"before_rewrite":\{"wins":1,"losses":15,"revisions":2/);
+});
+
+test('反思只带按当前目标/经历检索到的知识摘录，不塞整库目录', async () => {
+  const memory = new WorldMemory(null), self = new SelfModel(null);
+  self.addAgenda('在下界找要塞', 'goal', 'today');
+  self.record(record({ id: 'r1', outcome: 'stuck', summary: '走了很久没看到要塞', what: '朝一个方向找下界要塞' }));
+  const calls: unknown[] = [];
+  const knowledge = {
+    query(args: unknown) {
+      calls.push(args);
+      return { action: 'search', query: (args as { query: string }).query,
+        matches: [{ id: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', excerpt: '要塞按 432×432 区域生成' }] };
+    },
+  } as unknown as KnowledgeBase;
+  let sent: { role: string; content: string }[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: { role: string; content: string }[]) {
+    sent = messages;
+    return { text: '{}', latencyMs: 1 };
+  } } as unknown as Planner;
+  const thinker = new Thinker(planner, new FakeAdapter(), memory, new EventBus(), null, knowledge);
+  await thinker.reflect(self, 'P', new AbortController().signal);
+  const query = '在下界找要塞 朝一个方向找下界要塞';
+  assert.deepEqual(calls, [{ query, limit: 3 }], '检索词来自议程与最近经历，并限制返回条数');
+  assert.match(sent[0].content, /按当前目标\/经历检索出的相关文档\/章节摘录，不是全库目录/, '反思规则注明知识是按相关性摘取的');
+  const payload = JSON.parse(sent[1].content.split('\n')[0]);
+  assert.equal(payload.knowledge.query, query);
+  assert.deepEqual(payload.knowledge.matches, [{ id: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', excerpt: '要塞按 432×432 区域生成' }]);
+  assert.ok(!('documents' in payload.knowledge) && !('catalog' in payload.knowledge), '只带检索结果，不带整库目录');
+  memory.close();
+});
+
+test('没有检索到相关事实时反思输入不出现知识字段', () => {
+  const memory = new WorldMemory(null), self = new SelfModel(null);
+  const payload = JSON.parse(buildReflectionMessages(self, 'P', [], [], memory, { query: '找要塞', matches: [] })[1].content.split('\n')[0]);
+  assert.equal('knowledge' in payload, false);
+  memory.close();
 });
