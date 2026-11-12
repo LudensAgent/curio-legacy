@@ -219,3 +219,28 @@ test('显式 until 的搜索意图不依赖标题；混合活动采到别的资�
   assert.equal(k2.wins, 0, '采到副产物不能给寻找策略记胜');
   assert.equal(k2.counterexamples?.length, 1);
 });
+
+test('反向混合：看见寻找目标但没取得采集目标，不算寻找失败', () => {
+  const self = new SelfModel(null);
+  const k = self.learn('沿北向找到下界砖', { source: 'reflection', kind: 'explore' })!;
+  const a = createActivity({
+    what: '找到下界砖后采点铁', why: '', kind: 'explore', repeat: 1,
+    steps: [
+      { skill: 'explore_toward', args: { direction: 'N', distance: 96, until: 'nether_bricks' } },
+      { skill: 'gather', args: { block: 'iron_ore', count: 3 } },
+    ],
+  }, '', 'llm', exploreState());
+  a.results.push({ skill: 'explore_toward', args: {}, status: 'succeeded', summary: '看见下界砖', at: Date.now(), durationMs: 100,
+    pos: { x: 0.5, y: 64, z: -50.5 }, data: { travelled: 50, found: 'nether_bricks' } });
+  a.results.push({ skill: 'gather', args: {}, status: 'failed', failureCode: 'NOT_FOUND', summary: '没找到铁矿', at: Date.now(), durationMs: 20,
+    pos: { x: 0.5, y: 64, z: -50.5 } });
+  const record = recordOf(a, 'done', '看见下界砖，但没采到铁', exploreState());
+  assert.equal(record.resource?.mode, 'mixed');
+  assert.equal(record.resource?.located, true);
+  assert.deepEqual(record.resource?.unmetSearch, undefined, '寻找目标已完成');
+  assert.deepEqual(record.resource?.unmetAcquire, ['iron_ore']);
+  assert.equal(record.resource?.goalIncomplete, true);
+  self.record({ ...record, applying: k.id, applyingText: k.text });
+  assert.equal(k.wins, 1, '寻找目标已找到，不能因取得缺口判寻找失败');
+  assert.equal(k.counterexamples?.length ?? 0, 0, '不应写 TARGET_NOT_FOUND');
+});

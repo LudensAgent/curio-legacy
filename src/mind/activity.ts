@@ -1139,12 +1139,11 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
   // 寻找目标和取得目标分开验收：同一活动里采到别的资源，不能冒充找到寻找目标。
   const searchMatched = targetPlan.search.filter((target) => observedNames.some((name) => hitsResourceTarget(name, [target])));
   const acquireMatched = targetPlan.acquire.filter((target) => gainedTargetNames.some((name) => hitsResourceTarget(name, [target])));
+  const unmetSearch = targetPlan.search.filter((target) => !searchMatched.includes(target));
+  const unmetAcquire = targetPlan.acquire.filter((target) => !acquireMatched.includes(target));
   const searchIncomplete = targetPlan.search.length > 0 && searchMatched.length === 0;
   const acquireIncomplete = targetPlan.acquire.length > 0 && acquireMatched.length === 0;
-  const unmet = [
-    ...targetPlan.search.filter((target) => !searchMatched.includes(target)),
-    ...targetPlan.acquire.filter((target) => !acquireMatched.includes(target)),
-  ];
+  const unmet = [...unmetSearch, ...unmetAcquire];
   const findOnly = targetPlan.search.length > 0 && targetPlan.acquire.length === 0;
   const mode: 'find' | 'gather' | 'mixed' = findOnly ? 'find' : targetPlan.search.length > 0 ? 'mixed' : 'gather';
   // 定位只由寻找目标验收；没有寻找目标时，才用“看见/采集到什么”作一般定位事实。
@@ -1174,7 +1173,8 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
     ...(intent ? { resource: {
-      intent, mode, ...(targets.length ? { targets } : {}), ...(unmet.length ? { unmet } : {}), located, acquired,
+      intent, mode, ...(targets.length ? { targets } : {}), ...(unmet.length ? { unmet } : {}),
+      ...(unmetSearch.length ? { unmetSearch } : {}), ...(unmetAcquire.length ? { unmetAcquire } : {}), located, acquired,
       // 寻找目标和取得目标分别验收；任一类仍有未完成项才算资源目标未完成。
       // “取得未知”照实写未知，有界尝试另由 completion=attempt 说明，没有资源意图就不生成 resource。
       goalIncomplete: intent && (searchIncomplete || acquireIncomplete),

@@ -199,8 +199,12 @@ export interface ActivityRecord {
     /** find=只要找到/看见；gather=要拿到物品；mixed=两者都有。 */
     mode?: 'find' | 'gather' | 'mixed';
     targets?: string[];
-    /** 本次明确点名但没能验收的目标。 */
+    /** 本次明确点名但没能验收的目标（两类合并，供展示）。 */
     unmet?: string[];
+    /** 没能找到/看见的寻找目标；不能与没拿到的取得目标混为一谈。 */
+    unmetSearch?: string[];
+    /** 没能拿到的取得目标。 */
+    unmetAcquire?: string[];
     located: boolean;
     /** null 表示活动没有点名目标、现场也没有足够证据判断是否取得。 */
     acquired: boolean | null; goalIncomplete: boolean;
