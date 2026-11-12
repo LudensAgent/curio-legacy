@@ -150,9 +150,23 @@ test('文字记录带着按内容检索到的相关资料进入整理，不传�
   assert.equal(note.knowledge?.[0]?.id, 'blazes-and-fortresses');
   assert.equal(note.knowledge?.[0]?.section, 'generation');
   assert.match(note.knowledge![0]!.excerpt, /432×432/);
+  assert.ok(note.knowledge!.length <= 2 && note.knowledge!.every((match) => match.section), '只带可引用章节且每条记录最多 2 条');
   assert.ok(!('catalog' in note) && !('documents' in note), '不塞整库目录');
   assert.match(messages[0].content, /外部参考，不是现场事实/);
-  assert.match(messages[0].content, /与资料矛盾、记录措辞像只来自一次经历、或没有适用条件的文字策略/);
+  assert.match(messages[0].content, /资料与记录可能一致、矛盾，或只在某些条件下适用/);
   assert.match(messages[0].content, /单条记录要改写也可以 merge，from 只写它自己/);
   assert.deepEqual(input.knowledge_reference, { edition: 'java', version: '1.20.1', evidence: 'reference_not_current_state' });
+});
+
+test('长正文不稀释文字记录的检索；没有命中时不带 knowledge', (t) => {
+  const w = setup(t);
+  assert.ok(w.book.write('nether-fortress-long', '在下界找要塞', '很长的探索记录。'.repeat(200)).ok);
+  assert.ok(w.book.write('zzz-note', 'zzzz qqqq', '与任何资料都不相关的记录，只是随便写写的文字。').ok);
+  const curator = new SkillCurator(plannerOf([{ ok: true }]), w.engine, w.book, w.bus, {}, undefined, null, new KnowledgeBase('1.20.1'));
+  t.after(() => curator.stop());
+  const input = JSON.parse(curator.messages()[1].content) as { notes: { name: string; knowledge?: { id: string; section?: string }[] }[] };
+  const long = input.notes.find((entry) => entry.name === 'nether-fortress-long')!;
+  assert.equal(long.knowledge?.[0]?.id, 'blazes-and-fortresses', '正文长度不稀释主题检索');
+  assert.ok(long.knowledge!.every((match) => match.section));
+  assert.ok(!('knowledge' in input.notes.find((entry) => entry.name === 'zzz-note')!), '没有相关章节时不带 knowledge');
 });

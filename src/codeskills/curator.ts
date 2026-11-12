@@ -27,6 +27,9 @@ export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60
 const DAY_TICKS = 24_000;
 /** fired 在触发瞬间就加，执行结果要等结束（或取消）才记；刚触发的技能不能当成“触发过却什么都没做”。 */
 const FIRED_GRACE_MS = 10 * 60_000;
+/** 一轮整理最多给文字记录带几条资料摘录，避免提示词随记录数膨胀。 */
+const NOTE_KNOWLEDGE_TOTAL = 6;
+
 type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
 
@@ -453,26 +456,29 @@ export class SkillCurator {
         ...(st?.loops?.length ? { see_sawed_with: st.loops.map((l) => `${l.with.startsWith('doing:') ? `手上的「${l.with.slice(6)}」` : `「${l.with}」`}（${l.times} 回）`) } : {}), ...(b.code ? { code: b.code, code_validation: { full_source: true, error: compileCheck(b.code) } } : { steps: b.steps }) };
     });
     this.noteSeen = new Map();
+    const seenKnowledge = new Set<string>();
     const notes = this.notes().map((entry) => {
       this.noteSeen.set(entry.name, noteFingerprint(entry));
-      // 按记录内容检索相关资料，只带能引用章节的摘录；不传整库目录，也不把资料当成已验证。
-      // 名字和说明是主题，正文只取开头，避免长正文把检索词稀释掉。
-      const query = `${entry.name.replace(/-/g, ' ')} ${entry.description} ${entry.body.slice(0, 80)}`.slice(0, 160);
-      const found = this.knowledge && query ? this.knowledge.query({ query, limit: 2 }) : null;
-      const matches = found?.action === 'search'
-        ? found.matches.filter((match) => match.kind !== 'control' && match.section !== undefined)
+      // 按记录主题（名字+说明）检索；正文只用于人工阅读，混进检索词会稀释中文关键词。
+      // 只带能引用章节的摘录；请求 3 条再过滤，避免操作手册/无章节命中占掉名额。
+      const query = `${entry.name.replace(/-/g, ' ')} ${entry.description}`.slice(0, 120);
+      const found = this.knowledge ? this.knowledge.query({ query, limit: 3 }) : null;
+      const picked = found?.action === 'search'
+        ? found.matches.filter((match) => match.kind !== 'control' && match.section !== undefined && !seenKnowledge.has(`${match.id}#${match.section}`))
+          .slice(0, Math.min(2, NOTE_KNOWLEDGE_TOTAL - seenKnowledge.size))
         : [];
+      for (const match of picked) seenKnowledge.add(`${match.id}#${match.section}`);
       return { name: entry.name, target: 'note', description: entry.description, body: entry.body, notes: entry.notes,
         retired: this.engine.statsOf(entry.name)?.retired ?? null, disabled: this.engine.inactive(entry.name),
         ...(found?.action === 'error' ? { knowledge_error: found.message } : {}),
-        ...(matches.length ? { knowledge: matches.map(({ id, title, section, sectionTitle, excerpt }) => ({ id, title, section, sectionTitle, excerpt })) } : {}) };
+        ...(picked.length ? { knowledge: picked.map(({ id, title, section, sectionTitle, excerpt }) => ({ id, title, section, sectionTitle, excerpt })) } : {}) };
     });
     const system = `你在整理 Minecraft 机器人 Muses 自己写的技能及文字记录。像人整理笔记一样：
 - skills 分开列正式版本（target:skill）和候选（target:candidate）；同名两者的证据不能混用。retire 必须带 target；执行版本再带 version。收起候选不会收起同名稳定版；收起正式版时，未收起的同名候选仍可显式试用。
 - skills 提供完整执行契约，code 未截断。code_validation 是对完整源码的编译检查，error:null 表示通过，不能凭展示片段或猜测代码截断认定语法损坏；通过编译不证明玩法正确，仍需实际验收证据。
 - 已停用但未收起的技能也要评估；候选没有验收通过不等于已经会用。候选可保留试用、同名修订或依据证据收起，不强制心智做任何试验。
 - notes 是纯文字记录，不参与执行成败和闲置淘汰。可按内容重复或已被事实推翻来 retire（target:note），不能因为没有执行次数就收起。确有用途时可用 restore 恢复文字记录；读取不代表做法验证成功。
-${this.knowledge ? `- notes 里的 knowledge 是按该记录内容检索到的相关资料摘录（文档#章节，外部参考，不是现场事实；knowledge_reference 给出资料版本；knowledge_error 表示检索失败，不代表没有资料）。与资料矛盾、记录措辞像只来自一次经历、或没有适用条件的文字策略，应当降级成更窄或注明条件的写法、改写或 retire（target:note）；单条记录要改写也可以 merge，from 只写它自己、skill 写修订后的完整内容。不要因为查到资料就把它当成已验证，也不要要求每条记录都引用资料。` : ''}
+${this.knowledge ? `- notes 里的 knowledge 是按该记录主题检索到的相关资料摘录（文档#章节，外部参考，不是现场事实；knowledge_reference 给出资料版本；knowledge_error 表示检索失败，不代表没有资料）。资料与记录可能一致、矛盾，或只在某些条件下适用；是否据此把记录降级成更窄/注明条件的写法、改写或 retire（target:note），由你按证据判断。单条记录要改写也可以 merge，from 只写它自己、skill 写修订后的完整内容。不要因为查到资料就把它当成已验证，也不要要求每条记录都引用资料。` : ''}
 - 合并纯文字记录也用 merge：from 只能写 notes 中的名字，skill 只写 name、description、body；先保留原记录，是否收起来源再明确决定。写入已收起的文字目标不会自动恢复，需要时另写 restore。已有行为技能的补充笔记保留在 notes 中，修订必须保留其仍适用的约束。文字来源按替代收起（subsumed_by）时，只有 merge 确实成功写进目标后才算替代成立；合并失败过的来源，下一轮也不能凭 subsumed_by 收起。来源或目标在合并后又改了内容，旧合并关系也不再授权收起，需重新合并或改用不带 subsumed_by 的独立 retire。
 - 说的是同一件事、触发条件大面积重叠的：合并成一份更好的（merge：from 写被合并的名字，skill 写合并后的完整技能，必须沿用其中一个 from 名字，不要起 merged/unified/consolidated 这类新名）。合并时保留各自真正管用的部分（看 uses 的成败）。
 - 行为 merge 先保存候选，原技能保留；候选实际验收通过后再根据新证据决定是否 retire 来源技能。uses 是表中指定版本的证据，lifetime 是历史总计，不混用。aftermath 是这份技能当前版本最近几次事后观测（died 是否死亡、lost 从触发到判断净掉的血、still 触发处境还在/解除/未知），只是事实，成败已按 uses 记下，不要拿它再定一次成败；aftermath_other_versions 是别的版本观测到的，不能当成当前版本的经历。${postDeath ? `
