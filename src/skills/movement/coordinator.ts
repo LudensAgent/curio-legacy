@@ -122,14 +122,20 @@ const MAX_SAME_EVIDENCE_SEARCHES = 1;
  * 任一步失败就停下，把原因交回。改动逐条记入 edits。
  */
 async function runMakeWay(
-  ctx: SkillCtx, steps: MakeWayStep[], opts: MakeWayOptions,
-  /** 同一委托剩余可用的施工改动次数（原授权 − 会话累计），与 opts.maxEdits 的规划授权分开。 */
-  remainingEdits: number,
-  edits: MakeWayEdit[], deadline: number,
-  nameAt: (cell: Vec3Like) => string,
-  /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
-  supportTopAt: (cell: Vec3Like) => number | null,
+  ctx: SkillCtx,
+  job: {
+    steps: MakeWayStep[];
+    opts: MakeWayOptions;
+    /** 同一委托剩余可用的施工改动次数（原授权 − 会话累计），与 opts.maxEdits 的规划授权分开。 */
+    remainingEdits: number;
+    edits: MakeWayEdit[];
+    deadline: number;
+    nameAt: (cell: Vec3Like) => string;
+    /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
+    supportTopAt: (cell: Vec3Like) => number | null;
+  },
 ): Promise<MakeWayLegReceipt> {
+  const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt } = job;
   const from = { ...ctx.adapter.state().pos };
   // 规划是异步的：算完时身体可能还在滑动或已被推开。第一步的落点不在身边相邻格（或同格）就不执行，交回重规划。
   const first = steps[0];
@@ -291,8 +297,9 @@ function makeWayBudgetDetail(session: MovementSession, originalStop: StopReceipt
   const last = session.lastMakeWayEdit;
   const lastText = last === undefined ? '没有记录到实际改动'
     : `最后${last.kind === 'dig' ? '挖开' : '放置'} ${last.name}${cellText(last.pos)}`;
+  const allowed = session.authorization.makeWay?.maxEdits ?? 0;
   // 先给本次真正触发停止的事实；旧的碰撞证据放后面，不抢走额度与进度。
-  return `${progressed}；施工 ${session.counters.makeWayEdits}/${session.budget.maxMakeWayEdits}，${lastText}；${originalStop.detail}；下一步需要更多施工授权（新的明确委托）`;
+  return `${progressed}；施工 ${session.counters.makeWayEdits}/${allowed}，${lastText}；${originalStop.detail}；下一步需要更多施工授权（新的明确委托）`;
 }
 
 function stateFacts(session: MovementSession) {
@@ -1254,14 +1261,18 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       break;
     }
     const editsBefore = makeWayEdits.length;
-    const leg = await runMakeWay(ctx, steps, makeWay, makeWayEditBudget, makeWayEdits, deadline, (cell) => {
-      const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
-      return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
-    }, (cell) => {
-      const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
-      if (!view.observed) return null;
-      const state = view.evidence.observation.state;
-      return supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
+    const leg = await runMakeWay(ctx, {
+      steps, opts: makeWay, remainingEdits: makeWayEditBudget, edits: makeWayEdits, deadline,
+      nameAt: (cell) => {
+        const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
+        return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
+      },
+      supportTopAt: (cell) => {
+        const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
+        if (!view.observed) return null;
+        const state = view.evidence.observation.state;
+        return supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
+      },
     });
     makeWayLegs.push(leg);
     session.counters.makeWayLegs += 1;
@@ -1409,6 +1420,5 @@ function budgetOf(request: CoordinatorRequest): MovementBudget {
     maxObservedCells: Math.max(0, request.maxObservedCells),
     maxNoProgressSegments: Math.max(1, request.maxNoProgressSegments),
     maxLateralDrift: request.intent.kind === 'advance' ? request.intent.maxLateralDrift : 0,
-    maxMakeWayEdits: Math.max(0, request.makeWay?.maxEdits ?? 0),
   };
 }

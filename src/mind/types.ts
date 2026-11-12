@@ -74,6 +74,8 @@ export interface NavigationProgress {
   lastInvocationConfirmed?: number;
   /** 最近一次结构化停止原因；停因仍由 Agent 判断。 */
   stop?: { reason?: string; detail?: string };
+  /** 最近一次回执报告的结果类别（如 travel_to 的 PARTIAL / ARRIVED）。 */
+  outcome?: string;
   /** Agent 为这段委托声明的到达条件（done_when 快照）；精确目标格由 destination 表示。 */
   arrivalCondition?: Condition;
   /** 目标所在世界/维度；从实测位置重新规划时更新为新作用域，保留原目的地。 */
@@ -172,7 +174,7 @@ export interface Activity {
    * 被绕路挂起的长程移动：挂起发生在 `taskId`/`stepId`，实测 sessionId 在取消回执里归还。
    * 只是执行状态，不写回步骤参数；回来时复核 done_when 再决定是否带 sessionId 续接。
    */
-  movementPause?: { taskId: string; stepId: string; skill: string; sessionId?: string };
+  movementPause?: { taskId: string; stepId: string; sessionId?: string };
   /** 上一步开工时的身体/视野；只有环境确实变化才原样重试。 */
   stepStart?: { pos: { x: number; y: number; z: number }; view?: string };
   /**
@@ -258,6 +260,7 @@ export interface ActivityRecord {
     request?: NavigationRequest;
     progress?: NavigationProgress['progress'];
     sessionId?: string;
+    outcome?: string;
   };
   /** 这段活显式关联的窍门（k_…）；用于把后续实际应用交给对应经验的证据账。 */
   applying?: string;

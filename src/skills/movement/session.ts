@@ -80,8 +80,6 @@ export interface MovementBudget {
   maxObservedCells: number;
   maxNoProgressSegments: number;
   maxLateralDrift: number;
-  /** 创建 session 时冻结的施工改动上限；续接不再重新获得额度。 */
-  maxMakeWayEdits: number;
 }
 
 /** 创建 session 时冻结的委托授权；续接不得借旧 sessionId 扩大。 */
@@ -187,9 +185,9 @@ const inScope = (session: MovementSession, scope: MoveScope) =>
 const isTerminal = (session: MovementSession) =>
   session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped';
 
-/** 同一委托的施工改动余额：一次授权跨调用累计，恢复不重新获得额度。 */
+/** 同一委托的施工改动余额：冻结授权 − 会话累计，恢复不重新获得额度。 */
 export function remainingMakeWayEdits(session: MovementSession): number {
-  return Math.max(0, session.budget.maxMakeWayEdits - session.counters.makeWayEdits);
+  return Math.max(0, (session.authorization.makeWay?.maxEdits ?? 0) - session.counters.makeWayEdits);
 }
 
 /** 同一 intent 的稳定指纹（不含预算与单次调用旋钮）。 */

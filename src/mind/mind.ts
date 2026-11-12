@@ -1440,8 +1440,15 @@ export class Mind {
     pause.sessionId = sessionId;
     // 回来续接仍是同一逻辑动作：沿用原动作期限与材料账本，不重新起算。
     markContinuation(owner, step);
-    // 挂起回执同样并入活动导航：模型回来时会先看到 paused、原目标和可续接的 session。
-    noteNavigationResult(owner, { skill: o.task.skill, args: o.task.args }, o.result, this.d.adapter.state());
+    // 挂起回执并入活动导航，让模型回来时看到 paused、原目标和可续接的 session；
+    // 但如果同一步已经用新 session 在跑，就不能用旧回执把当前状态改回 paused。
+    const live = this.d.arbiter.info();
+    const liveStep = owner.steps[Math.max(0, owner.index - 1)];
+    const replacedByNewExecution = owner === this.activity && live?.planId === owner.id
+      && live.id !== o.task.id && liveStep?.id === step.id;
+    if (!replacedByNewExecution) {
+      noteNavigationResult(owner, { skill: o.task.skill, args: o.task.args }, o.result, this.d.adapter.state());
+    }
     this.d.bus.publish('activity_resume_ready', 'P3',
       `「${owner.what}」的 ${o.task.skill} 已挂起：${clipFeedback(o.result.summary, 160)}；回来用同一 sessionId 续接`,
       { planId: owner.id, stepId: step.id, sessionId });
@@ -1454,13 +1461,17 @@ export class Mind {
     if (o.result.status === 'cancelled' && o.suspended === true) { this.noteSuspendedMovement(o); return; }
     const owner = this.activity?.id === o.task.planId ? this.activity : null;
     const observationMiss = softMiss(owner, { skill: o.task.skill, args: o.task.args }, o.result);
-    // 长程移动没走到终点但有实测位移/实际施工时，不是“整段失败”；练习接口只有布尔值，先跳过中性样本。
+    // 长程移动没走到终点但有实测位移、实际施工或停在待决策/待授权的停点，不是“整段失败”；
+    // 练习接口只有布尔值，先跳过这些中性样本。真实身体/程序失败才记失败。
     const longRange = o.task.skill === 'travel_to' || o.task.skill === 'explore_toward';
-    const partialLongRange = longRange && o.result.status === 'failed'
-      && (navigationDisplacement(o.result, owner?.stepStart?.pos, this.d.adapter.state().pos) > 0.05
-        || ((o.result.data?.makeWay as { edits?: unknown[] } | undefined)?.edits?.length ?? 0) > 0);
+    const stopReason = (o.result.data?.stop as { reason?: unknown } | undefined)?.reason;
+    const executionFailure = stopReason === 'PHYSICAL_FAILURE' || stopReason === 'ACTION_FAILURE'
+      || stopReason === 'SCOPE_CHANGED' || stopReason === 'INTENT_MISMATCH';
+    const progressed = navigationDisplacement(o.result, owner?.stepStart?.pos, this.d.adapter.state().pos) > 0.05
+      || ((o.result.data?.makeWay as { edits?: unknown[] } | undefined)?.edits?.length ?? 0) > 0;
+    const neutralLongRange = longRange && o.result.status === 'failed' && (progressed || !executionFailure);
     if (o.result.status !== 'cancelled' && !observationMiss) {
-      if (o.task.source !== 'reflex' && !partialLongRange) {
+      if (o.task.source !== 'reflex' && !neutralLongRange) {
         this.d.self.practice(o.task.skill, o.result.status === 'succeeded', o.durationMs);
         this.d.self.feel({ type: 'step', ok: o.result.status === 'succeeded' });
       }
@@ -2235,7 +2246,7 @@ export class Mind {
           if (runningStep?.id !== undefined) {
             const previous = a.movementPause?.stepId === runningStep.id ? a.movementPause : undefined;
             a.movementPause = {
-              taskId: running.id, stepId: runningStep.id, skill: running.skill,
+              taskId: running.id, stepId: runningStep.id,
               ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
             };
           }

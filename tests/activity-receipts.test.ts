@@ -230,6 +230,36 @@ test('会话累计段数换算：同一 session 从 25 段到 31 段，活动账
   if (verdict.kind === 'done') assert.equal(verdict.met, true, '实测移动 24 格以上，收工条件按位置验收');
 });
 
+test('travel_to 的 PARTIAL 结果保留在活动导航里，不与整段失败混在一起', () => {
+  const a = make('走远', [{ skill: 'travel_to', args: { to: { x: 40, y: 64, z: 0 }, range: 2 } }]);
+  const step = nextStep(a)!;
+  a.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  afterStep(a, step, {
+    status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '已走一段，前方受阻',
+    data: { sessionId: 'ms_t', outcome: 'PARTIAL', confirmedSegments: 5, position: { x: 10, y: 64, z: 0.5 }, stop: { reason: 'BLOCKED' } },
+  }, 10, state());
+  assert.equal(a.navigation?.outcome, 'PARTIAL');
+  assert.equal(a.navigation?.phase, 'segment_completed');
+});
+
+test('方向探索回执里的临时 resolvedTarget 不会被当成最终目的地', () => {
+  const a = make('向西探索', [{
+    skill: 'explore_toward',
+    args: { direction: 'W', distance: 64, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 },
+  }]);
+  const step = nextStep(a)!;
+  afterStep(a, step, {
+    status: 'failed', failureCode: 'NOT_FOUND', summary: '前方边界仍缺证据',
+    data: {
+      sessionId: 'ms_west', confirmedSegments: 12, position: { x: -30.5, y: 64, z: 0.5 },
+      resolvedTarget: { x: -20, y: 64, z: 0.5 }, stop: { reason: 'UNKNOWN_BOUNDARY' },
+    },
+  }, 10, state());
+  assert.equal(a.navigation?.destination, undefined, 'waypoint 不是原目的地');
+  assert.equal(a.navigation?.completedSegments, 12);
+  assert.equal((a.navigation?.request as { direction?: string }).direction, 'W');
+});
+
 test('施工推进 30.81 格但普通 transition 为 0：活动按实测位移收尾，不记为整段失败', () => {
   const a = make('向南施工找要塞', [{
     skill: 'explore_toward',

@@ -282,10 +282,13 @@ function navigationRequestOf(step: Step, origin: NavPoint): NavigationRequest | 
  * 回执里的原目标坐标。方向探索没有坐标目标：实测位置和临时 waypoint 都不能当目的地。
  * travel_to 只给 x/z 时，用 targetFootY 或实测脚高补展示高度。
  */
-function navigationTargetOf(data: Record<string, unknown>, request: NavigationRequest | undefined): NavPoint | null {
-  const direct = navPoint(data.requestedTarget) ?? navPoint(data.resolvedTarget) ?? navPoint(data.to);
-  if (direct) return direct;
+function navigationTargetOf(data: Record<string, unknown>, request: NavigationRequest | undefined, step: Step): NavPoint | null {
+  // 方向探索没有坐标目的地；回执里的 resolvedTarget 是当前段 waypoint，不能当最终目标。
   if (request?.skill === 'explore_toward') return null;
+  const direct = navPoint(data.requestedTarget) ?? navPoint(data.to) ?? addressedTarget(step);
+  if (direct) return direct;
+  // coordinatorData 的 resolvedTarget 对方向型意图可能是临时 waypoint；只有 travel_to 明确承诺原目标。
+  if (request?.skill !== 'travel_to') return null;
   const resolved = data.resolvedTarget as Record<string, unknown> | undefined;
   if (typeof resolved?.x !== 'number' || !Number.isFinite(resolved.x)
     || typeof resolved.z !== 'number' || !Number.isFinite(resolved.z)) return null;
@@ -391,6 +394,8 @@ export function noteNavigationDispatch(
   nav.measured = { pos: { ...state.pos }, at: now };
   nav.segmentStart = { ...state.pos };
   if (opts.deadlineMs !== undefined) nav.parentDeadlineMs = opts.deadlineMs;
+  // 上一次派发的停因只描述已经结束的那次调用；新一段开始后不能继续显示为当前状态。
+  delete nav.stop;
   nav.phase = step.skill === 'plan_route' ? 'planning' : 'executing';
   nav.updatedAt = now;
   return nav;
@@ -413,7 +418,7 @@ export function noteNavigationResult(
   if (!NAVIGATION_SKILLS.has(step.skill)) return nav;
   const data = (result.data ?? {}) as Record<string, unknown>;
   const segment = data.segment && typeof data.segment === 'object' ? data.segment as Record<string, unknown> : undefined;
-  const requested = navigationTargetOf(data, nav.request);
+  const requested = navigationTargetOf(data, nav.request, step);
   if (!nav.destination && requested) adoptDestination(nav, requested);
   const confirmed = confirmedSegmentsOf(data);
   const source = [data.source, data.backend].find((value): value is string => typeof value === 'string' && !!value);
@@ -444,6 +449,8 @@ export function noteNavigationResult(
   const position = navPoint(data.position) ?? navPoint(data.lastPosition)
     ?? navPoint((data.measured as { current?: unknown } | undefined)?.current);
   const outcome = typeof data.outcome === 'string' ? data.outcome : typeof data.navOutcome === 'string' ? data.navOutcome : undefined;
+  if (outcome === undefined) delete nav.outcome;
+  else nav.outcome = outcome;
   const arrived = outcome === 'ARRIVED' || data.arrived === true || segment?.arrivedAtTarget === true;
   const failure = result.status === 'failed'
     ? { at: now, ...(result.failureCode ? { code: String(result.failureCode) } : {}), summary: clipFeedback(result.summary, 220) }
@@ -561,6 +568,7 @@ function describeNavigation(nav: NavigationProgress) {
     ...(nav.segmentStart ? { segment_start: nav.segmentStart } : {}),
     ...(nav.progress ? { measured_progress: nav.progress } : {}),
     ...(nav.sessionId ? { session_id: nav.sessionId } : {}),
+    ...(nav.outcome ? { last_outcome: nav.outcome } : {}),
     ...(nav.stop ? { stop_reason: nav.stop.reason, ...(nav.stop.detail ? { stop_detail: nav.stop.detail } : {}) } : {}),
     completed_segments: nav.completedSegments,
     remaining_count: nav.remaining.length,
@@ -577,24 +585,27 @@ function describeNavigation(nav: NavigationProgress) {
 }
 
 const DIRECTION_NAMES: Record<string, string> = { N: '北', E: '东', S: '南', W: '西' };
+/** 这些停点已经结束这次移动委托，不再承诺“继续同一移动会话”。 */
+const TERMINAL_MOVEMENT_STOPS = new Set(['ARRIVED', 'DISTANCE_MET', 'REGION_ENTERED', 'UNTIL_SEEN', 'CANCELLED', 'SUPERSEDED', 'SCOPE_CHANGED', 'INTENT_MISMATCH']);
 
 /** 长程委托的一句话现状与 continue/detour/switch 的后果；现场事实，不是调度建议。 */
 function movementDelegationOf(nav: NavigationProgress | undefined) {
   const request = nav?.request;
   if (nav === undefined || request === undefined) return undefined;
+  if (nav.phase === 'arrived' || nav.phase === 'cancelled' || nav.phase === 'failed'
+    || (nav.stop?.reason !== undefined && TERMINAL_MOVEMENT_STOPS.has(nav.stop.reason))) return undefined;
   const measured = nav.progress;
   const what = request.skill === 'explore_toward'
     ? `正向${DIRECTION_NAMES[request.direction] ?? request.direction}探索 ${request.distance} 格`
       + (measured?.along === undefined ? '' : `，已沿原方向推进 ${Math.round(measured.along * 100) / 100} 格`)
     : `去 ${typeof request.target === 'string' ? request.target : JSON.stringify(request.target) ?? String(request.target)}（range ${request.range}）`
       + (measured?.remaining === undefined ? '' : `，实测距原目标水平 ${measured.remaining} 格`);
+  // 数值与停因已由 navigation 块给出；这里只给“还在做什么”和三种选择的后果。
   return {
     what,
     session_id: nav.sessionId ?? null,
     state: nav.phase,
     can_resume: nav.stop?.reason === 'SUSPENDED' || nav.phase === 'paused',
-    ...(measured ? { measured_progress: measured } : {}),
-    ...(nav.stop ? { stop_reason: nav.stop.reason, ...(nav.stop.detail ? { stop_detail: nav.stop.detail } : {}) } : {}),
     continue: '按原目标与原委托参数继续同一移动会话；累计预算与实测进展保留',
     detour: '可先做别的事；完成后复核这段活的收工条件，未满足则恢复同一条路线',
     switch: '放弃这条路线；旧移动会话不再由这段活续接',
@@ -1331,6 +1342,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
       ...(a.navigation.request ? { request: a.navigation.request } : {}),
       ...(a.navigation.progress ? { progress: a.navigation.progress } : {}),
       ...(a.navigation.sessionId ? { sessionId: a.navigation.sessionId } : {}),
+      ...(a.navigation.outcome ? { outcome: a.navigation.outcome } : {}),
     } } : {}),
     completion: attemptOnly ? 'attempt' as const
       : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
@@ -1419,9 +1431,6 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
       // 当前站位取实时身体状态；navigation.measured 可能还停在派发起点。
       measured_pos: { x: state.pos.x, y: state.pos.y, z: state.pos.z },
       remaining_targets: a.navigation.remaining.length,
-      ...(a.navigation.request ? { original_request: a.navigation.request } : {}),
-      ...(a.navigation.progress ? { measured_progress: a.navigation.progress } : {}),
-      ...(a.navigation.stop?.reason ? { stop_reason: a.navigation.stop.reason } : {}),
       resume_with_session_id: a.navigation.stop?.reason === 'SUSPENDED' || a.navigation.phase === 'paused'
         ? a.navigation.sessionId ?? null : null,
     } : {}),

@@ -8,7 +8,7 @@ import {
 const scope = { worldId: 'w', dim: 'overworld', sessionId: 's' };
 const budget = {
   maxTransitions: 128, maxSearches: 32, maxObservations: 16, maxObservedCells: 512,
-  maxNoProgressSegments: 4, maxLateralDrift: 16, maxMakeWayEdits: 12,
+  maxNoProgressSegments: 4, maxLateralDrift: 16,
 };
 
 const advance = (direction: 'N' | 'E' | 'S' | 'W'): MovementIntent =>
@@ -41,7 +41,7 @@ test('施工额度按原授权减会话累计：暂停前用 7/12，恢复后只
   clearMovementSessions();
   const session = createMovementSession({
     intent: advance('W'), origin: { x: 0, y: 64, z: 0 }, bearing: { x: -1, z: 0 },
-    scope, budget: { ...budget, maxMakeWayEdits: 12 }, authorization: { swim: false }, now: Date.now(),
+    scope, budget, authorization: { swim: false, makeWay: { maxEdits: 12 } }, now: Date.now(),
   });
   session.counters.makeWayEdits = 7;
   assert.equal(remainingMakeWayEdits(session), 5);

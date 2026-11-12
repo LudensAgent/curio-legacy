@@ -95,6 +95,19 @@ test('长程移动在 continue_effect 附近说明原委托与 detour/switch 的
   assert.match(String(movement.switch), /不再.*续接/);
 });
 
+test('已到达或已看见目标的移动不再承诺继续同一会话', () => {
+  const a = createActivity({
+    what: '向西探索', why: '', kind: 'explore', repeat: 1,
+    steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 } }],
+  }, '', 'llm', state());
+  a.navigation!.phase = 'segment_completed';
+  a.navigation!.stop = { reason: 'UNTIL_SEEN' };
+  assert.equal((describeActivity(a, state()).continue_effect as Record<string, unknown>).movement_delegation, undefined);
+  a.navigation!.phase = 'arrived';
+  delete a.navigation!.stop;
+  assert.equal((describeActivity(a, state()).continue_effect as Record<string, unknown>).movement_delegation, undefined);
+});
+
 test('travel_to 的地标委托保留原目标与 range，不因没有三维坐标目标而丢失', () => {
   const a = createActivity({
     what: '回基地', why: '天黑了', kind: 'explore', repeat: 1,
