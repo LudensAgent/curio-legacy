@@ -516,7 +516,7 @@ export class Arbiter extends EventEmitter {
    * 显式挂起当前任务：同样立即停身体，但用类型化中止原因告诉执行层“保留可续接状态”。
    * 与 cancel 区分，恢复由调用方决定；本方法不自动续跑。
    */
-  suspend(reason: string) {
+  suspend() {
     const t = this.current;
     if (!t) return;
     t.suspended = true;

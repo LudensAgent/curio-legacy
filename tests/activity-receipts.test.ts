@@ -202,6 +202,61 @@ test('collection.dug>0 但顶层 dug=0/gained=0 时，不因历史方块数被�
   assert.equal(record.collection?.dug, 3);
 });
 
+test('会话累计段数换算：同一 session 从 25 段到 31 段，活动账是 31 而不是 56', () => {
+  const a = make('向南探索 96 格', [{
+    skill: 'explore_toward',
+    args: { direction: 'S', distance: 96, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 },
+  }], { repeat: 2, doneWhen: { type: 'exploration', min_distance: 24 } });
+  const step = nextStep(a)!;
+  // 探索条件需要一份完整可验收的活体状态（含连接/观测就绪/会话）。
+  const at = (z: number) => ({
+    connected: true, alive: true, observationReady: true, observationId: 1, sessionId: 's',
+    pos: { x: 0.5, y: 64, z }, inventory: [], emptySlots: 36, equipment: [], held: null,
+    hp: 20, food: 20, worldId: 'w', dim: 'overworld',
+  }) as any;
+  a.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  afterStep(a, step, {
+    status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '已推进 20 格',
+    data: { sessionId: 'ms_s', executed: 25, confirmedSegments: 25, position: { x: 0.5, y: 64, z: -20 }, progress: { along: 20 }, stop: { reason: 'NO_PATH' } },
+  }, 10, at(-20));
+  assert.equal(a.navigation?.completedSegments, 25);
+  const verdict = afterStep(a, step, {
+    status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '已推进 30.81 格',
+    data: { sessionId: 'ms_s', executed: 31, confirmedSegments: 31, position: { x: 0.5, y: 64, z: -30.81 }, progress: { along: 30.81 }, stop: { reason: 'NO_PATH' } },
+  }, 10, at(-30.81));
+  assert.equal(a.navigation?.completedSegments, 31, '会话累计值直接替换，不重复累加');
+  assert.equal(a.navigation?.lastInvocationConfirmed, 6);
+  assert.equal(verdict.kind, 'done');
+  if (verdict.kind === 'done') assert.equal(verdict.met, true, '实测移动 24 格以上，收工条件按位置验收');
+});
+
+test('施工推进 30.81 格但普通 transition 为 0：活动按实测位移收尾，不记为整段失败', () => {
+  const a = make('向南施工找要塞', [{
+    skill: 'explore_toward',
+    args: { direction: 'S', distance: 96, origin: { x: 0.5, y: 64, z: 0.5 }, maxLateralDrift: 16 },
+  }], { doneWhen: { type: 'exploration', min_distance: 24 } });
+  const step = nextStep(a)!;
+  a.stepStart = { pos: { x: 0.5, y: 64, z: 0.5 } };
+  const end = {
+    connected: true, alive: true, observationReady: true, observationId: 1, sessionId: 's',
+    pos: { x: 0.5, y: 64, z: -30.31 }, inventory: [], emptySlots: 36, equipment: [], held: null,
+    hp: 20, food: 20, worldId: 'w', dim: 'overworld',
+  } as any;
+  const verdict = afterStep(a, step, {
+    status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '底层搜索无路；已挖开并走到 (0,64,-31)',
+    data: {
+      sessionId: 'ms_dig', executed: 0, confirmedSegments: 0, position: { x: 0.5, y: 64, z: -30.31 },
+      makeWay: { edits: [{ kind: 'dig', pos: { x: 0, y: 63, z: -1 }, name: 'stone' }] },
+      stop: { reason: 'NO_PATH' },
+    },
+  }, 10, end);
+  assert.equal(a.navigation?.completedSegments, 0, '没有普通 transition 就照实记 0');
+  assert.equal(a.navigation?.progress?.along, undefined, '回执没报 along 就不补');
+  assert.equal(verdict.kind, 'done');
+  if (verdict.kind === 'done') assert.equal(verdict.met, true, '实测位置满足 24 格探索条件');
+  assert.equal(a.conditionTriggered, true, '收尾走的是同一套收工条件判定，不把最后一格 PATH_NOT_FOUND 当整段失败');
+});
+
 test('实测位置决定探索覆盖：同格观察不能算远处已搜索', () => {
   const local = make('找树砍原木', [{ skill: 'look_around', args: { for: 'log' } }]);
   local.results.push({ skill: 'look_around', args: {}, status: 'failed', failureCode: 'NOT_FOUND', summary: '视野内未见', at: Date.now(), durationMs: 2, pos: { x: 0.8, y: 64, z: 0.5 } });

@@ -180,6 +180,18 @@ const LEASE_TTL_MS = 5 * 60_000;
 
 const sessions = new Map<string, MovementSession>();
 
+const inScope = (session: MovementSession, scope: MoveScope) =>
+  session.scope.worldId === scope.worldId && session.scope.dim === scope.dim && session.scope.sessionId === scope.sessionId;
+
+/** 已完成/已取消/已停止的 session 不再参与“同一 scope 只能有一个活动意图”的取代。 */
+const isTerminal = (session: MovementSession) =>
+  session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped';
+
+/** 同一委托的施工改动余额：一次授权跨调用累计，恢复不重新获得额度。 */
+export function remainingMakeWayEdits(session: MovementSession): number {
+  return Math.max(0, session.budget.maxMakeWayEdits - session.counters.makeWayEdits);
+}
+
 /** 同一 intent 的稳定指纹（不含预算与单次调用旋钮）。 */
 export function intentKeyOf(intent: MovementIntent): string {
   return JSON.stringify(intent.kind === 'navigate'
@@ -196,7 +208,7 @@ function prune(now: number) {
   }
   if (sessions.size < CAPACITY) return;
   const removable = [...sessions.values()]
-    .filter((session) => session.phase === 'stopped' || session.phase === 'completed' || session.phase === 'cancelled')
+    .filter(isTerminal)
     .sort((a, b) => a.updatedAt - b.updatedAt);
   while (sessions.size >= CAPACITY && removable.length) sessions.delete(removable.shift()!.id);
   // 全是活动 session 时仍要守容量：丢掉最久未更新的一个，绝不让 map 无界增长。
@@ -211,8 +223,7 @@ function prune(now: number) {
 export function supersedeScope(scope: MoveScope, now: number, keep?: string) {
   for (const session of sessions.values()) {
     if (session.id === keep) continue;
-    if (session.scope.worldId !== scope.worldId || session.scope.dim !== scope.dim || session.scope.sessionId !== scope.sessionId) continue;
-    if (session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped') continue;
+    if (!inScope(session, scope) || isTerminal(session)) continue;
     session.phase = 'stopped';
     session.updatedAt = now;
     session.stop = { reason: 'SUPERSEDED', at: now, detail: '同一 scope 出现了新的移动意图，旧 session 不再允许继续执行' };
@@ -225,8 +236,7 @@ export function supersedeScope(scope: MoveScope, now: number, keep?: string) {
  */
 export function suspendScopeSessions(scope: MoveScope, now = Date.now()) {
   for (const session of sessions.values()) {
-    if (session.scope.worldId !== scope.worldId || session.scope.dim !== scope.dim || session.scope.sessionId !== scope.sessionId) continue;
-    if (session.phase === 'completed' || session.phase === 'cancelled' || session.phase === 'stopped') continue;
+    if (!inScope(session, scope) || isTerminal(session)) continue;
     session.phase = 'stopped';
     session.updatedAt = now;
     session.stop = { reason: 'SUSPENDED', at: now, detail: '身体被其他活动暂时借走；原移动委托与实测进展保留，可用同一 sessionId 续接' };
@@ -290,9 +300,7 @@ export function findMovementSession(id: string, now = Date.now()): MovementSessi
 }
 
 export function activeMovementSession(scope: MoveScope): MovementSession | undefined {
-  return [...sessions.values()]
-    .filter((session) => session.scope.worldId === scope.worldId && session.scope.dim === scope.dim && session.scope.sessionId === scope.sessionId)
-    .find((session) => session.phase !== 'completed' && session.phase !== 'cancelled' && session.phase !== 'stopped');
+  return [...sessions.values()].find((session) => inScope(session, scope) && !isTerminal(session));
 }
 
 /**

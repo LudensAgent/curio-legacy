@@ -18,7 +18,7 @@ import { planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.t
 import { mineCell, moveStep, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
-  acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease,
+  acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, releaseSessionLease, remainingMakeWayEdits,
   type MovementAuthorization, type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
 } from './session.ts';
 
@@ -122,7 +122,10 @@ const MAX_SAME_EVIDENCE_SEARCHES = 1;
  * 任一步失败就停下，把原因交回。改动逐条记入 edits。
  */
 async function runMakeWay(
-  ctx: SkillCtx, steps: MakeWayStep[], opts: MakeWayOptions, edits: MakeWayEdit[], deadline: number,
+  ctx: SkillCtx, steps: MakeWayStep[], opts: MakeWayOptions,
+  /** 同一委托剩余可用的施工改动次数（原授权 − 会话累计），与 opts.maxEdits 的规划授权分开。 */
+  remainingEdits: number,
+  edits: MakeWayEdit[], deadline: number,
   nameAt: (cell: Vec3Like) => string,
   /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
   supportTopAt: (cell: Vec3Like) => number | null,
@@ -167,8 +170,8 @@ async function runMakeWay(
   outer: for (const step of steps) {
     if (ctx.signal.aborted || Date.now() >= deadline) { failure = ctx.signal.aborted ? '父任务取消' : '期限已到'; break; }
     for (const cell of step.dig) {
-      if (edits.length >= opts.maxEdits) {
-        failure = `本次委托剩余的施工改动额度（${opts.maxEdits} 次）已用尽`;
+      if (edits.length >= remainingEdits) {
+        failure = `本次委托剩余的施工改动额度（${remainingEdits} 次）已用尽`;
         budgetExhausted = true;
         break outer;
       }
@@ -179,8 +182,8 @@ async function runMakeWay(
       edits.push({ kind: 'dig', pos: { ...cell }, name });
     }
     if (step.place !== undefined || step.kind === 'pillar') {
-      if (edits.length >= opts.maxEdits) {
-        failure = `本次委托剩余的施工改动额度（${opts.maxEdits} 次）已用尽`;
+      if (edits.length >= remainingEdits) {
+        failure = `本次委托剩余的施工改动额度（${remainingEdits} 次）已用尽`;
         budgetExhausted = true;
         break;
       }
@@ -288,7 +291,8 @@ function makeWayBudgetDetail(session: MovementSession, originalStop: StopReceipt
   const last = session.lastMakeWayEdit;
   const lastText = last === undefined ? '没有记录到实际改动'
     : `最后${last.kind === 'dig' ? '挖开' : '放置'} ${last.name}${cellText(last.pos)}`;
-  return `${originalStop.detail}；${progressed}；施工 ${session.counters.makeWayEdits}/${session.budget.maxMakeWayEdits}，${lastText}；下一步需要更多施工授权（新的明确委托）`;
+  // 先给本次真正触发停止的事实；旧的碰撞证据放后面，不抢走额度与进度。
+  return `${progressed}；施工 ${session.counters.makeWayEdits}/${session.budget.maxMakeWayEdits}，${lastText}；${originalStop.detail}；下一步需要更多施工授权（新的明确委托）`;
 }
 
 function stateFacts(session: MovementSession) {
@@ -485,7 +489,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     if (!sameAuthorization(session.authorization, authorization)) {
       return {
         ok: false, failureCode: 'BAD_ARGS',
-        summary: 'sessionId 与原委托的 swim/施工授权不一致；续接不能扩大或改写 dig/place 与 maxEdits，要换授权请新建移动意图',
+        summary: 'sessionId 与原委托的 swim/施工授权不一致；续接不能改变 dig/place 与 maxEdits（收窄也算改变），要换授权请新建移动意图',
         data: { reason: 'INTENT_MISMATCH', sessionId: session.id, authorization: session.authorization },
       };
     }
@@ -516,7 +520,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   }
 
   // 施工额度属于同一委托：恢复后只剩余额，不重新获得完整授权。
-  const makeWayEditBudget = Math.max(0, session.budget.maxMakeWayEdits - session.counters.makeWayEdits);
+  const makeWayEditBudget = remainingMakeWayEdits(session);
   const segments: SegmentReceipt[] = [];
   const swimLegs: SwimLegReceipt[] = [];
   const makeWayEdits: MakeWayEdit[] = [];
@@ -1250,7 +1254,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       break;
     }
     const editsBefore = makeWayEdits.length;
-    const leg = await runMakeWay(ctx, steps, { ...makeWay, maxEdits: makeWayEditBudget }, makeWayEdits, deadline, (cell) => {
+    const leg = await runMakeWay(ctx, steps, makeWay, makeWayEditBudget, makeWayEdits, deadline, (cell) => {
       const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
       return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
     }, (cell) => {

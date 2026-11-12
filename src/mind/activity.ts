@@ -9,7 +9,7 @@ import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
 import { hitsResourceTarget } from './progress-ledger.ts';
-import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, CollectionReceipt, NavigationProgress } from './types.ts';
+import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, CollectionReceipt, NavigationProgress, NavigationRequest } from './types.ts';
 
 /**
  * 截断长反馈时同时保留头尾：开头交代是哪一步/什么失败，结尾常带可执行事实
@@ -219,8 +219,12 @@ function digest(text: string): string {
   return (h >>> 0).toString(36);
 }
 
-/** 会让身体走向目的地或为其做只读预览的动作；只有它们参与导航目标。相对 move_step 不在此列。 */
-const NAVIGATION_SKILLS = new Set(['plan_route', 'navigate_to', 'advance']);
+/**
+ * 会让身体走向目的地或为其做只读预览的动作；只有它们参与导航目标。相对 move_step 不在此列。
+ * travel_to/explore_toward 没有三维坐标目标时也保留原委托形状（地标、方向/距离），
+ * 不拿途中的临时 waypoint 冒充最终目的地。
+ */
+const NAVIGATION_SKILLS = new Set(['plan_route', 'navigate_to', 'advance', 'travel_to', 'explore_toward']);
 
 type NavPoint = { x: number; y: number; z: number };
 
@@ -255,6 +259,74 @@ const navPoints = (value: unknown): NavPoint[] | undefined => {
   });
 };
 
+/** 原委托形状：travel_to 保留目标与 range，explore_toward 保留起点/方向/距离/横向范围。 */
+function navigationRequestOf(step: Step, origin: NavPoint): NavigationRequest | undefined {
+  const args = (step.args ?? {}) as Record<string, unknown>;
+  if (step.skill === 'travel_to') {
+    return { skill: 'travel_to', target: structuredClone(args.to), range: typeof args.range === 'number' ? args.range : 2 };
+  }
+  if (step.skill === 'explore_toward') {
+    const declaredOrigin = navPoint(args.origin);
+    return {
+      skill: 'explore_toward',
+      direction: typeof args.direction === 'string' ? args.direction : '?',
+      distance: typeof args.distance === 'number' ? args.distance : 0,
+      origin: declaredOrigin ?? { ...origin },
+      maxLateralDrift: typeof args.maxLateralDrift === 'number' ? args.maxLateralDrift : 0,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * 回执里的原目标坐标。方向探索没有坐标目标：实测位置和临时 waypoint 都不能当目的地。
+ * travel_to 只给 x/z 时，用 targetFootY 或实测脚高补展示高度。
+ */
+function navigationTargetOf(data: Record<string, unknown>, request: NavigationRequest | undefined): NavPoint | null {
+  const direct = navPoint(data.requestedTarget) ?? navPoint(data.resolvedTarget) ?? navPoint(data.to);
+  if (direct) return direct;
+  if (request?.skill === 'explore_toward') return null;
+  const resolved = data.resolvedTarget as Record<string, unknown> | undefined;
+  if (typeof resolved?.x !== 'number' || !Number.isFinite(resolved.x)
+    || typeof resolved.z !== 'number' || !Number.isFinite(resolved.z)) return null;
+  const measured = data.measured as { current?: unknown } | undefined;
+  const foot = typeof data.targetFootY === 'number' ? data.targetFootY
+    : navPoint(data.position)?.y ?? navPoint(measured?.current)?.y;
+  return typeof foot === 'number' ? { x: resolved.x, y: foot, z: resolved.z } : null;
+}
+
+const numberOrUndefined = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+
+/** 回执里的实测进展数值；没有报告就不补 0。 */
+function navigationProgressOf(data: Record<string, unknown>): NavigationProgress['progress'] | undefined {
+  const raw = data.progress as Record<string, unknown> | undefined;
+  const displacement = data.displacement as { horizontal?: unknown } | undefined;
+  const along = numberOrUndefined(raw?.along), lateral = numberOrUndefined(raw?.lateral);
+  const horizontalNet = numberOrUndefined(raw?.horizontalNet), remaining = numberOrUndefined(raw?.remaining);
+  const closer = numberOrUndefined(data.closer), horizontal = numberOrUndefined(displacement?.horizontal);
+  const progress = {
+    ...(along === undefined ? {} : { along }), ...(lateral === undefined ? {} : { lateral }),
+    ...(horizontalNet === undefined ? {} : { horizontalNet }), ...(remaining === undefined ? {} : { remaining }),
+    ...(closer === undefined ? {} : { closer }), ...(horizontal === undefined ? {} : { horizontal }),
+  };
+  return Object.keys(progress).length === 0 ? undefined : progress;
+}
+
+/** 本步实测水平位移：优先回执的原/终点，缺失时用活动账本的前后位置；不把计划点当实测。 */
+export function navigationDisplacement(
+  result: Pick<SkillResult, 'data'>, before?: NavPoint, after?: NavPoint,
+): number {
+  const data = result.data;
+  if (!data) return 0;
+  const measured = data.measured as { current?: unknown } | undefined;
+  const end = navPoint(data.position) ?? navPoint(measured?.current) ?? navPoint(data.lastPosition) ?? after;
+  const from = before ?? end;
+  const horizontal = end && from ? Math.hypot(end.x - from.x, end.z - from.z) : 0;
+  const reported = numberOrUndefined((data.displacement as { horizontal?: unknown } | undefined)?.horizontal);
+  return Math.max(horizontal, reported ?? 0);
+}
+
 /** 回执里已确认的段数：navigate_to/advance 报 executed，兼容旧的 confirmedSegments 字段。 */
 function confirmedSegmentsOf(data: Record<string, unknown>): number {
   if (typeof data.confirmedSegments === 'number' && Number.isFinite(data.confirmedSegments)) return data.confirmedSegments;
@@ -275,10 +347,12 @@ function invalidationReasonOf(data: Record<string, unknown>): string | undefined
 }
 
 function newNavigation(a: Activity, state: Pick<AgentState, 'pos' | 'worldId' | 'dim'>): NavigationProgress {
+  const step = a.steps.find((own) => NAVIGATION_SKILLS.has(own.skill));
   const destination = a.steps
-    .filter((step) => NAVIGATION_SKILLS.has(step.skill))
+    .filter((own) => NAVIGATION_SKILLS.has(own.skill))
     .map(addressedTarget)
     .find((point): point is NavPoint => point !== null);
+  const request = step === undefined ? undefined : navigationRequestOf(step, state.pos);
   const now = Date.now();
   const nav: NavigationProgress = {
     delegationId: a.id,
@@ -288,6 +362,7 @@ function newNavigation(a: Activity, state: Pick<AgentState, 'pos' | 'worldId' | 
     completedSegments: 0,
     remaining: [],
     phase: 'planning', updatedAt: now,
+    ...(request === undefined ? {} : { request }),
   };
   if (destination) adoptDestination(nav, destination);
   return nav;
@@ -307,6 +382,10 @@ export function noteNavigationDispatch(
   const now = Date.now();
   const destination = addressedTarget(step);
   if (!nav.destination && destination) adoptDestination(nav, destination);
+  if (nav.request === undefined) {
+    const request = navigationRequestOf(step, state.pos);
+    if (request !== undefined) nav.request = request;
+  }
   nav.worldId = state.worldId;
   nav.dim = state.dim;
   nav.measured = { pos: { ...state.pos }, at: now };
@@ -321,7 +400,7 @@ export function noteNavigationDispatch(
  * 把一步的实测回执并入当前导航目标：更新实测位置、已完成段、剩余目标、来源和失效/失败。
  * 只保留当前委托的一份状态；路线几何、traversal 和体素仍留在共享空间库。
  */
-function noteNavigationResult(
+export function noteNavigationResult(
   a: Activity, step: Step,
   result: Pick<SkillResult, 'status' | 'failureCode' | 'summary' | 'data'>,
   state: AgentState,
@@ -334,19 +413,45 @@ function noteNavigationResult(
   if (!NAVIGATION_SKILLS.has(step.skill)) return nav;
   const data = (result.data ?? {}) as Record<string, unknown>;
   const segment = data.segment && typeof data.segment === 'object' ? data.segment as Record<string, unknown> : undefined;
-  const requested = navPoint(data.requestedTarget) ?? navPoint(data.to) ?? addressedTarget(step);
+  const requested = navigationTargetOf(data, nav.request);
   if (!nav.destination && requested) adoptDestination(nav, requested);
   const confirmed = confirmedSegmentsOf(data);
   const source = [data.source, data.backend].find((value): value is string => typeof value === 'string' && !!value);
-  nav.completedSegments += confirmed;
+  const reportedSession = typeof data.sessionId === 'string' && data.sessionId ? data.sessionId : undefined;
+  if (reportedSession === undefined) {
+    nav.lastInvocationConfirmed = confirmed;
+    nav.completedSegments += confirmed;
+  } else {
+    // 长程工具回执的段数是同一会话的累计值：从 25 段走到 31 段，活动账应为 31 而不是 56。
+    const priorSessionConfirmed = nav.sessionId === reportedSession ? nav.completedSegments - (nav.segmentOffset ?? 0) : 0;
+    nav.lastInvocationConfirmed = Math.max(0, confirmed - priorSessionConfirmed);
+    if (nav.sessionId !== reportedSession) {
+      nav.segmentOffset = nav.completedSegments;
+      nav.sessionId = reportedSession;
+    }
+    nav.completedSegments = (nav.segmentOffset ?? 0) + confirmed;
+  }
+  const progress = navigationProgressOf(data);
+  if (progress !== undefined) nav.progress = progress;
+  const stopRaw = data.stop && typeof data.stop === 'object' ? data.stop as Record<string, unknown> : undefined;
+  const stopReason = typeof stopRaw?.reason === 'string' ? stopRaw.reason
+    : typeof data.stopReason === 'string' ? data.stopReason : undefined;
+  const stopDetail = typeof stopRaw?.detail === 'string' ? stopRaw.detail : undefined;
+  if (stopReason === undefined) delete nav.stop;
+  else nav.stop = { reason: stopReason, ...(stopDetail === undefined ? {} : { detail: clipFeedback(stopDetail, 240) }) };
   const invalidation = invalidationReasonOf(data);
   const remaining = navPoints(data.remainingPoints) ?? navPoints(data.remaining);
-  const position = navPoint(data.position) ?? navPoint(data.lastPosition);
+  const position = navPoint(data.position) ?? navPoint(data.lastPosition)
+    ?? navPoint((data.measured as { current?: unknown } | undefined)?.current);
   const outcome = typeof data.outcome === 'string' ? data.outcome : typeof data.navOutcome === 'string' ? data.navOutcome : undefined;
   const arrived = outcome === 'ARRIVED' || data.arrived === true || segment?.arrivedAtTarget === true;
   const failure = result.status === 'failed'
     ? { at: now, ...(result.failureCode ? { code: String(result.failureCode) } : {}), summary: clipFeedback(result.summary, 220) }
     : undefined;
+  // 活动层的“有进展”按整段委托判断；本次调用有没有新位移由 afterStep 的实测差值决定。
+  const hasProgress = nav.completedSegments > 0 || (nav.progress !== undefined
+    && [nav.progress.along, nav.progress.lateral, nav.progress.horizontalNet, nav.progress.closer, nav.progress.horizontal]
+      .some((value) => value !== undefined && Math.abs(value) > 0.05));
   // 保留当前计划的剩余目标与最后实测落点；同一语义在多条终态分支复用。
   const keepProgress = (nextRemaining: NavPoint[] | undefined) => {
     if (nextRemaining) nav.remaining = nextRemaining;
@@ -356,12 +461,18 @@ function noteNavigationResult(
     nav.phase = 'replanning';
     nav.lastInvalidation = { at: now, reason: clipFeedback(invalidation, 200) };
     // 失效前已确认的段仍是实测进展：保留最后落点与当前计划的剩余目标，别因失效丢掉。
-    if (confirmed > 0) keepProgress(remaining);
+    if (hasProgress) keepProgress(remaining);
   } else if (result.status === 'cancelled') {
-    nav.phase = 'cancelled';
-    // 取消只终止本段：已确认的段、剩余目标和最后实测落点照实保留。
-    if (confirmed > 0) keepProgress(remaining);
-    else if (remaining) nav.remaining = remaining;
+    if (stopReason === 'SUSPENDED') {
+      nav.phase = 'paused';
+      // 挂起不是失败：已确认段、剩余目标与最后实测落点都保留，回来可续接。
+      keepProgress(remaining ?? (nav.destination ? [{ ...nav.destination }] : []));
+    } else {
+      nav.phase = 'cancelled';
+      // 取消只终止本段：已确认的段、剩余目标和最后实测落点照实保留。
+      if (hasProgress) keepProgress(remaining);
+      else if (remaining) nav.remaining = remaining;
+    }
   } else if (arrived) {
     // 段终点等于原目的地才算到达；中间 waypoint 只是完成了一段。
     const final = !nav.destination || !requested || sameNavPoint(nav.destination, requested);
@@ -372,10 +483,10 @@ function noteNavigationResult(
       nav.phase = 'segment_completed';
       keepProgress(remaining?.length ? remaining : [{ ...nav.destination! }]);
     }
-  } else if (confirmed > 0) {
-    // 有实测确认的段就是进展；保留剩余目标，不把这一段当整趟失败。
+  } else if (hasProgress) {
+    // 有实测确认的段或真实位移就是进展；保留剩余目标，不把这一段当整趟失败。
     nav.phase = 'segment_completed';
-    keepProgress(remaining);
+    keepProgress(remaining ?? (nav.destination ? [{ ...nav.destination }] : []));
     if (failure) nav.lastFailure = failure;
   } else if (result.status === 'failed') {
     nav.phase = 'failed';
@@ -409,6 +520,11 @@ export function retargetNavigation(a: Activity, steps: ActivityStep[]) {
     adoptDestination(nav, destination);
     nav.phase = 'planning';
   }
+  // 调整后的步骤没有长程委托形状（例如换成 navigate_to）就不再沿用旧的方向探索/地标表述。
+  const step = steps.find((own) => NAVIGATION_SKILLS.has(own.skill));
+  const request = step === undefined ? undefined : navigationRequestOf(step, nav.measured.pos);
+  if (request !== undefined) nav.request = request;
+  else delete nav.request;
   if (a.doneWhen) nav.arrivalCondition = a.doneWhen; else delete nav.arrivalCondition;
   nav.updatedAt = now;
   return nav;
@@ -438,10 +554,14 @@ function describeNavigation(nav: NavigationProgress) {
     delegation_id: nav.delegationId,
     state: nav.phase,
     ...(nav.destination ? { original_destination: nav.destination } : {}),
+    ...(nav.request ? { original_request: nav.request } : {}),
     ...(nav.arrivalCondition ? { arrival_condition: nav.arrivalCondition } : {}),
     scope: `${nav.worldId}/${nav.dim}`,
     measured_position: nav.measured.pos,
     ...(nav.segmentStart ? { segment_start: nav.segmentStart } : {}),
+    ...(nav.progress ? { measured_progress: nav.progress } : {}),
+    ...(nav.sessionId ? { session_id: nav.sessionId } : {}),
+    ...(nav.stop ? { stop_reason: nav.stop.reason, ...(nav.stop.detail ? { stop_detail: nav.stop.detail } : {}) } : {}),
     completed_segments: nav.completedSegments,
     remaining_count: nav.remaining.length,
     // 只给当前计划的剩余点（上限 8），不把历史路点塞进提示词。
@@ -453,6 +573,31 @@ function describeNavigation(nav: NavigationProgress) {
     ...(nav.lastInvalidation ? { last_invalidation: nav.lastInvalidation.reason } : {}),
     ...(nav.lastFailure ? { last_failure: nav.lastFailure.summary } : {}),
     ...(nav.strategy ? { strategy: nav.strategy } : {}),
+  };
+}
+
+const DIRECTION_NAMES: Record<string, string> = { N: '北', E: '东', S: '南', W: '西' };
+
+/** 长程委托的一句话现状与 continue/detour/switch 的后果；现场事实，不是调度建议。 */
+function movementDelegationOf(nav: NavigationProgress | undefined) {
+  const request = nav?.request;
+  if (nav === undefined || request === undefined) return undefined;
+  const measured = nav.progress;
+  const what = request.skill === 'explore_toward'
+    ? `正向${DIRECTION_NAMES[request.direction] ?? request.direction}探索 ${request.distance} 格`
+      + (measured?.along === undefined ? '' : `，已沿原方向推进 ${Math.round(measured.along * 100) / 100} 格`)
+    : `去 ${typeof request.target === 'string' ? request.target : JSON.stringify(request.target) ?? String(request.target)}（range ${request.range}）`
+      + (measured?.remaining === undefined ? '' : `，实测距原目标水平 ${measured.remaining} 格`);
+  return {
+    what,
+    session_id: nav.sessionId ?? null,
+    state: nav.phase,
+    can_resume: nav.stop?.reason === 'SUSPENDED' || nav.phase === 'paused',
+    ...(measured ? { measured_progress: measured } : {}),
+    ...(nav.stop ? { stop_reason: nav.stop.reason, ...(nav.stop.detail ? { stop_detail: nav.stop.detail } : {}) } : {}),
+    continue: '按原目标与原委托参数继续同一移动会话；累计预算与实测进展保留',
+    detour: '可先做别的事；完成后复核这段活的收工条件，未满足则恢复同一条路线',
+    switch: '放弃这条路线；旧移动会话不再由这段活续接',
   };
 }
 
@@ -711,13 +856,22 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   // Activity 不按 failed 收尾。
   if (result.status === 'failed' && NAVIGATION_SKILLS.has(step.skill)) {
     const data = (result.data ?? {}) as Record<string, unknown>;
-    const confirmed = confirmedSegmentsOf(data);
-    if (confirmed > 0) {
+    const longRange = step.skill === 'travel_to' || step.skill === 'explore_toward';
+    // 长程工具的会话回执是累计值；本次是否有进展用单次增量与实测位移分别判断。
+    const confirmed = longRange
+      ? a.navigation?.lastInvocationConfirmed ?? confirmedSegmentsOf(data)
+      : confirmedSegmentsOf(data);
+    const moved = longRange ? navigationDisplacement(result, a.stepStart?.pos, { ...state.pos }) : 0;
+    if (confirmed > 0 || moved > 0.05) {
       a.consecutiveFailures = 0;
-      const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；保留这段实测进展，下一段从实测位置重新派发`;
       const reached = conditionReached();
       if (reached) return reached;
-      return remainingSteps(a) === 0 ? { kind: 'done', met: false, why } : { kind: 'continue' };
+      if (!longRange) {
+        const why = `${step.skill} 已确认 ${confirmed} 段但未到原目的地；保留这段实测进展，下一段从实测位置重新派发`;
+        return remainingSteps(a) === 0 ? { kind: 'done', met: false, why } : { kind: 'continue' };
+      }
+      // 长程工具：进展已记入活动账，但路线停点与续接凭据仍交给 Agent 决定，不自动重放整段。
+      // 落到下面的冻结目标分支，保留停止原因与 continuation.sessionId。
     }
   }
   if (softMiss(a, step, result)) {
@@ -1174,6 +1328,9 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
       dim: a.navigation.dim, completedSegments: a.navigation.completedSegments,
       remaining: a.navigation.remaining.map((p) => ({ ...p })), phase: a.navigation.phase,
       ...(a.navigation.lastInvalidation ? { lastInvalidation: a.navigation.lastInvalidation.reason } : {}),
+      ...(a.navigation.request ? { request: a.navigation.request } : {}),
+      ...(a.navigation.progress ? { progress: a.navigation.progress } : {}),
+      ...(a.navigation.sessionId ? { sessionId: a.navigation.sessionId } : {}),
     } } : {}),
     completion: attemptOnly ? 'attempt' as const
       : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
@@ -1251,6 +1408,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
         remaining_rounds: roundsLeft,
         done_when_can_stop_early: !!a.doneWhen,
       };
+  const movement = movementDelegationOf(a.navigation);
   // 正在执行的这一步被取消/换掉时会发生什么：如实说明会失去什么、哪些已确认的进展会保留。
   // 这不是建议，也不自动续跑；只把停下来的代价交给 Agent。
   const stopEffect = running && running.source !== 'filler' && running.source !== 'reflex' ? {
@@ -1261,6 +1419,11 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
       // 当前站位取实时身体状态；navigation.measured 可能还停在派发起点。
       measured_pos: { x: state.pos.x, y: state.pos.y, z: state.pos.z },
       remaining_targets: a.navigation.remaining.length,
+      ...(a.navigation.request ? { original_request: a.navigation.request } : {}),
+      ...(a.navigation.progress ? { measured_progress: a.navigation.progress } : {}),
+      ...(a.navigation.stop?.reason ? { stop_reason: a.navigation.stop.reason } : {}),
+      resume_with_session_id: a.navigation.stop?.reason === 'SUSPENDED' || a.navigation.phase === 'paused'
+        ? a.navigation.sessionId ?? null : null,
     } : {}),
     partial_progress_recorded: true,
     not_counted_as_completed: '被取消的这一步不会记为完成，也不会自动续跑到原目标',
@@ -1273,7 +1436,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(running ? { running_step: { skill: running.skill, args: running.args, source: running.source, elapsed_real_s: Math.round((Date.now() - running.startedAt) / 1000) } } : {}),
-    continue_effect: continueEffect,
+    continue_effect: movement === undefined ? continueEffect : { ...continueEffect, movement_delegation: movement },
     ...(stopEffect ? { stop_effect: stopEffect } : {}),
     ...(lastCollection ? { last_collection: lastCollection } : {}),
     ...(a.applying ? { applying: a.applying, applying_at_start: a.applyingText ?? 'unknown' } : {}),

@@ -371,6 +371,55 @@ test('绕路时挂起长程移动，回来带同一 sessionId 续接原委托', 
   assert.equal(w.mind.activity?.id, original.id);
 });
 
+test('挂起回执晚于插曲开始/续接时，按 taskId 与步骤实例归还，不结束当前活动', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.explore_toward;
+  SKILLS.explore_toward = {
+    name: 'explore_toward', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: (raw: any) => ({ ok: true as const, args: { direction: 'W', distance: 64, ...(raw?.sessionId ? { sessionId: raw.sessionId } : {}) } }),
+    run: async (ctx) => new Promise<SkillResult>((_resolve, reject) => {
+      const stop = () => {
+        // 模拟取消回执慢于插曲开始：先让 detour 和续接跑起来，再把 sessionId 交回。
+        setTimeout(() => {
+          const error = new AbortedError('cancelled');
+          (error as Error & { partial?: Record<string, unknown> }).partial = { sessionId: 'ms_late', stop: { reason: 'SUSPENDED' } };
+          reject(error);
+        }, 100);
+      };
+      if (ctx.signal.aborted) return stop();
+      ctx.signal.addEventListener('abort', stop, { once: true });
+    }),
+  };
+  t.after(() => { if (previous) SKILLS.explore_toward = previous; else delete SKILLS.explore_toward; });
+
+  await w.tick();
+  await w.reply(0, { monologue: '向西走', decision: 'new', activity: { what: '向西探索', steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64 } }] } });
+  await w.tick();
+  const original = w.mind.activity!;
+
+  w.mind.attention.notice('hungry', '饿了', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  const detourAt = w.pending.length - 1;
+  await w.reply(detourAt, { monologue: '先捡点东西', decision: 'detour', activity: { what: '捡东西', steps: [step(9)] } });
+  await w.tick();
+  assert.equal(w.mind.activity?.what, '捡东西', '插曲已经开始');
+  await w.finish();
+  await w.tick();
+  const askAt = w.pending.length - 1;
+  await w.reply(askAt, { monologue: '接着向西', decision: 'continue' });
+  await w.tick();
+  assert.equal(w.mind.activity?.id, original.id);
+
+  // 等迟到的取消回执：它只应把 sessionId 归还给原步骤，不能结束当前活动或改错步骤。
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  await flush();
+  assert.equal(original.movementPause?.sessionId, 'ms_late');
+  assert.equal(original.movementPause?.stepId, original.steps[0]?.id);
+  assert.equal(w.mind.activity?.id, original.id, '迟到回执没有结束当前活动');
+  assert.equal(w.mind.suspended.length, 0);
+});
+
 test('绕路回来时原活动收工条件已满足：复核后收工，不重新派发移动步', async (t) => {
   const w = fixture(t);
   const previous = SKILLS.explore_toward;
@@ -414,6 +463,34 @@ test('绕路回来时原活动收工条件已满足：复核后收工，不重�
   assert.equal(w.mind.activity, null, '复核已满足收工条件，不重派移动步');
   assert.notEqual(w.arbiter.info()?.skill, 'explore_toward');
   assert.equal(original.conditionTriggered, true);
+});
+
+test('长程移动部分推进不写成失败练习；真实无进展失败仍记失败', async (t) => {
+  const previous = SKILLS.travel_to;
+  const fake = (position: { x: number; y: number; z: number }, summary: string) => ({
+    name: 'travel_to', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: () => ({ ok: true as const, args: { to: { x: 0, y: 64, z: -96 }, range: 2 } }),
+    run: async () => fail('PATH_NOT_FOUND', summary, {
+      sessionId: 'ms_test', confirmedSegments: 0, position, stop: { reason: 'NO_PATH' },
+    }),
+  });
+  t.after(() => { if (previous) SKILLS.travel_to = previous; else delete SKILLS.travel_to; });
+
+  SKILLS.travel_to = fake({ x: 0.5, y: 64, z: -30 }, '底层搜索无路，但身体已向南移动 30 格');
+  const partial = fixture(t);
+  await partial.tick();
+  await partial.reply(0, { decision: 'new', activity: { what: '向南走', steps: [{ skill: 'travel_to', args: { to: { x: 0, y: 64, z: -96 }, range: 2 } }] } });
+  await partial.tick();
+  await flush();
+  assert.equal(partial.self.data.feel.travel_to, undefined, '有实测位移但未到达的长程移动不写失败样本');
+
+  SKILLS.travel_to = fake({ x: 0, y: 64, z: 0 }, '原地没有找到路线');
+  const stalled = fixture(t);
+  await stalled.tick();
+  await stalled.reply(0, { decision: 'new', activity: { what: '向南走', steps: [{ skill: 'travel_to', args: { to: { x: 0, y: 64, z: -96 }, range: 2 } }] } });
+  await stalled.tick();
+  await flush();
+  assert.ok((stalled.self.data.feel.travel_to?.fail ?? 0) > 0, '没有实测进展的真实失败仍计一次失败练习');
 });
 
 test('卡住时认真想，并把实际结果和卡住时的备选交给模型；学到的窍门会记下来', async (t) => {

@@ -16,7 +16,7 @@ import { causeName } from '../brain/habits.ts';
 import { consumptionSummary, toolTierFact } from '../brain/supply.ts';
 import { pickFuel } from '../skills/economy.ts';
 import { pickVariant } from '../skills/work.ts';
-import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, noteNavigationDispatch, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, progressSignals, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
+import { afterStep, argsLabel, beginStep, clipFeedback, invalidateNavigation, markContinuation, navigationDisplacement, noteNavigationDispatch, noteNavigationResult, rebindStanceTarget, retargetNavigation, stanceReached, softMiss, createActivity, describeActivity, doneWhenMet, diffInventory, inventoryOf, localStepFailure, nextStep, partialExcavation, planCoverageGap, progressSignals, recordOf, remainingSteps, signatureOf, targetKeyOf, viewOf, withoutRemediation } from './activity.ts';
 import { relativeCellAction } from '../skills/stance.ts';
 import { suspendScopeSessions } from '../skills/movement/session.ts';
 import { instinctNote, type BehaviorEngine } from './behaviors.ts';
@@ -763,7 +763,14 @@ export class Mind {
       this.resumeCheck = null;
     } else this.resumeCheck = null;
     const step = nextStep(this.activity);
-    if (!step) return this.finishActivity('done', '这段活的步骤都做完了');
+    if (!step) {
+      const condition = this.activity.doneWhen;
+      // 步骤用完也走同一套收尾判定：收工条件未满足就照实记 unmet，不把“做完了步骤”当成目标完成。
+      if (condition && !doneWhenMet(this.activity, this.d.adapter.state(), this.safe(() => this.d.perception.snapshot(), undefined))) {
+        return this.finishActivity('unmet', `步骤都用完了，收工条件未满足：${JSON.stringify(condition)}`);
+      }
+      return this.finishActivity('done', '这段活的步骤都做完了');
+    }
     // 局部恢复只作为事实提醒，不拦截 Agent 已明确选择的新一步；否则“先往东挪一格”
     // 这类合法尝试会被同一位置的历史失败误伤，反而把行动锁死。
     const localFails = this.localPathFailures(this.d.adapter.state());
@@ -789,6 +796,17 @@ export class Mind {
           this.d.bus.publish('body_adapt', 'P2', `「${gap.skill}」的站位副作用已经把身体带到本次支撑的脚位 (${rebound.target.x},${rebound.target.y},${rebound.target.z})；接着的相对移动目标已达成，不再移动`, { planId: this.activity.id, skill: step.skill, target: rebound.target });
           this.activity.results.push({ skill: step.skill, args: step.args, status: 'succeeded', summary: '站位副作用已达成该相对移动的目标，不再移动', at: Date.now(), durationMs: 0, pos: { ...body.pos } });
           this.activity.consecutiveFailures = 0;
+          // 这一步没有真正派发动作，但实测位置已经变化：收工条件仍按同一套规则复核。
+          if (this.activity.doneWhen) {
+            const condition = JSON.stringify(this.activity.doneWhen);
+            const met = doneWhenMet(this.activity, body, this.safe(() => this.d.perception.snapshot(), undefined));
+            if (met) {
+              this.activity.conditionTriggered = true;
+              this.finishActivity('done', `补支撑已顺带走到目标格；收工条件已满足 ${condition}`);
+            } else if (remainingSteps(this.activity) === 0) {
+              this.finishActivity('unmet', `补支撑已顺带走到目标格，但收工条件未满足：${condition}`);
+            }
+          }
           return;
         }
         if (rebound) {
@@ -817,9 +835,10 @@ export class Mind {
     // 逻辑动作的模板（带稳定 id）：期限与材料账本按它记录；动作回执里的规范化参数不能当模板。
     const template = this.activity.steps[Math.max(0, this.activity.index - 1)] ?? step;
     const pausedMovement = this.activity.movementPause;
-    const resumingMovement = pausedMovement !== undefined && pausedMovement.stepId === template.id;
+    const resumeSessionId = pausedMovement !== undefined && pausedMovement.stepId === template.id
+      ? pausedMovement.sessionId : undefined;
     // 回来先复核活动自己的收工条件：已经满足就收工，不因“回到该步”而重走一次。
-    if (resumingMovement && this.activity.doneWhen
+    if (pausedMovement?.stepId === template.id && this.activity.doneWhen
       && doneWhenMet(this.activity, state, this.safe(() => this.d.perception.snapshot(), undefined))) {
       const condition = JSON.stringify(this.activity.doneWhen);
       delete this.activity.movementPause;
@@ -828,7 +847,7 @@ export class Mind {
       return;
     }
     // 续接同一逻辑动作：沿用原动作期限/材料账本，不重新起算。
-    if (resumingMovement) markContinuation(this.activity, template);
+    if (pausedMovement?.stepId === template.id) markContinuation(this.activity, template);
     const budget = skill ? beginStep(this.activity, template, state) : undefined;
     if (budget && budget.remainingMs <= 0) {
       this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
@@ -838,7 +857,6 @@ export class Mind {
     noteNavigationDispatch(this.activity, template, state, budget ? { deadlineMs: budget.deadlineMs } : {});
     // sessionId 是执行状态，只注入本次派发参数，不写回 Agent 的原始步骤参数：
     // adjust 的实例/参数相等性校验仍以原意图为准。
-    const resumeSessionId = pausedMovement !== undefined && pausedMovement.stepId === template.id ? pausedMovement.sessionId : undefined;
     const dispatch = resumeSessionId !== undefined && step.args !== null && typeof step.args === 'object' && !Array.isArray(step.args)
       ? { ...step, args: { ...(step.args as Record<string, unknown>), sessionId: resumeSessionId } }
       : step;
@@ -1413,12 +1431,17 @@ export class Mind {
     const owner = this.activity?.id === o.task.planId ? this.activity
       : this.suspended.find((a) => a.id === o.task.planId);
     if (!owner) return;
-    const step = owner.steps[owner.index];
+    const pause = owner.movementPause;
+    // 只认挂起时记录的那个任务；按步骤实例归还，不按回来时可能已经前进的 index。
+    if (pause === undefined || pause.taskId !== o.task.id) return;
+    const step = owner.steps.find((own) => own.id === pause.stepId);
     const sessionId = o.result.data?.sessionId;
-    if (!step || step.id === undefined || step.skill !== o.task.skill || typeof sessionId !== 'string') return;
-    owner.movementPause = { taskId: o.task.id, stepId: step.id, skill: step.skill, sessionId };
+    if (!step || step.skill !== o.task.skill || typeof sessionId !== 'string') return;
+    pause.sessionId = sessionId;
     // 回来续接仍是同一逻辑动作：沿用原动作期限与材料账本，不重新起算。
     markContinuation(owner, step);
+    // 挂起回执同样并入活动导航：模型回来时会先看到 paused、原目标和可续接的 session。
+    noteNavigationResult(owner, { skill: o.task.skill, args: o.task.args }, o.result, this.d.adapter.state());
     this.d.bus.publish('activity_resume_ready', 'P3',
       `「${owner.what}」的 ${o.task.skill} 已挂起：${clipFeedback(o.result.summary, 160)}；回来用同一 sessionId 续接`,
       { planId: owner.id, stepId: step.id, sessionId });
@@ -1429,9 +1452,15 @@ export class Mind {
     if (this.stepExpiry?.taskId === o.task.id) this.clearStepExpiry();
     if (o.task.source === 'filler') return;
     if (o.result.status === 'cancelled' && o.suspended === true) { this.noteSuspendedMovement(o); return; }
-    const observationMiss = softMiss(this.activity?.id === o.task.planId ? this.activity : null, { skill: o.task.skill, args: o.task.args }, o.result);
+    const owner = this.activity?.id === o.task.planId ? this.activity : null;
+    const observationMiss = softMiss(owner, { skill: o.task.skill, args: o.task.args }, o.result);
+    // 长程移动没走到终点但有实测位移/实际施工时，不是“整段失败”；练习接口只有布尔值，先跳过中性样本。
+    const longRange = o.task.skill === 'travel_to' || o.task.skill === 'explore_toward';
+    const partialLongRange = longRange && o.result.status === 'failed'
+      && (navigationDisplacement(o.result, owner?.stepStart?.pos, this.d.adapter.state().pos) > 0.05
+        || ((o.result.data?.makeWay as { edits?: unknown[] } | undefined)?.edits?.length ?? 0) > 0);
     if (o.result.status !== 'cancelled' && !observationMiss) {
-      if (o.task.source !== 'reflex') {
+      if (o.task.source !== 'reflex' && !partialLongRange) {
         this.d.self.practice(o.task.skill, o.result.status === 'succeeded', o.durationMs);
         this.d.self.feel({ type: 'step', ok: o.result.status === 'succeeded' });
       }
@@ -2201,10 +2230,19 @@ export class Mind {
       if (running?.planId === a.id) {
         const resumeMovement = RESUMABLE_LONG_RANGE.has(running.skill);
         if (resumeMovement) {
+          // 先记下挂起发生在哪个步骤实例；取消回执可能晚到，不能按回来时的 index 猜。
+          const runningStep = a.steps[Math.max(0, a.index - 1)];
+          if (runningStep?.id !== undefined) {
+            const previous = a.movementPause?.stepId === runningStep.id ? a.movementPause : undefined;
+            a.movementPause = {
+              taskId: running.id, stepId: runningStep.id, skill: running.skill,
+              ...(previous?.sessionId === undefined ? {} : { sessionId: previous.sessionId }),
+            };
+          }
           // 先标记原移动 session 可续接，再挂起；插曲随后新建的移动意图只取代仍在执行的 session。
           const state = this.d.adapter.state();
           suspendScopeSessions({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId });
-          this.d.arbiter.suspend('先去处理别的事');
+          this.d.arbiter.suspend();
         } else {
           this.d.arbiter.cancel('先去处理别的事');
         }
