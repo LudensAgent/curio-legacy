@@ -20,7 +20,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 const decision = { decision: 'new', monologue: '先看看眼前的情况，再决定怎么用这些资料。',
   activity: { what: '观察身边', steps: [{ skill: 'look_around', args: { seconds: 1 } }] } };
 
-function fixture(t: TestContext, replies: object[], tier: MindContext['tier'] = 'deliberate', body = `## conditions | 条件
+function fixture(t: TestContext, replies: (object | string)[], tier: MindContext['tier'] = 'deliberate', body = `## conditions | 条件
 测试资料：关于床的使用条件，是否采用由 Agent 自己决定。
 
 ## effects | 效果
@@ -45,8 +45,8 @@ ${body}
   const planner = new Planner(cfg, { name: 'knowledge-protocol-test', complete: async (messages) => {
     calls.push(structuredClone(messages));
     const reply = replies[calls.length - 1];
-    assert.ok(reply, 'unexpected additional model call');
-    return { text: JSON.stringify(reply), latencyMs: 1 };
+    assert.notEqual(reply, undefined, 'unexpected additional model call');
+    return { text: typeof reply === 'string' ? reply : JSON.stringify(reply), latencyMs: 1 };
   } }, adapter, memory, bus, null);
   const knowledge = new KnowledgeBase('1.20.1', directory);
   const thinker = new Thinker(planner, adapter, memory, bus, null, knowledge);
@@ -174,8 +174,10 @@ test('low air underwater reads a knowledge query embedded in a step without esca
 });
 
 test('knowledge reading obeys one cumulative byte budget, reports pagination or exhaustion and resets for the next thought', async (t) => {
-  const read = { kind: 'knowledge', id: 'fixture-topic', section: 'conditions' };
-  const w = fixture(t, [read, read, read, decision, read, decision], 'deliberate', `## conditions | 条件\n${'知识预算测试的完整中文正文。'.repeat(1000)}`);
+  // 每次读不同章节：同一参数会命中本念的查询缓存，不再消耗字节预算。
+  const read = (section: string) => ({ kind: 'knowledge', id: 'fixture-topic', section });
+  const long = (section: string) => `## ${section} | 条件${section}\n${`知识预算测试的完整中文正文${section}。`.repeat(1000)}`;
+  const w = fixture(t, [read('alpha'), read('beta'), read('gamma'), decision, read('alpha'), decision], 'deliberate', [long('alpha'), long('beta'), long('gamma')].join('\n\n'));
   const queried = t.mock.method(w.knowledge, 'query');
   await w.think();
   const prefix = '查询结果（只读，不是现场事实）：';
@@ -202,4 +204,37 @@ test('reading a document directory persists its chapter list for later thoughts'
   assert.equal(facts.length, 1);
   assert.equal(facts[0]!.docId, 'fixture-topic');
   assert.match(facts[0]!.fact, /章节：条件；效果/);
+});
+
+test('an invalid decision after a knowledge query retries with the cached result', async (t) => {
+  const w = fixture(t, [{ kind: 'knowledge', query: '床的使用条件' }, { nope: true }, decision]);
+  const result = await w.think();
+  assert.equal(result.activity?.steps[0].skill, 'look_around');
+  assert.equal(w.calls.length, 3);
+  assert.match(w.calls[2].at(-1)!.content, /资料已经查过，不要重复查询/);
+  assert.match(w.calls[2].at(-1)!.content, /fixture-topic/);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 1, '重试不重复查同一个问题');
+});
+
+test('repeating the same knowledge query reuses the cached result', async (t) => {
+  const w = fixture(t, [{ kind: 'knowledge', query: '床的使用条件' }, { kind: 'knowledge', query: '床的使用条件' }, decision]);
+  await w.think();
+  assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 1);
+});
+
+test('an empty reply after a knowledge query retries with the cached result', async (t) => {
+  const w = fixture(t, [{ kind: 'knowledge', query: '床的使用条件' }, '', decision]);
+  const result = await w.think();
+  assert.equal(result.activity?.steps[0].skill, 'look_around');
+  assert.match(w.calls[2].at(-1)!.content, /空回复/);
+  assert.match(w.calls[2].at(-1)!.content, /资料已经查过，不要重复查询/);
+  assert.match(w.calls[2].at(-1)!.content, /fixture-topic/);
+});
+
+test('repeating an earlier knowledge query within one thought also reuses its cache entry', async (t) => {
+  const first = { kind: 'knowledge', query: '床的使用条件' }, second = { kind: 'knowledge', id: 'fixture-topic', section: 'conditions' };
+  const w = fixture(t, [first, second, first, decision]);
+  await w.think();
+  assert.equal(w.bus.recent().filter((e) => e.type === 'knowledge_query').length, 2, '两个不同问题各查一次，第三个重复问题走缓存');
+  assert.match(w.calls[3].at(-1)!.content, /结果同上一条/);
 });

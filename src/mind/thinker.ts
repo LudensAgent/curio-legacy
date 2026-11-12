@@ -20,7 +20,7 @@ import { terrainSketch } from '../building/site.ts';
 import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
-import type { KnowledgeBase } from '../knowledge/library.ts';
+import type { KnowledgeBase, KnowledgeMatch } from '../knowledge/library.ts';
 import { describeBuild, myBuilds } from './home.ts';
 import type { LedgerView } from './ledger.ts';
 import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
@@ -37,6 +37,17 @@ const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
  */
 export const LOW_AIR_OXYGEN = 10;
 import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision, type NextDraft } from './types.ts';
+
+/** 无效决定重试时把已查到的资料压成一小段，提醒模型不要重复查询。 */
+const knowledgeDigest = (result: string) => {
+  let parsed: { action?: string; matches?: KnowledgeMatch[];
+    document?: { id: string; sections?: { id: string; text?: string }[] } };
+  // 知识库未启用时返回的是普通文字；解析边界失败就按原文截一段交给模型。
+  try { parsed = JSON.parse(result) as typeof parsed; } catch { return result.slice(0, 800); }
+  if (parsed.action === 'search') return (parsed.matches ?? []).map((match) => `${match.id}${match.section ? `#${match.section}` : ''}：${match.excerpt}`).join('\n').slice(0, 1200) || '没有匹配';
+  const section = parsed.document?.sections?.find((candidate) => candidate.text);
+  return section ? `${parsed.document!.id}#${section.id}：${section.text!.slice(0, 1200)}` : result.slice(0, 800);
+};
 
 const str = (v: unknown, max: number) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 
@@ -448,8 +459,13 @@ export class Thinker {
     const suppressEscalation = (why: string) => this.bus.publish('llm_escalate_suppressed', 'P3', `水位低氧，先不升级成认真想：${why}`, { reason: ctx.reason, oxygen: ctx.state.oxygen });
     const knowledgeExhausted = JSON.stringify({ error: '本次思考的知识查询预算已用完，请根据已读资料作决定。' });
     const knowledgeReserve = Buffer.byteLength(knowledgeExhausted, 'utf8');
+    // 同一念里按问题缓存资料结果：重复查同一问题不再访问后端，也不重复塞结果；
+    // 无效决定重试时用最近一次结果摘要（last），都不重新查。
+    const knowledgeMemo: { cache: Map<string, string>; last: string | null; retried: boolean } = { cache: new Map(), last: null, retried: false };
     const query = async (kind: string, raw: Record<string, unknown>) => {
       if (kind !== 'knowledge') return this.query(kind, raw, ctx, signal);
+      const key = JSON.stringify(raw);
+      if (knowledgeMemo.cache.has(key)) return '（与上次查询相同，结果同上一条，不再重复返回）';
       const remaining = 10_000 - knowledgeBytes;
       if (remaining < 512 + knowledgeReserve) {
         knowledgeBytes += knowledgeReserve;
@@ -457,6 +473,8 @@ export class Thinker {
       }
       const result = await this.query(kind, raw, ctx, signal, remaining - knowledgeReserve);
       knowledgeBytes += Buffer.byteLength(result, 'utf8');
+      knowledgeMemo.cache.set(key, result);
+      knowledgeMemo.last = result;
       return result;
     };
     let repaired = false;
@@ -470,6 +488,12 @@ export class Thinker {
         invalid++;
         const error = c.finishReason === 'length' ? '输出被截断' : c.text.trim() ? `不是合法 JSON：${(e as Error).message}` : '空回复';
         this.planner.noteInvalid(ctx.reason, error);
+        // 查过资料后空回复/无效：把已查到的内容再压一遍交给它，并明确不要重复查询；只补这一次。
+        if (knowledgeMemo.last && !knowledgeMemo.retried) {
+          knowledgeMemo.retried = true;
+          messages.push({ role: 'user', content: `刚才的回复无效（${error}）。资料已经查过，不要重复查询；根据这份资料给出决定：\n${knowledgeDigest(knowledgeMemo.last)}\n只输出一个简短的 JSON 对象（monologue 不超过 60 字）。` });
+          continue;
+        }
         if (invalid >= 2) throw new Error(`INVALID_DECISION: ${error}`);
         messages.push({ role: 'user', content: `刚才的回复无效（${error}）。请直接输出一个简短的 JSON 对象（monologue 不超过 60 字）。` });
         continue;
@@ -540,6 +564,12 @@ export class Thinker {
         firstDraft = null;
         invalid++;
         this.planner.noteInvalid(ctx.reason, parsed.error);
+        if (knowledgeMemo.last && !knowledgeMemo.retried) {
+          knowledgeMemo.retried = true;
+          messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },
+            { role: 'user', content: `这个决定没法执行：${parsed.error}。资料已经查过，不要重复查询；根据它改正后只输出一个 JSON 对象：\n${knowledgeDigest(knowledgeMemo.last)}` });
+          continue;
+        }
         if (invalid >= 2) throw new Error(`INVALID_DECISION: ${parsed.error}`);
         messages.push({ role: 'assistant', content: c.text.slice(0, 1500) }, { role: 'user', content: `这个决定没法执行：${parsed.error}。请改正后只输出一个 JSON 对象。` });
         continue;
