@@ -106,6 +106,8 @@ const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS',
 const MAX_MAKE_WAY_LEGS = 64;
 /** 所需区段暂时加载不了（存档正在写盘等）时，等这么久再重试，最多这么多次。 */
 const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
+/** 同一站位、同一相关证据、同一搜索终态最多重搜几次；再多就是搜索/复验矛盾，交回 Agent。 */
+const MAX_SAME_EVIDENCE_SEARCHES = 1;
 
 /**
  * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell，只用授权工具或当前手持），再补支撑（place_support）
@@ -233,6 +235,7 @@ const STOP_FAILURE: Record<StopReason, FailureCode> = {
   PHYSICAL_FAILURE: 'EFFECT_NOT_CONFIRMED',
   ACTION_FAILURE: 'ERROR',
   MODE_GAP: 'PATH_NOT_FOUND',
+  CONFLICT: 'PATH_NOT_FOUND',
   NO_PROGRESS: 'PATH_NOT_FOUND',
   LATERAL_DRIFT: 'PATH_NOT_FOUND',
   DETOUR_TOO_LARGE: 'PATH_NOT_FOUND',
@@ -248,12 +251,12 @@ const isSuccess = (reason: StopReason) => reason === 'DISTANCE_MET' || reason ==
 const canResume = (reason: StopReason) =>
   reason === 'BUDGET_EXHAUSTED' || reason === 'TIMEOUT' || reason === 'NO_PROGRESS' || reason === 'UNKNOWN_BOUNDARY'
   || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'RESIDENCY_NOT_READY'
-  || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED';
+  || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED' || reason === 'CONFLICT';
 
 /** 终止后仍允许同一 session 续接的原因；其余终态必须新建意图。 */
 const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
   'BUDGET_EXHAUSTED', 'TIMEOUT', 'NO_PROGRESS', 'UNKNOWN_BOUNDARY',
-  'BLOCKED', 'NO_PATH', 'RESIDENCY_NOT_READY', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED',
+  'BLOCKED', 'NO_PATH', 'RESIDENCY_NOT_READY', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED', 'CONFLICT',
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -289,7 +292,8 @@ function continuationOf(session: MovementSession) {
     requires: canContinue
       ? reason === 'BLOCKED' ? ['已记录受阻的出边；附近可见证据或站位变化后，同一目标可用原 sessionId 复核']
         : reason === 'UNKNOWN_BOUNDARY' ? ['观察相关边界或靠近后重新调用；原目标不变时用同一 sessionId']
-          : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
+          : reason === 'CONFLICT' ? ['同一站位/证据下搜索与复验不一致；先观察、换站位或施工改变证据，再决定是否续接']
+            : reason === 'NO_PROGRESS' ? ['换一个意图或先改变地形/证据，再决定是否续接']
             : reason === 'RESIDENCY_NOT_READY' ? ['所需数据未加载/驻留；可稍后重试、先观察或换位置；同一 sessionId 续接，累计预算不会重置']
               : ['用同一 sessionId 续接；累计预算不会重置']
       : budgetExhausted && reason !== undefined && canResume(reason)
@@ -423,6 +427,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   const swimLegs: SwimLegReceipt[] = [];
   const makeWayEdits: MakeWayEdit[] = [];
   const makeWayLegs: MakeWayLegReceipt[] = [];
+  /** 同一站位/终态/边界在“没有新相关观察、身体也没动”时重复搜索的次数。 */
+  const sameEvidenceSearches = new Map<string, number>();
+  /** 上一次搜索之后是否真的观察到相关证据变化；无关视觉刷新不算。 */
+  let evidenceChangedSinceSearch = false;
+  /** 复验已把同一搜索结果判为 OPEN（或相反），但搜索仍给出不同结论。 */
+  let searchContradicted = false;
   let observation: ObservationReceipt | undefined;
   let invocationTransitions = 0;
   let stop: StopReceipt | null = null;
@@ -576,6 +586,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         return goal;
       };
       const chunksBefore = ctx.memory.visitedChunkCount;
+      const searchSawNewEvidence = evidenceChangedSinceSearch;
+      evidenceChangedSinceSearch = false;
+      // 矛盾结论只属于同一证据版本；观察到新证据后重新判断。
+      if (searchSawNewEvidence) searchContradicted = false;
       const segment = await runNavigationSegment(ctx, {
         goal: goalAt(state.pos),
         ...(request.rolling ? { nextWindow: goalAt } : {}),
@@ -640,6 +654,21 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       if (segment.outcome === 'cancelled') {
         stop = stopOf('CANCELLED', segment.detail ?? '执行被取消；已确认段保留');
         break;
+      }
+      // 同一站位、同一相关证据下反复得到同一搜索终态：不是“再搜一次就好”。
+      // 允许一次（边界复验可能带来新证据），第二次就交回原因和具体边界，不自动重播。
+      // 若复验已判同一条边 OPEN 而搜索仍说证据不足，按 CONFLICT 交回；否则如实停在 UNKNOWN_BOUNDARY。
+      if (!progressed && segment.searches > 0 && segment.outcome === 'unknown_boundary') {
+        const siteKey = `${cellText(after.pos)}|${segment.searchStatus}|${segment.boundary ? boundaryKeyOf(segment.boundary, after.pos) : segment.stopCode ?? ''}`;
+        const count = (searchSawNewEvidence ? 0 : sameEvidenceSearches.get(siteKey) ?? 0) + 1;
+        sameEvidenceSearches.set(siteKey, count);
+        if (!searchSawNewEvidence && count > MAX_SAME_EVIDENCE_SEARCHES) {
+          const edge = segment.boundary === undefined ? '' : `（边界 ${cellText(segment.boundary.from)}→${cellText(segment.boundary.to)}）`;
+          stop = stopOf(searchContradicted ? 'CONFLICT' : 'UNKNOWN_BOUNDARY', `同一站位 ${cellText(after.pos)}、同一相关证据下搜索仍返回 ${segment.searchStatus}${edge}`
+            + `；${searchContradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播，下一步由你决定`,
+            { ...(segment.boundary === undefined ? {} : { boundaries: [segment.boundary] }) });
+          break;
+        }
       }
       // 身体稳稳站在地面上（活着、不在岩浆里）时，执行层的失败只是这一段的结束，后面从实测位置重新规划。
       const steady = after.alive && after.onGround && !after.inLava;
@@ -838,6 +867,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           session.observedBoundaries = [...(session.observedBoundaries ?? []), boundaryKey!];
           session.updatedAt = Date.now();
           if (observation.relatedChanged) {
+            evidenceChangedSinceSearch = true;
             session.phase = 'replanning';
             continue;
           }
@@ -896,6 +926,9 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           return check.transitions[0]?.status === 'OPEN';
         };
         if (canProceed()) {
+          // 同一条边在最新证据下已 OPEN，但这次搜索仍说证据不足/无路：记录矛盾事实，
+          // 允许再搜一次；仍不一致时按 CONFLICT 交回，而不是无限重播。
+          searchContradicted = true;
           session.phase = 'replanning';
           continue;
         }
@@ -1009,6 +1042,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (Date.now() >= deadline) { stop = stopOf('TIMEOUT', '前沿观察到达原期限'); break; }
         const boundarySighting = request.checkSighting?.();
         if (boundarySighting !== undefined) { stop = stopOf('UNTIL_SEEN', boundarySighting); break; }
+        if (observation.relatedChanged) evidenceChangedSinceSearch = true;
         if (!observation.relatedChanged) {
           const detoured = await tryDetour();
           if (detoured === 'cancelled') { stop = stopOf('CANCELLED', '绕行时父任务取消'); break; }
@@ -1054,6 +1088,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       stop = stopOf(stop.reason, `${stop.detail}；试过开路：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}`);
       break;
     }
+    const editsBefore = makeWayEdits.length;
     const leg = await runMakeWay(ctx, steps, makeWay, makeWayEdits, deadline, (cell) => {
       const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
       return view.observed ? view.evidence.observation.state.name.replace(/^minecraft:/, '') : 'unknown';
@@ -1064,6 +1099,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       return supportTop(state.name.replace(/^minecraft:/, ''), state.properties);
     });
     makeWayLegs.push(leg);
+    session.counters.makeWayLegs += 1;
+    session.counters.makeWayEdits += makeWayEdits.length - editsBefore;
     // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
     if (leg.stale) { stop = null; continue; }
     if (leg.executed === 0) {

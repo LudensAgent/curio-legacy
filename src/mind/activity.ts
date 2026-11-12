@@ -602,7 +602,9 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
   const navStage = reportedStage(result);
   // 只留能判定“定位/取得/位移/覆盖”的回执字段；整份 data（尤其 local 图）不进活动历史。
   const RECEIPT_KEYS = new Set(['found', 'foundPos', 'foundRef', 'foundEntityId', 'visibleEntities', 'coverage', 'dug', 'moved', 'crafted', 'placed', 'block', 'cell', 'was', 'noDrop',
-    'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall', 'collection']);
+    'searched', 'scanViews', 'displacement', 'travelled', 'unopened', 'container', 'onGround', 'pendingFall', 'collection',
+    // 结构化停止原因与实测进展：给反思/后续决定用，不复制整份路线或体素。
+    'stop', 'stopReason', 'arrived', 'position']);
   const receipt = result.data
     ? Object.fromEntries(Object.entries(result.data).filter(([key]) => RECEIPT_KEYS.has(key)))
     : undefined;
@@ -935,16 +937,49 @@ export function afterStep(a: Activity, step: Step, result: SkillResult, duration
 }
 
 /** 资源型活动：步骤、标题或收工条件在要某样东西。只用于回执分类，不替 Agent 选资源。 */
-const RESOURCE_SKILLS = new Set(['gather', 'forage', 'hunt', 'fish', 'farm', 'take_items', 'mine_cell', 'craft', 'smelt', 'expedition', 'excavate_run']);
+const RESOURCE_SKILLS = new Set(['gather', 'forage', 'hunt', 'fish', 'farm', 'take_items', 'craft', 'smelt']);
 const RESOURCE_WORDS = /木料|原木|木板|木棍|菌柄|木头|矿石|铁|煤|钻石|食物|材料|资源|gather|mine|wood|log|plank|stick|ore|iron|coal|diamond/i;
 const SEARCH_SKILLS = new Set(['look_around', 'gather', 'forage', 'hunt', 'fish', 'find_item', 'expedition']);
 const SEARCH_WORDS = /找|搜索|搜寻|探|扫|环顾|查看|look|search|explore|scout/i;
 
-function resourceIntentOf(a: Activity): boolean {
-  const done = a.doneWhen ? JSON.stringify(a.doneWhen) : '';
-  return a.steps.some((step) => RESOURCE_SKILLS.has(step.skill)
-    && (step.skill !== 'expedition' || !!(step.args as Record<string, unknown> | undefined)?.find))
-    || RESOURCE_WORDS.test(`${a.what} ${done}`);
+/** 标题里常见的资源词到目标类别；只影响回执归因，不参与动作选择。 */
+const TEXT_RESOURCE_TARGETS: readonly (readonly [RegExp, string])[] = [
+  [/原木|木头|木料|菌柄|log|wood/i, 'log'], [/木板|plank/i, 'plank'], [/木棍|stick/i, 'stick'],
+  [/铁|iron/i, 'iron'], [/煤|coal/i, 'coal'], [/钻石|diamond/i, 'diamond'], [/金|gold/i, 'gold'], [/铜|copper/i, 'copper'],
+  [/圆石|cobblestone/i, 'cobblestone'], [/石头|stone/i, 'stone'],
+];
+
+/** 活动明确点名要的资源；来自收工条件、步骤参数和标题里的资源词。 */
+function resourceTargetsOf(a: Activity): string[] {
+  const targets = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const name = value.trim().replace(/^minecraft:/, '');
+    if (name && name !== 'any') targets.add(name);
+  };
+  if (a.doneWhen?.type === 'inventory_min') add(a.doneWhen.item);
+  if (a.doneWhen?.type === 'exploration') add(a.doneWhen.find);
+  // 标题里点名的常见资源只转成类别目标；不替 Agent 补充它没说的东西。
+  for (const [pattern, target] of TEXT_RESOURCE_TARGETS) if (pattern.test(a.what)) add(target);
+  for (const step of a.steps) {
+    const args = step.args as Record<string, unknown> | undefined;
+    for (const key of ['item', 'block', 'find', 'target', 'name', 'for'] as const) {
+      const value = args?.[key];
+      if (Array.isArray(value)) value.forEach(add);
+      else add(value);
+    }
+  }
+  return [...targets];
+}
+/** 目标可以是具体物品、类别（log/wood）或简称；只做包含匹配，不推断未点名的资源。 */
+const hitsResourceTarget = (name: string, targets: readonly string[]): boolean =>
+  !targets.length || targets.some((target) => name === target || name.endsWith(`_${target}`) || name.includes(target)
+    // 矿石方块与它的产物：iron_ore 也匹配 raw_iron。
+    || target.endsWith('_ore') && name === `raw_${target.slice(0, -4)}`);
+
+function resourceIntentOf(a: Activity, targets: readonly string[]): boolean {
+  return targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill))
+    || RESOURCE_WORDS.test(a.what);
 }
 
 function searchIntentOf(a: Activity): boolean {
@@ -1029,18 +1064,51 @@ export function localStepFailure(
 export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string, state: AgentState, info: { newChunks?: number | null } = {}): ActivityRecord {
   const { gained, lost } = diffInventory(a.startInventory, inventoryOf(state));
   const receipts = a.results.flatMap((result) => result.data ? [result.data] : []);
-  // 定位看“这一趟实际看见了/采到了什么”，不把 find_item 的历史记录或 go_near 的到达算成找到资源。
-  const located = receipts.some((data) => !!data.found || Number(data.dug ?? 0) > 0
-    || (Number(data.travelled ?? 0) > 0 && !!data.coverage));
-  const acquired = Object.keys(gained).length > 0
-    || receipts.some((data) => Number(data.dug ?? 0) > 0 || Number(data.moved ?? 0) > 0 || Number(data.crafted ?? 0) > 0);
-  const intent = resourceIntentOf(a);
   const attemptOnly = !!a.attemptOnly;
   const exploration = explorationOf(a, state.pos, info.newChunks ?? null);
   const failed = [...a.results].reverse().find((result) => result.status === 'failed');
+  // 最近一次结构化停止原因：移动会话的完整 stop 回执优先，其次技能自己报告的 stopReason。
+  // 只留原因、说明和少量边界，不把整段路线或体素复制进活动历史。
+  const stopReceipt = [...a.results].reverse().flatMap((result) => {
+    const stop = result.data?.stop as { reason?: unknown; detail?: unknown; boundaries?: unknown } | undefined;
+    if (stop !== undefined && typeof stop.reason === 'string') {
+      return [{
+        reason: stop.reason,
+        ...(typeof stop.detail === 'string' ? { detail: stop.detail.slice(0, 240) } : {}),
+        ...(Array.isArray(stop.boundaries) && stop.boundaries.length ? { boundaries: stop.boundaries.slice(0, 3) } : {}),
+      }];
+    }
+    const reason = result.data?.stopReason;
+    return typeof reason === 'string' ? [{ reason }] : [];
+  })[0];
   // 采集回执只在活动期间的结果里有；结束时要把它带进最近记录，否则单步 gather 结束就只剩一句摘要。
   const collectionResult = [...a.results].reverse().find((result) => !!result.data?.collection);
   const collectionReceipt = collectionResult?.data?.collection as CollectionReceipt | undefined;
+  // 资源归因只看活动点名的目标与真实产出：挖掘/移动本身不证明拿到了目标，也不证明资源目标失败。
+  const targets = resourceTargetsOf(a);
+  const intent = resourceIntentOf(a, targets);
+  const foundNames = receipts.flatMap((data) => {
+    const value = data.found;
+    if (typeof value === 'string') return [value.replace(/^minecraft:/, '')];
+    const name = (value as { name?: unknown } | undefined)?.name;
+    return typeof name === 'string' ? [name.replace(/^minecraft:/, '')] : [];
+  });
+  const wasBlocks = receipts.flatMap((data) => typeof data.was === 'string' ? [data.was.replace(/^minecraft:/, '')] : []);
+  const gainedNames = Object.keys(gained).map((name) => name.replace(/^minecraft:/, ''));
+  const collectionItems = (collectionReceipt?.items ?? []).map((name) => name.replace(/^minecraft:/, ''));
+  const collectionNames = [...collectionItems, ...(collectionReceipt?.block ? [collectionReceipt.block.replace(/^minecraft:/, '')] : [])];
+  // 定位：看见目标、实际挖到/采到它，或背包里已有同名产物；没有点名目标时只把“看见/采集”算定位。
+  const located = targets.length
+    ? [...foundNames, ...wasBlocks, ...gainedNames, ...collectionNames].some((name) => hitsResourceTarget(name, targets))
+    : foundNames.length > 0 || wasBlocks.length > 0 || !!collectionReceipt;
+  // 取得：有点名目标时必须真的拿到它；没点名目标时只有采集回执或“挖到了某个方块且背包有增量”能作证，
+  // 挖掘/移动动作本身不再自动算作取得（否则开路副产物会被当成资源目标完成）。无法判断时记 null。
+  // 采集回执的 items 是“可能产物”，只有 targetMet/gained 才证明真的进了背包。
+  const collected = collectionReceipt?.targetMet === true ? collectionItems : [];
+  const acquired: boolean | null = targets.length
+    ? [...gainedNames, ...collected].some((name) => hitsResourceTarget(name, targets))
+    : collectionReceipt ? collectionReceipt.targetMet === true
+      : wasBlocks.length > 0 && gainedNames.length > 0 ? true : null;
   return {
     id: a.id, what: a.what, kind: a.kind, outcome, summary: summary.slice(0, 200),
     ...(a.facing ? { facing: a.facing } : {}),
@@ -1055,7 +1123,12 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
       : outcome === 'done' ? (a.conditionTriggered ? 'condition' as const : 'steps' as const)
         : outcome === 'unmet' ? 'unmet' as const : undefined,
     operationCompleted: outcome === 'done',
-    ...(intent || attemptOnly ? { resource: { intent, located, acquired, goalIncomplete: attemptOnly || (intent && !acquired) } } : {}),
+    ...(intent || attemptOnly ? { resource: {
+      intent, ...(targets.length ? { targets } : {}), located, acquired,
+      // 有点名目标却没拿到，或没点名目标、只确认了其他产物时，都不能声称资源目标完成；
+      // “取得未知”照实写未知，有界尝试另由 completion=attempt 说明。
+      goalIncomplete: intent && acquired !== true,
+    } } : {}),
     ...(collectionResult && collectionReceipt ? { collection: { ...collectionReceipt, skill: collectionResult.skill, ...(collectionResult.args !== undefined ? { args: collectionResult.args } : {}), at: collectionResult.at } } : {}),
     ...(exploration.searchIntent || hasExplorationCondition(a.doneWhen) ? { exploration } : {}),
     durationSec: Math.round((Date.now() - a.startedAt) / 1000), gained, lost,
@@ -1063,6 +1136,7 @@ export function recordOf(a: Activity, outcome: ActivityOutcome, summary: string,
     ...(a.applying ? { applying: a.applying } : {}), ...(a.applyingText ? { applyingText: a.applyingText } : {}),
     ...(failed ? { failure: { skill: failed.skill, ...(failed.args !== undefined ? { args: failed.args } : {}), code: failed.failureCode ?? null, summary: failed.summary.slice(0, 240),
       at: failed.at, ...(failed.worldId ? { worldId: failed.worldId } : {}), ...(failed.dim ? { dim: failed.dim } : {}), ...(failed.pos ? { pos: { ...failed.pos } } : {}) } } : {}),
+    ...(stopReceipt ? { stop: stopReceipt } : {}),
     at: Date.now(), signature: signatureOf(a.steps),
     failures: a.failures,
   };

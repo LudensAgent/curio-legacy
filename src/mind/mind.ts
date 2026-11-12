@@ -1010,7 +1010,7 @@ export class Mind {
     // 完成事实分层：操作结束、资源定位、资源取得、上层目标各说各的，不把 done 当成资源目标完成。
     const completionNotes = [
       ...(record.completion === 'attempt' ? [`有界尝试：${a.attemptOnly?.reason ?? '收工条件不能验收目标'}（操作结束不代表目标完成）`] : []),
-      ...(record.resource?.goalIncomplete ? [`资源目标未完成（定位${record.resource.located ? '是' : '否'}、取得${record.resource.acquired ? '是' : '否'}）`] : []),
+      ...(record.resource?.goalIncomplete ? [`资源目标未完成（目标 ${record.resource.targets?.join('、') ?? '未点名'}；定位${record.resource.located ? '是' : '否'}；取得${record.resource.acquired === null ? '未知' : record.resource.acquired ? '是' : '否'}）`] : []),
       ...(a.planCoverageGap ? [`计划覆盖缺口：${a.planCoverageGap}`] : []),
       // 这一趟离入口的最远点在这段活里推进了：如实说推进到多远（沿旧路走回前沿同样算，不看是否进了新区块）。
       ...(this.safe(() => this.d.excursions?.frontierAdvancedSince(state.worldId, a.startedAt), false) ? (() => {

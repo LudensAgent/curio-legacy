@@ -187,8 +187,12 @@ export interface ActivityRecord {
   completion?: 'condition' | 'steps' | 'unmet' | 'attempt';
   /** 操作本身结束 ≠ 资源目标完成；这两件事分开记。旧记录没有该字段时不要猜。 */
   operationCompleted?: boolean;
-  /** 资源型活动的定位/取得/上层目标状态；从执行回执和背包变化算，不靠模型口述。 */
-  resource?: { intent: boolean; located: boolean; acquired: boolean; goalIncomplete: boolean };
+  /** 资源型活动的定位/取得/上层目标状态；从活动目标、执行回执和背包变化算，不靠模型口述。 */
+  resource?: {
+    intent: boolean; targets?: string[]; located: boolean;
+    /** null 表示活动没有点名目标、现场也没有足够证据判断是否取得。 */
+    acquired: boolean | null; goalIncomplete: boolean;
+  };
   /** 最近一次采集回执的历史快照（不代表当前背包）；供活动结束后的最近记录与回想使用。 */
   collection?: CollectionRecord;
   /** 实测探索覆盖：位置来自每步回执，不来自活动标题。 */
@@ -208,6 +212,8 @@ export interface ActivityRecord {
   applyingText?: string;
   /** 最近一次失败步骤的真实动作、授权参数、时间、作用域、位置与回执；总结压缩后仍保留失败条件。 */
   failure?: { skill: string; args?: unknown; code: string | null; summary: string; at: number; worldId?: string; dim?: string; pos?: { x: number; y: number; z: number } };
+  /** 移动/导航停止的结构化原因（如 UNKNOWN_BOUNDARY/CONFLICT/BUDGET_EXHAUSTED）与具体边界；归因仍由 Agent 判断。 */
+  stop?: { reason: string; detail?: string; boundaries?: unknown[] };
 }
 
 export interface AgendaItem {

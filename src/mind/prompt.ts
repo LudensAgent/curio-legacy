@@ -867,6 +867,7 @@ function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
   return { what: recallText(r.what, memory, dimension, r.at), outcome: r.completion === 'condition' ? 'condition_met' : r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
+    ...(r.stop ? { stop: `${r.stop.reason}${r.stop.detail ? `：${r.stop.detail.slice(0, 120)}` : ''}` } : {}),
     ...(r.facing ? { facing: r.facing } : {}),
     ...(r.collection ? { collection: collectionSnapshot(r.collection) } : {}),
     ...(r.expect ? { i_expected: recallText(r.expect, memory, dimension, r.at) } : {}), ...(r.hypothesis ? { hypothesis: recallText(r.hypothesis, memory, dimension, 0) } : {}) };
