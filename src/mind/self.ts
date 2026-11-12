@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { shortId } from '../util.ts';
+import { applyProgress, emptyProgressLedger, progressSummary, type ProgressEntry, type ProgressInput, type ProgressLedger } from './progress-ledger.ts';
 import type { ActivityKind, ActivityRecord, AgendaItem, DiaryEntry, Experiment, Habits, KnowHow, Mood, Thought } from './types.ts';
 
 interface SelfData {
@@ -28,6 +29,8 @@ interface SelfData {
   habits?: Habits;
   /** 主目标和它的待办清单（像 agent 的 todo 列表）：每段活都应该推进其中没勾掉的一项 */
   plan?: FocusPlan;
+  /** 独立进展账本：按目标保留空间/移动/执行/成本/物品事实，换活动或换做法不清零。 */
+  progressLedger?: ProgressLedger;
   /** 最近几个主目标（阶段目标）的起止和结局：回顾阶段目标时看自己是不是一直在原地打转 */
   stages?: StageRecord[];
   observedProgress?: ObservedProgress;
@@ -533,6 +536,26 @@ export class SelfModel {
   creditAgenda(id: string | undefined) {
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
     if (item) { item.attempts++; item.updatedAt = Date.now(); this.touch(); }
+  }
+
+  // ---------------------------------------------------------------- 进展账本
+  /** 把一段活的实测结果记到目标账上；目标 id 由调用方用计划成果/议程决定。 */
+  recordProgress(input: ProgressInput) {
+    this.data.progressLedger = applyProgress(this.data.progressLedger ?? emptyProgressLedger(), input);
+    this.touch();
+  }
+
+  /** 给提示词的紧凑摘要；没有记录返回 null，不编一个 0 进展。 */
+  progressSummary(targetId: string | undefined) {
+    return targetId ? progressSummary(this.data.progressLedger?.entries[targetId]) : null;
+  }
+
+  /** 详情：指定目标返回整条账；不指定返回整本账，供按需查询。 */
+  progressLedger(): ProgressLedger;
+  progressLedger(targetId: string): ProgressEntry | null;
+  progressLedger(targetId?: string): ProgressLedger | ProgressEntry | null {
+    const ledger = this.data.progressLedger ?? emptyProgressLedger();
+    return targetId ? ledger.entries[targetId] ?? null : ledger;
   }
 
   // ---------------------------------------------------------------- 经历与窍门

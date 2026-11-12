@@ -1038,6 +1038,27 @@ export class Mind {
         whyStopped: failed?.failureCode ?? outcome,
       });
     }
+    // 进展账本按目标累计，不按动作名/做法分桶：换方法、改活动标题都不会清零。
+    // 没有计划时也记到 unassigned，避免开发期探索事实丢失；提示词只显示当前目标的摘要。
+    {
+      const planForProgress = this.d.self.plan();
+      const targetId = a.outcomeId && planForProgress?.steps.some((st) => st.id === a.outcomeId)
+        ? a.outcomeId
+        : planForProgress?.steps.find((st) => !st.done)?.id ?? planForProgress?.agendaId ?? 'unassigned';
+      const label = planForProgress?.steps.find((st) => st.id === targetId)?.text ?? planForProgress?.goal ?? '未关联计划';
+      this.d.self.recordProgress({
+        targetId, label, at: record.at, dim: state.dim, start: a.startPos, end: state.pos,
+        outcome, ...(record.completion ? { completion: record.completion } : {}),
+        ...(record.stop?.reason ? { stopReason: record.stop.reason } : {}),
+        failedCode: failed?.failureCode ?? null, summary: record.summary ?? summary, durationSec: record.durationSec,
+        newChunks: record.exploration?.newChunks ?? null, visitedCells: record.exploration?.visitedCells ?? 0,
+        gained: record.gained, lost: record.lost,
+        ...(record.resource?.targets ? { targets: record.resource.targets } : {}),
+        ...(record.resource ? { acquired: record.resource.acquired } : {}),
+        ...(a.startVitals?.hp !== undefined && typeof state.hp === 'number' ? { hpDelta: state.hp - a.startVitals.hp } : {}),
+        ...(a.startVitals?.food !== undefined && typeof state.food === 'number' ? { foodDelta: state.food - a.startVitals.food } : {}),
+      });
+    }
     // 物品、清单或新区块都没动：记一笔无进展。整条链只在这里观察，不替 Agent 判断原因。
     const planAfter = this.d.self.plan()?.progressAt;
     // 出行最远点推进也算：沿旧路走回上次的前沿不会进新区块，但身体确实到了这一段没到过的远处。

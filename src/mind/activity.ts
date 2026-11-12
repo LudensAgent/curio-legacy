@@ -8,6 +8,7 @@ import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
 import type { SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
+import { hitsResourceTarget } from './progress-ledger.ts';
 import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, CollectionReceipt, NavigationProgress } from './types.ts';
 
 /**
@@ -453,7 +454,8 @@ function describeNavigation(nav: NavigationProgress) {
   };
 }
 
-export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'], state: Pick<AgentState, 'inventory' | 'pos' | 'worldId' | 'dim'>): Activity {
+export function createActivity(draft: ActivityDraft, monologue: string, source: Activity['source'],
+  state: Pick<AgentState, 'inventory' | 'pos' | 'worldId' | 'dim'> & Partial<Pick<AgentState, 'hp' | 'food'>>): Activity {
   const a: Activity = {
     id: shortId('act_'), what: draft.what, why: draft.why, kind: draft.kind, steps: draft.steps.map((s) => ({ ...s, id: shortId('st_') })),
     ...(draft.facing ? { facing: draft.facing } : {}),
@@ -463,6 +465,9 @@ export function createActivity(draft: ActivityDraft, monologue: string, source: 
     ...(draft.applying ? { applying: draft.applying } : {}),
     ...(draft.outcomeId ? { outcomeId: draft.outcomeId } : {}), ...(draft.methodId ? { methodId: draft.methodId } : {}),
     source, monologue, startedAt: Date.now(), startPos: { ...state.pos }, failures: 0, consecutiveFailures: 0, adaptations: [], results: [],
+    ...(typeof state.hp === 'number' || typeof state.food === 'number' ? { startVitals: {
+      ...(typeof state.hp === 'number' ? { hp: state.hp } : {}), ...(typeof state.food === 'number' ? { food: state.food } : {}),
+    } } : {}),
     ...(draft.dropped?.length ? { dropped: [...draft.dropped] } : {}),
     startInventory: inventoryOf(state),
   };
@@ -971,12 +976,6 @@ function resourceTargetsOf(a: Activity): string[] {
   }
   return [...targets];
 }
-/** 目标可以是具体物品、类别（log/wood）或简称；只做包含匹配，不推断未点名的资源。 */
-const hitsResourceTarget = (name: string, targets: readonly string[]): boolean =>
-  !targets.length || targets.some((target) => name === target || name.endsWith(`_${target}`) || name.includes(target)
-    // 矿石方块与它的产物：iron_ore 也匹配 raw_iron。
-    || target.endsWith('_ore') && name === `raw_${target.slice(0, -4)}`);
-
 function resourceIntentOf(a: Activity, targets: readonly string[]): boolean {
   return targets.length > 0 || a.steps.some((step) => RESOURCE_SKILLS.has(step.skill))
     || RESOURCE_WORDS.test(a.what);

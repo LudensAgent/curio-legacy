@@ -245,7 +245,7 @@ const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"
 const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} 请建筑师画图纸：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数；不写 names 列出全部动作（含平时不显示的进阶动作）
-- {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"mechanics","query":"…"} 查底层操作接口
+- {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"progress","target":"po_…"} 查某个目标的空间/移动/执行/成本/物品进展（省略 target 看全部；【专注】里只有摘要）｜{"kind":"mechanics","query":"…"} 查底层操作接口
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
 /** 技能书目录放在系统提示词最后：它变得最勤（写、改、收起），放在前面会让后面不变的大段内容每次都缓存不中。
  *  每条只留名字、状态和一句用途；状态用图例说明，瞥一眼连用途也省掉，按需用 skill 查。 */
@@ -611,6 +611,12 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       })) } : {}),
       ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}`) } : {}),
       checklist_note: '清单是成果；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
+      // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
+      ...(() => {
+        const nextOutcome = plan.steps.find((st) => !st.done);
+        const trend = nextOutcome ? ctx.self.progressSummary(nextOutcome.id) : null;
+        return trend ? { progress_trend: trend } : {};
+      })(),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
       no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
       activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,

@@ -115,6 +115,8 @@ export interface Activity {
   startedAt: number;
   /** 开工时的身体位置；结束时的实测位移和覆盖范围从这里算，不靠自然语言。 */
   startPos: { x: number; y: number; z: number };
+  /** 开工时的生命/饥饿；只用于记录这段活的成本差，不用于验收。 */
+  startVitals?: { hp?: number; food?: number };
   /** 开工时已访问区块数；结束时用它算新区块，避免把活动期间已有的探索算成这一趟的。 */
   startChunks?: number;
   failures: number;

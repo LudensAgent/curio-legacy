@@ -27,7 +27,7 @@ import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
-const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge'];
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'progress'];
 /** 需要完整上下文（技能、图纸、Wiki 资料、矿道记录）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
 const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
 /**
@@ -669,6 +669,12 @@ export class Thinker {
         this.planner.controlKnowledge.expose(ctx.state.worldId, result.mechanics.map((m) => m.primitive));
         this.bus.publish('mechanics_query', 'P3', `查底层操作：${String(raw.query ?? '').slice(0, 80)}`);
         return JSON.stringify(result).slice(0, 5000);
+      }
+      if (kind === 'progress') {
+        const target = String(raw.target ?? raw.outcome ?? '').trim();
+        this.bus.publish('progress_query', 'P3', `查进展：${target || '全部目标'}`, { target: target || null });
+        const detail = target ? ctx.self.progressLedger(target) : ctx.self.progressLedger();
+        return detail === null ? `没有目标 ${target} 的进展记录` : JSON.stringify(detail).slice(0, 6000);
       }
       const recall = this.planner.recall;
       if (!recall) {
