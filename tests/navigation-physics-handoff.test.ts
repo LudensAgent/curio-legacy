@@ -8,7 +8,9 @@ import { MineflayerAdapter } from '../src/adapter/mineflayer.ts';
 import type { MoveOpts, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
+import { feetGoal } from '../src/skills/movement/goal.ts';
 import { navigateTo } from '../src/skills/movement/navigate.ts';
+import { runNavigationSegment } from '../src/skills/movement/segment.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 import { makeCtx } from './survival-helpers.ts';
@@ -457,4 +459,19 @@ test('连续控制：下界地形代理（落差 + 台阶 + 窄口转弯）', { 
   assert.equal(stopped, 0, '落差/台阶/窄口转弯不停车');
   assert.equal(back, 0);
   assertTimelineCoversDispatches(controlEvents.timeline, dispatches);
+});
+
+
+test('执行期体素全过期：实时方块确认沿平地连续交接，不逐格停车', async (t) => {
+  const { ctx, timer, dispatches, controlEvents } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -2, x1: 14, z0: -2, z1: 2 });
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const voxel = ctx.spatial!.session.voxel;
+  const result = await runNavigationSegment(ctx, {
+    goal: feetGoal({ x: 10.5, y: 64, z: 0.5 }), allowed: ['walk'], historical: false,
+    maxTransitions: 12, allowUnknownCorridor: false, deadline: ctx.deadline, searchBudget: 2,
+    onPhase: (phase) => { if (phase === 'executing') voxel.markStale('overworld', 'pending_effect'); },
+  });
+  assert.equal(result.outcome, 'reached_waypoint', result.detail);
+  assert.ok((result.liveConfirmedCount ?? 0) > 0, JSON.stringify({ live: result.liveConfirmedCount, confirmed: result.confirmed.length }));
+  assert.ok(controlEvents.clears < dispatches.length, '连续交接，不逐格清键');
 });

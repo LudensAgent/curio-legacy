@@ -1423,9 +1423,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       const p = b.entity.position;
       if (mode !== 'feet' || settleAtTarget || !b.entity.onGround || Math.abs(p.y - target.y) > FEET_ARRIVAL_TOLERANCE.vertical || atEndpoint()) return 0;
       const past = -(p.x - tx) * Math.sin(heading) - (p.z - tz) * Math.cos(heading);
-      // 格列验收时，只有越过目标格列（落在下一列）才算越过中间点；脚位窗验收时，仍在目标格内的少量冲过算到位。
+      // 格列验收时，只有越过目标格列（落在下一列）才算越过中间点；脚位窗验收时，
+      // 仍在脚位容差内的少量冲过算到位（路线点可能在格边界附近，2cm 越格不应触发重规划）。
       if (passColumn) return past - 0.5;
-      return Math.floor(p.x) === fx && Math.floor(p.z) === fz ? 0 : past;
+      return Math.hypot(p.x - tx, p.z - tz) <= FEET_ARRIVAL_TOLERANCE.horizontal ? 0 : past;
     };
     const checkPosition = () => {
       if (p0y - b.entity.position.y > maxDropDown + FEET_ARRIVAL_TOLERANCE.vertical) {
@@ -1436,8 +1437,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         throw new Error(`CORRIDOR_VIOLATION: 连续脚位实测横向 ${corridorLateral().toFixed(2)} 格，超出授权 ${activeCorridor.maxLateral} 格；实际位于 (${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)})，已停止`);
       }
       const past = passedIntermediate();
-      if (past > 1e-9) {
-        throw Object.assign(new Error(`CHECKPOINT_PASSED: 实测脚位已越过中间点 ${past.toFixed(3)} 格并超出脚位容差，停止并从当前实测位置重规划`), { code: 'CHECKPOINT_PASSED' });
+      // 0.6 是落地纠正循环仍能走回目标的窗口；小于它的冲过交给纠正/交接，
+      // 不把 2–20cm 的惯性误差升级成整段重规划。
+      if (past > 0.6) {
+        throw Object.assign(new Error(`CHECKPOINT_PASSED: 实测脚位已越过中间点 ${past.toFixed(3)} 格并超出纠正窗口，停止并从当前实测位置重规划`), { code: 'CHECKPOINT_PASSED' });
       }
     };
     check();

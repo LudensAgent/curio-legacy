@@ -101,6 +101,10 @@ export interface TransitionReceipt {
   pathLength: number;
   /** 共享体素里这一步还不完整，执行前由当前已加载方块即时确认。 */
   confirmedByLive?: true;
+  /** 这一步把前进键交给了下一步（kept），还是停稳/重新起步（stopped）。 */
+  handoff?: 'kept' | 'stopped';
+  /** 从这一步开始发出身体控制到实测确认的毫秒数（含等待/制动）。 */
+  elapsedMs?: number;
 }
 
 export interface SegmentReceipt {
@@ -982,6 +986,7 @@ async function runNavigationSegmentInner(
   try {
   for (const [index, transition] of transitions.entries()) {
     physicalIndex = index;
+    const stepStartedAt = Date.now();
     if (ctx.signal.aborted) return cancelledHere(index, transition, ctx.adapter.state().pos);
     const previous = transitions[index - 1];
     // 上一段在 physicsTick 里复验下一步有效并保留了前进键：下一段接续，不再
@@ -1026,6 +1031,7 @@ async function runNavigationSegmentInner(
       confirmed.push({
         transition, measuredFrom, measuredTo: { ...current.pos },
         measuredHorizontal: horizontal, measuredVertical: vertical, pathLength: horizontal + vertical,
+        handoff: 'kept', elapsedMs: Date.now() - stepStartedAt,
       });
       pathLength += horizontal + vertical;
       executed += 1;
@@ -1046,7 +1052,8 @@ async function runNavigationSegmentInner(
     // 只要实测仍站在计划起点格列、脚高相符，就复验“实测起点 → 原计划落点”的真实几何；
     // 离开起点格列才从实测位置重规划。
     const startDrift = current.pos.x !== transition.from.x || current.pos.y !== transition.from.y || current.pos.z !== transition.from.z;
-    const canVerifyResidual = (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop')
+    // jump 也从同一格列内的实测起点复验：小偏差（几厘米）不该因为计划起点是浮点值就整段重搜。
+    const canVerifyResidual = (transition.kind === 'walk' || transition.kind === 'step' || transition.kind === 'drop' || transition.kind === 'jump')
       && current.onGround
       && Math.floor(current.pos.x) === Math.floor(transition.from.x) && Math.floor(current.pos.z) === Math.floor(transition.from.z)
       && Math.abs(current.pos.y - transition.from.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
@@ -1092,6 +1099,7 @@ async function runNavigationSegmentInner(
     let continuous = false;
     let passColumn = false;
     let cellFinish = false;
+    let checkpointHeld = false;
     if (transition.kind === 'jump') {
       const remaining = request.deadline - Date.now();
       if (remaining < 1) {
@@ -1203,7 +1211,6 @@ async function runNavigationSegmentInner(
       // 连续路线的下一步已在 tick 外确认；到达本点时只读取这个结果，有效就保持运动键，
       // 由紧接着的下一段身体控制接续。同向、已确认净空的转弯、台阶与一格落差都保留速度；
       // 终点仍按原逻辑制动。
-      let checkpointHeld = false;
       // 在 physicsTick 之外复用 continuous 的下一步确认；tick 回调只返回这个结果，
       // 不在逐帧路径里做体素查询。证据之后若变化，下一段执行前仍会用实测起点重新复验。
       const checkpointEligible = continuous && next !== undefined && !directionalFinish
@@ -1260,7 +1267,7 @@ async function runNavigationSegmentInner(
         confirmed.push({
           transition, measuredFrom: partial.from, measuredTo: partial.to,
           measuredHorizontal: partial.horizontal, measuredVertical: partial.vertical, pathLength: path,
-          ...(liveStep ? { confirmedByLive: true as const } : {}),
+          ...(liveStep ? { confirmedByLive: true as const } : {}), handoff: 'stopped', elapsedMs: Date.now() - stepStartedAt,
         });
         if (liveStep) liveConfirmedCount += 1;
         pathLength += path;
@@ -1334,7 +1341,7 @@ async function runNavigationSegmentInner(
       measuredHorizontal: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z),
       measuredVertical: Math.abs(arrived.pos.y - current.pos.y),
       pathLength: Math.hypot(arrived.pos.x - current.pos.x, arrived.pos.z - current.pos.z) + Math.abs(arrived.pos.y - current.pos.y),
-      ...(liveStep ? { confirmedByLive: true as const } : {}),
+      ...(liveStep ? { confirmedByLive: true as const } : {}), handoff: checkpointHeld ? 'kept' : 'stopped', elapsedMs: Date.now() - stepStartedAt,
     });
     if (liveStep) liveConfirmedCount += 1;
     pathLength += confirmed.at(-1)!.pathLength;
