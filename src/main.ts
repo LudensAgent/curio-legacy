@@ -112,6 +112,9 @@ try {
     snapshotLimits: {
       maxBytes: config.spatial.snapshotMaxBytes,
       maxObservedCells: config.spatial.maxObservedCells,
+      // 库默认 32MiB；facts 含 gone 历史会持续增长，不显式放宽会让整次 checkpoint
+      // 在写入前失败，voxel/journal/ledger 也一起不落盘。
+      maxFactBytes: config.spatial.maxFactBytes,
     },
     // 单次保存只提交有界 dirty 前缀；剩余 dirty 由同一调度周期的后续批次提交。
     voxelBatchMaxBytes: config.spatial.voxelBatchMaxBytes,
@@ -185,8 +188,17 @@ if (!migrationGate.ok) {
   }) + '\n');
   process.exit(1);
 }
+const containers = new ContainerLedger(path.join(config.dataDir, 'containers.json'), adapter.state().worldId);
+const semantic = new SpatialSemanticStore(spatial.session, containers, {
+  sessionId: adapter.state().sessionId,
+  worldId: adapter.state().worldId,
+});
+// 启动时先压一次 gone/revoked 历史：上次运行可能留下远超保留量的旧记录，
+// 不能让关停或第一次定时保存再撞容量上限。
+semantic.compactGoneHistory();
 // 常规运行时每 30 秒在物理 tick 之外走同一条公开 checkpoint 路径；只汇报实际
 // 保存结果与剩余 dirty，最终 flush/close 仍由 finishShutdown 的 spatial.shutdown 负责。
+// 每次保存前先把 gone/revoked 历史压到有界保留量：facts 快照不能随着历史无限增长。
 const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) => {
   if (fact.status === 'saved') {
     const { checkpoint } = fact;
@@ -199,18 +211,14 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
     return;
   }
   const capacityNote = fact.error.kind === 'capacity'
-    ? `，快照上限=${Math.round(config.spatial.snapshotMaxBytes / 1048576)}MiB（SPATIAL_SNAPSHOT_MAX_MB）`
+    ? `，快照上限=${Math.round(config.spatial.snapshotMaxBytes / 1048576)}MiB（SPATIAL_SNAPSHOT_MAX_MB），facts 上限=${Math.round(config.spatial.maxFactBytes / 1048576)}MiB（SPATIAL_MAX_FACT_MB）`
     : '';
   bus.publish('spatial_checkpoint_failed', 'P1',
     `共享空间记忆保存失败（${fact.error.kind ?? fact.error.name}）：${fact.error.message}${capacityNote}｜lifecycle=${fact.state.lifecycle}, closing=${spatial.closing}, 剩余 dirty=${fact.remainingDirty}, unconfirmed=${fact.state.unconfirmedCheckpointId ?? 'none'}`,
     { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
-}, DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS, DEFAULT_SPATIAL_CHECKPOINT_BATCHES);
-const containers = new ContainerLedger(path.join(config.dataDir, 'containers.json'), adapter.state().worldId);
-const semantic = new SpatialSemanticStore(spatial.session, containers, {
-  sessionId: adapter.state().sessionId,
-  worldId: adapter.state().worldId,
-});
+}, DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS, DEFAULT_SPATIAL_CHECKPOINT_BATCHES,
+  () => { semantic.compactGoneHistory(); });
 if (spatial.session.legacyFactsMigrationVersion < 1) await spatial.session.checkpoint({ completeLegacyFactsMigration: true });
 const memory = new WorldMemory(worldMemoryPath, { semantic });
 try {

@@ -60,7 +60,13 @@ export const EXCAVATION_WAYPOINT_CAP = 8;
 export const BASE_CAP = 64;
 export const HERD_CAP = 40;
 export const HAZARD_CAP = 40;
-export const GONE_CAP = 120;
+/**
+ * gone/revoked 历史在 checkpoint 前物理压缩后每类保留的最近条数。
+ * live 事实不受影响；旧历史被真正删除，下一次全量 facts 快照因此有界。
+ */
+export const GONE_PLACE_KEEP = 2000;
+export const GONE_RESOURCE_KEEP = 500;
+export const GONE_CONTAINER_KEEP = 200;
 
 type Vec = { x: number; y: number; z: number };
 
@@ -702,6 +708,26 @@ export class SpatialSemanticStore {
     }
   }
 
+  /**
+   * 物理压缩 gone/revoked 历史：每类只保留最近 N 条，live 事实不动。
+   * 有删除时库修订号前进，下一次 checkpoint 写出的 facts 域变小；返回实际删除数。
+   * 这是把“上限只标 gone”改成真正有界历史的维护动作，checkpoint 前调用。
+   */
+  compactGoneHistory() {
+    const removed = this.facts.compactGone({
+      keepGonePlaces: GONE_PLACE_KEEP,
+      keepGoneResources: GONE_RESOURCE_KEEP,
+      keepGoneContainers: GONE_CONTAINER_KEEP,
+    });
+    if (removed.places + removed.resources + removed.containers > 0) {
+      this.cache = null;
+      this.resourceIndex = null;
+      this.portalFacts = null;
+      this.goneIndex = null;
+    }
+    return removed;
+  }
+
   markGone(label: string, dim: string, pos: Vec3Like, now: string) {
     const at = point(pos);
     const livePlace = this.livePlaces().find((fact) => fact.label === label
@@ -736,9 +762,7 @@ export class SpatialSemanticStore {
       goneSource: goneSourceProvenance(now, { source: 'program', sessionId: this.sessionId }),
     };
     this.upsertPlace(fact);
-    // Facts are retained state by contract; GONE_CAP cannot physically delete
-    // history. The cap is intentionally not enforced here (reported as a
-    // first-batch limitation).
+    // 这里只标 gone；旧历史由 checkpoint 前的 compactGoneHistory 物理压缩。
   }
 
   /**

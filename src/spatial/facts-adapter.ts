@@ -21,6 +21,8 @@ import { InMemoryFactStore } from 'curio-minecraft-3d-memory';
 import type {
   JsonObject,
   ContainerAnchorFact,
+  FactCompactionOptions,
+  FactCompactionResult,
   FactGoneEvidence,
   FactLocation,
   FactPage,
@@ -42,6 +44,8 @@ import type { Vec3Like } from '../adapter/types.ts';
 
 export type {
   ContainerAnchorFact,
+  FactCompactionOptions,
+  FactCompactionResult,
   FactGoneEvidence,
   FactLocation,
   FactPage,
@@ -77,6 +81,7 @@ export type HostFactsPort = Pick<
   | 'places'
   | 'resources'
   | 'containers'
+  | 'compactGone'
 >;
 
 export const semanticFactKind = (fact: SemanticFact): 'place' | 'resource' | 'container' =>

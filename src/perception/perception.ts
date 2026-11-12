@@ -217,6 +217,11 @@ export class Perception {
   private surfaceColumns = new Map<string, { y: number; at: number }>();
   /** 地下时四个水平方向扫天光的最近方向（缓存几秒，避免每个快照都扫 32 格） */
   private surfaceDir: { key: string; at: number; dir: string | null; dist: number | null } | null = null;
+  /**
+   * 本次会话已记过 danger 地标的 16³ 区段。live 地标上限淘汰旧地标后，下一帧仍会看见
+   * 同一片岩浆；只靠 live 去重会反复“写一条 → 淘汰 → 再写”，gone 历史会被这种循环灌满。
+   */
+  private notedDangerSections = new Set<string>();
 
   constructor(private adapter: GameAdapter, private memory: WorldMemory, private bus: EventBus, private vision: Vision, spatial?: SharedSpatialSession) {
     this.spatial = spatial;
@@ -525,13 +530,24 @@ export class Perception {
         const name = this.vision.expose(pos);
         if (!name) continue;
         if (this.memory.markSeen('blocks', name)) this.bus.publish('discovery', 'P2', `首次看见方块：${name}（刚挖开的邻面）`, { category: 'block', name, pos });
-        if (DANGER.has(name)) this.memory.addLandmark('danger', name, s.dim, pos);
+        if (DANGER.has(name)) this.noteDanger(s.dim, name, pos);
         if (isResourceBlock(name) && name !== 'lava') {
           const observed = this.vision.seenEvidence(pos);
           if (observed?.name === name) this.memory.addLandmark('resource', name, s.dim, pos, 24, this.resourceEvidence(observed));
         }
       }
     }
+  }
+
+  /**
+   * 记一次 danger 地标；同一会话同一 16³ 区段只写一次。
+   * 否则 live 地标上限淘汰本地岩浆/刷怪笼后，下一帧会重新写一条，gone 历史就被反复灌满。
+   */
+  private noteDanger(dim: string, name: string, pos: Vec3Like) {
+    const key = `${dim}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
+    if (this.notedDangerSections.has(key)) return;
+    this.notedDangerSections.add(key);
+    this.memory.addLandmark('danger', name, dim, pos, 24);
   }
 
   /**
@@ -655,13 +671,15 @@ export class Perception {
       // 每帧最多记这么多次；没记到的下一帧还在视野里，会接着记。
       const noted = new Set<string>();
       const note = (kind: 'danger' | 'resource', name: string, pos: Vec3Like) => {
-        const key = `${kind}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
+        const section = `${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
+        if (kind === 'danger' && this.notedDangerSections.has(`${s.dim}|${name}|${section}`)) return;
+        const key = `${kind}|${name}|${section}`;
         if (noted.has(key) || noted.size >= LANDMARK_NOTES_PER_UPDATE) return;
         noted.add(key);
         if (kind === 'resource') {
           const observed = v.seenEvidence(pos);
           if (observed?.name === name) this.memory.addLandmark(kind, name, s.dim, pos, 24, this.resourceEvidence(observed));
-        } else this.memory.addLandmark(kind, name, s.dim, pos, 24);
+        } else this.noteDanger(s.dim, name, pos);
       };
       // 地标表每拍只取一次：逐格判断时反复取会把整表（含箱子记录）重建上百遍。循环里删掉的按 id 记下，不再当作存在。
       let marks: ReturnType<typeof this.memory.landmarks> | null = null;

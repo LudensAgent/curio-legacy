@@ -152,6 +152,50 @@ test('默认每 30 秒触发一次 checkpoint；保存后 clean 则跳过', asyn
   assert.equal(reports.length, 1, 'clean 跳过不产生汇报');
 });
 
+test('每个保存周期先压缩 gone 历史；压缩删除后的 dirty 会被本次保存带走', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fx = makeSpatial();
+  // 压缩前是 clean；压缩删了 gone 历史后必须变 dirty 并保存，否则缩小后的 facts 域不会落盘。
+  fx.setState({ dirty: false });
+  const saved = checkpoint('cp-compacted');
+  let compacted = 0;
+  fx.onCheckpoint(async () => {
+    fx.setState({ dirty: false, lastConfirmedCheckpointId: 'cp-compacted' });
+    return saved;
+  });
+  const reports: SpatialCheckpointReport[] = [];
+  const stop = startSpatialCheckpointScheduler(fx.spatial, (report) => reports.push(report), 1000, 1, () => {
+    compacted += 1;
+    fx.setState({ dirty: true });
+  });
+  t.after(stop);
+
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(compacted, 1);
+  assert.equal(fx.calls, 1, '压缩产生的 dirty 必须在同一周期保存');
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]?.status, 'saved');
+});
+
+test('压缩本身出错按一次保存失败上报，不进入 checkpoint', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fx = makeSpatial();
+  fx.setState({ dirty: true });
+  const reports: SpatialCheckpointReport[] = [];
+  const stop = startSpatialCheckpointScheduler(fx.spatial, (report) => reports.push(report), 1000, 1, () => {
+    throw new Error('facts compaction failed');
+  });
+  t.after(stop);
+
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(fx.calls, 0, '压缩失败不应继续提交保存');
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]?.status, 'failed');
+  assert.match(String((reports[0] as { error?: { message?: string } }).error?.message), /compaction failed/);
+});
+
 test('一个周期内连续提交有界批次，直到 clean 或达到批数上限', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();

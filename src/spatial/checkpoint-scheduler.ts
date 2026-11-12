@@ -58,6 +58,7 @@ export function startSpatialCheckpointScheduler(
   report: (fact: SpatialCheckpointReport) => void,
   intervalMs = DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
   maxBatchesPerCycle = 1,
+  compact?: () => void,
 ): () => void {
   // 只接受 Node 定时器支持范围内的整数毫秒（1..2147483647）。
   if (!Number.isInteger(intervalMs) || intervalMs < 1 || intervalMs > 2_147_483_647) {
@@ -93,7 +94,19 @@ export function startSpatialCheckpointScheduler(
   const timer = setInterval(() => {
     if (stopped || pending) return;
     const before = spatial.getPersistenceState();
-    if (spatial.closing || before.lifecycle !== 'open' || before.inFlightCheckpointId !== null || spatial.session.busy || !before.dirty) return;
+    if (spatial.closing || before.lifecycle !== 'open' || before.inFlightCheckpointId !== null || spatial.session.busy) return;
+    // 物理压缩 gone 历史是 checkpoint 的前置维护：它本身会让 facts 变 dirty，
+    // 所以必须在 dirty 判断之前执行；失败按一次保存失败上报，不进入 checkpoint。
+    if (compact !== undefined) {
+      try {
+        compact();
+      } catch (error) {
+        const state = spatial.getPersistenceState();
+        report({ status: 'failed', error: errorFacts(error), remainingDirty: state.dirty, state: { ...state } });
+        return;
+      }
+    }
+    if (!spatial.getPersistenceState().dirty) return;
     pending = true;
     void runCycle().finally(() => { pending = false; });
   }, intervalMs);
