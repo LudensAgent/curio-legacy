@@ -28,6 +28,10 @@ import type { WorkingSetLease } from './working-set.ts';
 /** 单次 prepare 的 Section 上限；与库默认 maxLoadBatchSections 一致，超限只报事实。 */
 export const MAX_ROUTE_SECTIONS = 256;
 
+/** 容量失败后按需保存的冷却：同一会话 10 秒内只做一次，避免反复触发 checkpoint。 */
+const CAPACITY_RECOVERY_COOLDOWN_MS = 10_000;
+const capacityRecoveryAt = new WeakMap<SharedSpatialSession, number>();
+
 /** 身体尺寸与执行器一致；只用于推导真实会读到的 Section，不参与移动判断。 */
 const BODY = { width: 0.6, height: 1.8, pose: 'standing' as const };
 
@@ -192,6 +196,7 @@ export async function acquireRouteResidency(
   const BUSY_POLL_MS = 50;
   const BUSY_WAIT_MS = 3_000;
   const waitStarted = Date.now();
+  const abortedNow = () => options.signal?.aborted === true;
   const retryStopped = (why: 'signal aborted' | 'deadline reached'): RouteResidencyFailure => ({
     status: 'not_ready',
     reason: 'cancelled',
@@ -205,7 +210,7 @@ export async function acquireRouteResidency(
     const busyUntil = waitStarted + BUSY_WAIT_MS;
     const until = options.deadline === undefined ? busyUntil : Math.min(busyUntil, options.deadline);
     const remaining = until - Date.now();
-    if (options.signal?.aborted === true) return retryStopped('signal aborted');
+    if (abortedNow()) return retryStopped('signal aborted');
     if (remaining <= 0) {
       if (options.deadline !== undefined && Date.now() >= options.deadline) return retryStopped('deadline reached');
       break;
@@ -244,7 +249,23 @@ export async function acquireRouteResidency(
     };
   }
 
-  const result = outcome.result;
+  let result = outcome.result;
+  // 容量不足不是“路线不可用”：先异步保存一次（提交 dirty），让已提交的冷 Section 可被换出，
+  // 再重试同一个 prepare。全程在等待真实 I/O，不在物理帧里同步阻塞，也不在动作中途抢占后台保存。
+  const capacityFailure = result.status === 'failed' ? result.result.capacity : null;
+  let recovered = false;
+  if (capacityFailure !== null && (capacityFailure.kind === 'byte_capacity' || capacityFailure.kind === 'count_capacity')
+    && !abortedNow()
+    && (options.deadline === undefined || options.deadline - Date.now() > 5_000)
+    && Date.now() - (capacityRecoveryAt.get(spatial) ?? 0) >= CAPACITY_RECOVERY_COOLDOWN_MS) {
+    capacityRecoveryAt.set(spatial, Date.now());
+    const saved = await spatial.checkpoint().then(() => true, () => false);
+    if (abortedNow()) return retryStopped('signal aborted');
+    if (saved) {
+      const retry = await prepareOnce();
+      if (retry.kind === 'result') { result = retry.result; recovered = true; }
+    }
+  }
   if (result.status === 'ready') {
     return {
       status: 'ready',
@@ -277,11 +298,14 @@ export async function acquireRouteResidency(
       noRecord,
     };
   }
-  const capacity = result.result.capacity;
+  const finalCapacity = result.result.capacity;
+  // 把换出拒绝原因带出来：pinned/dirty/not_committed 对应完全不同的处理，别只报“腾不出空间”。
+  const rejected = result.result.evictionRejected.reduce((counts, entry) => ({ ...counts, [entry.reason]: (counts[entry.reason] ?? 0) + 1 }), {} as Record<string, number>);
+  const reasons = Object.entries(rejected).map(([reason, count]) => `${reason}×${count}`).join('、');
   return {
     status: 'not_ready',
     reason: 'failed',
-    message: capacity?.message ?? 'working-set prepare failed',
+    message: `${finalCapacity?.message ?? 'working-set prepare failed'}${reasons ? `；不可换出：${reasons}` : ''}${recovered ? '；已保存并重试一次' : ''}`,
     sections,
     noRecord: [...noRecord, ...result.result.noRecord],
   };
