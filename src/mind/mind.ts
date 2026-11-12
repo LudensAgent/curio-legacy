@@ -31,7 +31,7 @@ import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
 import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
-import { describeLeg, type ExcursionLog } from './excursions.ts';
+import { describeLeg, exploreAttemptFromReceipt, type ExcursionLog } from './excursions.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
 import type { Activity, ActivityDraft, ActivityEnd, ActivityOutcome, ActivityRecord, MindDecision, NextDraft, Noticing } from './types.ts';
 
@@ -1454,10 +1454,29 @@ export class Mind {
       { planId: owner.id, stepId: step.id, sessionId });
   }
 
+  /** 把一次探索委托的实测推进记进当前这段出行；只供提示词回放事实，不判断该往哪走。 */
+  private noteExploreOutcome(o: TaskOutcome) {
+    const state = this.d.adapter.state();
+    const leg = this.d.excursions?.current(state.worldId);
+    // 迟到的回执或穿门后到达的回执不属于当前这段出行：不把旧维度的推进记到新账上。
+    if (!leg || leg.dim !== state.dim || leg.startedAt > o.task.startedAt) return;
+    const record = exploreAttemptFromReceipt({
+      status: o.suspended === true ? 'suspended'
+        : o.result.status === 'succeeded' ? 'succeeded' : o.result.status === 'cancelled' ? 'cancelled' : 'failed',
+      failureCode: o.result.failureCode,
+      data: (o.result.data ?? {}) as Record<string, unknown>,
+      args: (o.task.args ?? {}) as Record<string, unknown>,
+      fallbackEnd: state.pos, at: Date.now(), dim: state.dim,
+    });
+    if (record) this.d.excursions?.noteExplore(record);
+  }
+
   // ---------------------------------------------------------------- 动作结果
   private onDone(o: TaskOutcome) {
     if (this.stepExpiry?.taskId === o.task.id) this.clearStepExpiry();
     if (o.task.source === 'filler') return;
+    // 挂起也是一次委托调用的结束：先把已观测到的推进记进账，再做会话归还。
+    if (o.task.skill === 'explore_toward' || o.task.skill === 'expedition') this.safe(() => this.noteExploreOutcome(o), undefined);
     // 挂起任务可能落定为 cancelled，也可能在观察到中止前自然停止（failed）；两者都要归还会话，
     // 不能因为状态不是 cancelled 就把回执丢给插曲活动。
     if (o.suspended === true) { this.noteSuspendedMovement(o); return; }
@@ -1904,7 +1923,7 @@ export class Mind {
         this.d.behaviors ? (name) => this.d.behaviors!.autoNote(name) : undefined) ?? [], []),
       recalled, ...(hindsightMemories ? { hindsightMemories } : {}), ...(openedSkill ? { openedSkill } : {}), ...(learnFrom ? { learnFrom } : {}), plan,
       hunting: this.safe(() => this.d.ledger?.huntTally() ?? null, null),
-      ...(tier === 'deliberate' && this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
+      ...(this.d.excursions ? { excursions: this.d.excursions.legs() } : {}),
       ...(tier === 'deliberate' ? (() => {
         this.safe(() => this.refreshReach(state), undefined);
         const reach = this.reachCache.get(state.dim);

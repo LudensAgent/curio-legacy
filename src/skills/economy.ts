@@ -633,10 +633,12 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
     const foodText = `；食物 出发时 ${food} 个、现在 ${foodNow} 个`;
     if (targets.length) {
       const msg = `远征向 ${args.direction} 走了 ${travelled} 格（目标 ${args.distance} 格），路线两侧约 ${EXPEDITION_SCAN_RADIUS} 格内没看见 ${args.find}；更远处和遮挡后仍未知${blocked ? '（中途受阻）' : ''}${foodText}`;
-      const data = { travelled, found: null, coverage, direction: args.direction, ...(blocked ? { blocked: true } : {}) };
+      const data = { travelled, found: null, coverage, direction: args.direction, ...(blocked ? { blocked: true, stopReason: 'BLOCKED' } : {}) };
       return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', msg, data);
     }
     const msg = `远征向 ${args.direction} 走了 ${travelled} 格，新区块 +${newChunks}，留下 ${waypoints} 个路标${foodText}`;
-    return travelled >= args.distance * 0.5 ? ok(msg, { travelled }) : fail('PATH_NOT_FOUND', `${msg}（中途受阻）`);
+    // 没有 find 的远征也要带回起点/终点，供出行账记录实测推进；不改变远征行为。
+    const data = { travelled, coverage, direction: args.direction, ...(blocked ? { blocked: true, stopReason: 'BLOCKED' } : {}) };
+    return travelled >= args.distance * 0.5 ? ok(msg, data) : fail('PATH_NOT_FOUND', `${msg}（中途受阻）`, data);
   },
 };
