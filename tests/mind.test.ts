@@ -1765,3 +1765,15 @@ test('开工时没有计划的活动，不会被后来新建的计划认领进�
   assert.equal(w.self.progressLedger(outcomeId), null, '旧活动不能计入后来新建的成果');
   assert.equal(w.self.progressLedger('unassigned')?.movement.activities, 1, '记到未关联当前计划');
 });
+
+test('没有显式 outcome_id 的活动不归到第一个未完成清单项', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  const plan = w.self.setPlan('找到下界要塞', ['向北开出稳定巷道推进', '找到下界要塞'])!;
+  const firstOutcome = plan.steps[0]!.id;
+  await w.reply(0, { monologue: '先沿已知通道走一段', decision: 'new', activity: { what: '沿已知通道走 24 格', kind: 'explore', steps: [step()] } });
+  assert.equal(w.mind.activity?.outcomeId, undefined);
+  await w.finish(ok('走完 24 格'));
+  assert.equal(w.self.progressLedger(firstOutcome), null, '没有明确关联就不能算到第一个未完成成果');
+  assert.equal(w.self.progressLedger('unassigned')?.movement.activities, 1, '记到 unassigned');
+});

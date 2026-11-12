@@ -54,8 +54,6 @@ export type ProgressEntry = {
   passage: { dug: number; filled: number; openSteps: number };
   /** 目标证据：看见/定位/取得；与移动覆盖分开，不能由走得远推出来。 */
   targetEvidence: { found: string[]; located: boolean; acquired: boolean | null };
-  /** 这些活动是怎么归到这项目标上的：Agent 显式写的 outcome_id、落到下一项，还是未关联。 */
-  attribution: Record<'explicit' | 'next_outcome' | 'unassigned', number>;
   last: {
     at: number;
     outcome: ActivityOutcome;
@@ -94,8 +92,6 @@ export type ProgressInput = {
   located?: boolean;
   /** 施工回执的挖开/补支撑/本来就能直接走；缺省表示这次活动没有施工回执。 */
   work?: { dug: number; filled: number; openSteps: number };
-  /** 这条活动是怎么归到 targetId 的；缺省按 unassigned 记，不冒充显式归因。 */
-  attribution?: 'explicit' | 'next_outcome' | 'unassigned';
   hpDelta?: number;
   foodDelta?: number;
 };
@@ -128,7 +124,6 @@ const emptyEntry = (input: ProgressInput): ProgressEntry => ({
   items: { explicitTargets: {}, sideProducts: {} },
   passage: { dug: 0, filled: 0, openSteps: 0 },
   targetEvidence: { found: [], located: false, acquired: null },
-  attribution: { explicit: 0, next_outcome: 0, unassigned: 0 },
   last: { at: input.at, outcome: input.outcome, result: input.summary.slice(0, 200) },
 });
 
@@ -202,10 +197,6 @@ export function applyProgress(ledger: ProgressLedger, input: ProgressInput): Pro
       located: previous.targetEvidence?.located === true || input.located === true,
       acquired: input.acquired !== undefined ? input.acquired : previous.targetEvidence?.acquired ?? null,
     },
-    attribution: {
-      ...(previous.attribution ?? { explicit: 0, next_outcome: 0, unassigned: 0 }),
-      [input.attribution ?? 'unassigned']: (previous.attribution?.[input.attribution ?? 'unassigned'] ?? 0) + 1,
-    },
     last: {
       at: input.at, outcome: input.outcome, result: input.summary.slice(0, 200),
       ...(input.completion ? { completion: input.completion } : {}),
@@ -236,8 +227,7 @@ export function progressSummary(entry: ProgressEntry | undefined) {
       located: entry.targetEvidence.located,
       acquired: entry.targetEvidence.acquired,
     } } : {}),
-    ...(entry.attribution ? { attributed_by: entry.attribution } : {}),
-    coverage_note: 'farthest/new_chunks/net_displacement/activities/repeat_visits 是移动覆盖，不等于目标成果；passage 的 dug/filled 才是新通道，target_evidence 才是看见/定位/取得；attributed_by 说明这些活动是显式关联还是落到下一项',
+    coverage_note: 'farthest/new_chunks/net_displacement/activities/repeat_visits 是移动覆盖，不等于目标成果；passage 的 dug/filled 才是新通道，target_evidence 才是看见/定位/取得',
     last: `${entry.last.outcome}${entry.last.stopReason ? `/${entry.last.stopReason}` : ''}：${entry.last.result.slice(0, 80)}`,
   };
 }

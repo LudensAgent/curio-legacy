@@ -1057,19 +1057,18 @@ export class Mind {
         evidence: attemptEvidence,
       });
     }
-    // 进展账本按目标累计，不按动作名/做法分桶：换方法、改活动标题都不会清零。
-    // 没有计划或计划已换掉时记到 unassigned，避免把旧活动算到新目标上；提示词只显示当前目标的摘要。
+    // 进展账本按目标累计，不按动作名/做法分桶。只有活动**显式**写了匹配当前计划的
+    // outcome_id 才归到该成果；没有明确关联的活动记到 unassigned，不能因为“计划里还有
+    // 未完成项”就猜它是那项成果，否则一次 24 格已知通路会显示成要塞目标的最远距离/活动数。
     {
-      const targetId = planStillCurrent && a.outcomeId && planForProgress?.steps.some((st) => st.id === a.outcomeId)
-        ? a.outcomeId
-        : planStillCurrent ? planForProgress?.steps.find((st) => !st.done)?.id ?? planForProgress?.agendaId ?? 'unassigned' : 'unassigned';
-      const label = planStillCurrent
-        ? planForProgress?.steps.find((st) => st.id === targetId)?.text ?? planForProgress?.goal ?? '未关联计划'
-        : '未关联当前计划';
+      const explicitOutcome = planStillCurrent && a.outcomeId !== undefined
+        && planForProgress?.steps.some((st) => st.id === a.outcomeId) === true;
+      const targetId = explicitOutcome ? a.outcomeId! : 'unassigned';
+      const label = explicitOutcome
+        ? planForProgress!.steps.find((st) => st.id === targetId)!.text
+        : '未明确关联成果';
       this.d.self.recordProgress({
         targetId, label, at: record.at, dim: state.dim, start: a.startPos, end: state.pos,
-        // 显式 outcome_id / 落到下一项 / 未关联，分别记账；复盘能看出这条活动是不是真的属于该成果。
-        attribution: targetId === 'unassigned' ? 'unassigned' : a.outcomeId === targetId ? 'explicit' : 'next_outcome',
         outcome, ...(record.completion ? { completion: record.completion } : {}),
         ...(record.stop?.reason ? { stopReason: record.stop.reason } : {}),
         failedCode: failed?.failureCode ?? null, summary: record.summary ?? summary, durationSec: record.durationSec,
