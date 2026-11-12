@@ -33,6 +33,7 @@ import { checkMigrationGate } from './spatial/migration-state.ts';
 import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
 import { capabilitySummary } from './spatial/capabilities.ts';
+import { spatialForegroundActive } from './spatial/foreground.ts';
 import {
   DEFAULT_SPATIAL_CHECKPOINT_BATCHES,
   DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
@@ -218,7 +219,9 @@ const stopSpatialCheckpoints = startSpatialCheckpointScheduler(spatial, (fact) =
     { error: fact.error, remainingDirty: fact.remainingDirty, lifecycle: fact.state.lifecycle,
       closing: spatial.closing, unconfirmedCheckpointId: fact.state.unconfirmedCheckpointId, state: fact.state });
 }, DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS, DEFAULT_SPATIAL_CHECKPOINT_BATCHES,
-  () => { semantic.compactGoneHistory(); });
+  () => { semantic.compactGoneHistory(); },
+  // 身体在跑技能时后台保存让路；保存只占动作之间的空闲窗口。
+  () => spatialForegroundActive());
 if (spatial.session.legacyFactsMigrationVersion < 1) await spatial.session.checkpoint({ completeLegacyFactsMigration: true });
 const memory = new WorldMemory(worldMemoryPath, { semantic });
 try {

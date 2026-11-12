@@ -196,6 +196,51 @@ test('压缩本身出错按一次保存失败上报，不进入 checkpoint', asy
   assert.match(String((reports[0] as { error?: { message?: string } }).error?.message), /compaction failed/);
 });
 
+test('身体执行动作期间后台保存让路，空闲周期再保存', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fx = makeSpatial();
+  fx.setState({ dirty: true });
+  let foreground = true;
+  let compacted = 0;
+  fx.onCheckpoint(async () => {
+    fx.setState({ dirty: false, lastConfirmedCheckpointId: 'cp-fg' });
+    return checkpoint('cp-fg');
+  });
+  const reports: SpatialCheckpointReport[] = [];
+  const stop = startSpatialCheckpointScheduler(fx.spatial, (report) => reports.push(report), 1000, 1,
+    () => { compacted += 1; }, () => foreground);
+  t.after(stop);
+
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(compacted, 0, '动作期间连压缩也不做');
+  assert.equal(fx.calls, 0, '动作期间不启动 checkpoint');
+  assert.equal(reports.length, 0);
+
+  foreground = false;
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(compacted, 1);
+  assert.equal(fx.calls, 1, '空闲窗口照常保存');
+});
+
+test('一个保存周期进行中身体开始动作时，不再继续下一批', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const fx = makeSpatial();
+  fx.setState({ dirty: true });
+  let foreground = false;
+  fx.onCheckpoint(async () => {
+    foreground = true; // 第一批保存期间 Agent 开始动作
+    return checkpoint('cp-partial');
+  });
+  const stop = startSpatialCheckpointScheduler(fx.spatial, () => {}, 1000, 4, undefined, () => foreground);
+  t.after(stop);
+
+  t.mock.timers.tick(1000);
+  await flush();
+  assert.equal(fx.calls, 1, '当前批次完成后让路，不继续排队下一批');
+});
+
 test('一个周期内连续提交有界批次，直到 clean 或达到批数上限', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const fx = makeSpatial();

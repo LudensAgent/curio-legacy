@@ -3,6 +3,7 @@ import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
+import { beginSpatialForeground, endSpatialForeground } from '../spatial/foreground.ts';
 import { SKILLS } from '../skills/index.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { runSkill, validateSkill, type FailureCode, type Senses, type SkillResult } from '../skills/types.ts';
@@ -369,6 +370,11 @@ export class Arbiter extends EventEmitter {
       ...(this.spatial ? { spatial: this.spatial } : {}),
     };
 
+    // 移动类动作会显式 prepare section：后台 checkpoint 调度器在这个窗口让路，
+    // 避免保存占住单 I/O 门、把前台的 section prepare 拒绝成 busy。非移动动作
+    // （等待/吃饭/观察）不占这个门，不需要推迟保存。
+    const foreground = skill.movement === true;
+    if (foreground) beginSpatialForeground();
     runSkill(ctx, skill, v.args as { make?: boolean })
       .catch((e: any): SkillResult => {
         if (e?.name === 'AbortedError') {
@@ -482,7 +488,8 @@ export class Arbiter extends EventEmitter {
           }
         }
         this.emit('done', { task: info, result, durationMs, preemptedBy, gentle } satisfies TaskOutcome);
-      });
+      })
+      .finally(() => { if (foreground) endSpatialForeground(); });
 
     const { controller: _c, gentle: _g, ...info } = task;
     return info;

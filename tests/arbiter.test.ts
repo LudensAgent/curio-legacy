@@ -6,6 +6,7 @@ import { WorldMemory } from '../src/memory/store.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { SKILLS } from '../src/skills/index.ts';
 import type { SharedSpatialSession } from '../src/spatial/shared-session.ts';
+import { spatialForegroundActive } from '../src/spatial/foreground.ts';
 import { sleep } from '../src/util.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
@@ -29,6 +30,50 @@ test('取消任务：立即释放控制，任务以 cancelled 结束', async () 
   assert.equal(o.result.status, 'cancelled');
   assert.ok(adapter.stopAllCount >= 1);
   assert.equal(arbiter.current, null);
+});
+
+test('技能执行期间标记为前台动作，任务落定后清除', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_foreground = {
+    name: 'test_foreground', description: '', argsDoc: '{}', timeoutMs: 5000, movement: true,
+    validate: () => ({ ok: true, args: {} }),
+    async run() {
+      await sleep(100);
+      return { status: 'succeeded', summary: 'ok' };
+    },
+  };
+  try {
+    const done = next();
+    arbiter.start({ skill: 'test_foreground' }, 'llm');
+    await sleep(20);
+    assert.equal(spatialForegroundActive(), true, '技能在跑时后台 checkpoint 应让路');
+    await done;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(spatialForegroundActive(), false, '任务落定后释放前台标记');
+  } finally {
+    delete SKILLS.test_foreground;
+  }
+});
+
+test('非移动技能不占用前台让路标记，后台保存可以在等待期间进行', async () => {
+  const { arbiter, next } = setup();
+  SKILLS.test_no_foreground = {
+    name: 'test_no_foreground', description: '', argsDoc: '{}', timeoutMs: 5000, movement: false,
+    validate: () => ({ ok: true, args: {} }),
+    async run() {
+      await sleep(100);
+      return { status: 'succeeded', summary: 'ok' };
+    },
+  };
+  try {
+    const done = next();
+    arbiter.start({ skill: 'test_no_foreground' }, 'llm');
+    await sleep(20);
+    assert.equal(spatialForegroundActive(), false);
+    await done;
+  } finally {
+    delete SKILLS.test_no_foreground;
+  }
 });
 
 test('beginShutdown 停止新任务与控制，但不把共享会话标记为暂停', async () => {

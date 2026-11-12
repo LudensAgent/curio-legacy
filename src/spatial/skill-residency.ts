@@ -185,12 +185,13 @@ export async function acquireRouteResidency(
     (result) => ({ kind: 'result' as const, result }),
     (error: unknown) => ({ kind: 'error' as const, error }),
   );
-  // 检查点调度器/后台加载短暂占用时，库以 kind 'busy' 拒绝 prepare：这是忙，
-  // 不是路线不可用。只在调用方 signal/deadline 范围内对 'busy' 做有限次退避
-  // 重试（至多 4 次尝试）；closing/closed/error 等其他失败不重试。耗尽后保留
-  // 最后一次真实错误，取消/期限则返回 cancelled 交给调用方区分生命周期与超时。
-  const BUSY_ATTEMPTS = 4;
-  const BUSY_BACKOFF_MS = [10, 20, 40];
+  // 检查点调度器/后台加载/统计查询短暂占用时，库以 kind 'busy' 拒绝 prepare：这是忙，
+  // 不是路线不可用。一次 checkpoint 的 voxel 批次提交可能远长于几十毫秒，固定 4 次
+  // 几十毫秒的退避不够；在调用方 signal/deadline 范围内按 50ms 轮询，最多等
+  // BUSY_WAIT_MS。等不到再原样返回 busy；closing/closed/error 等其他失败不重试。
+  const BUSY_POLL_MS = 50;
+  const BUSY_WAIT_MS = 3_000;
+  const waitStarted = Date.now();
   const retryStopped = (why: 'signal aborted' | 'deadline reached'): RouteResidencyFailure => ({
     status: 'not_ready',
     reason: 'cancelled',
@@ -200,21 +201,17 @@ export async function acquireRouteResidency(
   });
 
   let outcome = await prepareOnce();
-  let attempts = 1;
-  while (
-    attempts < BUSY_ATTEMPTS
-    && outcome.kind === 'error'
-    && outcome.error instanceof PersistenceError
-    && outcome.error.kind === 'busy'
-  ) {
-    const remaining = options.deadline === undefined
-      ? Number.POSITIVE_INFINITY
-      : options.deadline - Date.now();
+  while (outcome.kind === 'error' && outcome.error instanceof PersistenceError && outcome.error.kind === 'busy') {
+    const busyUntil = waitStarted + BUSY_WAIT_MS;
+    const until = options.deadline === undefined ? busyUntil : Math.min(busyUntil, options.deadline);
+    const remaining = until - Date.now();
     if (options.signal?.aborted === true) return retryStopped('signal aborted');
-    if (remaining <= 0) return retryStopped('deadline reached');
+    if (remaining <= 0) {
+      if (options.deadline !== undefined && Date.now() >= options.deadline) return retryStopped('deadline reached');
+      break;
+    }
 
     let aborted = false;
-    const waitMs = Math.min(BUSY_BACKOFF_MS[attempts - 1]!, remaining);
     await new Promise<void>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const onAbort = () => { aborted = true; cleanup(); resolve(); };
@@ -222,24 +219,25 @@ export async function acquireRouteResidency(
         if (timer !== undefined) clearTimeout(timer);
         options.signal?.removeEventListener('abort', onAbort);
       };
-      timer = setTimeout(() => { cleanup(); resolve(); }, waitMs);
+      timer = setTimeout(() => { cleanup(); resolve(); }, Math.min(BUSY_POLL_MS, remaining));
       options.signal?.addEventListener('abort', onAbort, { once: true });
     });
     if (aborted) return retryStopped('signal aborted');
-    if (options.deadline !== undefined && Date.now() >= options.deadline) {
-      return retryStopped('deadline reached');
-    }
 
     outcome = await prepareOnce();
-    attempts += 1;
   }
   if (outcome.kind === 'error') {
     const kind = outcome.error instanceof PersistenceError ? outcome.error.kind : 'error';
     const reason: RouteResidencyFailureReason = kind === 'busy' || kind === 'closing' || kind === 'closed' ? kind : 'error';
+    // busy 的原文只有一句泛化的内存门说明；把等待时长和实际在飞的 checkpoint 一并带上，
+    // 心智才能区分“存储忙”与“这一片 Section 读不了”。
+    const persistence = kind === 'busy' ? spatial.getPersistenceState() : null;
+    const busyNote = reason !== 'busy' ? ''
+      : `（已等 ${Date.now() - waitStarted}ms${persistence?.inFlightCheckpointId ? `；checkpoint ${persistence.inFlightCheckpointId} 在飞` : ''}${persistence?.dirty ? '；仍有 dirty 数据待保存' : ''}）`;
     return {
       status: 'not_ready',
       reason,
-      message: outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+      message: `${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}${busyNote}`,
       sections,
       noRecord,
       error: outcome.error,
