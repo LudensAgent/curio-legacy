@@ -2210,7 +2210,8 @@ export class Mind {
       Object.assign(a, { what: draft.what, why: draft.why || a.why, kind: draft.kind, steps, repeat: draft.repeat, iteration: 0, index: runningIndex + 1, adaptations: [], consecutiveFailures: 0,
         monologue: decision.monologue || a.monologue });
       // 调整后仍保留同一个步骤实例才继续沿用它的移动续接凭据；换了步骤就不再借旧会话。
-      if (a.movementPause !== undefined && !steps.some((s) => s.id === a.movementPause!.stepId)) delete a.movementPause;
+      const pausedStepId = a.movementPause?.stepId;
+      if (pausedStepId !== undefined && !steps.some((s) => s.id === pausedStepId)) delete a.movementPause;
       if (draft.facing) a.facing = draft.facing; else delete a.facing;
       if (draft.doneWhen) a.doneWhen = draft.doneWhen; else delete a.doneWhen;
       if (draft.outcomeId) a.outcomeId = draft.outcomeId; else delete a.outcomeId;
