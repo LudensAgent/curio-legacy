@@ -292,6 +292,13 @@ function assertTimelineCoversDispatches(timeline: ControlEvent[], dispatches: { 
     '每个 transition 都能在时间线上找到派发');
 }
 
+test('navigate_to 分段上限：接受 64，拒绝 65', () => {
+  const adapter = new FakeAdapter();
+  const base = { to: { x: 1, y: 64, z: 0 }, allowed: ['walk'] };
+  assert.equal(navigateTo.validate!({ ...base, maxStepsPerSegment: 64 }, adapter).ok, true);
+  assert.equal(navigateTo.validate!({ ...base, maxStepsPerSegment: 65 }, adapter).ok, false);
+});
+
 test('真实物理：先斜向再直行的路线一路不停车、不后退', async (t) => {
   const { ctx, timer, entity, frames, dispatches } = setup(() => 63, { x: 0.5, y: 64, z: 0.5 }, { x0: -3, x1: 12, z0: -3, z1: 8 });
   t.after(() => { clearInterval(timer); ctx.memory.close(); });

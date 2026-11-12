@@ -241,7 +241,7 @@ export const travelTo: Skill<TravelToArgs> = {
       allowed: ['walk', 'step', 'drop', 'jump'],
       historical: true,
       maxSteps,
-      maxStepsPerSegment: Math.min(64, maxSteps),
+      maxStepsPerSegment: Math.min(32, maxSteps),
       maxSegments: MAX_SEGMENTS,
       // 边走边规划时每接一段窗口、每次绕路都要搜索：预算约每格一次，只防无限循环，不截断长途委托。
       maxSearches: Math.min(128, 16 + Math.ceil(direct)),
