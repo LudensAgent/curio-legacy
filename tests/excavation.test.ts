@@ -22,6 +22,9 @@ class ExcavationWorld extends FakeAdapter {
   acknowledgeMoveOnly = false;
   afterDig?: (pos: Vec3Like) => void;
   afterMove?: () => void;
+  sneakPlaceAt?: (target: Vec3Like, itemNames: string[], signal: AbortSignal, options?: { advance?: boolean }) => Promise<{
+    ok: boolean; placed?: Vec3Like; placedName?: string; verified?: boolean; advanced?: boolean;
+  }>;
   constructor() { super(); this.pos = { x: 0.5, y: 64, z: 0.5 }; this.inv.set('iron_pickaxe', 1); }
   setBlock(pos: Vec3Like, name: string) {
     this.blocks = this.blocks.filter((block) => block.pos.x !== pos.x || block.pos.y !== pos.y || block.pos.z !== pos.z);
