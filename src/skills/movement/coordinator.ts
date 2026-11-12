@@ -110,7 +110,9 @@ export type MakeWayLegReceipt = {
   budgetExhausted?: true;
 };
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
-const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY']);
+// CONFLICT（搜索说证据不足、复验却判边 OPEN）同样是“普通搜索走不下去”：授权了施工时交给开路，
+// 开路逐步用当前方块确认、每段只做一处改动并产生新证据，不会原地重播同一次搜索。
+const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY', 'CONFLICT']);
 /** 一次调用最多开路几段（每段只做到第一处改动，因此一段至多一次改动）；与施工上限一致，避免段数先于额度截断长距离搭桥。 */
 const MAX_MAKE_WAY_LEGS = MAKE_WAY_MAX_EDITS;
 /** 所需区段暂时加载不了（存档正在写盘等）时，等这么久再重试，最多这么多次。 */
