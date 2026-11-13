@@ -29,7 +29,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
-import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, SelfModel } from './self.ts';
+import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, REVIEW_GAP_DEFAULT_MS, REVIEW_GAP_RANGE_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import { describeLeg, exploreAttemptFromReceipt, type ExcursionLog } from './excursions.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
@@ -240,9 +240,7 @@ export class Mind {
   static readonly LOCAL_FAILURE_TTL_MS = 10 * 60_000;
   /** 搜索状态（无进展、局部失败、换维/换区证据）跨轮次保留的上限；过期恢复不再冒充当前状态。 */
   static readonly SEARCH_STATE_TTL_MS = 30 * 60_000;
-  /** 两次因为情绪的阶段回顾至少隔多久（每次在这个范围里随机）：情绪只是提醒，不能一烦就换目标 */
-  static REVIEW_GAP_MIN: [number, number] = [45, 90];
-  private reviewGapMs = 45 * 60_000;
+  private reviewGapMs = REVIEW_GAP_DEFAULT_MS;
   /** 情绪到多少才提醒回顾 */
   static BORED_REVIEW = 0.75;
   static FED_UP_REVIEW = 0.65;
@@ -321,6 +319,10 @@ export class Mind {
 
   constructor(private d: MindDeps) {
     this.timing = { ...DEFAULT_TIMING, ...(d.timing ?? {}) };
+    // 阶段回顾计时跨重启保留：重启本身不该算作“又该回顾了”。
+    const reviewClock = d.self.reviewClock();
+    this.lastReviewAt = reviewClock.at;
+    this.reviewGapMs = reviewClock.gapMs;
     const state = d.adapter.state();
     d.memory.setWorld(state.worldId);
     d.thinker.skillStats = (name) => d.behaviors?.statsOf(name);
@@ -658,7 +660,8 @@ export class Mind {
     const plan = this.d.self.plan();
     const days = (this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000;
     // 1) 主目标过了好几个游戏天（3–5 天里随机）还没做成：回顾一次，别一直钻牛角尖
-    const overdue = !!plan && plan.reviewDays !== undefined && days >= plan.reviewDays;
+    // 过期回顾也受跨重启的回顾间隔约束：回顾发出后重启，不会在 boot 后立刻再触发一次。
+    const overdue = !!plan && plan.reviewDays !== undefined && days >= plan.reviewDays && now - this.lastReviewAt >= this.reviewGapMs;
     // 2) 情绪提醒：腻透了或烦透了，而且确实没进展（主目标停滞）；
     //    目标至少做了一天、离上次回顾够久，才提醒——情绪会起伏，不能一烦就换
     const m = this.d.self.mood;
@@ -678,6 +681,9 @@ export class Mind {
       stuck ? `最近 ${recent.length} 段活里卡住/没做成 ${stuckRuns} 段` : '',
       this.keptHint ? '回想时觉得主目标可以放下了' : ''].filter(Boolean).join('、');
     this.review = { at: now, why };
+    // 回顾一发出就记下时间：期间重启也不会立刻再触发一次。
+    this.lastReviewAt = now;
+    this.d.self.setReviewClock(now, this.reviewGapMs);
     this.d.bus.publish('stage_review', 'P2', `停下来回顾阶段目标：${why}`, { boredom: m.boredom, frustration: m.frustration, days, stalledMin: Math.round(stalledMin) });
     this.requestThink(`${why}：停下来想想这一阶段到底在做什么，要不要换个阶段目标`, 'deliberate');
   }
@@ -2458,8 +2464,9 @@ export class Mind {
     if (!switched) this.d.self.postponeReview(this.gameDay, (this.d.self.observedProgress()?.planGameTicks ?? 0) / 24000);
     this.review = null;
     this.lastReviewAt = Date.now();
-    const [lo, hi] = Mind.REVIEW_GAP_MIN;
+    const [lo, hi] = REVIEW_GAP_RANGE_MIN;
     this.reviewGapMs = (lo + this.d.self.rand() * (hi - lo)) * 60_000;
+    this.d.self.setReviewClock(this.lastReviewAt, this.reviewGapMs);
     this.keptHint = null;
   }
 

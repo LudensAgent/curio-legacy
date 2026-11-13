@@ -122,6 +122,29 @@ test('错过多个回顾期限后，继续目标仍从当前游戏天起宽限',
   assert.equal(thinks.length, 1, '不会连续追补已经错过的回顾');
 });
 
+test('回顾计时跨重启保留；异常时间戳不会永久禁止回顾', () => {
+  const self = new SelfModel(null);
+  const now = Date.now();
+  self.setReviewClock(now, 60 * 60_000);
+  assert.deepEqual(self.reviewClock(), { at: now, gapMs: 60 * 60_000 });
+  // 时钟回拨/存档异常：未来时间戳、非数值都按未知处理
+  self.data.reviewAt = now + 24 * 60 * 60_000;
+  assert.equal(self.reviewClock().at, 0);
+  self.data.reviewAt = Number.NaN;
+  assert.equal(self.reviewClock().at, 0);
+  // 异常间隔收敛到合法区间
+  self.data.reviewAt = now;
+  self.data.reviewGapMs = 1_000_000_000;
+  assert.equal(self.reviewClock().gapMs, 90 * 60_000);
+  self.data.reviewGapMs = 0;
+  assert.equal(self.reviewClock().gapMs, 45 * 60_000);
+  self.data.reviewGapMs = -1;
+  assert.equal(self.reviewClock().gapMs, 45 * 60_000);
+  // 写入时也收敛，避免新存档再带出越界值
+  self.setReviewClock(now, 0);
+  assert.equal(self.reviewClock().gapMs, 45 * 60_000);
+});
+
 test('最近反复卡住也会停下来回顾，哪怕清单还在微推进', () => {
   const { mind, self, thinks } = fakeMind({ boredom: 0.3, progressMinAgo: 5, days: 1 });
   const now = Date.now();

@@ -25,7 +25,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 6; i++) await setImmediate(); };
 
-function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('../src/knowledge/skillbook.ts').SkillBook; behaviors?: boolean } = {}) {
+function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('../src/knowledge/skillbook.ts').SkillBook; behaviors?: boolean; reviewClock?: { at: number; gapMs: number } } = {}) {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const vision = new Vision(adapter), arbiter = new Arbiter(adapter, memory, bus, vision);
   const perception = new Perception(adapter, memory, bus, vision);
@@ -34,6 +34,7 @@ function fixture(t: TestContext, opts: { autonomous?: boolean; book?: import('..
   const planner = new Planner(cfg, { name: opts.autonomous === false ? 'mock' : 'mind-test-model', complete: (messages, _signal, hint) =>
     new Promise((resolve, reject) => pending.push({ resolve, reject, messages, hint })) }, adapter, memory, bus, null);
   const self = new SelfModel(null, ['好奇', '谨慎']);
+  if (opts.reviewClock) self.setReviewClock(opts.reviewClock.at, opts.reviewClock.gapMs);
   const finishes: ((r?: SkillResult) => void)[] = [];
   const previous = SKILLS.mind_step;
   SKILLS.mind_step = { name: 'mind_step', description: '测试用的一步活', argsDoc: '{"n"?: 数字}', timeoutMs: 60000, movement: false,
@@ -1052,6 +1053,32 @@ test('已挂着的操作者指令这一念写 doing：照做，不受紧急挂�
   await w.reply(w.pending.length - 1, { monologue: '照做', decision: 'switch', activity: { what: '去下界', steps: [step(2)] }, operator: { status: 'doing' } });
   assert.equal(w.mind.activity?.what, '去下界');
   assert.ok(!w.mind.suspended.some((a) => a.what === '砍树'), '操作者指令照做时不挂起原活动');
+});
+
+test('重启后从 SelfModel 恢复阶段回顾计时，过期目标也不会立刻再回顾', (t) => {
+  const at = Date.now() - 10 * 60_000;
+  const w = fixture(t, { reviewClock: { at, gapMs: 60 * 60_000 } });
+  assert.equal((w.mind as any).lastReviewAt, at);
+  assert.equal((w.mind as any).reviewGapMs, 60 * 60_000);
+  const thinks: string[] = [];
+  (w.mind as any).requestThink = (reason: string) => thinks.push(reason);
+  // 目标已经过期、情绪也到了，但上次回顾只在 10 分钟前：不立刻再触发
+  w.self.setPlan('测试目标', ['一步']);
+  w.self.setOnline(true, Date.now());
+  w.self.data.plan!.progressAt = Date.now() - 60 * 60_000;
+  w.self.data.plan!.stalledOnlineMs = 60 * 60_000;
+  w.self.data.plan!.stalledObservedSince = Date.now() - 60 * 60_000;
+  w.self.data.plan!.stalledHistoryUnknown = false;
+  w.self.data.plan!.reviewDays = 1;
+  w.self.data.mood.boredom = 0.9;
+  w.self.notePlanDay(60);
+  w.self.setObservedProgress({ planId: w.self.plan()!.agendaId, planGameTicks: 48000, planObservedSince: Date.now() });
+  (w.mind as any).stageReviewCheck();
+  assert.equal(thinks.length, 0, '没到回顾间隔，连过期路径也不触发');
+  // 间隔过了：可以回顾
+  (w.mind as any).lastReviewAt = Date.now() - 2 * 60 * 60_000;
+  (w.mind as any).stageReviewCheck();
+  assert.equal(thinks.length, 1, '间隔过了才回顾');
 });
 
 test('零碎经验先存着，出乎意料（卡住）才马上记成窍门', async (t) => {

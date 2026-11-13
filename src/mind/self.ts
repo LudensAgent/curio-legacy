@@ -28,6 +28,9 @@ interface SelfData {
   likes?: { at: number; text: string }[];
   /** 上次回想的时间与当时的窍门数 */
   reflectedAt?: number;
+  /** 阶段回顾计时：上次发起/结束回顾的现实时间与下一次情绪回顾的最短间隔；跨重启保留。 */
+  reviewAt?: number;
+  reviewGapMs?: number;
   knowHowAtReflect?: number;
   /** 自上次回想以来新增的明确反例：出现反例本身就该进入反思，而不只是等新窍门。 */
   counterexamplesSinceReflect?: number;
@@ -286,6 +289,10 @@ function lessonContext(text: string): string | undefined {
   return context?.replace(/\s+/g, '').toLowerCase();
 }
 
+/** 情绪回顾的最短/最长间隔（分钟）；Mind 的随机间隔和 SelfModel 的持久化校验共用这一组。 */
+export const REVIEW_GAP_RANGE_MIN = [45, 90] as const;
+export const REVIEW_GAP_DEFAULT_MS = REVIEW_GAP_RANGE_MIN[0] * 60_000;
+
 /** 清单里未完成的成果被删改后，新清单至少试满这么久才允许下一次删改；
  * 也是“停滞多久值得看看清单”的阈值。阶段回顾/操作者指令不受此限；只加项不受限。 */
 export const PLAN_REVISION_MIN = 15;
@@ -406,6 +413,25 @@ export class SelfModel {
     const p = this.data.plan;
     return p?.setDay !== undefined && Number.isFinite(day) ? Math.max(0, day - p.setDay) : 0;
   }
+  /** 阶段回顾计时：上次发起/结束回顾的现实时间与下一次情绪回顾的最短间隔；
+   * 未来时间戳（时钟回拨/存档异常）按未知处理，不能永久禁止回顾；gap 收敛到合法区间。 */
+  reviewClock() {
+    const at = this.data.reviewAt;
+    const raw = this.data.reviewGapMs;
+    const safeAt = typeof at === 'number' && Number.isFinite(at) && at <= Date.now() ? at : 0;
+    const gapMs = typeof raw === 'number' && Number.isFinite(raw)
+      ? Math.min(REVIEW_GAP_RANGE_MIN[1] * 60_000, Math.max(REVIEW_GAP_DEFAULT_MS, raw))
+      : REVIEW_GAP_DEFAULT_MS;
+    return { at: safeAt, gapMs };
+  }
+  setReviewClock(at: number, gapMs: number) {
+    this.data.reviewAt = at;
+    this.data.reviewGapMs = Number.isFinite(gapMs)
+      ? Math.min(REVIEW_GAP_RANGE_MIN[1] * 60_000, Math.max(REVIEW_GAP_DEFAULT_MS, gapMs))
+      : REVIEW_GAP_DEFAULT_MS;
+    this.touch();
+  }
+
   /** 回顾后决定接着做：再给它 1–2 个游戏天，到时再回顾 */
   postponeReview(day: number, observedDays?: number): number | null {
     const p = this.data.plan;
