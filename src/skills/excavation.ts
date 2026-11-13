@@ -258,13 +258,14 @@ function standingCell(ctx: SkillCtx, feet: Vec3Like, ledger: RiskLedger, opts: P
 
 /** Only this adjacent work column and its touching hazard boundaries are read.
  * These reads never discover structures or choose an underground direction. */
-function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: RiskLedger, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}) {
+function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: RiskLedger, opts: Pick<ExcavationArgs, 'wet' | 'lava' | 'allowFalling'> = {}): { cells: Vec3Like[]; fire: Vec3Like[] } {
   const { adapter } = ctx;
   const cells = Array.from({ length: height }, (_, level) => ({ ...feet, y: feet.y + level }));
-  // 火/灵魂火没有碰撞、一下就能打灭：落在这条通道本来要挖开的格里时，按普通工作面挖掉，
-  // 不因此改向；通道旁边的火仍按紧邻危险停下。
+  // 火/灵魂火没有碰撞、一下就能打灭：落在通道格里，或紧邻通道面时，都按普通施工对象顺手挖掉，
+  // 不因此改向；液体/接触型危险仍按原有授权口径硬停。
   const fireInColumn = (pos: Vec3Like, name: string) => (name === 'fire' || name === 'soul_fire')
     && cells.some((cell) => cell.x === pos.x && cell.y === pos.y && cell.z === pos.z);
+  const fire = new Map<string, Vec3Like>();
   for (const pos of cells) {
     const name = adapter.blockAt(pos);
     if (name === null) throw new ExcavationStop('NOT_FOUND', '局部工作面未加载/未知', false, 'unknown');
@@ -290,12 +291,18 @@ function preflightColumn(ctx: SkillCtx, feet: Vec3Like, height: number, ledger: 
       const neighbor = adapter.blockAt(at);
       // 邻格未加载不是已确认的危险；只作为未知边界报告，工作面/落点/身体空间未知仍在别处硬停。
       if (neighbor === null) { noteUnknown(ledger, at); continue; }
+      // 紧邻面的火不拦施工：收集起来由开挖方顺手打灭（无碰撞、一击即灭），
+      // 和通道内的火同一口径；只有打不灭时如实记下，不拿它挡住整条通道。
+      if ((neighbor === 'fire' || neighbor === 'soul_fire') && !fireInColumn(at, neighbor)) {
+        fire.set(`${at.x},${at.y},${at.z}`, { ...at });
+        continue;
+      }
       if (hazard(neighbor) && !fireInColumn(at, neighbor) && !noteRisk(ledger, at, neighbor, 'neighbor', opts)) {
         throw new ExcavationStop('BAD_ARGS', `紧邻开挖面是 ${neighbor}（${hazardLabel(neighbor)}）`, false, 'risk');
       }
     }
   }
-  return cells;
+  return { cells, fire: [...fire.values()] };
 }
 
 /** 下一落点没支撑时的只读缺口：把当前可见的较低落点原样列出，不选择、不自动垫/挖/下落。 */
@@ -339,6 +346,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const { adapter, senses, signal } = ctx;
   const origin = adapter.state();
   let entryId: string | undefined, checkpointId: string | undefined, completed = 0, excavated = 0, noDropBlocks = 0, filled = 0, fillTried = false;
+  /** 紧邻通道面的火：无碰撞、一击即灭，按施工对象顺手打掉，不因此改向。 */
+  let fireCleared = 0;
+  const fireNotCleared: string[] = [];
   /** 既没挖也没补就迈过去的格数：这些格本来就能直接走。 */
   let openSteps = 0;
 
@@ -357,6 +367,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     ? `（按 fill 补了 ${filled} 处支撑：${fillFacts.map((f) => `${f.item} 在 (${f.at.x},${f.at.y},${f.at.z})`).join('、')}）`
     : '';
   const noDropNote = () => noDropBlocks ? `（其中 ${noDropBlocks} 格没有掉落）` : '';
+  const fireNote = () => fireCleared || fireNotCleared.length
+    ? `（顺手打灭 ${fireCleared} 处紧邻的火${fireNotCleared.length ? `；${fireNotCleared.length} 处没打灭：${fireNotCleared.slice(0, 2).join('；')}` : ''}）`
+    : '';
   const startChunks = ctx.memory.visitedChunkCount;
   // 这一段实际做了什么：开挖是固定方向直线施工，平地上也是一格一格迈；按实数报，不让“挖出 N 格”掩盖其实没挖。
   const workNote = () => completed ? `（${completed} 格里挖掉 ${excavated} 块、补了 ${filled} 处支撑、${openSteps} 格本来就能直接走）` : '';
@@ -365,7 +378,7 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
   const details = () => {
     const checkpoint = path.at(-1)?.pos ?? null;
     return { structureVerified: false, mode: args.mode, direction: args.direction, requestedSteps: args.steps, completedSteps: completed, descendedLevels: args.mode === 'stairs' ? completed : 0, ascendedLevels: args.mode === 'stairs_up' ? completed : 0,
-      excavatedBlocks: excavated, openSteps, noDropBlocks, filledBlocks: filled, fillFacts, entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
+      excavatedBlocks: excavated, openSteps, noDropBlocks, filledBlocks: filled, fillFacts, fireClearedBlocks: fireCleared, fireNotCleared: [...fireNotCleared], entryId, nextEntryId: checkpointId ?? entryId, checkpoint, path, adjustedDrops,
       risks: ledger.risks.map((risk) => ({ ...risk, at: { ...risk.at } })), riskCells: ledger.risks.map((risk) => ({ ...risk.at })), unknownAdjacent: ledger.unknownAdjacent.map((at) => ({ ...at })),
       actualOffset: checkpoint ? { x: checkpoint.x - origin.pos.x, y: checkpoint.y - origin.pos.y, z: checkpoint.z - origin.pos.z } : null,
       coverage: '仅探索实际经过的单条有界通道，未证明已覆盖地下区域或找到要塞' };
@@ -531,12 +544,26 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       // 指定的 fill 材料背包里根本没有：挖开也补不上，照旧在挖前按能力缺口停下，不白挖。
       if (supportProblemNow && args.fill && args.fill !== 'any' && !adapter.state().inventory.some((i) => i.name === args.fill && i.count > 0)) await fillSupport();
       const height = args.mode === 'stairs' ? 3 : 2;
-      const cells = preflightColumn(ctx, next, height, ledger, args).reverse();
+      const pre = preflightColumn(ctx, next, height, ledger, args);
+      const cells = pre.cells.reverse();
       // A one-block jump needs extra clearance above the current head before
       // moving. Its floor and the next step block are never dug out.
       const workCheck = () => { preflightColumn(ctx, next, height, ledger, args); if (args.mode === 'stairs_up') preflightColumn(ctx, here, 3, ledger, args); };
       workCheck();
       if (args.mode === 'stairs_up') cells.unshift({ ...here, y: here.y + 2 });
+      // 紧邻通道面的火先打灭：没有碰撞，不影响通行，但挨着走会持续掉血。
+      // 打不灭（够不着/未加载）只记事实，不拿它挡住整条巷。
+      for (const pos of pre.fire) {
+        assertSession(ctx, origin);
+        const name = adapter.blockAt(pos);
+        if (name !== 'fire' && name !== 'soul_fire') continue;
+        const result = await adapter.dig(pos, signal, args.tool ? { tool: args.tool } : undefined);
+        if (!result.ok) { fireNotCleared.push(`(${pos.x},${pos.y},${pos.z}) ${result.reason ?? '未打灭'}`); continue; }
+        const after = adapter.blockAt(pos);
+        if (after === 'fire' || after === 'soul_fire') { fireNotCleared.push(`(${pos.x},${pos.y},${pos.z}) 打灭后仍是火`); continue; }
+        markSelfModified(ctx.spatial, origin.dim, pos, ctx.taskId);
+        fireCleared++;
+      }
       for (const pos of cells) {
         assertSession(ctx, origin);
         workCheck();
@@ -624,10 +651,10 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       });
       ctx.progress(completed / args.steps, `实际推进 ${completed}/${args.steps} 格，${args.mode === 'stairs' ? '沿阶梯下降' : args.mode === 'stairs_up' ? '沿阶梯上升' : '搜索当前层通道'}`);
       if (await observe()) {
-        return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
+        return ok(`有界开挖中观察到目标，保留实际入口与路径${dropNote()}${fillNote()}${fireNote()}${noDropNote()}`, { ...details(), stoppedByObservation: true });
       }
     }
-    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${workNote()}${dropNote()}${fillNote()}${noDropNote()}${visitedNote()}，保留下一入口；尚未证明找到结构`, details());
+    return ok(`实际挖出 ${completed} 格${args.mode === 'stairs' ? '下降阶梯' : args.mode === 'stairs_up' ? '上升阶梯' : '水平通道'}${workNote()}${dropNote()}${fillNote()}${fireNote()}${noDropNote()}${visitedNote()}，保留下一入口；尚未证明找到结构`, details());
   } catch (error) {
     if (isAbort(error)) {
       // 取消/超时也要保留已经实际挖掉的格数与路径；不足一步的移动不算完成，不伪造入口。

@@ -16,7 +16,7 @@ import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
 import { supportTop } from '../../perception/geometry.ts';
 import { liveEdgeStatus } from './live-edge.ts';
-import { MAKE_WAY_MAX_EDITS, planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
+import { isDiggableFire, MAKE_WAY_MAX_EDITS, planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
 import { mineCell, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import {
@@ -115,6 +115,8 @@ export type MakeWayLegReceipt = {
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY', 'CONFLICT']);
 /** 一次调用最多开路几段（每段只做到第一处改动，因此一段至多一次改动）；与施工上限一致，避免段数先于额度截断长距离搭桥。 */
 const MAX_MAKE_WAY_LEGS = MAKE_WAY_MAX_EDITS;
+/** 没有 dig/place 授权时，普通路线被火挡住可顺手打灭的上限；火没有碰撞，不属于开挖/搭建委托。 */
+const FIRE_CLEAR_MAX = 64;
 /** 所需区段暂时加载不了（存档正在写盘等）时，等这么久再重试，最多这么多次。 */
 const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
 /** 同一站位、同一相关证据、同一搜索终态最多重搜几次；再多就是搜索/复验矛盾，交回 Agent。 */
@@ -134,6 +136,9 @@ export async function runMakeWay(
     /** 同一委托剩余可用的施工改动次数（原授权 − 会话累计），与 opts.maxEdits 的规划授权分开。 */
     remainingEdits: number;
     edits: MakeWayEdit[];
+    /** 没有 dig/place 授权时顺手打灭火的记录与上限；火不占施工额度。 */
+    fireEdits?: MakeWayEdit[];
+    fireBudget?: number;
     deadline: number;
     nameAt: (cell: Vec3Like) => string;
     /** 目标格脚下那格的已记录支撑顶面（0–1，如灵魂沙 0.875）；未知为 null，按整格算。 */
@@ -145,6 +150,8 @@ export async function runMakeWay(
   },
 ): Promise<MakeWayLegReceipt> {
   const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt, onProgress } = job;
+  const fireEdits = job.fireEdits ?? [];
+  const fireBudget = job.fireBudget ?? 0;
   const from = { ...ctx.adapter.state().pos };
   // 规划是异步的：算完时身体可能还在滑动或已被推开。第一步的落点不在身边相邻格（或同格）就不执行，交回重规划。
   const first = steps[0];
@@ -191,16 +198,19 @@ export async function runMakeWay(
   outer: for (const [stepIndex, step] of steps.entries()) {
     if (ctx.signal.aborted || Date.now() >= deadline) { failure = ctx.signal.aborted ? '父任务取消' : '期限已到'; break; }
     for (const cell of step.dig) {
-      if (edits.length >= remainingEdits) {
-        failure = `本次委托剩余的施工改动额度（${remainingEdits} 次）已用尽`;
+      const name = nameAt(cell);
+      // 火没有碰撞、一击即灭：没有 dig/place 授权时也顺手打掉，不占施工额度；
+      // 有授权时它和普通挖开一样计入本次委托的施工记录。
+      const fireOnly = fireBudget > 0 && isDiggableFire(name);
+      if (fireOnly ? fireEdits.length >= fireBudget : edits.length >= remainingEdits) {
+        failure = fireOnly ? `本次调用顺手打灭火的额度（${fireBudget} 处）已用尽` : `本次委托剩余的施工改动额度（${remainingEdits} 次）已用尽`;
         budgetExhausted = true;
         break outer;
       }
-      const name = nameAt(cell);
       // 规划时已排除已记录的液体邻格；墙后看不见的邻格是授权 dig 承担的风险，不再按“当前视野没看清”拦。
       failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig?.tool === undefined ? {} : { tool: opts.dig.tool }) }) ?? undefined;
       if (failure !== undefined) break outer;
-      edits.push({ kind: 'dig', pos: { ...cell }, name });
+      (fireOnly ? fireEdits : edits).push({ kind: 'dig', pos: { ...cell }, name });
     }
     if (step.place !== undefined || step.kind === 'pillar') {
       if (edits.length >= remainingEdits) {
@@ -322,7 +332,8 @@ export type CoordinatorOutcome =
       stop: StopReceipt;
       observation?: ObservationReceipt;
       swimLegs?: SwimLegReceipt[];
-      makeWay?: { edits: MakeWayEdit[]; legs: MakeWayLegReceipt[] };
+      /** edits 只记施工改动；fireEdits 是没有 dig/place 授权时顺手打灭的火。 */
+      makeWay?: { edits: MakeWayEdit[]; fireEdits?: MakeWayEdit[]; legs: MakeWayLegReceipt[] };
     };
 
 /** 真实回执边界统一用 contract 的分类；精确原因留在 stop.failure，这里只给旧 FailureCode 兼容值。 */
@@ -613,6 +624,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   const segments: SegmentReceipt[] = [];
   const swimLegs: SwimLegReceipt[] = [];
   const makeWayEdits: MakeWayEdit[] = [];
+  /** 没有 dig/place 授权时顺手打灭的火；单独记账，不占施工额度。 */
+  const fireEdits: MakeWayEdit[] = [];
   const makeWayLegs: MakeWayLegReceipt[] = [];
   /** 同一站位/终态/边界在“没有新相关观察、身体也没动”时重复搜索的次数。 */
   const sameEvidenceSearches = new Map<string, number>();
@@ -1336,15 +1349,19 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       && stop?.reason === 'DELEGATION_RESTRICTION'
       && lastSegment?.search.policy?.firstRejection !== undefined
       && isConstructionFixablePolicyRejection(lastSegment.search.policy.firstRejection.reason);
-    // 火/灵魂火不是不可绕过的世界结论：授权 dig 时先打掉再走，不把它当成整趟委托的终点。
-    const fireFixable = makeWay?.dig !== undefined
-      && stop?.reason === 'DELEGATION_RESTRICTION'
+    // 火/灵魂火不是不可绕过的世界结论：没有碰撞，普通路线被它挡住时直接顺手打灭再走，
+    // 不要求 dig/place 授权，也不占本次委托的施工额度。
+    const fireFixable = stop?.reason === 'DELEGATION_RESTRICTION'
       && lastSegment?.search.policy?.firstRejection !== undefined
       && isFirePolicyRejection(lastSegment.search.policy.firstRejection.reason);
-    if (makeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable || fireFixable)) break;
+    // 没有 dig/place 授权时也允许为“挡路的火”试一次：只清理火，规划不带 allowPlainRoute，
+    // 所以没有火可清时返回 null，不会改变普通受阻委托的语义。
+    const fireOnly = makeWay === undefined && request.makeWayAvailable === true && stop !== null && (MAKE_WAY_STOPS.has(stop.reason) || fireFixable);
+    const activeMakeWay: MakeWayOptions | undefined = makeWay ?? (fireOnly ? { fire: true, maxEdits: 0 } : undefined);
+    if (activeMakeWay === undefined || stop === null || !(MAKE_WAY_STOPS.has(stop.reason) || policyFixable || fireFixable)) break;
     // 同一委托的施工额度已在前面用掉：普通路线仍可走；若又停在只有施工能解决的原因上，
-    // 如实报告额度耗尽，不重新开一份预算。
-    if (makeWayEdits.length >= makeWayEditBudget) {
+    // 如实报告额度耗尽，不重新开一份预算。顺手打灭火不走施工额度。
+    if (!fireOnly && makeWayEdits.length >= makeWayEditBudget) {
       stop = stopOf('MAKE_WAY_BUDGET_EXHAUSTED', makeWayBudgetDetail(session, stop));
       break;
     }
@@ -1362,20 +1379,21 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     const start = feetCell(here);
     // 普通搜索已经失败，这里也接受“不改方块、但确实走到目标附近”的纯移动路线；
     // 否则会把一条真实存在的通路丢掉，误报“找不到路线”。
-    const steps = await planMakeWay(voxel, scope.dim, start, target, { ...makeWay, allowPlainRoute: true }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
+    const steps = await planMakeWay(voxel, scope.dim, start, target, { ...activeMakeWay, allowPlainRoute: !fireOnly }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
       { signal: ctx.signal, deadlineMs: deadline });
     if (steps === null && ctx.signal.aborted) { stop = cancellationStop(ctx, '开路规划时父任务取消'); break; }
     if (steps === null && Date.now() >= deadline) { stop = stopOf('TIMEOUT', '开路规划到达原期限'); break; }
     if (steps === null) {
       // 说清试过开路、用了哪些授权、缺哪种手段：是否补授权由调用方决定。
-      const granted = [makeWay.dig === undefined ? null : 'dig', makeWay.place === undefined ? null : `place(${makeWay.place.item})`].filter((x): x is string => x !== null);
-      const missing = [makeWay.dig === undefined ? 'dig（挖开挡路格）' : null, makeWay.place === undefined ? 'place（补脚下支撑/原地垫高）' : null].filter((x): x is string => x !== null);
-      stop = stopOf(stop.reason, `${stop.detail}；试过开路：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}`);
+      const granted = [activeMakeWay.fire === true ? '打灭挡路的火' : null, activeMakeWay.dig === undefined ? null : 'dig', activeMakeWay.place === undefined ? null : `place(${activeMakeWay.place.item})`].filter((x): x is string => x !== null);
+      const missing = [activeMakeWay.dig === undefined ? 'dig（挖开挡路格）' : null, activeMakeWay.place === undefined ? 'place（补脚下支撑/原地垫高）' : null].filter((x): x is string => x !== null);
+      stop = stopOf(stop.reason, `${stop.detail}；${fireOnly ? '试过顺手打灭挡路的火' : '试过开路'}：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}`);
       break;
     }
     const editsBefore = makeWayEdits.length;
     const leg = await runMakeWay(ctx, {
-      steps, opts: makeWay, remainingEdits: makeWayEditBudget, edits: makeWayEdits, deadline, onProgress: reportProgress,
+      steps, opts: activeMakeWay, remainingEdits: fireOnly ? 0 : makeWayEditBudget, edits: makeWayEdits,
+      fireEdits, fireBudget: fireOnly ? FIRE_CLEAR_MAX : 0, deadline, onProgress: reportProgress,
       wade: request.swim === true,
       nameAt: (cell) => {
         const view = voxel.cellAt(scope.dim, cell.x, cell.y, cell.z);
@@ -1447,18 +1465,19 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
   const finalStop = stop ?? stopOf('ACTION_FAILURE', '协调循环没有产生终止事实');
   const status: SkillStatus = finalStop.reason === 'CANCELLED' || finalStop.reason === 'SUSPENDED' ? 'cancelled'
     : isSuccess(finalStop.reason) ? 'succeeded' : 'failed';
-  const editedText = makeWayEdits.map((edit) => `${edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、');
+  const allEdits = [...makeWayEdits, ...fireEdits];
+  const editedText = allEdits.map((edit) => `${isDiggableFire(edit.name) ? '打灭' : edit.kind === 'dig' ? '挖开' : '放置'} ${edit.name}${cellText(edit.pos)}`).join('、');
   // 一段开路可能在执行中被取消：即使没有完成的 leg，已确认改动也要出现在回执里。
-  const makeWayNote = makeWayEdits.length === 0 && makeWayLegs.length === 0 ? ''
-    : makeWayLegs.length === 0 ? `；代为开路在这一段完成前中止，已确认改动 ${makeWayEdits.length} 处：${editedText}`
-      : `；代为开路 ${makeWayLegs.length} 段：${makeWayEdits.length === 0 ? '没有改动方块' : editedText}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`;
+  const makeWayNote = allEdits.length === 0 && makeWayLegs.length === 0 ? ''
+    : makeWayLegs.length === 0 ? `；代为开路在这一段完成前中止，已确认改动 ${allEdits.length} 处：${editedText}`
+      : `；代为开路 ${makeWayLegs.length} 段：${allEdits.length === 0 ? '没有改动方块' : editedText}${makeWayLegs.some((leg) => leg.failure !== undefined) ? `（停在：${makeWayLegs.filter((leg) => leg.failure !== undefined).map((leg) => leg.failure).at(-1)}）` : ''}`;
   return {
     ok: true,
     status,
     ...(status === 'failed' ? { failureCode: failureCodeOfStop(finalStop.reason) } : {}),
     summary: renderSummary(session, finalStop, segments) + (swimLegs.length === 0 ? ''
       : `；代为游泳 ${swimLegs.length} 段（${swimLegs.map((leg) => `${leg.mode === 'dry_shore' ? '上岸' : '水面点'} ${cellText(leg.target)} ${leg.status}，氧气 ${leg.oxygenBefore}→${leg.oxygenAfter}`).join('；')}）`)
-      + (request.makeWay === undefined && request.makeWayAvailable === true && MAKE_WAY_STOPS.has(finalStop.reason)
+      + (request.makeWay === undefined && request.makeWayAvailable === true && MAKE_WAY_STOPS.has(finalStop.reason) && makeWayLegs.length === 0
         ? '；本次没有授权 dig/place，没有挖也没有放' : '')
       + makeWayNote,
     session,
@@ -1466,7 +1485,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     stop: finalStop,
     ...(observation === undefined ? {} : { observation }),
     ...(swimLegs.length === 0 ? {} : { swimLegs }),
-    ...(makeWayEdits.length === 0 && makeWayLegs.length === 0 ? {} : { makeWay: { edits: makeWayEdits, legs: makeWayLegs } }),
+    ...(allEdits.length === 0 && makeWayLegs.length === 0 ? {} : { makeWay: { edits: makeWayEdits, fireEdits, legs: makeWayLegs } }),
   };
 }
 
