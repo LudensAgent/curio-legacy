@@ -289,6 +289,9 @@ function lessonContext(text: string): string | undefined {
   return context?.replace(/\s+/g, '').toLowerCase();
 }
 
+/** 换主目标：阶段回顾（写 switch_reason）或操作者明确指令；清单做完/同一念释放旧目标自然进入下一阶段。提示词与闸门文案共用这一句。 */
+export const GOAL_SWITCH_RULE = '换主目标要走阶段回顾（认真想并写 switch_reason）或操作者的明确指令；清单做完、或同一念先放下旧目标时自然进入下一阶段。其余时候先做眼前的事。';
+
 /** 情绪回顾的最短/最长间隔（分钟）；Mind 的随机间隔和 SelfModel 的持久化校验共用这一组。 */
 export const REVIEW_GAP_RANGE_MIN = [45, 90] as const;
 export const REVIEW_GAP_DEFAULT_MS = REVIEW_GAP_RANGE_MIN[0] * 60_000;
@@ -633,9 +636,8 @@ export class SelfModel {
     const to = (this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30);
     const head = `主目标「${cur.text.slice(0, 40)}」尚未完成，没换成「${to}」：`;
     if (opts.deliberate && opts.reason?.trim()) return head + `已观察到 ${Math.round(this.planStalledMin())} 分钟在线无清单进展${this.planStallInfo().historyUnknown ? '（更早的在线时长未知）' : ''}，一时的想法不换主目标。`
-      + '想做的事先记进 agenda（以后再做），眼前要先做的事写成 activity 或 detour；等停下来回顾阶段目标时（腻了、烦了、或者主目标很久没进展）再决定换不换';
-    return head + '眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标；'
-      + (opts.deliberate ? '真决定换一个阶段目标，在 plan 里写 "switch_reason" 说为什么' : '真要换主目标得认真想一想，并写 switch_reason');
+      + `想做的事先记进 agenda（以后再做），眼前要先做的事写成 activity 或 detour。${GOAL_SWITCH_RULE}`;
+    return head + `眼前要先做的事（过夜、脱困、回地面、吃饭、清包、补工具）直接写成 activity 或 detour，做完会回到主目标。${GOAL_SWITCH_RULE}`;
   }
   /** 清单里带 done_when、还没勾掉的项：身体看得见的事实达成了就自动勾（不用等模型记得写 done） */
   autoCheckPlan(met: (c: import('../projects/types.ts').Condition) => boolean): string[] {

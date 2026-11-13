@@ -16,7 +16,7 @@ import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
-import { cleanLesson, moodWords, PLAN_NOTE, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
+import { cleanLesson, GOAL_SWITCH_RULE, moodWords, PLAN_NOTE, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
 import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
@@ -107,7 +107,7 @@ export interface MindContext {
   materials?: { wood: MaterialTally; ore: MaterialTally } | null;
   /** 主目标和清单 */
   plan?: FocusPlan | null;
-  /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项时才允许换主目标） */
+  /** 阶段回顾：情绪或回想提醒它停下来看这一阶段在做什么（有这一项或操作者明确下令时才允许换主目标） */
   stageReview?: Record<string, unknown>;
   /** 主目标级无进展闸门：最近几段活没有物品/清单/新区块/出行最远点的变化，重复的动作签名会被退回重新确认 */
   progressGate?: Record<string, unknown> | null;
@@ -251,7 +251,7 @@ const OPERATOR = `【操作者】控制台里的操作者（直播的主人）�
 const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods，不必重抄 steps）。删掉没做完的成果：在阶段回顾里、或这一念明确回应操作者指令（operator doing/adopted）时，可以直接改；平时要改则必须认真想并在 plan 里写 switch_reason，说明等效替代或为什么不再需要，且距上次删改满 ${PLAN_REVISION_MIN} 分钟。只观察停滞不构成删项理由。新增一项随时可以；拆分或合并未完成的项会改变成果文字，按删改处理。删项不会自动完成主目标：删项那一念不收工（阶段回顾里也一样），下一念明确勾完清单才收工。`;
 
 /** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
-const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。有【阶段回顾】时可换主目标。`;
+const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。${GOAL_SWITCH_RULE}`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读、再由你决定。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
@@ -421,7 +421,7 @@ function planRevisionHint(ctx: MindContext): string | null {
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
   const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
-  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）。${PLAN_EDIT_RULE} 如果只是换做法，写 {"focus":"${plan.agendaId}","methods":[…] } 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。${GOAL_SWITCH_RULE} ${PLAN_EDIT_RULE} 如果只是换做法，写 {"focus":"${plan.agendaId}","methods":[…] } 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
 }
 
 /** 这一念的意图文本：当前活动、议程、最近三个念头。提醒里的“想下矿/想回地面”判断共用同一口径。 */

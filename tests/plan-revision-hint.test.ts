@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { buildMindMessages } from '../src/mind/prompt.ts';
-import { SelfModel } from '../src/mind/self.ts';
+import { GOAL_SWITCH_RULE, SelfModel } from '../src/mind/self.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import type { ActivityRecord } from '../src/mind/types.ts';
@@ -36,7 +36,7 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
     self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
     audience: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /主目标「挖够粗铁做装备」的清单已观察到 15 在线分钟没勾掉一项/);
-  assert.match(user.content, /主目标不用换（换目标要等阶段回顾）/);
+  assert.ok(user.content.includes(GOAL_SWITCH_RULE), '引用统一的换目标规则');
   assert.match(user.content, /清单是成果，做法可以随时换/);
   assert.match(user.content, /删掉没做完的成果/);
   assert.match(user.content, /写 switch_reason/);

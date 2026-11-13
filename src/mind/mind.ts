@@ -29,7 +29,7 @@ import { myBed } from '../skills/stations.ts';
 import { StrategyLog } from './strategy.ts';
 import type { ParsedGameMessage } from '../memory/game-messages.ts';
 import { NEAR_END_REASON, type MindContext } from './prompt.ts';
-import { cleanLesson, cleanPlanStep, moodWords, PLAN_REVISION_MIN, REVIEW_GAP_DEFAULT_MS, REVIEW_GAP_RANGE_MIN, SelfModel } from './self.ts';
+import { cleanLesson, cleanPlanStep, GOAL_SWITCH_RULE, moodWords, PLAN_REVISION_MIN, REVIEW_GAP_DEFAULT_MS, REVIEW_GAP_RANGE_MIN, SelfModel } from './self.ts';
 import type { LedgerView } from './ledger.ts';
 import { describeLeg, exploreAttemptFromReceipt, type ExcursionLog } from './excursions.ts';
 import { LOW_AIR_OXYGEN, type Thinker } from './thinker.ts';
@@ -211,7 +211,7 @@ export class Mind {
   /** 正在等的“阶段回顾”：情绪（腻了、烦了）或回想提醒它停下来看看这一阶段在做什么 */
   private review: { at: number; why: string } | null = null;
   private lastReviewAt = 0;
-  /** 这一念是阶段回顾：只有这时（或主目标停滞）才允许换主目标 */
+  /** 这一念是阶段回顾：只有这时（或操作者明确下令）才允许换主目标 */
   private inReview = false;
   /** 回想时觉得主目标可以放下了：留到下一次阶段回顾时告诉它 */
   private keptHint: string | null = null;
@@ -1299,7 +1299,7 @@ export class Mind {
     this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点/准备度（空槽、食物、耐久、存入）的变化：${repeated}`, {
       agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
     });
-    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法、换地点还是调整主目标`, 'deliberate');
+    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法还是换地点。${GOAL_SWITCH_RULE}`, 'deliberate');
   }
 
   /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */
@@ -1313,7 +1313,7 @@ export class Mind {
       repeated_signatures: gate.signatures.map((signature) => signature.length > 160 ? `${signature.slice(0, 159)}…` : signature),
       measured: '进展按物品、清单勾项、新区块、出行离入口最远点，或准备度实测变化（空槽增加、食物点增加、护甲/镐耐久增加、存入容器的件数）计；其他变化（比如沿旧路移动、观察到新地形）不在这几项里',
       available_search: 'look_around 只覆盖当前视野；gather 只查已看见/记得的方块；explore_toward 朝选定方向边走边看；travel_to 去记得的坐标；expedition 可带 find 沿 100–600 格路线扫两侧约 32 格。已知地点和出行记录见【记得的地方】。',
-      rule: `上面列出的签名（同一做法+同一区域+同一证据版本）会被退回重新确认；连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次仍写同一做法就放行。也可以写 plan 改清单或主目标。`,
+      rule: `上面列出的签名（同一做法+同一区域+同一证据版本）会被退回重新确认；连续 ${Mind.PROGRESS_GATE_REJECT_LIMIT + 1} 次仍写同一做法就放行。也可以写 plan 改做法或清单（删未完成成果按【专注】的规则）。${GOAL_SWITCH_RULE}`,
     };
   }
 
@@ -2627,7 +2627,7 @@ export class Mind {
       const focus = p.focus ?? p.goal;
       // 只改做法不能顺带换主目标：归属写错会把旧做法记到新计划上。
       if (focus && focus !== cur.agendaId && focus !== cur.goal) {
-        decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；要换主目标请同时写 steps`);
+        decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；${GOAL_SWITCH_RULE}（要换主目标还要同时写 steps）`);
         return; // 拒绝整条 plan，不能顺手勾掉当前计划的项
       }
       this.applyPlanMethods(p);

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Mind } from '../src/mind/mind.ts';
+import { GOAL_SWITCH_RULE } from '../src/mind/self.ts';
 import { SelfModel } from '../src/mind/self.ts';
 
 function harness() {
@@ -35,7 +36,12 @@ test('连续无进展达到阈值：记录闸门并要求认真想，不替它�
   assert.ok(mind.progressGate, '达到阈值后应有闸门');
   assert.ok(events.some((event) => event.type === 'progress_gate'));
   assert.equal(thinks[0]?.tier, 'deliberate');
-  assert.match(thinks[0]?.reason ?? '', /没有物品、清单、新区块或出行最远点的变化/);
+  assert.match(thinks[0]?.reason ?? '', /没有物品、清单、新区块、出行最远点或准备度/);
+  assert.doesNotMatch(thinks[0]?.reason ?? '', /调整主目标/);
+  const facts = mind.progressGateFacts();
+  assert.ok(thinks[0]?.reason.includes(GOAL_SWITCH_RULE), '闸门引用统一的换目标规则');
+  assert.ok(facts.rule.includes(GOAL_SWITCH_RULE), '闸门事实引用统一的换目标规则');
+  assert.match(thinks[0]?.reason ?? '', /阶段回顾/);
   // 只陈述量没变，不断言“同一条路没用”，也不要求必须换做法
   assert.doesNotMatch(thinks[0]?.reason ?? '', /不会产生新信息|必须换/);
 });
