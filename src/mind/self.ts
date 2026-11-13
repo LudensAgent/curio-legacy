@@ -589,8 +589,9 @@ export class SelfModel {
   }
   /**
    * 主目标是这一阶段要拿到的成果，不随眼前的事换：
-   * 已有主目标还在推进（清单没做完）时，换成别的目标要认真想过、写出理由，或者是操作者下的令；
-   * 同一个决定里先放下/做完了当前目标的不拦。返回拒绝的说明，可以换就返回 null。
+   * 已有主目标还在推进（清单没做完）时，只有在阶段回顾里认真想过、写出理由才换，
+   * 或者操作者明确下令；单纯时间停滞不算。同一个决定里先放下/做完了当前目标的不拦。
+   * 返回拒绝的说明，可以换就返回 null。
    */
   goalSwitchRefusal(target: string, opts: { deliberate: boolean; reason?: string; operator?: boolean; releasing?: string[]; review?: boolean }): string | null {
     const plan = this.plan();
@@ -601,9 +602,8 @@ export class SelfModel {
     if (plan && plan.steps.length && plan.steps.every((st) => st.done)) return null;
     if (opts.releasing?.includes(cur.id) || opts.operator) return null;
     // 一时冒出来的想法不能顶掉主目标：只有停下来回顾阶段目标时（腻了、烦了、或回想觉得该放下），
-    // 或者主目标已经很久没推进（没有清单也算），认真想过、写了理由才换
-    const stalled = !plan || this.planStalledMin() >= SelfModel.STALL_MIN;
-    if (opts.deliberate && opts.reason?.trim() && (opts.review || stalled)) return null;
+    // 认真想过、写了理由才换；单纯的时间停滞不授权战略切换。
+    if (opts.deliberate && opts.reason?.trim() && opts.review) return null;
     const to = (this.data.agenda.find((a) => a.id === t)?.text ?? t).slice(0, 30);
     const head = `主目标「${cur.text.slice(0, 40)}」尚未完成，没换成「${to}」：`;
     if (opts.deliberate && opts.reason?.trim()) return head + `已观察到 ${Math.round(this.planStalledMin())} 分钟在线无清单进展${this.planStallInfo().historyUnknown ? '（更早的在线时长未知）' : ''}，一时的想法不换主目标。`
@@ -620,13 +620,28 @@ export class SelfModel {
     if (out.length) { p.updatedAt = Date.now(); p.progressAt = Date.now(); this.resetPlanStall(p, p.progressAt); this.feel({ type: 'progress' }); this.touch(); }
     return out;
   }
+  /** done 序号/文字指向的清单下标；文字只匹配第一处。checkPlan 与 previewChecks 共用。 */
+  private checkIndex(steps: PlanOutcome[], d: number | string): number {
+    return typeof d === 'number' ? d : steps.findIndex((x) => x.text === d || x.text.includes(String(d)));
+  }
+  /** 这一念的 done 序号/文字按 checkPlan 的口径会勾掉哪些项（只预览，不修改）。 */
+  previewChecks(done: (number | string)[]): number[] {
+    const p = this.plan();
+    if (!p) return [];
+    const checked = new Set<number>();
+    for (const d of done) {
+      const i = this.checkIndex(p.steps, d);
+      if (i >= 0 && i < p.steps.length && !p.steps[i].done) checked.add(i);
+    }
+    return [...checked];
+  }
   /** 勾掉清单里的项：序号或文字 */
   checkPlan(done: (number | string)[], met?: (c: import('../projects/types.ts').Condition) => boolean, refused?: string[]): string[] {
     const p = this.plan();
     if (!p) return [];
     const out: string[] = [];
     for (const d of done) {
-      const st = typeof d === 'number' ? p.steps[d] : p.steps.find((x) => x.text === d || x.text.includes(String(d)));
+      const st = p.steps[this.checkIndex(p.steps, d)];
       // 写了 done_when 的项以事实为准：条件没达到，说“做完了”也不勾
       if (st && !st.done && st.doneWhen && met && !met(st.doneWhen)) { refused?.push(st.text); continue; }
       if (st && !st.done) { st.done = true; out.push(st.text); }
@@ -635,6 +650,7 @@ export class SelfModel {
     return out;
   }
   activeAgenda(): AgendaItem | undefined { return this.data.agenda.find((a) => a.status === 'active'); }
+  agendaItem(id: string): AgendaItem | undefined { return this.data.agenda.find((a) => a.id === id); }
   creditAgenda(id: string | undefined) {
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
     if (item) { item.attempts++; item.updatedAt = Date.now(); this.touch(); }

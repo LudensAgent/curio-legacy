@@ -54,7 +54,7 @@ test('legacy goals count only observed online time across disconnection and rest
   assert.equal(restored.plan()!.progressAt, now);
 });
 
-test('goal-switch stall threshold is based on observed online time', (t) => {
+test('goal switch needs a stage review, not just observed online stall', (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const self = new SelfModel(null);
@@ -66,5 +66,6 @@ test('goal-switch stall threshold is based on observed online time', (t) => {
   self.setOnline(true, now);
   assert.match(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换' }) ?? '', /已观察到 20 分钟在线无清单进展/);
   now += 21 * 60_000;
-  assert.equal(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换' }), null);
+  assert.match(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换' }) ?? '', /一时的想法不换主目标/);
+  assert.equal(self.goalSwitchRefusal('寻找村庄', { deliberate: true, reason: '想换', review: true }), null, '阶段回顾里才能换');
 });

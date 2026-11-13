@@ -2171,7 +2171,7 @@ export class Mind {
       const { before, after, keptGoals } = this.d.self.consolidate(c);
       // 回想想放下正在推进的主目标：不替它放，告诉它，下一次认真想时自己决定
       for (const g of keptGoals) this.keptHint = `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了`;
-      for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在认真想时写 agenda_drop，或者换一个主目标`, { agendaId: g.id });
+      for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在阶段回顾里决定，或按操作者的明确指令`, { agendaId: g.id });
       for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `${KNOW_HOW_LESSON_KEY_PREFIX}${k.id}` });
       }
@@ -2219,6 +2219,8 @@ export class Mind {
       this.safe(() => this.d.onWorthLearning?.(decision.worthLearning!), undefined);
       this.d.bus.publish('worth_learning', 'P3', `觉得值得学：${decision.worthLearning}`);
     }
+    // 先处理目标选择/结束：判断 done/drop 时活跃清单还在，同一念的 plan 也不会建了又被 agenda 结束。
+    this.applyAgendaFocus(decision);
     this.applyPlan(decision);
     this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
     // Only an explicit continue can supply its missing next draft this way.
@@ -2277,15 +2279,6 @@ export class Mind {
       for (const a of decision.agenda.add) {
         const item = this.d.self.addAgenda(a.text, a.kind, a.horizon, learn);
         if (item) this.d.bus.publish('agenda', 'P3', `${a.kind === 'idea' ? '冒出个点子' : a.kind === 'question' ? '想弄明白' : '想做'}：${a.text}`, { id: item.id });
-      }
-      for (const id of decision.agenda.done) this.d.self.setAgendaStatus(id, 'done');
-      for (const id of decision.agenda.drop) this.d.self.setAgendaStatus(id, 'dropped');
-      if (decision.agenda.focus) {
-        const item = this.d.self.data.agenda.find((a) => a.id === decision.agenda!.focus);
-        const refused = item?.kind === 'goal' ? this.goalSwitchRefusal(decision, decision.agenda.focus) : null;
-        if (item && item.kind !== 'goal') decision.notes.push(`「${item.text}」是${item.kind === 'idea' ? '点子' : '疑问'}，不能当主目标：真想做就加成 goal`);
-        else if (refused) { decision.notes.push(refused); this.d.bus.publish('goal_switch_refused', 'P3', refused, { to: decision.agenda.focus }); }
-        else this.d.self.setAgendaStatus(decision.agenda.focus, 'active');
       }
     }
     // 先看“局部失败 → 换维度/来源”是否有新证据，再看无进展闸门。
@@ -2445,9 +2438,14 @@ export class Mind {
     this.keptHint = null;
   }
 
-  /** 这一念明确回应了操作者指令（或采纳了建议）；换目标与改清单共用同一口径。 */
+  /** 这一念明确回应了操作者指令（或采纳了建议）：改清单时可以用。 */
   private operatorAnswered(decision: MindDecision) {
     return decision.operator?.status === 'doing' || decision.operator?.status === 'adopted';
+  }
+
+  /** 操作者明确要求换/结束目标：只认指令，不把采纳建议当命令。 */
+  private operatorOrdered(decision: MindDecision) {
+    return decision.operator?.status === 'doing';
   }
 
   private goalSwitchRefusal(decision: MindDecision, target: string): string | null {
@@ -2455,7 +2453,7 @@ export class Mind {
       review: this.inReview,
       deliberate: decision.tier === 'deliberate',
       reason: decision.plan?.switchReason ?? decision.switchReason,
-      operator: this.operatorAnswered(decision),
+      operator: this.operatorOrdered(decision),
       releasing: [...(decision.agenda?.drop ?? []), ...(decision.agenda?.done ?? [])],
     });
   }
@@ -2465,6 +2463,126 @@ export class Mind {
     const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
     const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];
     this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
+  }
+
+  /**
+   * 目标选择与结束：在 applyPlan 之前处理。判断 done/drop 时活跃清单还在，
+   * 同一念的 plan 也不会“建了又被 agenda 结束”。
+   * 完成必须有清单证据；阶段回顾/操作者指令可以放下未完成的目标，但记为 dropped（abandoned），不冒充 done。
+   */
+  private applyAgendaFocus(decision: MindDecision) {
+    const agenda = decision.agenda;
+    if (!agenda) return;
+    const requestedDone = [...agenda.done];
+    const requestedDrop = [...agenda.drop];
+    // 同一念只能有一个主目标：带清单的 plan.focus（没写 focus 时用 goal）是具体承诺，优先；
+    // 另一个只记 note，不各自生效。
+    const planFocus = decision.plan?.steps?.length ? decision.plan.focus ?? decision.plan.goal : undefined;
+    if (planFocus && agenda.focus && agenda.focus !== planFocus) {
+      decision.notes.push(`这一念同时给了两个主目标（plan.focus=${planFocus}，agenda.focus=${agenda.focus}）；以带清单的 plan.focus 为准，agenda.focus 未应用`);
+      agenda.focus = undefined;
+    }
+    // 结束目标只认阶段回顾和操作者的明确指令；采纳建议不算命令。
+    const mayEnd = this.inReview || this.operatorOrdered(decision);
+    const endBy = this.inReview ? '阶段回顾' : '操作者指令';
+    // 这一念真正结束掉的目标：只有它才能给 goalSwitchRefusal 当 releasing。
+    const endedIds = new Set<string>();
+    const dropItem = (id: string, note: string, by: string) => {
+      this.d.self.setAgendaStatus(id, 'dropped');
+      endedIds.add(id);
+      decision.notes.push(note);
+      this.d.bus.publish('goal_dropped', 'P2', note, { id, by });
+    };
+    for (const id of agenda.done) {
+      const item = this.d.self.agendaItem(id);
+      if (!item) { decision.notes.push(`议程里没有 ${id}，没标完成`); continue; }
+      if (item.status === 'done') { decision.notes.push(`「${item.text}」已经完成，无需再标`); continue; }
+      if (item.status === 'dropped') { decision.notes.push(`「${item.text}」已经放下，不重复记`); continue; }
+      const cur = this.d.self.plan();
+      const active = cur?.agendaId === id;
+      const focused = this.d.self.activeAgenda()?.id === id;
+      const pending = active ? cur.steps.map((st, i) => ({ st, i })).filter(({ st }) => !st.done) : [];
+      // 这一念会勾掉剩下的项：完成与否交给 applyPlanDone 按 done_when 验收，不在这里提前算完成。
+      // previewChecks 与 checkPlan 共用同一口径：一个字符串只勾第一处匹配。
+      const checks = this.d.self.previewChecks(decision.plan?.done ?? []);
+      const completesThisThought = active && pending.length > 0 && pending.every(({ i }) => checks.includes(i));
+      if (completesThisThought) continue;
+      if (pending.length) {
+        if (!mayEnd) {
+          const note = `「${item.text}」还有 ${pending.length} 项没完成，不能标完成；先勾完清单，或等阶段回顾/操作者指令`;
+          decision.notes.push(note);
+          this.d.bus.publish('goal_done_refused', 'P2', note, { id, unfinished: pending.map(({ st }) => st.text) });
+          continue;
+        }
+        dropItem(id, `「${item.text}」是放下的（${pending.length} 项没做完；${endBy}），不是完成`, this.inReview ? 'stage_review' : 'operator');
+        continue;
+      }
+      // 活跃主目标但还没有清单：同样没有完成证据，不能由普通念头结束。
+      if (!active && focused) {
+        if (!mayEnd) {
+          const note = `「${item.text}」是当前主目标，但还没有清单，没有完成证据，不能标完成；先写清单，或等阶段回顾/操作者指令`;
+          decision.notes.push(note);
+          this.d.bus.publish('goal_done_refused', 'P2', note, { id });
+          continue;
+        }
+        dropItem(id, `「${item.text}」是放下的（还没有清单证据；${endBy}），不是完成`, this.inReview ? 'stage_review' : 'operator');
+        continue;
+      }
+      if (!active) {
+        dropItem(id, `「${item.text}」不是当前主目标，没有清单证据，按放下记（不是完成）`, 'no_evidence');
+        continue;
+      }
+      this.d.self.setAgendaStatus(id, 'done');
+      endedIds.add(id);
+      this.d.bus.publish('goal_done', 'P2', `主目标完成：${item.text}`, { id });
+    }
+    for (const id of agenda.drop) {
+      const item = this.d.self.agendaItem(id);
+      if (!item) { decision.notes.push(`议程里没有 ${id}，没放下`); continue; }
+      if (endedIds.has(id)) {
+        decision.notes.push(`「${item.text}」已经按 done 处理，drop 忽略`);
+        continue;
+      }
+      if (item.status === 'done' || item.status === 'dropped') { decision.notes.push(`「${item.text}」已经结束，不重复记`); continue; }
+      const active = this.d.self.plan()?.agendaId === id || this.d.self.activeAgenda()?.id === id;
+      if (active && !mayEnd) {
+        const note = `「${item.text}」是当前主目标且还没完成，不能随手放下；要放下请在阶段回顾里，或按操作者指令`;
+        decision.notes.push(note);
+        this.d.bus.publish('goal_drop_refused', 'P2', note, { id });
+        continue;
+      }
+      dropItem(id, `放下：${item.text}`, active ? (this.inReview ? 'stage_review' : 'operator') : 'agenda_cleanup');
+    }
+    // 同一念既要结束某个目标、又给它写清单：只有目标真的结束了才撤下清单；
+    // 被拒绝的 done/drop 不能顺手把这一念的清单也丢掉。focus 可能没写，用 goal 文字兜底。
+    const endedRefs = new Set<string>([...endedIds].flatMap((id) => {
+      const item = this.d.self.agendaItem(id);
+      return item ? [id, item.text] : [id];
+    }));
+    if (planFocus && endedRefs.has(planFocus)) {
+      decision.notes.push(`这一念同时要结束「${planFocus}」又给它写清单；结束优先，清单未应用`);
+      delete decision.plan!.steps;
+      delete decision.plan!.conditions;
+    }
+    // goalSwitchRefusal 只把真正结束掉的目标当 releasing；被拒绝的 done/drop 不能顺带授权换目标。
+    agenda.done = requestedDone.filter((id) => endedIds.has(id));
+    agenda.drop = requestedDrop.filter((id) => endedIds.has(id));
+    if (agenda.focus) {
+      const item = this.d.self.agendaItem(agenda.focus);
+      if (!item) { decision.notes.push(`议程里没有 ${agenda.focus}，没换主目标`); return; }
+      if (requestedDone.includes(agenda.focus) || requestedDrop.includes(agenda.focus)) {
+        decision.notes.push(`这一念同时结束和聚焦「${item.text}」；结束优先，聚焦未应用`);
+        return;
+      }
+      if (item.status === 'done' || item.status === 'dropped') {
+        decision.notes.push(`「${item.text}」已经结束，不能直接当主目标；要重新做请新建目标或写清单`);
+        return;
+      }
+      if (item.kind !== 'goal') { decision.notes.push(`「${item.text}」是${item.kind === 'idea' ? '点子' : '疑问'}，不能当主目标：真想做就加成 goal`); return; }
+      const refused = this.goalSwitchRefusal(decision, agenda.focus);
+      if (refused) { decision.notes.push(refused); this.d.bus.publish('goal_switch_refused', 'P3', refused, { to: agenda.focus }); return; }
+      this.d.self.setAgendaStatus(agenda.focus, 'active');
+    }
   }
 
   /** 主目标的清单：定下/改写、勾掉做完的项；全勾掉就算主目标完成 */
@@ -2481,6 +2599,11 @@ export class Mind {
         return; // 拒绝整条 plan，不能顺手勾掉当前计划的项
       }
       this.applyPlanMethods(p);
+      return this.applyPlanDone(decision);
+    }
+    // 先 agenda 后 plan 的顺序下，刚换到的新目标可能还没有清单；做法不能静默丢掉。
+    if (!p.steps?.length && !cur && (p.methods !== undefined || p.methodDrop?.length)) {
+      decision.notes.push('只改做法时当前没有清单可挂：先给主目标写 steps，再写 methods');
       return this.applyPlanDone(decision);
     }
     let droppedUnfinished = false;
