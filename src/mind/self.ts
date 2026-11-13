@@ -122,8 +122,13 @@ export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[
   /** 过了这么多游戏天还没做成，就停下来回顾要不要换（定下时在 3–5 天里随机，回顾后接着做会往后推） */
   reviewDays?: number }
 
-/** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”这类格式 */
-export const cleanPlanStep = (t: string) => { let s = String(t).trim(), prev = ''; while (s !== prev) { prev = s; s = s.replace(/^(?:\d+[.、)]\s*|\[[ xX✓]?\]\s*|[☐☑●○▶-]\s*)/, '').trim(); } return s.slice(0, 60); };
+/** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”和行内 po_/pm_ 展示 id。
+ * 抄回来的格式不能进正文：文字一变，按文字恢复的勾选、id 和 done_when 就全对不上了。 */
+export const cleanPlanStep = (t: string) => {
+  let s = String(t).trim(), prev = '';
+  while (s !== prev) { prev = s; s = s.replace(/^(?:\d+[.、)]\s*|\[[ xX✓]?\]\s*|[☐☑●○▶-]\s*)/, '').trim(); }
+  return s.replace(/\s*\b(?:po|pm)_[A-Za-z0-9_-]+/g, '').replace(/\s{2,}/g, ' ').trim().slice(0, 60);
+};
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
 
@@ -275,6 +280,8 @@ export class SelfModel {
         if (saved?.version === 1) this.data = { ...this.data, ...saved, traits: traits.length ? traits : saved.traits ?? [] };
       } catch { /* 文件坏了就当第一次玩：不影响游玩 */ }
     }
+    // 旧存档的清单可能带模型抄回来的展示 id：读入时归一，按文字对勾选/ID/done_when 才不会失配。
+    for (const st of this.data.plan?.steps ?? []) { const text = cleanPlanStep(st.text); if (text) st.text = text; }
     if (file) { this.timer = setInterval(() => this.flush(), 5000); this.timer.unref?.(); }
   }
 
@@ -468,10 +475,13 @@ export class SelfModel {
     if (!old) this.feel({ type: 'goal_set' });
     const doneBefore = new Set(old?.steps.filter((st) => st.done).map((st) => st.text) ?? []);
     const idBefore = new Map(old?.steps.map((st) => [st.text, st.id] as const) ?? []);
+    // 文字没变就没换成果：这次没写 done_when（比如只是把清单抄回来）不丢掉原来的条件。
+    const condBefore = new Map(old?.steps.flatMap((st) => st.doneWhen ? [[st.text, st.doneWhen] as const] : []) ?? []);
     const cleaned = steps.map((t, i) => ({ text: cleanPlanStep(t), cond: conditions[i] ?? null })).filter((x) => x.text).slice(0, 8);
-    const outcomes: PlanOutcome[] = cleaned.map(({ text, cond }) => ({
-      id: idBefore.get(text) ?? shortId('po_'), text, done: doneBefore.has(text), ...(cond ? { doneWhen: cond } : {}),
-    }));
+    const outcomes: PlanOutcome[] = cleaned.map(({ text, cond }) => {
+      const doneWhen = cond ?? condBefore.get(text);
+      return { id: idBefore.get(text) ?? shortId('po_'), text, done: doneBefore.has(text), ...(doneWhen ? { doneWhen } : {}) };
+    });
     const rewritten = !!old && old.steps.map((st) => st.text).join('|') !== cleaned.map((c) => c.text).join('|');
     const revisedAt = rewritten ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
     this.data.plan = { agendaId: item.id, goal: item.text, steps: outcomes, setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),

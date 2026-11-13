@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import { Mind } from '../src/mind/mind.ts';
 import { SelfModel } from '../src/mind/self.ts';
@@ -143,4 +146,37 @@ test('按距离完成的尝试/进展不重置计划 stall 时钟；只有勾清
   await new Promise((resolve) => setTimeout(resolve, 2));
   self.checkPlan([0]);
   assert.notEqual(self.plan()!.progressAt, progressAt, '勾掉清单项才是真正的计划推进');
+});
+
+test('清单行原样抄回（序号、勾选、po_ id）：不丢勾选、ID 与 done_when', () => {
+  const self = new SelfModel(null);
+  const cond = { type: 'self_state', field: 'dim', equals: 'the_nether' } as const;
+  const plan = self.setPlan('整备基地', ['睡床并确认重生点', '整理背包'], [cond, null])!;
+  self.checkPlan([0]);
+  assert.equal(self.plan()!.steps[0]!.done, true);
+
+  const id0 = self.plan()!.steps[0]!.id;
+  const copied = self.setPlan(plan.agendaId, [`0. [x] 睡床并确认重生点 ${id0}`, '1. [ ] 整理背包'])!;
+  assert.equal(copied.steps[0]!.text, '睡床并确认重生点', '抄回来的展示 id 不进正文');
+  assert.equal(copied.steps[0]!.done, true, '文字没变，已勾掉的项保持勾掉');
+  assert.equal(copied.steps[0]!.id, id0, '文字没变，成果 ID 保持稳定');
+  assert.deepEqual(copied.steps[0]!.doneWhen, cond, '这次没写 done_when 也沿用原条件');
+  assert.equal(copied.revisedAt, undefined, '原样抄回不算改写清单');
+});
+
+test('读入旧存档时归一清单文字：带展示 id 的旧项仍能对上勾选和 ID', () => {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'curio-plan-')), 'self.json');
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    agenda: [{ id: 'a_test01', text: '整备基地', kind: 'goal', status: 'active', at: Date.now(), updatedAt: Date.now() }],
+    plan: { agendaId: 'a_test01', goal: '整备基地', setAt: Date.now(), updatedAt: Date.now(), progressAt: Date.now(), steps: [
+      { id: 'po_old111', text: '睡床并确认重生点 po_bzk4r8', done: true },
+      { id: 'po_old222', text: '整理背包 po_0ougfk', done: false },
+    ] },
+  }));
+  const self = new SelfModel(file);
+  const plan = self.setPlan('a_test01', ['睡床并确认重生点', '整理背包'])!;
+  assert.deepEqual(plan.steps.map((st) => st.text), ['睡床并确认重生点', '整理背包']);
+  assert.deepEqual(plan.steps.map((st) => st.id), ['po_old111', 'po_old222'], '旧 ID 按归一后的文字沿用');
+  assert.equal(plan.steps[0]!.done, true, '旧勾选保留');
 });
