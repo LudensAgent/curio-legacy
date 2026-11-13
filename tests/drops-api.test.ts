@@ -28,3 +28,18 @@ test('交给恢复技能的失败带上动作算出的目标坐标和当时位�
   assert.equal(g.target, undefined);
   assert.deepEqual(g.position, { x: 3, y: 64, z: 4 });
 });
+
+test('api.state 的 feetBlock/headBlock 是触觉读数，形状与 blockAt 相同 {name, kind}', async () => {
+  const ctx: any = { bus: new EventBus(),
+    adapter: {
+      state: () => ({ pos: { x: 0.5, y: 64, z: 0.5 }, hp: 20, food: 20, oxygen: 20, inventory: [], equipment: [] }),
+      blockAt: (p: { y: number }) => (p.y === 65 ? 'netherrack' : 'air'),
+      eye: () => null,
+    },
+    memory: { lastDeath: () => null },
+    senses: { refresh() {} },
+  };
+  const s = await makeBridge(ctx)('state', []) as any;
+  assert.deepEqual(s.feetBlock, { name: 'air', kind: 'open' });
+  assert.deepEqual(s.headBlock, { name: 'netherrack', kind: 'solid' });
+});

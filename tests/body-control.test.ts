@@ -104,7 +104,7 @@ test('感官：代码能读到距上次挨打多久、死后掉在地上的东�
 });
 
 test('触发条件：dropped_items 和 dim 都是感觉得到的事实，怎么用由技能自己定', () => {
-  const sense = (dim: string, deathDrop: Sense['deathDrop']) => ({ state: { dim, hp: 20, food: 20 }, hostiles: [], lightLevel: 15, facing: 'N', cell: () => null, doing: null, hurtAgoMs: Infinity, cover: 'open', deathDrop }) as unknown as Sense;
+  const sense = (dim: string, deathDrop: Sense['deathDrop']) => ({ state: { dim, hp: 20, food: 20 }, hostiles: [], lightLevel: 15, facing: 'N', cell: () => null, head: null, doing: null, hurtAgoMs: Infinity, cover: 'open', deathDrop }) as unknown as Sense;
   const p = validatePredicate({ dropped_items: { within: 100, left_above: 60 } });
   assert.ok(!('error' in p));
   assert.equal(evalPredicate(p as any, sense('overworld', { dist: 40, leftS: 200, count: 3 })), true);

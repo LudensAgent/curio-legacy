@@ -265,3 +265,17 @@ test('顶层取消分别记录稳定版和候选使用，执行期间修订且�
   const stored = JSON.parse(fs.readFileSync(path.join(w.directory, 'stats.json'), 'utf8')) as Record<string, BehaviorStats>;
   assert.equal(stored[definition.name].cancelled, 3);
 });
+
+test('试用中的反射触发后空转，也和稳定版一样记 idle、歇一会儿，不会冷却一过就再打断', async (t) => {
+  const w = setup(t, (book) => {
+    assert.ok(book.write(definition.name, definition.description, '尚未验收的候选',
+      { ...definition, when: { hp_below: 8 }, code: 'return {skipped:"这次不适用"};', verify: 'return true;' }, { candidate: true }).ok);
+  });
+  w.adapter.hp = 6;
+  const done = new Promise<TaskOutcome>((resolve) => w.arbiter.once('done', resolve));
+  const now = Date.now();
+  assert.equal(w.engine.tick(null, now), true, '要命条件下候选可以自动接手');
+  await done;
+  assert.equal(w.engine.statsOf(definition.name)?.idleInterrupts, 1, '候选空转也要留下 idle 信号');
+  assert.ok(w.engine.heldNow(now + 1).includes(definition.name), '候选空转后先歇一会儿');
+});

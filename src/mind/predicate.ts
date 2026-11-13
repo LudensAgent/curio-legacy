@@ -48,6 +48,8 @@ export interface Sense {
   lightLevel: number | null;
   facing: Facing;
   cell(rel: [number, number, number]): string | null;
+  /** 头所在那格的触觉读数（适配器直接读身体占据格）；cell 读的是视觉记忆，身体自己占的格可能是旧的 */
+  head: string | null;
   /** 正在做的（非填充）动作 */
   doing: string | null;
   /** 恢复类技能：刚才失败的那个动作 */
@@ -214,7 +216,8 @@ export function evalPredicate(p: Predicate, s: Sense): boolean {
   if (p.on_ground !== undefined && (st.onGround !== false) !== p.on_ground) return false;
   if (p.night !== undefined && !st.isDay !== p.night) return false;
   if (p.dark !== undefined && ((s.lightLevel !== null && s.lightLevel <= 7) !== p.dark)) return false;
-  if (p.in_wall !== undefined && headInWall(s.cell([0, 1, 0])) !== p.in_wall) return false;
+  // 埋头是身体的触觉事实：按头格的当前方块判断，不用可能过时的视觉记忆（移动中会误报“头在墙里”）。
+  if (p.in_wall !== undefined && headInWall(s.head) !== p.in_wall) return false;
   if (p.hostile && !s.hostiles.some((h) => h.dist <= p.hostile!.within && (!p.hostile!.name || p.hostile!.name.some((n) => glob(n, h.name)))
     && (p.hostile!.fusing === undefined || !!h.fusing === p.hostile!.fusing)
     && (p.hostile!.seen === undefined || (h.perception === 'seen') === p.hostile!.seen))) return false;
@@ -274,6 +277,7 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   };
   return {
     state, hostiles, drops, lightLevel, facing, doing, ...(failure ? { failure } : {}), hurtAgoMs, cell,
+    head: adapter.blockAt({ x: feet.x, y: feet.y + 1, z: feet.z }),
     get cover() { return coverOf(cell); },
   };
 }

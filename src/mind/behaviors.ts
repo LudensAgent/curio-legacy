@@ -937,15 +937,17 @@ export class BehaviorEngine {
   }
 
   /** 嵌套调用也保留子技能自己的版本证据；顶层由 arbiter 的 done 事件记账。resolved 供 onDone 在回执缺版本时传入按 trial 归属的行为。 */
-  recordInvocation(name: string, result: SkillResult, resolved?: Behavior, taskId?: string) {
+  /** 记一次调用；返回 true 表示这次什么都没做（no-op），调用方据此决定要不要让反射歇一会儿。 */
+  recordInvocation(name: string, result: SkillResult, resolved?: Behavior, taskId?: string): boolean {
     const b = resolved ?? this.completed(name, result.data?.version);
-    if (result.status === 'cancelled') { this.noteInvocation(name, resolved || result.data?.version !== undefined ? b : undefined, result); return; }
-    if (!b) return;
-    if (this.noteInvocation(name, b, result)) return;
+    if (result.status === 'cancelled') { this.noteInvocation(name, resolved || result.data?.version !== undefined ? b : undefined, result); return false; }
+    if (!b) return false;
+    if (this.noteInvocation(name, b, result)) return true;
     // 统一目标达成未知的记账：失败才算失败、verify 通过才算成功；没写/没通过 verify 的“跑完了”只记使用、不记成败。
     const okRun = this.runOutcome(result);
-    if (okRun === null) return;
+    if (okRun === null) return false;
     this.record(b, okRun, result.summary, result.data ?? {}, taskId);
+    return false;
   }
 
   /** 一次运行的成败：失败算失败，verify 通过算成功；其余是目标达成未知（只记使用）。恢复技能不看 verify。 */
@@ -1068,7 +1070,14 @@ export class BehaviorEngine {
       // 代码本身出错（参数、异常）才不等事后观测：马上记失败；其余保留 aftermath 供 judge 补记死亡、掉血、处境等事实。
       if (okRun === false && ['ERROR', 'BAD_ARGS'].includes(String(o.result.failureCode))) this.aftermath.delete(name);
     }
-    if (b.candidate) { this.recordInvocation(name, o.result, b, o.task.id); return; }
+    if (b.candidate) {
+      // 试用中的反射接手后什么都没做：和稳定版一样记 idle 并歇一会儿，否则冷却一过又会打断手上的事。
+      if (this.recordInvocation(name, o.result, b, o.task.id) && o.task.source === 'reflex') {
+        this.noteIdle(name, pending?.nearest, pending?.interrupted);
+        if (pending) this.aftermath.delete(name);
+      }
+      return;
+    }
     const skipped = this.noteInvocation(name, b, o.result);
     if (recoveryRun) {
       recovery.behavior = b;

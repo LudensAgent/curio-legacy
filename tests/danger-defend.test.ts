@@ -8,7 +8,7 @@ test('技能触发条件 in_wall：头那一格是实心方块', () => {
   const p = validatePredicate({ in_wall: true, hurt_within: 3 }) as any;
   assert.ok(!p.error);
   const sense = (head: string) => ({ state: { hp: 9, inventory: [] } as any, hostiles: [], lightLevel: null, facing: 'N' as const, doing: null, hurtAgoMs: 1000, cover: 'open' as const,
-    cell: (rel: [number, number, number]) => rel[1] === 1 ? head : 'air' });
+    cell: () => 'air', head });
   assert.equal(evalPredicate(p, sense('gravel')), true);
   assert.equal(evalPredicate(p, sense('air')), false);
   assert.equal(evalPredicate(p, sense('torch')), false, '火把这类不算埋住');
@@ -41,4 +41,12 @@ test('defend 把 entityId 0/负数当占位，回退到按 target 名字匹配',
   assert.deepEqual(defend.validate({ entityId: 0 }, w as any), { ok: true, args: {} });
   // 正整数才是真实实体 ID，予以保留
   assert.deepEqual(defend.validate({ entityId: 7, target: 'hoglin' }, w as any), { ok: true, args: { entityId: 7, target: 'hoglin' } });
+});
+
+test('in_wall 按头格触觉判断：视觉记忆里那格是实心、身体实际头格是空气时不触发', () => {
+  const p = validatePredicate({ in_wall: true }) as any;
+  const sense = { state: { hp: 20, inventory: [] } as any, hostiles: [], lightLevel: null, facing: 'N' as const, doing: null, hurtAgoMs: Infinity, cover: 'open' as const,
+    cell: () => 'netherrack', head: 'air' };
+  assert.equal(evalPredicate(p, sense), false, '移动中的旧视觉记忆不能让“埋头”误触发');
+  assert.equal(evalPredicate(p, { ...sense, cell: () => 'air', head: 'netherrack' }), true, '头格真被实心方块占住才触发');
 });
