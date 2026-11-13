@@ -33,7 +33,7 @@ const START_POSITION_TOLERANCE = 0.05;
 interface CellArgs { at: Rel; facing: Facing; xyz?: Vec3Like }
 interface OriginSnapshot { pos: Vec3Like; feet: Vec3Like; worldId: string; sessionId: string; dim: string }
 interface MoveArgs extends CellArgs { origin?: OriginSnapshot; allowHazard?: boolean }
-interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string; allowUnknownAdjacent?: boolean }
+interface MineArgs extends CellArgs { own?: boolean; wet?: boolean; lava?: boolean; fall?: boolean; tool?: string; autoTool?: boolean; allowUnknownAdjacent?: boolean }
 interface PlaceArgs extends CellArgs { item: string }
 interface SupportArgs extends CellArgs { item: string }
 type PlaceAttempt = {
@@ -462,9 +462,9 @@ const moveStepSkill: Skill<MoveArgs> = {
 /** 挖掉确切的一格。用户明确指定目标、可接受的风险和工具；代码只执行并核对。 */
 const mineCellSkill: Skill<MineArgs> = {
   name: 'mine_cell',
-  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。身边能挖到的格以当前已加载方块状态为准：视线只是补充观察，看不见/被遮挡但已加载的格照常开挖（不把未看见当空气，也不当成未知），只有未加载才返回未知、不挖别处。只用 tool 指定的工具；没写 tool 时只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格已加载时按实时状态检查；未加载、无法排除侧后方液体流入时默认不挖，allowUnknownAdjacent:true 显式接受未加载邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
-  catalog: '{"at":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"tool"?:"物品名","wet"?/"lava"?/"fall"?/"allowUnknownAdjacent"?:true：挖掉身边指定的一格（[0,-1,0] 是脚下支撑）；液体邻格、挖脚下落差、邻格未看清要显式授权',
-  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
+  description: '挖掉身边指定的一格（[前,上,右] 或 xyz）。相对坐标 [0,-1,0] 指脚部支撑格（站半砖/床/雪层时就是脚所在那一格，脚高可为分数），不是脚的整数格下方一格。身边能挖到的格以当前已加载方块状态为准：视线只是补充观察，看不见/被遮挡但已加载的格照常开挖（不把未看见当空气，也不当成未知），只有未加载才返回未知、不挖别处。只用 tool 指定的工具；没写 tool 时默认只用当前手持（空手就空手挖），不自动换更合适的、也不自动造工具；autoTool:true 时由身体按方块从背包挑合适的工具装备到主手（挖完不会自动换回）。指定 tool 不在背包返回 TOOL_MISSING；不掉落也照挖并回报 noDrop，换工具先 hold_item。没指定时按适配器真实规则返回 noDrop、超时等事实。液体邻格默认不挖；wet/lava 显式接受进水/进岩浆。邻格已加载时按实时状态检查；未加载、无法排除侧后方液体流入时默认不挖，allowUnknownAdjacent:true 显式接受未加载邻格风险。挖脚下支撑块时，下方 1 格是实心落点可直接挖；2–3 格落差或落点未知要 fall:true，落点是水/岩浆还要 wet:true/lava:true。挖掉脚下支撑后会等落地（有界）并回报 onGround、AABB 下剩余支撑格和实际落差；仍在空中时标 pendingFall，不会把目标格已空当作已落地。只挖不走，不挖基岩。',
+  catalog: '{"at":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"tool"?:"物品名"，"autoTool"?true，"wet"?/"lava"?/"fall"?/"allowUnknownAdjacent"?:true：挖掉身边指定的一格（[0,-1,0] 是脚下支撑）；autoTool 由身体挑工具；液体邻格、挖脚下落差、邻格未看清要显式授权',
+  argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "autoTool"?true（由身体按方块从背包挑合适的工具装备到主手；不写 tool 时默认只用当前手持）, "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "autoTool"?true, "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
   movement: false,
   // 计划录入只检查写法；目标是否在挖得到的范围、邻格和落点由执行前按最新位置确认。
@@ -474,7 +474,7 @@ const mineCellSkill: Skill<MineArgs> = {
     if (typeof facing !== 'string') return { ok: false, error: String(facing) };
     const tool = a.tool;
     if (tool !== undefined && (typeof tool !== 'string' || !/^[a-z0-9_]{1,80}$/.test(tool))) return { ok: false, error: 'tool 为可选物品注册名（小写字母、数字、下划线）' };
-    const flags = { ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) };
+    const flags = { ...(tool !== undefined ? { tool } : {}), ...(a.autoTool === true ? { autoTool: true } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) };
     const rawXyz = a.xyz ?? a.abs ?? a.world;
     if (rawXyz !== undefined) {
       const xyz = absValue(rawXyz);
@@ -500,11 +500,11 @@ const mineCellSkill: Skill<MineArgs> = {
       if (![xyz.x, xyz.y, xyz.z].every(Number.isInteger)) return { ok: false, error: 'xyz 是方块格坐标，x/y/z 都必须是整数' };
       const rel = parseRel(toRel(feetCell(adapter.state().pos), facing as Facing, xyz), { f: 2, u: [-1, 3], r: 2 });
       if (typeof rel === 'string') return { ok: false, error: `(${xyz.x},${xyz.y},${xyz.z}) 不在身边能挖到的范围：${rel}；先走近` };
-      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
+      return { ok: true, args: { at: rel, facing: facing as Facing, xyz, ...(tool !== undefined ? { tool } : {}), ...(a.autoTool === true ? { autoTool: true } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
     }
     const at = parseRel(relValue(a), { f: 2, u: [-1, 3], r: 2 });
     if (typeof at === 'string') return { ok: false, error: at };
-    return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
+    return { ok: true, args: { at, facing: facing as Facing, ...(tool !== undefined ? { tool } : {}), ...(a.autoTool === true ? { autoTool: true } : {}), ...(a.own === true ? { own: true } : {}), ...(a.wet === true ? { wet: true } : {}), ...(a.lava === true ? { lava: true } : {}), ...(a.fall === true ? { fall: true } : {}), ...(a.allowUnknownAdjacent === true ? { allowUnknownAdjacent: true } : {}) } };
   },
   async run(ctx, args) {
     throwIfAborted(ctx.signal);
@@ -622,12 +622,12 @@ const mineCellSkill: Skill<MineArgs> = {
     const keepsake = KEEPSAKE.test(before) ? before : null;
     const countOf = (n: string) => countItems(adapter, [n]);
     const had = keepsake ? countOf(keepsake) : 0;
-    // 只用调用者指定的工具；没指定就只用当前手持（空手就空手挖），不换更合适的、也不造工具。
+    // 只用调用者指定的工具；没指定就只用当前手持（空手就空手挖）；autoTool 才让身体自己挑，不造工具。
     // info 会让 breakCell 回填适配器实测的 noDrop/digMs；成功回执照实带回，不把空手掉落写成“拿到了”。
     const digInfo: { noDrop?: boolean; ms?: number } = {};
     let adapterError: string | undefined;
     try {
-      await breakCell(ctx, pos, true, digInfo, { allowWater: args.wet, allowLava: args.lava, ...(args.tool !== undefined ? { tool: args.tool } : { handOnly: true }) });
+      await breakCell(ctx, pos, true, digInfo, { allowWater: args.wet, allowLava: args.lava, ...(args.tool !== undefined ? { tool: args.tool } : args.autoTool === true ? {} : { handOnly: true }) });
     } catch (e) {
       if (isAbort(e)) throw e;
       // 适配器异常不等于世界没变：先核对目标格，已空就按部分/已确认效果继续结算。

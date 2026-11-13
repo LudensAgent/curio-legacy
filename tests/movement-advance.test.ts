@@ -65,6 +65,26 @@ function setup(map: VoxelMap) {
   return { adapter, ctx };
 }
 
+/** 带着主手状态的假身体：模拟真实适配器“自动挑工具->装到主手”，并记录换手动作。 */
+class HandWorld extends FakeAdapter {
+  hand: string | null = null;
+  override state() {
+    return { ...super.state(), held: this.hand };
+  }
+  override async equipItem(name: string | null, destination: 'hand' | 'off-hand' | 'head' | 'torso' | 'legs' | 'feet', signal: AbortSignal) {
+    if (name === null) return { ok: true };
+    const result = await super.equipItem(name, destination, signal);
+    if (result.ok && destination === 'hand') this.hand = name;
+    return result;
+  }
+  override async dig(pos: Vec3Like, signal: AbortSignal, opts?: { tool?: string | null; handOnly?: boolean }) {
+    const result = await super.dig(pos, signal);
+    // 自动挑工具（没有 handOnly/tool）时装石镐；handOnly 保持原手持。
+    if (result.ok && opts?.handOnly !== true) this.hand = opts?.tool ?? 'stone_pickaxe';
+    return result;
+  }
+}
+
 function args(raw: Record<string, unknown>) {
   const validation = advance.validate(raw, new FakeAdapter());
   assert.equal(validation.ok, true, validation.ok ? '' : validation.error);
@@ -734,6 +754,30 @@ test('代为开路每完成一步动作就按实测位置上报进度，不是�
   });
   assert.equal(leg.executed, 3, JSON.stringify(leg));
   assert.deepEqual(reportedX, [1.5, 2.5, 3.5], '每一步迈完就上报当时的实测位置');
+});
+
+test('开路挖完把主手还原成这段开路开始时的物品，不把临时工具留给调用方', async (t) => {
+  const map = corridor(8);
+  const adapter = new HandWorld();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx: SkillCtx = { ...makeCtx(adapter), spatial: fakeSpatial(map) };
+  t.after(() => ctx.memory.close());
+  adapter.inv.set('iron_pickaxe', 1);
+  adapter.inv.set('stone_pickaxe', 1);
+  adapter.hand = 'iron_pickaxe';
+  for (const pos of [{ x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 }]) adapter.blocks.push({ name: 'stone', pos });
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  const leg = await runMakeWay(ctx, {
+    steps: [{ kind: 'move', to: { x: 1, y: 64, z: 0 }, dig: [{ x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 }] }],
+    opts: { dig: {}, maxEdits: 4 },
+    remainingEdits: 4, edits: [], deadline: Date.now() + 60_000,
+    nameAt: (cell) => adapter.blockAt(cell) ?? 'air',
+    supportTopAt: (cell) => cell.x === 1 && cell.y === 63 ? 1 : null,
+    onProgress: () => {},
+  });
+  assert.equal(leg.failure, undefined, leg.failure);
+  assert.equal(adapter.hand, 'iron_pickaxe', '挖完不能把临时工具留在主手');
+  assert.ok(adapter.actions.includes('equip:iron_pickaxe:hand'), JSON.stringify(adapter.actions));
 });
 
 test('开路迈步前用当前已加载方块确认落点支撑：落点是空腔就不迈出', async (t) => {

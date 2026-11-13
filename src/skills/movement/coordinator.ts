@@ -123,10 +123,11 @@ const RESIDENCY_RETRY_MS = 300, MAX_RESIDENCY_RETRIES = 20;
 const MAX_SAME_EVIDENCE_SEARCHES = 1;
 
 /**
- * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell，只用授权工具或当前手持），再补支撑（place_support）
- * 或原地垫高（pillar_one，只用授权方块），然后迈到下一格（连续脚位身体控制）。迈出前用当前已加载方块
- * 再确认落点支撑、扫掠与危险格：计划里按“未知格大概有支撑”排出来的步骤不能直接当真，确认不了就停下交回。
- * 每个基础动作照常做自己的安全检查；任一步失败就停下，把原因交回。改动逐条记入 edits。
+ * 按开路计划逐步执行：每一步先挖开要占的格（mine_cell：写了工具名只用那一把，dig:true 由身体挑合适的工具），
+ * 再补支撑（place_support）或原地垫高（pillar_one，只用授权方块），然后迈到下一格（连续脚位身体控制）。
+ * 挖/放会临时换手，交回前把主手还原成这段开路开始时的物品，不让辅助动作的临时工具留成调用方的手持。
+ * 迈出前用当前已加载方块再确认落点支撑、扫掠与危险格：计划里按“未知格大概有支撑”排出来的步骤不能直接当真，
+ * 确认不了就停下交回。每个基础动作照常做自己的安全检查；任一步失败就停下，把原因交回。改动逐条记入 edits。
  */
 export async function runMakeWay(
   ctx: SkillCtx,
@@ -152,6 +153,7 @@ export async function runMakeWay(
   const { steps, opts, remainingEdits, edits, deadline, nameAt, supportTopAt, onProgress } = job;
   const fireEdits = job.fireEdits ?? [];
   const fireBudget = job.fireBudget ?? 0;
+  const handBefore = ctx.adapter.state().held;
   const from = { ...ctx.adapter.state().pos };
   // 规划是异步的：算完时身体可能还在滑动或已被推开。第一步的落点不在身边相邻格（或同格）就不执行，交回重规划。
   const first = steps[0];
@@ -208,7 +210,8 @@ export async function runMakeWay(
         break outer;
       }
       // 规划时已排除已记录的液体邻格；墙后看不见的邻格是授权 dig 承担的风险，不再按“当前视野没看清”拦。
-      failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig?.tool === undefined ? {} : { tool: opts.dig.tool }) }) ?? undefined;
+      // dig:true 没有指定工具时交给身体按方块挑（会临时装备），挖完在交回前还原这段开路开始时的主手。
+      failure = await run(mineCell, { xyz: [cell.x, cell.y, cell.z], allowUnknownAdjacent: true, ...(opts.dig === undefined ? {} : opts.dig.tool === undefined ? { autoTool: true } : { tool: opts.dig.tool }) }) ?? undefined;
       if (failure !== undefined) break outer;
       (fireOnly ? fireEdits : edits).push({ kind: 'dig', pos: { ...cell }, name });
     }
@@ -301,6 +304,15 @@ export async function runMakeWay(
     if (step.dig.length > 0 || step.place !== undefined || step.kind === 'pillar') break;
   }
   if (previousMoveHandedOff) ctx.adapter.stopAll?.();
+  // 挖/放期间的临时换手不留给调用方：还原成这段开路开始时的主手（被取消时不替它多做动作；
+  // 原手持已经用完/不在背包就只保留实际手持，不伪装还原成功）。
+  if (!ctx.signal.aborted && ctx.adapter.equipItem) {
+    const now = ctx.adapter.state();
+    if (now.held !== handBefore
+      && (handBefore === null || now.inventory.some((item) => item.name === handBefore && item.count > 0))) {
+      await ctx.adapter.equipItem(handBefore, 'hand', ctx.signal).catch(() => undefined);
+    }
+  }
   return {
     from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed,
     ...(failure === undefined ? {} : { failure }),

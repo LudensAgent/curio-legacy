@@ -963,6 +963,21 @@ test('mine_cell：相对和绝对 xyz 同样校验 tool，只用指定或当前�
   assert.equal(missingWorld.blockAt({ x: 1, y: 64, z: 0 }), 'stone');
 });
 
+test('mine_cell：autoTool 把工具选择交给身体，不再固定 handOnly', async (t) => {
+  const w = stoneAtFeet(new ToolWorld());
+  w.heldTool = null;
+  w.inv.set('stone_pickaxe', 1);
+  w.inv.set('iron_pickaxe', 1);
+  const ctx = makeCtx(w, { senses: { observeBlocks: visibleTargets(w) } });
+  t.after(() => ctx.memory.close());
+  const v = mineCell.validate({ at: [1, 0, 0], facing: 'E', autoTool: true }, w);
+  assert.ok(v.ok, !v.ok ? v.error : '');
+  const r = await mineCell.run(ctx, v.args);
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(w.digOpts, [{}], 'autoTool 不传 handOnly/tool，交给适配器按方块选');
+  assert.ok(w.equipAttempts.some((n) => /_pickaxe$/.test(n)), '身体从背包里装了镐');
+});
+
 test('mine_cell：指定工具采不到掉落时照样挖开并回报 noDrop，不自动换工具', async (t) => {
   const w = new ToolWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
