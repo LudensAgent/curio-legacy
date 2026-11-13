@@ -1,3 +1,4 @@
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { sleep } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
@@ -51,21 +52,32 @@ export const rangedDefend: Skill<{ entityId?: number; shots: number }> = {
   async run(ctx, args) {
     if (!ctx.adapter.rangedAttack) return fail('ERROR', '适配器没有远程武器能力');
     let shots = 0;
+    // 后退走不通只管这一次走位：射击照常，但失败次数和原因要如实带进回执。
+    let retreatFailed = 0;
+    let retreatReason = '';
+    const retreatNote = () => retreatFailed ? `（后退失败 ${retreatFailed} 次，未能拉开距离就继续射击：${retreatReason}）` : '';
     try {
       for (; shots < args.shots;) {
         ctx.senses.refresh();
-        const target = ctx.senses.perceivedEntities(48).find((entity) => args.entityId === undefined ? entity.kind === 'hostile' : entity.id === args.entityId);
-        if (!target) return shots ? ok(`已射击 ${shots} 次，目标不再可感知，不能确认击败`, { shots, defeatVerified: false }) : fail('NOT_FOUND', '没有可感知的射击目标');
-        if (ctx.adapter.state().hp <= 6) return fail('LOW_HP', '生命过低，停止射击并请求撤离');
-        if (target.dist < 5) await ctx.adapter.moveTo({ kind: 'away_from', pos: target.pos, distance: 10 }, { signal: ctx.signal, timeoutMs: 5000 });
+        const target = ctx.senses.perceivedEntities(SENSE_ENTITY_RADIUS).find((entity) => args.entityId === undefined ? entity.kind === 'hostile' : entity.id === args.entityId);
+        if (!target) return shots ? ok(`已射击 ${shots} 次，目标不再可感知，不能确认击败${retreatNote()}`, { shots, defeatVerified: false, ...(retreatFailed ? { retreatFailed } : {}) }) : fail('NOT_FOUND', '没有可感知的射击目标');
+        if (ctx.adapter.state().hp <= 6) return fail('LOW_HP', `生命过低，停止射击并请求撤离${retreatNote()}`, { shots, ...(retreatFailed ? { retreatFailed } : {}) });
+        // 拉开距离只是射击前的走位辅助：找不到退路时照常射击，不能让整轮射击因走位失败中止。
+        // 骷髅、猪灵常在 5 格内放箭，后退路径又常被地形卡住，这里失败是常态。
+        if (target.dist < 5) await ctx.adapter.moveTo({ kind: 'away_from', pos: target.pos, distance: 10 }, { signal: ctx.signal, timeoutMs: 5000 })
+          .catch((e) => {
+            if (isAbort(e)) throw e;
+            retreatFailed++;
+            retreatReason = String((e as Error).message).slice(0, 80);
+          });
         const result = await ctx.adapter.rangedAttack(target.id, ctx.signal);
-        if (!result.ok) return fail(result.reason === 'NO_BOW_OR_ARROWS' ? 'MISSING_MATERIALS' : 'ERROR', `射击失败：${result.reason}`, { shots });
+        if (!result.ok) return fail(result.reason === 'NO_BOW_OR_ARROWS' ? 'MISSING_MATERIALS' : 'ERROR', `射击失败：${result.reason}${retreatNote()}`, { shots, ...(retreatFailed ? { retreatFailed } : {}) });
         shots++;
         ctx.progress(shots / args.shots, `已射击 ${shots} 次`);
         await sleep(250, ctx.signal);
       }
-      return ok(`完成 ${shots} 次实际射击`, { shots, defeatVerified: false });
-    } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `射击中断：${(error as Error).message}`, { shots }); }
+      return ok(`完成 ${shots} 次实际射击${retreatNote()}`, { shots, defeatVerified: false, ...(retreatFailed ? { retreatFailed } : {}) });
+    } catch (error) { if (isAbort(error)) throw error; return fail(codeFromError(error), `射击中断：${(error as Error).message}${retreatNote()}`, { shots, ...(retreatFailed ? { retreatFailed } : {}) }); }
   },
 };
 

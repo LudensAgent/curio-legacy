@@ -34,6 +34,16 @@ export interface VisionConfig {
 export const DEFAULT_VISION: VisionConfig = { range: 0, hFov: 120, vFov: 96, cols: 40, rows: 32, hearRadius: 10, bandCols: 160, bandRows: 8 };
 const FALLBACK_RANGE = 64;
 const MAX_RANGE = 64;
+/**
+ * 听觉范围（格）按声音大小分档：一般敌对生物至少 16 格；恶魂的哭嚎、烈焰人的噼啪声传得更远。
+ * 弹体（箭、火球实体）属于 other，不走听觉，所以这里只列生物本身。
+ * VISION_HEAR 仍是基础值：决定被动生物的距离，也能把敌对生物的听觉调得更大。
+ */
+const HEAR_FLOOR_HOSTILE = 16;
+const LOUD_HEARING: Record<string, number> = { ghast: 48, blaze: 24 };
+const MAX_LOUD_HEARING = Math.max(...Object.values(LOUD_HEARING));
+/** 心智能注意到的最远距离：至少覆盖听觉里传得最远的生物，否则听得见也进不了心智。 */
+export const SENSE_ENTITY_RADIUS = Math.max(48, MAX_LOUD_HEARING);
 /** 后台视觉每片最多连续占用主线程这么久，随后 setImmediate 让出。 */
 const SCAN_SLICE_MS = 8;
 
@@ -640,8 +650,15 @@ export class Vision {
     // ---- 实体：视锥 + 视线 + 光照
     const seen: SeenEntity[] = [];
     const heard: SeenEntity[] = [];
+    // 听觉范围：敌对生物至少 HEAR_FLOOR_HOSTILE，声音大的按 LOUD_HEARING；其余仍用基础值。
+    const hearRangeOf = (e: EntityInfo) => e.kind === 'hostile'
+      ? Math.max(this.cfg.hearRadius, HEAR_FLOOR_HOSTILE, LOUD_HEARING[e.name] ?? 0)
+      : this.cfg.hearRadius * 0.6;
     const ents: VisionFrame['entities'] = [];
-    for (const e of this.adapter.nearbyEntities(range)) {
+    // 听觉不能被视野距离截断：VISION_RANGE 调小（如 32）时，40 格外的恶魂仍要能听见。
+    // 看得见的最远距离由下面的 maxSee 另按光照和 range 限制，这里放宽枚举范围不会让它们“看见”。
+    const entityScan = Math.max(range, this.cfg.hearRadius, HEAR_FLOOR_HOSTILE, MAX_LOUD_HEARING);
+    for (const e of this.adapter.nearbyEntities(entityScan)) {
       const h = e.height ?? (e.kind === 'item' ? 0.25 : 1.6);
       const cx = e.pos.x, cz = e.pos.z;
       const targets = [e.pos.y + h * 0.5, e.pos.y + h * 0.9];
@@ -668,7 +685,7 @@ export class Vision {
         const v = 0.5 - relPitch / vFov;
         seen.push({ ...base, u, v });
         if (e.kind !== 'item') ents.push({ name: e.name, kind: e.kind, u, v, dist: Math.round(e.dist) });
-      } else if (e.kind !== 'item' && e.kind !== 'other' && e.dist <= (e.kind === 'hostile' ? this.cfg.hearRadius : this.cfg.hearRadius * 0.6)) {
+      } else if (e.kind !== 'item' && e.kind !== 'other' && e.dist <= hearRangeOf(e)) {
         heard.push({ ...base, how: 'heard', phase: undefined, hp: undefined, velocity: undefined });
       }
       yield;

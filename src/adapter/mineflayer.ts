@@ -15,6 +15,7 @@ import { installClientGuard } from './click-guard.ts';
 import { isClimbableBlockName } from './land-rules.ts';
 import { AIR_BLOCKS, attachmentFaces, isTreeSaplingItem, saplingSoilFor, saplingSoilText } from '../perception/surroundings.ts';
 import { feetCell, facingOfYaw, supportCell } from '../perception/local.ts';
+import { relOf, SENSE_ENTITY_RADIUS, yawTo } from '../perception/vision.ts';
 import { bodyOverlapsPortal, PORTAL_KINDS, portalApproach as computePortalApproach, portalStance as computePortalStance } from '../perception/portal.ts';
 import { MAX_STEP_RISE, MAX_WALK_TO_DISTANCE } from 'curio-minecraft-3d-memory';
 import { FEET_ARRIVAL_TOLERANCE } from './types.ts';
@@ -147,6 +148,8 @@ const HOSTILE = new Set([
   'elder_guardian', 'hoglin', 'zoglin', 'piglin_brute', 'warden', 'shulker', 'ender_dragon',
 ]);
 const NEUTRAL = new Set(['enderman', 'zombified_piglin', 'wolf', 'bee', 'iron_golem', 'llama', 'panda', 'polar_bear', 'dolphin', 'goat']);
+/** 刚对我们造成伤害的生物，在这段时间内不论原本是否中立都按敌对对待。 */
+const ATTACKER_TTL_MS = 10_000;
 const BAD_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'suspicious_stew', 'chorus_fruit']);
 const WEAPON_ORDER = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'];
 /**
@@ -293,6 +296,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
   private newSession() {
     this.dragonDeath = null;
+    this.attackers.clear();
     this.spawned = false;
     const previousSessionId = this.sessionId;
     this.sessionId = shortId('session_');
@@ -536,13 +540,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     });
     bot._client.prependListener('damage_event', (packet: any) => {
       if (packet?.entityId !== bot.entity?.id) return;
-      const entity = (id: number) => id > 0 ? bot.entities[id - 1] : undefined;
-      const describe = (e: any) => e ? `${e.username ?? e.name ?? e.type ?? 'entity'}${e.position && bot.entity?.position ? ` ${e.position.distanceTo(bot.entity.position).toFixed(1)} 格` : ''}` : undefined;
-      const cause = entity(packet.sourceCauseId), direct = entity(packet.sourceDirectId);
-      this.lastDamage = {
-        type: this.damageTypes.get(packet.sourceTypeId) ?? `damage_type#${packet.sourceTypeId}`,
-        cause: describe(cause), direct: direct !== cause ? describe(direct) : undefined, at: Date.now(),
-      };
+      this.noteDamage(packet);
     });
     bot.on('entityHurt', (e: any) => {
       if (e === bot.entity) this.emit('hurt', this.hurtCause());
@@ -886,6 +884,12 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const name = String(ent.name ?? '');
     if (ent.type === 'player') return 'player';
     if (name === 'item') return 'item';
+    // 正在打我们的生物：伤害来源在最近 10 秒内，不论原本是否中立都按敌对对待。
+    const attackingUntil = this.attackers.get(ent.id);
+    if (attackingUntil !== undefined) {
+      if (attackingUntil > Date.now()) return 'hostile';
+      this.attackers.delete(ent.id);
+    }
     if (name === 'enderman') {
       const keys: string[] = this.mcData?.entitiesByName?.enderman?.metadataKeys ?? [];
       if (['creepy', 'stared_at'].some((key) => keys.indexOf(key) >= 0 && ent.metadata?.[keys.indexOf(key)] === true)) return 'hostile';
@@ -5426,6 +5430,34 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
   private damageTypes = new Map<number, string>();
   /** 最近一次自己受到的伤害（damage_event），供 hurt 事件报告真实来源。 */
   private lastDamage: { type: string; cause?: string; direct?: string; at: number } | null = null;
+  /** 最近对我们造成伤害的实体 id → 失效时刻；见 classify 与 ATTACKER_TTL_MS。 */
+  private attackers = new Map<number, number>();
+  /**
+   * 把一次 damage_event 记成可读的伤害事实：来源的名字、距离和相对身体的方位（正前/右后…）。
+   * 挨冷箭或挨火球时，光有名字和距离不知道往哪边躲。刚打我们的生物在 ATTACKER_TTL_MS 内按敌对对待。
+   */
+  private noteDamage(packet: { entityId: number; sourceTypeId: number; sourceCauseId: number; sourceDirectId: number }) {
+    const b = this.bot;
+    if (!b?.entity?.position) return;
+    const entity = (id: number) => id > 0 ? b.entities[id - 1] : undefined;
+    const describe = (e: any) => {
+      if (!e) return undefined;
+      const from = b.entity.position;
+      const near = e.position && from;
+      const bearing = near && Number.isFinite(b.entity.yaw)
+        ? `，在你${relOf(yawTo(e.position.x - from.x, e.position.z - from.z) - b.entity.yaw)}`
+        : '';
+      return `${e.username ?? e.name ?? e.type ?? 'entity'}${near ? ` ${e.position.distanceTo(from).toFixed(1)} 格` : ''}${bearing}`;
+    };
+    const cause = entity(packet.sourceCauseId), direct = entity(packet.sourceDirectId);
+    // 不论原本是否中立（金甲猪灵、僵尸猪灵、末影人、狼…），刚打过我们的都按敌对对待。
+    if (cause?.id !== undefined) this.attackers.set(cause.id, Date.now() + ATTACKER_TTL_MS);
+    // 没有可归属的来源（无主箭/火球）时，至少把直接命中的弹体方向和距离说清楚。
+    this.lastDamage = {
+      type: this.damageTypes.get(packet.sourceTypeId) ?? `damage_type#${packet.sourceTypeId}`,
+      cause: describe(cause), direct: direct !== cause ? describe(direct) : undefined, at: Date.now(),
+    };
+  }
   async ride(target: { x: number; z: number }, signal: AbortSignal, opts: { timeoutMs: number; stop?: () => boolean; via?: { x: number; z: number }[]; arriveWithin?: number }): Promise<ActionResult & { arrived: boolean; blocked?: boolean; moved: number }> {
     const check = this.actionCheckpoint(signal);
     const b = this.bot;

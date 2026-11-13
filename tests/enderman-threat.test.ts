@@ -34,3 +34,19 @@ test('猪灵穿金盔甲时是中立，猪灵蛮兵始终敌对', () => {
   assert.equal(classify({ name: 'piglin' }), 'passive');
   assert.equal(classify({ name: 'piglin_brute' }), 'hostile');
 });
+
+test('正在打我们的中立生物按敌对对待，10 秒后恢复中立', () => {
+  const adapter = new MineflayerAdapter(config, new EventBus());
+  adapter.mcData = require('minecraft-data')('1.20.1');
+  const classify = (entity: any) => (adapter as any).classify(entity);
+  const now = Date.now();
+  (adapter as any).attackers.set(42, now + 10_000);
+  assert.equal(classify({ id: 42, name: 'enderman', metadata: [] }), 'hostile', '刚打过我们的末影人不能再当无害');
+  assert.equal(classify({ id: 43, name: 'enderman', metadata: [] }), 'passive', '没打过我们的仍是中立');
+  (adapter as any).attackers.set(44, now - 1);
+  assert.equal(classify({ id: 44, name: 'zombified_piglin', metadata: [] }), 'passive', '过期后不再按敌对');
+  assert.equal((adapter as any).attackers.has(44), false, '过期条目顺手清掉');
+  (adapter as any).attackers.set(45, now + 10_000);
+  (adapter as any).newSession();
+  assert.equal((adapter as any).attackers.size, 0, '换会话（重生/断线）后不继承上一条命的攻击者');
+});

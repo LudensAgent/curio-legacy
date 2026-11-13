@@ -115,6 +115,23 @@ test('实体：墙后的僵尸看不见；近处的能“听见”，远处的�
   assert.deepEqual(vision.perceivedEntities(40).map((e) => e.name), ['zombie']);
 });
 
+test('听觉按声音大小分档：一般敌对生物至少 16 格，恶魂传得更远', () => {
+  const { adapter, vision } = setup();
+  adapter.entities.push({ id: 1, name: 'skeleton', kind: 'hostile', pos: { x: -15, y: 64, z: 0 }, dist: 0, height: 1.99 });
+  adapter.entities.push({ id: 2, name: 'ghast', kind: 'hostile', pos: { x: -40, y: 64, z: 0 }, dist: 0, height: 4 });
+  adapter.entities.push({ id: 3, name: 'zombie', kind: 'hostile', pos: { x: -25, y: 64, z: 0 }, dist: 0, height: 1.95 });
+  vision.scan();
+  assert.deepEqual(vision.heard.map((e) => e.name).sort(), ['ghast', 'skeleton'], '身后的骷髅 15 格和恶魂 40 格都听得见，僵尸 25 格听不见');
+});
+
+test('听觉不被视野距离截断：VISION_RANGE=32 时 40 格的恶魂仍听得见', () => {
+  const adapter = new FakeAdapter();
+  adapter.entities.push({ id: 2, name: 'ghast', kind: 'hostile', pos: { x: -40, y: 64, z: 0 }, dist: 0, height: 4 });
+  const vision = new Vision(adapter, { range: 32, hFov: 120, vFov: 96, cols: 24, rows: 12, hearRadius: 10, bandCols: 0, bandRows: 0 });
+  vision.scan();
+  assert.deepEqual(vision.heard.map((e) => e.name), ['ghast'], '看见的距离限制不能被当成听见的距离限制');
+});
+
 test('实体：视野内且无遮挡的牛能看见，并给出画面坐标与方位', () => {
   const { adapter, vision } = setup();
   adapter.entities.push({ id: 3, name: 'cow', kind: 'passive', pos: { x: 12, y: 64, z: -3 }, dist: 0, height: 1.4 });

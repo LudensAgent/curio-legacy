@@ -1,6 +1,7 @@
 import type { AgentState, GameAdapter } from '../adapter/types.ts';
 import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { measureLight } from '../skills/light.ts';
 import type { Senses } from '../skills/types.ts';
 
@@ -262,9 +263,10 @@ export function senseNow(adapter: Pick<GameAdapter, 'state' | 'blockAt' | 'eye'>
   let hostiles: Sense['hostiles'] = [];
   let drops: NonNullable<Sense['drops']> = [];
   try {
-    const ents = senses.perceivedEntities(32);
+    const ents = senses.perceivedEntities(SENSE_ENTITY_RADIUS);
     hostiles = ents.filter((e) => e.kind === 'hostile').map((e) => ({ name: e.name, dist: e.dist, ...(e.fusing ? { fusing: true } : {}), ...(e.perception ? { perception: e.perception } : {}) }));
-    drops = ents.filter((e) => e.kind === 'item' && e.perception !== 'heard').map((e) => ({ item: e.name.replace(/^item:/, ''), dist: e.dist }));
+    // 掉落物仍按原来的 32 格：扩大的是对敌对生物的听觉，不顺手扩大拾取判断范围。
+    drops = ents.filter((e) => e.kind === 'item' && e.perception !== 'heard' && e.dist <= 32).map((e) => ({ item: e.name.replace(/^item:/, ''), dist: e.dist }));
   } catch { /* 感官暂不可用 */ }
   let lightLevel: number | null = null;
   try { if (adapter.lightAt) lightLevel = measureLight(adapter as Pick<GameAdapter, 'blockAt' | 'lightAt'>, state.pos, state.timeOfDay, state.isDay).level; } catch { /* 光照读不到 */ }

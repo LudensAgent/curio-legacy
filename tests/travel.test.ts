@@ -524,6 +524,22 @@ test('equip_armor confirms real slots and ranged_defend spends arrows without cl
   assert.equal(ranged.result.data?.defeatVerified, false);
 });
 
+test('ranged_defend：目标贴身时后退走不通，仍照常射击，不因走位失败中止', async () => {
+  const { adapter, vision, run } = setup();
+  adapter.inv.set('bow', 1);
+  adapter.inv.set('arrow', 3);
+  adapter.entities.push({ id: 13, name: 'skeleton', kind: 'hostile', pos: { x: 3, y: 64, z: 0 }, dist: 3 });
+  vision.scan();
+  // 骷髅、猪灵常在 5 格内放箭，而这里的地形没有退路：后退失败不能让整轮射击作废。
+  adapter.moveTo = async () => { throw new Error('NAVIGATION_GAP: 没有可验证的候选站位'); };
+  const ranged = await run('ranged_defend', { entityId: 13, shots: 2 });
+  assert.equal(ranged.result.status, 'succeeded', ranged.result.summary);
+  assert.equal(adapter.inv.get('arrow'), 1);
+  assert.equal(adapter.actions.filter((a) => a === 'ranged:13').length, 2);
+  assert.equal(ranged.result.data?.retreatFailed, 2, '走位失败要如实记下次数');
+  assert.match(ranged.result.summary, /后退失败 2 次.*NAVIGATION_GAP/, '回执要说明没拉开距离就继续射击');
+});
+
 test('End gateway records actual same-session displacement and only verifies return after a second teleport', async () => {
   const { adapter, memory, vision, run } = setup();
   adapter.dim = 'the_end'; adapter.inv.set('ender_pearl', 2);
