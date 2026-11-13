@@ -12,7 +12,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 const rec = (what: string, outcome: ActivityRecord['outcome'], at: number): ActivityRecord =>
   ({ id: `r-${at}`, what, kind: 'explore', outcome, summary: '没进展', durationSec: 30, gained: {}, lost: {}, at, signature: 'sig', failures: 1 });
 
-test('主目标清单观察在线没进展且最近反复卡住：提示改清单、不换主目标、不重写已勾掉的项', (t) => {
+test('主目标清单观察在线没进展且最近反复卡住：提示改清单的条件、不换主目标、不重写已勾掉的项', (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
@@ -37,9 +37,12 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
     audience: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /主目标「挖够粗铁做装备」的清单已观察到 15 在线分钟没勾掉一项/);
   assert.match(user.content, /主目标不用换（换目标要等阶段回顾）/);
-  assert.match(user.content, /清单可以按实际情况改/);
-  assert.match(user.content, /不再强制写 switch_reason/);
-  assert.doesNotMatch(user.content, /删项要在 plan 里写/);
+  assert.match(user.content, /清单是成果，做法可以随时换/);
+  assert.match(user.content, /删掉没做完的成果/);
+  assert.match(user.content, /写 switch_reason/);
+  assert.match(user.content, /距上次删改满 15 分钟/);
+  assert.match(user.content, /只观察停滞不构成删项理由/);
+  assert.doesNotMatch(user.content, /不再强制写 switch_reason/);
   assert.match(user.content, /「下到 y16 找铁」）保留，别写成新步骤/);
 });
 
@@ -91,14 +94,14 @@ test('改过清单后，要等新清单也卡住两段才再提示改清单；�
   const think = () => buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
     self, memory, plan: self.plan()!, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
     audience: null, notes: [], mySkills: [], persona: 'P' })[1].content;
-  assert.match(think(), /清单可以按实际情况改/);
+  assert.match(think(), /的清单已观察到/);
   now += 60_000;
   self.setPlan(self.plan()!.agendaId, ['换个地方挖竖井', '挖到 24 个粗铁']);
   stall();
   const afterRewrite = think();
-  assert.doesNotMatch(afterRewrite, /清单可以按实际情况改/, '刚改过清单，旧的卡住记录不再催改');
+  assert.doesNotMatch(afterRewrite, /的清单已观察到/, '刚改过清单，旧的卡住记录不再催改');
   assert.match(afterRewrite, /"checklist_rewrites_since_progress":1/);
   now += 60_000;
   self.data.history.push(rec('换地方挖竖井', 'stuck', now - 30_000), rec('换地方挖竖井', 'unmet', now - 10_000));
-  assert.match(think(), /清单可以按实际情况改/, '新清单也卡住两段，再提示');
+  assert.match(think(), /的清单已观察到/, '新清单也卡住两段，再提示');
 });

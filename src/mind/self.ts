@@ -111,7 +111,7 @@ export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[
   methods?: PlanMethod[]; attempts?: PlanAttempt[];
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
   progressAt?: number;
-  /** 清单内容被改写的时刻（只记文字真的变了的那几次，保留最近 20 次）；不算推进 */
+  /** 撤掉/改掉未完成成果的时刻（只记这几次，保留最近 20 次）；单纯加项不计，也不算推进 */
   revisedAt?: number[];
   /** 已观察的在线停滞时长；历史数据不足时只表示下限。 */
   stalledOnlineMs?: number;
@@ -122,12 +122,36 @@ export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[
   /** 过了这么多游戏天还没做成，就停下来回顾要不要换（定下时在 3–5 天里随机，回顾后接着做会往后推） */
   reviewDays?: number }
 
-/** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”和行内 po_/pm_ 展示 id。
+/** 【专注】里宿主附加的清单注解。cleanPlanStep 用同一组文字剥掉，避免模型抄回时被当成新成果。 */
+const HELD_START = '（其实不用做：';
+export const PLAN_NOTE = {
+  autoDone: '（条件达成，自动勾的）',
+  autoPending: '（条件达成会自动勾）',
+  heldStart: HELD_START,
+  held: (names: string) => `${HELD_START}${names}）`,
+};
+const noteLiteral = (s: string) => s.slice(1, -1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const PLAN_NOTE_RE = new RegExp(`\\s*（(?:${noteLiteral(PLAN_NOTE.autoDone)}|${noteLiteral(PLAN_NOTE.autoPending)})）`, 'g');
+/** “其实不用做”里可能带耐久等嵌套括号，按深度找到配对的右括号再剥掉。 */
+const stripHeldNote = (s: string) => {
+  const at = s.lastIndexOf(PLAN_NOTE.heldStart);
+  if (at < 0) return s;
+  let depth = 0;
+  for (let i = at; i < s.length; i++) {
+    if (s[i] === '（') depth++;
+    else if (s[i] === '）' && --depth === 0) return `${s.slice(0, at)}${s.slice(i + 1)}`.trim();
+  }
+  return s.slice(0, at).trim();
+};
+
+/** 清单项的文字：去掉模型从【专注】里抄回来的“0. [ ] ”、行内 po_/pm_ 展示 id，以及宿主自己附加的注解。
  * 抄回来的格式不能进正文：文字一变，按文字恢复的勾选、id 和 done_when 就全对不上了。 */
 export const cleanPlanStep = (t: string) => {
   let s = String(t).trim(), prev = '';
   while (s !== prev) { prev = s; s = s.replace(/^(?:\d+[.、)]\s*|\[[ xX✓]?\]\s*|[☐☑●○▶-]\s*)/, '').trim(); }
-  return s.replace(/\s*\b(?:po|pm)_[A-Za-z0-9_-]+/g, '').replace(/\s{2,}/g, ' ').trim().slice(0, 60);
+  return stripHeldNote(s).replace(/\s*\b(?:po|pm)_[A-Za-z0-9_-]+/g, '')
+    .replace(PLAN_NOTE_RE, '')
+    .replace(/\s{2,}/g, ' ').trim().slice(0, 60);
 };
 
 export const clamp01 = (n: number) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
@@ -262,7 +286,8 @@ function lessonContext(text: string): string | undefined {
   return context?.replace(/\s+/g, '').toLowerCase();
 }
 
-/** 清单已观察停滞多久后，由 agent 按实际情况自主增删；主目标不随之变更 */
+/** 清单里未完成的成果被删改后，新清单至少试满这么久才允许下一次删改；
+ * 也是“停滞多久值得看看清单”的阈值。阶段回顾/操作者指令不受此限；只加项不受限。 */
 export const PLAN_REVISION_MIN = 15;
 
 /** 持久化的“我”：性格、情绪、议程、窍门、实验、日记、最近的念头。重启后接着上次的心思玩。 */
@@ -482,8 +507,11 @@ export class SelfModel {
       const doneWhen = cond ?? condBefore.get(text);
       return { id: idBefore.get(text) ?? shortId('po_'), text, done: doneBefore.has(text), ...(doneWhen ? { doneWhen } : {}) };
     });
-    const rewritten = !!old && old.steps.map((st) => st.text).join('|') !== cleaned.map((c) => c.text).join('|');
-    const revisedAt = rewritten ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
+    // 只有“撤掉/改掉没完成的成果”才算一次清单改写；单纯加项不占用改写冷却，
+    // 否则补一项新工作就会让之后的合理删改被冷却挡住。
+    const cleanedTexts = cleaned.map((c) => c.text);
+    const removedUnfinished = !!old && old.steps.some((st) => !st.done && !cleanedTexts.includes(st.text));
+    const revisedAt = removedUnfinished ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
     this.data.plan = { agendaId: item.id, goal: item.text, steps: outcomes, setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
       progressAt: old ? old.progressAt ?? old.setAt : Date.now(),

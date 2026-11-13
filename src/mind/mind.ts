@@ -2445,14 +2445,26 @@ export class Mind {
     this.keptHint = null;
   }
 
+  /** 这一念明确回应了操作者指令（或采纳了建议）；换目标与改清单共用同一口径。 */
+  private operatorAnswered(decision: MindDecision) {
+    return decision.operator?.status === 'doing' || decision.operator?.status === 'adopted';
+  }
+
   private goalSwitchRefusal(decision: MindDecision, target: string): string | null {
     return this.d.self.goalSwitchRefusal(target, {
       review: this.inReview,
       deliberate: decision.tier === 'deliberate',
       reason: decision.plan?.switchReason ?? decision.switchReason,
-      operator: decision.operator?.status === 'doing' || decision.operator?.status === 'adopted',
+      operator: this.operatorAnswered(decision),
       releasing: [...(decision.agenda?.drop ?? []), ...(decision.agenda?.done ?? [])],
     });
+  }
+
+  /** 做法不受成果保护：更新当前做法并广播；成果清单原样保留。 */
+  private applyPlanMethods(p: NonNullable<MindDecision['plan']>) {
+    const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
+    const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];
+    this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
   }
 
   /** 主目标的清单：定下/改写、勾掉做完的项；全勾掉就算主目标完成 */
@@ -2468,12 +2480,10 @@ export class Mind {
         decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；要换主目标请同时写 steps`);
         return; // 拒绝整条 plan，不能顺手勾掉当前计划的项
       }
-      const changed = this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
-      const active = changed?.methods?.filter((m) => m.status === 'active') ?? [];
-      this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
+      this.applyPlanMethods(p);
       return this.applyPlanDone(decision);
     }
-    let autonomousRevision = false;
+    let droppedUnfinished = false;
     if (p.steps?.length) {
       const focus = p.focus ?? cur?.agendaId ?? this.d.self.activeAgenda()?.id ?? p.goal;
       // 想把主目标换成另一件事：先看当前的阶段目标是不是还在推进（眼前的事不该顶替它）
@@ -2491,39 +2501,37 @@ export class Mind {
         const next = p.steps.map((t) => cleanPlanStep(t)).filter(Boolean);
         if (next.join('|') === cur.steps.map((st) => st.text).join('|')) {
           // 成果没变、只换做法：做法不受清单保护，直接更新。
-          if (p.methods !== undefined || p.methodDrop?.length) {
-            this.d.self.updatePlanMethods(p.methods, p.methodDrop ?? []);
-            const active = this.d.self.plan()?.methods?.filter((m) => m.status === 'active') ?? [];
-            this.d.bus.publish('plan_methods', 'P2', `做法更新：${active.length ? active.map((m) => m.text).join('；') : '没有启用中的做法'}`, { methods: active.map((m) => ({ id: m.id, text: m.text, attempts: m.attempts })) });
-          }
+          if (p.methods !== undefined || p.methodDrop?.length) this.applyPlanMethods(p);
           return this.applyPlanDone(decision); // 原样重写：成果没变
+        }
+        // 瞥一眼只负责看一眼：成果清单的任何增删改都留给认真想；做法仍可随手换。
+        if (decision.tier === 'glance') {
+          const methodsGiven = p.methods !== undefined || !!p.methodDrop?.length;
+          if (methodsGiven) this.applyPlanMethods(p);
+          decision.notes.push(`瞥一眼不改成果清单：这次想改的清单留到认真想${methodsGiven ? '；做法已按你的选择更新' : ''}`);
+          return this.applyPlanDone(decision);
         }
         const dropped = cur.steps.filter((st) => !st.done && !next.includes(st.text)).map((st) => st.text);
         if (dropped.length) {
-          // 主目标不变；清单是执行计划。停滞后由 agent 按实际结果自主增删，不再强制 switch_reason；
-          // 未停滞时仍要求认真想过并写理由，避免刚定下的清单被眼前的临时事顶掉。
-          const stalledMin = this.d.self.planStalledMin();
+          // 清单是这一阶段要拿到的成果，不是当前做法。删掉未完成的成果只走三条明路：
+          // 阶段回顾、操作者指令，或认真写出理由并让上一版清单试满 PLAN_REVISION_MIN。
+          // 停滞时间只说明“该看看了”，本身不授权删项：否则过了阈值之后每一念都能随手删，
+          // 清单就跟着眼前一念来回改（2026-11-10 半小时 28 次；2026-11-13 五分钟三次）。
+          // 改写清单不算推进，停滞计时不会因改写清零；换做法不受此限，只写 methods 即可。
+          const operatorOrdered = this.operatorAnswered(decision);
           const withReason = decision.tier === 'deliberate' && !!p.switchReason;
-          // 停滞时间是保护门；不按 tier 再拦：瞥一眼也可以按实际结果改，改清单提示只在认真想时出现。
-          // 改写清单不算推进，停滞计时不会因改写清零：只看停滞的话，过了阈值之后每一念都能随手删项，
-          // 清单就跟着眼前一念来回改（2026-11-10 半小时 28 次，回主世界补给这项被反复删了又加）。
-          // 不写理由的自主删项还要求离上次改写也过了同样久，让新清单先按它试一段；写 switch_reason 随时可改。
           const lastRevised = cur.revisedAt?.at(-1);
           const sinceRevisionMin = lastRevised === undefined ? Infinity : (Date.now() - lastRevised) / 60_000;
-          const canRevise = stalledMin >= PLAN_REVISION_MIN && sinceRevisionMin >= PLAN_REVISION_MIN;
-          if (!withReason && !canRevise) {
-            const why = decision.tier === 'glance' ? '瞥一眼时不改清单'
-              : stalledMin >= PLAN_REVISION_MIN
-                ? `上次改清单在 ${Math.round(sinceRevisionMin)} 分钟前（现实时间），新清单还没试满 ${PLAN_REVISION_MIN} 分钟；真要删改就在 plan 里写 "switch_reason" 说为什么`
-                : `要删改没做完的项得在 plan 里写 "switch_reason" 说为什么（比如这一项做不成、换了更好的做法）；清单观察停滞 ${PLAN_REVISION_MIN} 分钟后可以直接按实际结果改`;
-            decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的`);
+          const canRevise = withReason && sinceRevisionMin >= PLAN_REVISION_MIN;
+          if (!this.inReview && !operatorOrdered && !canRevise) {
+            const why = !p.switchReason ? '要删改没做完的项，得认真想在 plan 里写 "switch_reason" 说明为什么（等效替代或不再需要）；光有停滞时间不算'
+              : `上次改清单在 ${Math.round(sinceRevisionMin)} 分钟前（现实时间），新清单还没试满 ${PLAN_REVISION_MIN} 分钟；到点再改，或等阶段回顾/操作者指令`;
+            decision.notes.push(`清单没改：「${dropped.slice(0, 3).join('」「')}」还没做完，${why}。眼前的事（脱困、回地面、补工具、过夜）写成 activity 或 detour，做完会回到清单；新冒出来的必要步骤可以加在后面，不用删旧的；换做法只写 methods，不必重抄 steps`);
             this.d.bus.publish('plan_rewrite_refused', 'P3', `主目标「${cur.goal}」的清单没改：没做完的「${dropped.slice(0, 3).join('」「')}」不随眼前的事删掉`, { dropped, tier: decision.tier });
             return this.applyPlanDone(decision);
           }
-          if (!withReason) {
-            autonomousRevision = true;
-            decision.notes.push(`清单按已观察 ${Math.round(stalledMin)} 分钟无进展自主调整：删掉了「${dropped.slice(0, 3).join('」「')}」；主目标「${cur.goal.slice(0, 30)}」不变`);
-          }
+          droppedUnfinished = true;
+          decision.notes.push(`清单改写：删掉了「${dropped.slice(0, 3).join('」「')}」（${this.inReview ? '阶段回顾' : operatorOrdered ? '操作者指令' : `认真想并写了理由：${p.switchReason}`}）；主目标「${cur.goal.slice(0, 30)}」不变`);
         }
       }
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
@@ -2543,10 +2551,10 @@ export class Mind {
           : 'plan 没定下来：focus 写议程里某个目标的 id，或者直接写一句话的目标（会新建一个目标）；还要有 steps（清单至少一项）');
       }
     }
-    this.applyPlanDone(decision, { skipGoalCompletion: autonomousRevision });
+    this.applyPlanDone(decision, { skipGoalCompletion: droppedUnfinished });
   }
 
-  /** 勾掉清单里做完的项；全勾掉就算主目标完成。自主删项的那一念不能顺手把主目标标完成。 */
+  /** 勾掉清单里做完的项；全勾掉就算主目标完成。删掉未完成项的那一念不能顺手把主目标标完成（阶段回顾/操作者指令的删改也一样）。 */
   private applyPlanDone(decision: MindDecision, opts: { skipGoalCompletion?: boolean } = {}) {
     const p = decision.plan;
     if (!p) return;

@@ -16,7 +16,7 @@ import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
-import { cleanLesson, moodWords, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
+import { cleanLesson, moodWords, PLAN_NOTE, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
 import type { Condition } from '../projects/types.ts';
 import type { Activity, ActivityRecord, Noticing } from './types.ts';
 import type { FocusPlan } from './self.ts';
@@ -247,8 +247,11 @@ const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
 
+/** 清单删改的统一规则：系统提示与【专注】/改清单提示引用同一段文字，避免口径漂移。 */
+const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods，不必重抄 steps）。删掉没做完的成果：在阶段回顾里、或这一念明确回应操作者指令（operator doing/adopted）时，可以直接改；平时要改则必须认真想并在 plan 里写 switch_reason，说明等效替代或为什么不再需要，且距上次删改满 ${PLAN_REVISION_MIN} 分钟。只观察停滞不构成删项理由。新增一项随时可以；拆分或合并未完成的项会改变成果文字，按删改处理。删项不会自动完成主目标：删项那一念不收工（阶段回顾里也一样），下一念明确勾完清单才收工。`;
+
 /** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
-const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停，换做法不删成果。给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。删掉没做完的成果要写 steps 并在 plan 里写 switch_reason 说明为什么；有【阶段回顾】时可换主目标。`;
+const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。有【阶段回顾】时可换主目标。`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读、再由你决定。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
@@ -401,7 +404,7 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   return `过水可用的材料：${blocks ? `any 能用的土石类方块 ${blocks} 块` : 'any 能用的土石类方块没有'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}；从水里直接爬上岸，岸顶最多比水面高 1 格；更高的岸要先垫方块或挖台阶（由你决定）`;
 }
 
-/** 主目标清单观察在线没进展、最近几段活还卡/没做成：提示可以改清单（不动主目标、不删做完的项、不重写已勾掉的项） */
+/** 主目标清单观察在线没进展、最近几段活还卡/没做成：给事实并说明删改清单的条件（不动主目标、不删做完的项、不重写已勾掉的项） */
 function planRevisionHint(ctx: MindContext): string | null {
   if (ctx.tier !== 'deliberate') return null;
   const plan = ctx.plan;
@@ -411,14 +414,14 @@ function planRevisionHint(ctx: MindContext): string | null {
   const since = plan.progressAt ?? plan.setAt;
   const acts = ctx.self.history(60).filter((r) => r.at > since);
   if (acts.length < 3) return null;
-  // 改过清单之后，要等新清单也卡住两段才再提：否则停滞期间每次认真想都收到“可以改清单”，一念一改
+  // 删改过未完成项之后，要等新清单也卡住两段才再提：否则停滞期间每次认真想都收到“可以改清单”，一念一改
   const revised = Math.max(since, plan.revisedAt?.at(-1) ?? 0);
   const stuck = acts.filter((r) => r.at > revised && (r.outcome === 'stuck' || r.outcome === 'unmet'));
   if (stuck.length < 2) return null;
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
   const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
-  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）；清单可以按实际情况改，也可以不改：补上缺的一步、拆分或合并项、删掉做不成的项（已观察到 ${Math.round(stall.minutes)} 分钟无进展，删项不再强制写 switch_reason；写一句理由记下来更好；删项不会自动完成主目标，要收工请走阶段回顾或明确勾完清单），写 plan {"focus":"${plan.agendaId}","steps":[…] }${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。主目标不用换（换目标要等阶段回顾）。${PLAN_EDIT_RULE} 如果只是换做法，写 {"focus":"${plan.agendaId}","methods":[…] } 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
 }
 
 /** 这一念的意图文本：当前活动、议程、最近三个念头。提醒里的“想下矿/想回地面”判断共用同一口径。 */
@@ -628,7 +631,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
     goal, agenda_id: plan?.agendaId ?? item!.id,
     ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => {
       const held = !st.done ? gearAlreadyHeldInText(st.text, ctx.state.inventory, ctx.state.equipment) : null;
-      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.id ? ` ${st.id}` : ''}${held ? `（其实不用做：${held}）` : ''}${st.done && st.auto ? '（条件达成，自动勾的）' : !st.done && st.doneWhen ? '（条件达成会自动勾）' : ''}`;
+      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.id ? ` ${st.id}` : ''}${held ? PLAN_NOTE.held(held) : ''}${st.done && st.auto ? PLAN_NOTE.autoDone : !st.done && st.doneWhen ? PLAN_NOTE.autoPending : ''}`;
     }), ...(next >= 0 ? { next_item: next } : {}),
       ...(plan.methods?.some((m) => m.status === 'active') ? { methods: plan.methods.filter((m) => m.status === 'active').map((m) => ({
         id: m.id, text: m.text, ...(m.outcomeId ? { outcome: m.outcomeId } : {}), attempts: m.attempts,
@@ -637,7 +640,9 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       })) } : {}),
       ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
-      checklist_note: '清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；methods 是当前做法，可换可停，换做法不删成果。改成果清单要在 plan 里写 steps（和 switch_reason 说明为什么删掉没做完的项）；给 activity 写 outcome_id/method_id 可把结果记到对应账上。',
+      checklist_note: ctx.tier === 'glance'
+        ? '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。'
+        : `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`,
       ...(plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(() => {

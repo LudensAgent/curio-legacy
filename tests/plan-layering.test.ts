@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { Mind } from '../src/mind/mind.ts';
-import { SelfModel } from '../src/mind/self.ts';
+import { PLAN_NOTE, SelfModel } from '../src/mind/self.ts';
 
 /** applyPlan 的最小心智壳：只接 self/bus，用来检查成果/做法分层后的实际结果。 */
 const applyPlanHarness = (self: SelfModel) => {
@@ -81,7 +81,7 @@ test('applyPlan：成果不变时只换做法不触发清单保护；改成果�
   assert.match(removed.notes.join('；'), /还没做完/);
 
   const removedWithReason = apply({ focus: plan.agendaId, steps: ['找到下界要塞'], switchReason: '食物已够，不再单列' });
-  assert.deepEqual(removedWithReason.notes, []);
+  assert.match(removedWithReason.notes.join('；'), /清单改写/);
   assert.deepEqual(self.plan()!.steps.map((st) => st.text), ['找到下界要塞']);
 });
 
@@ -162,6 +162,17 @@ test('清单行原样抄回（序号、勾选、po_ id）：不丢勾选、ID �
   assert.equal(copied.steps[0]!.id, id0, '文字没变，成果 ID 保持稳定');
   assert.deepEqual(copied.steps[0]!.doneWhen, cond, '这次没写 done_when 也沿用原条件');
   assert.equal(copied.revisedAt, undefined, '原样抄回不算改写清单');
+});
+
+test('抄回宿主附加的注解（条件达成会自动勾 / 条件达成，自动勾的 / 其实不用做）不算改写清单', () => {
+  const self = new SelfModel(null);
+  const plan = self.setPlan('整备基地', ['整理背包', '睡床并确认重生点', '门口放火把'])!;
+  // “其实不用做”里带嵌套括号（耐久），也要整体剥掉
+  const held = PLAN_NOTE.held('已经有 火把×8（耐久 100/100），还经用');
+  const copied = self.setPlan(plan.agendaId, ['整理背包（条件达成会自动勾）', '睡床并确认重生点（条件达成，自动勾的）', `门口放火把${held}`])!;
+  assert.deepEqual(copied.steps.map((st) => st.text), ['整理背包', '睡床并确认重生点', '门口放火把']);
+  assert.deepEqual(copied.steps.map((st) => st.id), plan.steps.map((st) => st.id));
+  assert.equal(copied.revisedAt, undefined, '宿主注解不产生改写记录');
 });
 
 test('读入旧存档时归一清单文字：带展示 id 的旧项仍能对上勾选和 ID', () => {
