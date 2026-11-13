@@ -159,7 +159,7 @@ export interface Activity {
   /** 被身体反射打断了几次 */
   interruptions?: number;
   /** 最近一次还没完成这一步就被打断：身体反射或受伤；只记原因、动作与当时位置。 */
-  lastInterruption?: { at: number; kind: 'body_reflex' | 'hurt' | 'adjusted' | 'detour'; reason: string; skill: string; pos?: { x: number; y: number; z: number } };
+  lastInterruption?: { at: number; kind: 'body_reflex' | 'hurt' | 'adjusted' | 'detour' | 'emergency'; reason: string; skill: string; pos?: { x: number; y: number; z: number } };
   /** 这段活在按哪条已学窍门做（k_…）：结果只作为那条窍门的应用证据，不自动证明结论正确。 */
   applying?: string;
   /** 开工时那条窍门的原文快照；同一 id 后来被改写时，旧活动不能替新结论记成功。 */

@@ -134,6 +134,9 @@ const LOCAL_PATH = new Set(['move_step', 'plan_route', 'navigate_to', 'advance',
 /** 绕路时可以把移动会话整体挂起、回来用同一 sessionId 续接的两个长程工具。 */
 const RESUMABLE_LONG_RANGE = new Set(['explore_toward', 'travel_to']);
 
+/** 一次决定落到身体时的上下文：危险紧急、操作者指令照做、或提前规划。 */
+type ApplyFlags = { urgent?: boolean; emergency?: boolean; operator?: boolean; nearEnd?: boolean };
+
 export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
@@ -1320,9 +1323,9 @@ export class Mind {
    * 要求活动里带新的具体证据（开箱/远征搜索/采集）或 plan.switch_reason；
    * 拒绝一次，第二次放行并标为未验证，避免把紧急返程困死。
    */
-  private enforceSourceSwitchEvidence(decision: MindDecision, info: { urgent?: boolean }): boolean {
+  private enforceSourceSwitchEvidence(decision: MindDecision, info: ApplyFlags): boolean {
     const failure = this.lastLocalFailure;
-    if (!failure || info.urgent || this.order || this.userSuggestion) return true;
+    if (!failure || info.urgent || info.operator || this.order || this.userSuggestion) return true;
     const now = Date.now();
     const state = this.safe(() => this.d.adapter.state(), null);
     // 过期、换了世界/会话的局部失败不再是当前决策的依据；同一次失败才保留“拒绝一次→第二次放行”的计数。
@@ -1381,9 +1384,9 @@ export class Mind {
    * 闸门真正加在动作入口：无进展列表里已经出现过的动作签名，拒绝一次并要求重想。
    * 连续两次仍选同一条路时解除闸门，避免把模型困死；选择不同地点/方法则放行并清除。
    */
-  private enforceProgressGate(decision: MindDecision, info: { urgent?: boolean }): boolean {
+  private enforceProgressGate(decision: MindDecision, info: ApplyFlags): boolean {
     const gate = this.progressGate;
-    if (!gate || info.urgent || this.order) return true;
+    if (!gate || info.urgent || info.operator || this.order) return true;
     if (Date.now() - gate.at > 15 * 60_000) { this.progressGate = null; this.progressGateRejects = 0; return true; }
     const signature = decision.activity ? gateSignatureOf(decision.activity.steps)
       : decision.next ? gateSignatureOf(decision.next.steps) : null;
@@ -1433,6 +1436,39 @@ export class Mind {
       : '';
     if (running?.planId === a.id) this.d.arbiter.cancel(why);
     this.finishActivity(outcome, partial ? `${why}${partial}` : why);
+  }
+
+  /**
+   * 把当前活动挂起：保留步骤与可续接的移动会话，绕路或紧急避险后回来复核。
+   * 与 dropActivity 不同，这里不结束活动，也不算失败或放弃。
+   */
+  private suspendActivity(kind: 'detour' | 'emergency') {
+    const a = this.activity;
+    if (!a) return;
+    const running = this.d.arbiter.info();
+    if (running?.planId === a.id) {
+      const emergency = kind === 'emergency';
+      const resumeMovement = RESUMABLE_LONG_RANGE.has(running.skill);
+      if (!resumeMovement || !this.pauseActivityMovement(a, running, 'detour',
+        emergency
+          ? '紧急避险时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接'
+          : '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接')) {
+        this.d.arbiter.cancel(emergency ? '紧急避险' : '先去处理别的事');
+        a.index = Math.max(0, a.index - 1);
+        a.lastInterruption = {
+          at: Date.now(), kind: emergency ? 'emergency' : 'detour',
+          reason: emergency
+            ? '紧急避险取消了正在执行的那个动作，它没有完成；回来会从该步重做'
+            : '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
+          skill: running.skill, pos: { ...this.d.adapter.state().pos },
+        };
+      }
+    }
+    a.suspendedAt = Date.now();
+    this.suspended.push(a);
+    if (this.suspended.length > 2) this.suspended.shift();
+    this.activity = null;
+    this.d.bus.publish('activity_suspend', 'P2', kind === 'emergency' ? `紧急避险先放下「${a.what}」，做完会回来复核` : `先放下「${a.what}」，等会儿回来`);
   }
 
   /**
@@ -2077,7 +2113,10 @@ export class Mind {
       }
       // 刚收到的指令：照做时不受“专注”的限制（瞥一眼不能换、刚开工先不改）
       // 刚收到的指令（或决定采纳的建议）：照做时不受专注的限制
-      const followsOperator = orderWasNew && (order?.kind === 'order' ? decision.operator?.status !== 'cannot' : decision.operator?.status === 'adopted');
+      // 刚收到的指令默认这一念照做（只有明确 cannot 才不按它走）；已挂着的指令只有这一念写 doing 才算照做。
+      const followsOperator = !!order && (order.kind === 'order'
+        ? decision.operator?.status === 'doing' || (orderWasNew && decision.operator?.status !== 'cannot')
+        : decision.operator?.status === 'adopted');
       // An adjustment can repeat the step that was still running when the
       // model saw it, even though it completed before its answer arrived.
       // Return the actual result for a fresh decision; do not silently remove
@@ -2106,8 +2145,11 @@ export class Mind {
       if (order && order === this.order) this.answerOrder(order, orderWasNew, decision);
       const goalBefore = this.d.self.plan()?.agendaId ?? null;
       this.inReview = reviewing;
+      // 低血、饥饿、岩浆、水下低氧也算紧急：这些处境里的 switch/new 只挂起原活动，不永久放弃。
+      // emergency 只影响活动挂起，不放宽无进展/换来源闸门（那是 urgent/operator 的事）。
+      const emergency = urgent || ctx.state.hp <= Mind.HURT_STOP_HP || ctx.state.food <= 6 || ctx.state.inLava || (ctx.state.inWater && ctx.state.oxygen < LOW_AIR_OXYGEN);
       try {
-        this.apply(decision, activityId, ctx.lastRecord, { urgent: urgent || followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
+        this.apply(decision, activityId, ctx.lastRecord, { urgent, emergency, operator: followsOperator, nearEnd: reason === Mind.NEAR_END_REASON });
       } finally { this.inReview = false; }
       const runningReflex = this.d.arbiter.info();
       if (runningReflex?.source === 'reflex' && this.activity) {
@@ -2211,7 +2253,7 @@ export class Mind {
   }
 
   /** 把一次决定落到身体和心里 */
-  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord, info: { urgent?: boolean; nearEnd?: boolean } = {}) {
+  private apply(decision: MindDecision, thoughtAboutActivity: string | null, reflectedRecord: ActivityRecord | null = this.lastRecord, info: ApplyFlags = {}) {
     this.lastDecision = decision;
     this.notes = decision.notes;
     this.applySkill(decision);
@@ -2222,10 +2264,10 @@ export class Mind {
     // 先处理目标选择/结束：判断 done/drop 时活跃清单还在，同一念的 plan 也不会建了又被 agenda 结束。
     this.applyAgendaFocus(decision);
     this.applyPlan(decision);
-    this.guardFocus(decision, thoughtAboutActivity, !!info.urgent);
+    this.guardFocus(decision, thoughtAboutActivity, info);
     // Only an explicit continue can supply its missing next draft this way.
     // new/adjust/switch retain the Agent's request to change the current work.
-    if (info.nearEnd && !info.urgent && decision.activity && !decision.next && decision.kind === 'continue'
+    if (info.nearEnd && !info.urgent && !info.operator && decision.activity && !decision.next && decision.kind === 'continue'
       && this.activity && this.activity.id === thoughtAboutActivity && this.activity.consecutiveFailures === 0) {
       decision.next = decision.activity;
       delete decision.activity;
@@ -2361,32 +2403,15 @@ export class Mind {
       return;
     }
     if (decision.kind === 'detour' && this.activity) {
-      const a = this.activity;
-      const running = this.d.arbiter.info();
-      if (running?.planId === a.id) {
-        const resumeMovement = RESUMABLE_LONG_RANGE.has(running.skill);
-        // 可续接的移动会话先挂起；步骤实例对不上或不可续接时退回取消。
-        if (!resumeMovement || !this.pauseActivityMovement(a, running,
-          'detour', '先去做别的事时挂起了正在执行的移动；原目标与移动会话保留，回来复核后从该步续接')) {
-          this.d.arbiter.cancel('先去处理别的事');
-          a.index = Math.max(0, a.index - 1);
-          a.lastInterruption = {
-            at: Date.now(), kind: 'detour',
-            reason: '先去做别的事时取消了正在执行的那个动作，它没有完成；回来会从该步重做',
-            skill: running.skill, pos: { ...this.d.adapter.state().pos },
-          };
-        }
-      }
-      a.suspendedAt = Date.now();
-      this.suspended.push(a);
-      if (this.suspended.length > 2) this.suspended.shift();
-      this.activity = null;
-      this.d.bus.publish('activity_suspend', 'P2', `先放下「${a.what}」，等会儿回来`);
+      this.suspendActivity('detour');
       this.beginActivity(draft, decision.monologue, decision.source, 'detour');
       return;
     }
+    // 紧急避险不改写 Agent 的明确决定：new/switch 照做，但当前活动先挂起保留，
+    // 不清空 suspended；紧急活动做完后由 Agent 决定是否回来。
+    if (info.emergency && !info.operator && this.activity && ['new', 'switch', 'experiment'].includes(decision.kind)) this.suspendActivity('emergency');
     if (this.activity) this.dropActivity(decision.kind === 'switch' ? 'abandoned' : 'replaced', decision.monologue.slice(0, 80) || `改做：${draft.what}`);
-    if (decision.kind === 'switch') this.suspended = [];
+    if (decision.kind === 'switch' && !info.emergency) this.suspended = [];
     this.beginActivity(draft, decision.monologue, decision.source, decision.kind, decision.kind === 'experiment' ? decision.hypothesis : undefined);
   }
 
@@ -2701,12 +2726,24 @@ export class Mind {
     }
   }
 
-  /** Focus reminders preserve the Agent's explicit choice and scheduling. */
-  private guardFocus(decision: MindDecision, thoughtAboutActivity: string | null, urgent: boolean) {
+  /** 专注：紧急的 new/switch 由 apply 挂起原活动后照做；非紧急瞥一眼不换活；操作者指令照做时不拦。 */
+  private guardFocus(decision: MindDecision, thoughtAboutActivity: string | null, info: ApplyFlags) {
     const a = this.activity;
-    if (!a || urgent || !decision.activity) return;
-    if (decision.kind === 'switch' && decision.tier === 'glance') {
-      decision.notes.push(`这次 switch 会放下「${a.what}」，不会自动回来；保留你的明确决定`);
+    if (!a || info.operator || !decision.activity) return;
+    // 紧急避险不改写明确决定；apply 会先把原活动挂起，回来由 Agent 决定。
+    if (info.emergency) return;
+    // 非紧急的瞥一眼不换掉手上的活：排到这段之后；已经排好下一段就不覆盖。
+    if (decision.tier === 'glance' && (decision.kind === 'new' || decision.kind === 'switch')) {
+      if (decision.next) {
+        delete decision.activity;
+        decision.kind = 'continue';
+        decision.notes.push(`已有排好的下一段「${decision.next.what}」；这次瞥一眼看到的事先不排，想换就认真想`);
+        return;
+      }
+      decision.next = decision.activity;
+      delete decision.activity;
+      decision.kind = 'continue';
+      decision.notes.push(`瞥一眼不放下手上的「${a.what}」；把它排到这段之后，想马上换就转成认真想`);
       return;
     }
     const running = this.d.arbiter.info();

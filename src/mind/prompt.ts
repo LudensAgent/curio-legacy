@@ -242,7 +242,7 @@ activity.done_when 只结束当前活动；next.requires 只决定下一段能�
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}]}；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
-const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的｜experiment 验证一个猜想的小活｜rest 歇一下`;
+const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
@@ -341,11 +341,11 @@ ${movesCatalog(28)}`;
 
 /** 瞥一眼的专属说明；放在共用前缀之后，避免改动它时打碎前面的缓存 */
 const GLANCE_GUIDE = `这次只是抬头看一眼，不必把每个细节重新铺开：
-- 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust/detour/switch 写出 steps——独白、what、expect、noticed 不会改变执行。
+- 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust，插一件事用 detour——独白、what、expect、noticed 不会改变执行。
 - 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
 - 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
-- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；明确决定放下当前活动用 switch，想立即改做法用 adjust。做完清单一项写 "plan":{"done":[序号]}。
+- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；想立即改做法用 adjust。瞥一眼不直接放下手上的活：new/switch 会排到这段之后；有危险时直接做避险动作，原来的活会先挂起保留，回来由你决定要不要接着做，不会清空暂停记录。非紧急时，要永久放下当前活动就转成认真想；紧急时原活动会挂起保留，回来再决定。做完清单一项写 "plan":{"done":[序号]}。
 - 技能书在文末：需要时先用 skill 查询；文字做法不能用 use_skill 直接执行，只有已注册的可执行技能或可试用候选才能调用。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。`;
 

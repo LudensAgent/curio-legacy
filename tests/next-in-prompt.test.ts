@@ -51,7 +51,9 @@ test('系统提示词先要求核对 continue_effect，只有决定原样执行�
       userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
     assert.match(system.content, /核对【手上的活】的 continue_effect/);
     assert.match(system.content, /只有决定原样执行剩余计划才 continue/);
-    assert.match(system.content, /adjust\/detour\/switch/);
+    assert.match(system.content, /adjust/);
+    assert.match(system.content, /detour/);
+    assert.match(system.content, /switch/);
     assert.doesNotMatch(system.content, /手上的活还顺，就 continue/);
     assert.doesNotMatch(system.content, /在推进清单就 continue/);
   } finally {

@@ -975,7 +975,7 @@ test('思考期间完成的动作不阻止不同的明确调整', async (t) => {
   assert.deepEqual(w.arbiter.info()?.args, { n: 3 });
 });
 
-for (const kind of ['new', 'adjust'] as const) test(`注意到事情后明确 ${kind} 仍立即改变当前活动`, async (t) => {
+for (const kind of ['new', 'adjust'] as const) test(`注意到事情后明确 ${kind}：adjust 立即改做法，new 排到下一段`, async (t) => {
   const w = fixture(t);
   await w.tick();
   await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
@@ -984,9 +984,74 @@ for (const kind of ['new', 'adjust'] as const) test(`注意到事情后明确 ${
   await w.tick();
   assert.equal(w.pending.length, 2);
   await w.reply(1, { monologue: '现在改做法', decision: kind, activity: { what: '改为收集石头', steps: [step(2)] } });
-  assert.equal(w.mind.lastDecision?.kind, kind);
-  assert.equal(w.mind.activity?.what, '改为收集石头');
-  assert.equal(w.mind.lastDecision?.next, undefined);
+  if (kind === 'new') {
+    assert.equal(w.mind.lastDecision?.kind, 'continue');
+    assert.equal(w.mind.activity?.what, '砍树', '瞥一眼 new 不放下当前活动');
+    assert.equal(w.mind.lastDecision?.next?.what, '改为收集石头', '排到下一段');
+  } else {
+    assert.equal(w.mind.lastDecision?.kind, 'adjust');
+    assert.equal(w.mind.activity?.what, '改为收集石头');
+    assert.equal(w.mind.lastDecision?.next, undefined);
+  }
+});
+
+test('紧急瞥一眼 switch 只挂起原活动，不清空暂停记录', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  w.mind.suspended.push({ id: 'old', what: '旧暂停', why: '', kind: 'other', steps: [], index: 0, results: [], startedAt: Date.now(), failures: 0 } as any);
+  w.mind.attention.notice('danger', '有危险', 0.9);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  await w.reply(1, { monologue: '先躲', decision: 'switch', activity: { what: '躲开', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '躲开');
+  assert.ok(w.mind.suspended.some((a) => a.what === '砍树'), '原活动进 suspended');
+  assert.ok(w.mind.suspended.some((a) => a.what === '旧暂停'), '旧暂停记录还在');
+});
+
+test('紧急活动做完后原活动回到手上，先复核再决定是否继续', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  w.mind.attention.notice('danger', '有危险', 0.9);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  await w.reply(1, { monologue: '先躲', decision: 'switch', activity: { what: '躲开', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '躲开');
+  await w.finish(ok('躲开了'));
+  assert.equal(w.mind.activity?.what, '砍树', '紧急活动结束后原活动回到手上');
+  await w.tick();
+  assert.match(JSON.stringify(w.pending.at(-1)?.messages ?? []), /还要接着做吗/);
+});
+
+for (const s of [
+  { name: '低血', set: (w: ReturnType<typeof fixture>) => { w.adapter.hp = 10; } },
+  { name: '饥饿', set: (w: ReturnType<typeof fixture>) => { w.adapter.food = 5; } },
+  { name: '岩浆', set: (w: ReturnType<typeof fixture>) => { w.adapter.inLava = true; } },
+] as const) test(`${s.name}也算紧急：切换只挂起原活动，不记成换掉/放弃`, async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  s.set(w);
+  (w.mind as any).think('测试紧急状态', 'deliberate');
+  await flush();
+  await w.reply(w.pending.length - 1, { monologue: '先处理', decision: 'switch', activity: { what: '处理紧急', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '处理紧急');
+  assert.ok(w.mind.suspended.some((a) => a.what === '砍树'), '原活动挂起');
+  assert.ok(!w.bus.recent().some((e) => e.type === 'attempt_end' && /replaced|abandoned/.test(e.msg)), '没有记成换掉/放弃');
+});
+
+test('已挂着的操作者指令这一念写 doing：照做，不受紧急挂起限制', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  w.mind.order = { text: '先去下界', at: Date.now(), status: 'doing', nudged: 1, kind: 'order' };
+  w.mind.attention.notice('danger', '有危险', 0.9);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  await w.reply(w.pending.length - 1, { monologue: '照做', decision: 'switch', activity: { what: '去下界', steps: [step(2)] }, operator: { status: 'doing' } });
+  assert.equal(w.mind.activity?.what, '去下界');
+  assert.ok(!w.mind.suspended.some((a) => a.what === '砍树'), '操作者指令照做时不挂起原活动');
 });
 
 test('零碎经验先存着，出乎意料（卡住）才马上记成窍门', async (t) => {

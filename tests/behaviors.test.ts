@@ -341,8 +341,8 @@ test('use_skill：一步步照做，每步的 if 当场判断', async (t) => {
   assert.match((arbiter.start({ skill: 'use_skill', args: { name: 'nope' } }, 'llm') as any).error, /没有.*nope/);
 });
 
-test('专注提醒不改写瞥一眼的 switch：做完新活动不会自动恢复旧活动', async (t) => {
-  const ran = testSkills(t);
+test('瞥一眼想 switch：排到下一段，不放下也不挂起当前活动', async (t) => {
+  testSkills(t);
   const prev = SKILLS.t_slow;
   t.after(() => { if (prev) SKILLS.t_slow = prev; else delete SKILLS.t_slow; });
   SKILLS.t_slow = { name: 't_slow', description: '慢活', argsDoc: '{}', timeoutMs: 60000, movement: false, validate: () => ({ ok: true, args: {} }),
@@ -367,15 +367,11 @@ test('专注提醒不改写瞥一眼的 switch：做完新活动不会自动恢�
   mind.attention.notice('night', '天黑了', 0.6);
   mind.tick(); await flush();
   await reply({ monologue: '天黑了，先躲起来', decision: 'switch', activity: { what: '挖坑躲一晚', steps: [{ skill: 't_ok' }] } });
-  for (let i = 0; i < 4; i++) { mind.tick(); await flush(); }
-  assert.ok(ran.includes('t_ok'), '躲了');
-  assert.notEqual(mind.activity?.what, '砍木头', '明确放下的旧活动不自动恢复');
-  assert.equal(mind.suspended.length, 0);
-  assert.equal(mind.lastDecision!.kind, 'switch');
-  assert.match(mind.lastDecision!.notes.join(), /保留你的明确决定/);
-  // 勾掉清单
-  (mind as any).applyPlan({ plan: { done: [0] }, notes: [] });
-  assert.equal(self.plan()?.steps[0].done, true);
+  assert.equal(mind.activity?.what, '砍木头', '当前活动还在');
+  assert.equal(mind.lastDecision!.kind, 'continue', '瞥一眼不换活动');
+  assert.equal(mind.lastDecision!.next?.what, '挖坑躲一晚', '排到下一段');
+  assert.equal(mind.suspended.length, 0, '没有挂起或放弃');
+  assert.match(mind.lastDecision!.notes.join(), /排到这段之后/);
 });
 
 function minimalCtx(adapter: FakeAdapter, memory: WorldMemory, perception: Perception, self: SelfModel, mind: Mind) {
