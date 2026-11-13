@@ -42,7 +42,10 @@ const MAX_RANGE = 64;
 const HEAR_FLOOR_HOSTILE = 16;
 const LOUD_HEARING: Record<string, number> = { ghast: 48, blaze: 24 };
 const MAX_LOUD_HEARING = Math.max(...Object.values(LOUD_HEARING));
-/** 心智能注意到的最远距离：至少覆盖听觉里传得最远的生物，否则听得见也进不了心智。 */
+/**
+ * 心智与 ranged_defend 取敌对生物的最远距离：至少覆盖听觉里传得最远的生物（默认配置下够用）。
+ * VISION_HEAR 调到 48 以上时视觉能听得更远，但这两个消费者仍只取这个半径内的敌对生物。
+ */
 export const SENSE_ENTITY_RADIUS = Math.max(48, MAX_LOUD_HEARING);
 /** 后台视觉每片最多连续占用主线程这么久，随后 setImmediate 让出。 */
 const SCAN_SLICE_MS = 8;
