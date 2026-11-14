@@ -219,9 +219,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
           const at = stale.slice(0, 3).map((h) => `(${h.pos.x},${h.pos.y},${h.pos.z})`).join('、');
           return fail('NOT_FOUND', `记得的 ${args.on} 已经不是当前方块了（记忆过期）：${at}${stale.length > 3 ? ` 等 ${stale.length} 处` : ''}；没有对着旧位置使用，先重新看见或换一处`, { stale: stale.slice(0, 8).map((h) => ({ ...h.pos })) });
         }
-        if (tooTight) return fail('NOT_FOUND', `看得见的 ${tooTight} 格水面都贴着岸/堤/墙：船身约 1.375 格宽，四周 3×3（水面层和上一层）有实心方块的水面服务器不让放船；没有放。离岸再远一格的开阔水面才放得下（要不要挪、往哪挪由你定）`, { tooTight });
+        if (tooTight) return fail('NOT_FOUND', `看得见的 ${tooTight} 格水面都贴着岸/堤/墙：船身约 1.375 格宽，四周 3×3（水面层和上一层）有实心方块的水面服务器不让放船；没有放。离岸再远一格的开阔水面才放得下`, { tooTight });
         if (ownStand || covered) {
-          return fail('NOT_FOUND', `看得见的 ${args.on} 里没有能种 ${args.item} 的：${ownStand ? '最近那块就是自己脚下站着的（身体占着它上面那格）' : ''}${ownStand && covered ? '，' : ''}${covered ? `${covered} 块上面那格不是空气` : ''}；没有种。站到旁边一格、让要种的那块上面空出来再试（往哪站由你定）`, { ownStand, covered });
+          return fail('NOT_FOUND', `看得见的 ${args.on} 里没有能种 ${args.item} 的：${ownStand ? '最近那块就是自己脚下站着的（身体占着它上面那格）' : ''}${ownStand && covered ? '，' : ''}${covered ? `${covered} 块上面那格不是空气` : ''}；没有种。站到旁边一格、让要种的那块上面空出来再试`, { ownStand, covered });
         }
         return fail('NOT_FOUND', `看不见可以对着用的 ${args.on}${args.dir ? `（${args.dir} 方向）` : ''}${fluid ? '' : '（on 只认方块；对生物用东西写 interact {"entity":…,"with":…}）'}`);
       }
@@ -609,7 +609,7 @@ export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number
 /** 在水里朝一格游过去（往下潜或往上游）：捡水底的东西、挖水下的方块之前先游到跟前。气不够就停，不替它决定潜多深 */
 export const dive: Skill<{ xyz: { x: number; y: number; z: number }; min_oxygen: number }> = {
   name: 'dive',
-  description: '在水里朝一格游过去（往下潜或往上游），到跟前停下；气（oxygen）降到 min_oxygen 就停下回报，上不上浮由你定。只在水里用',
+  description: '在水里朝一格游过去（往下潜或往上游），到跟前停下；气（oxygen）降到 min_oxygen 就停下回报。只在水里用',
   argsDoc: '{"xyz": [x,y,z], "min_oxygen"?: 2-18（默认 8）}',
   timeoutMs: 35000,
   movement: true,
@@ -672,7 +672,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     const s0Snapshot = { pos: { ...s0.pos }, oxygen: s0.oxygen, observedAt: Date.now() };
     // 目标格已观察为岩浆：swim_path 只有水面控制，明确拒绝而不是把身体开进岩浆；风险事实交给 Agent 决定下一步。
     if (a.blockAt({ x: Math.floor(args.xyz.x), y: Math.floor(args.xyz.y), z: Math.floor(args.xyz.z) }) === 'lava') {
-      return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_path 只做水面游泳，不执行进入岩浆；如果确实要靠近，风险与做法由你选择`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
+      return fail('BAD_ARGS', `(${args.xyz.x},${args.xyz.y},${args.xyz.z}) 是岩浆：swim_path 只做水面游泳，不执行进入岩浆；如果确实要靠近，需要显式承担岩浆风险`, { landed: false, target: { ...args.xyz }, unsupportedTarget: 'lava', pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     }
     // 预算耗尽（remaining <= 0）才拒绝，不强行开游；剩余不足时用真实剩余时间，不把父级预算拉长。
     const timeoutMs = Math.min(args.timeoutMs ?? 20000, ctx.deadline - Date.now());
@@ -685,7 +685,7 @@ export const swimTo: Skill<{ xyz: { x: number; y: number; z: number }; timeoutMs
     // 目标干岸比观察到的水面高过 1 格：水里爬不上去，先别开游白耗预算；把高度和机制交给 Agent 决定下一步。
     if (route?.reason === 'SHORE_TOO_HIGH' && route.climbNeeded !== undefined) {
       return fail('PATH_NOT_FOUND',
-        `没有开游：目标脚位比水面高 ${route.climbNeeded} 格（水面顶 y=${route.waterTop}，目标脚 y=${route.targetY}）；从水里直接爬上岸最多高 1 格。需要垫方块/挖台阶/改选更低的岸（由你决定）；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`,
+        `没有开游：目标脚位比水面高 ${route.climbNeeded} 格（水面顶 y=${route.waterTop}，目标脚 y=${route.targetY}）；从水里直接爬上岸最多高 1 格。需要垫方块/挖台阶/改选更低的岸；现在在 (${s0.pos.x.toFixed(1)},${s0.pos.y.toFixed(1)},${s0.pos.z.toFixed(1)})，氧气 ${s0.oxygen}/20`,
         { landed: false, target: { ...args.xyz }, reason: route.reason, targetY: route.targetY, waterTop: route.waterTop, climbNeeded: route.climbNeeded, pos: s0Snapshot.pos, oxygen: s0Snapshot.oxygen, observedAt: s0Snapshot.observedAt });
     }
     const routeFacts = route ? { route: { waypoints: routeCells.map((c) => ({ x: c.x + 0.5, y: c.y, z: c.z + 0.5 })), ...(route.why ? { why: route.why } : {}) } } : {};

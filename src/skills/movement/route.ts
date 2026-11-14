@@ -115,12 +115,12 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
     ? `还有未观察/待重新确认（STALE：自身动作的效果未确认或观测互相矛盾）的边界${stale ? '，部分格待重新确认' : ''}；先 look_around/靠近刷新证据再试`
     : result.status === 'NO_PATH_IN_MEMORY'
       ? result.evidenceMode === 'historical'
-        ? '历史体素里也没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标时由你决定'
-        : '已存几何里没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标时由你决定'
+        ? '历史体素里也没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标'
+        : '已存几何里没有 walk/step/drop 路线（NO_PATH_IN_MEMORY）；需要挖/垫/搭、观察或换目标'
       : result.status === 'UNSUPPORTED'
         ? `搜索不支持该精确目标：${result.reason}；不自动改写成附近格或吸附脚高`
         : result.status === 'INVALIDATED'
-          ? '搜索期间地图证据/驻留发生变化；重新观察或重试由你决定'
+          ? '搜索期间地图证据/驻留发生变化；重新观察或重试'
           : result.status === 'BUDGET_EXHAUSTED'
             ? result.budget === 'time'
               ? `搜索时间预算耗尽（${result.stats.durationMs}ms / ${SPATIAL_SEARCH_MS}ms），先规划更近的一段或走近再试`
@@ -134,7 +134,7 @@ async function spatialRoute(spatial: NonNullable<SkillCtx['spatial']>, state: Ag
     : currentPrefix === undefined || currentPrefix.transitions.length === 0
       ? '历史搜索无完整路线；当前证据下也没有可达前缀'
       : `历史搜索无完整路线；当前证据下存在可达前缀到 ${fmt(currentPrefix.endpoint)}（${currentPrefix.transitions.length} 段），这不是到达`;
-  const boundaryNote = `；${resultBoundarySummary.observationMayResolve ? '额外观察/靠近可能刷新证据' : resultBoundarySummary.total === 0 ? '没有记录到边界' : '额外观察不会改变已观测阻挡'}；${resultBoundarySummary.needsExplicitActionOrOtherRoute ? '存在需要显式动作/其他移动能力/换路线的边界（由你决定）' : '未记录到需要挖/建或换路线的边界'}`;
+  const boundaryNote = `；${resultBoundarySummary.observationMayResolve ? '额外观察/靠近可能刷新证据' : resultBoundarySummary.total === 0 ? '没有记录到边界' : '额外观察不会改变已观测阻挡'}；${resultBoundarySummary.needsExplicitActionOrOtherRoute ? '存在需要显式动作/其他移动能力/换路线的边界' : '未记录到需要挖/建或换路线的边界'}`;
   const routeLabel = result.evidenceMode === 'historical' ? '历史体素路线（含待重新确认的证据，当前可通行性未知）' : '空间 3D 路线';
   // 历史候选的显式复验：共享原 deadline、取消感知、逐段有界并让出事件循环。
   const verification = result.status === 'FOUND' && result.evidenceMode === 'historical'

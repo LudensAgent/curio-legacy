@@ -771,7 +771,7 @@ export class Mind {
         if (evidence.status !== 'satisfied') {
           const detail = `前置条件 ${JSON.stringify(requires)}；状态 ${evidence.status}，实际 ${JSON.stringify(evidence.actual)}${evidence.reason ? `；原因：${evidence.reason}` : ''}`;
           this.d.bus.publish('decision_stale', 'P2', `提前想好的「${q.draft.what}」没有启动：${detail}`, { was: q.draft.what, requires, status: evidence.status, actual: evidence.actual });
-          this.requestThink(`提前想好的「${q.draft.what}」没有启动：${detail}。请按现在的事实重新决定（继续等、先准备条件或改做别的都由你定）`, 'deliberate');
+          this.requestThink(`提前想好的「${q.draft.what}」没有启动：${detail}。请按现在的事实重新决定`, 'deliberate');
           return;
         }
       }
@@ -870,7 +870,7 @@ export class Mind {
     if (pausedMovement?.stepId === template.id) markContinuation(this.activity, template);
     const budget = skill ? beginStep(this.activity, template, state) : undefined;
     if (budget && budget.remainingMs <= 0) {
-      this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来，下一步由你决定`);
+      this.finishActivity('stuck', `「${step.skill}」的自动重试沿用原动作期限，现在已经到期；没有用新的超时重来`);
       return;
     }
     // 下一段开始前复核实测位置；父期限只做快照展示，实际门禁仍是 beginStep/stepExpiry 账本。
@@ -1578,7 +1578,7 @@ export class Mind {
         const climbed = o.result.data?.climbed;
         if (o.task.skill !== 'pillar_one' && typeof climbed === 'number' && climbed > 0) {
           const spent = o.result.data?.spent;
-          this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，累计爬升 ${spent} 格` : ''}）；没有可靠的续跑状态，是否继续由你决定`);
+          this.finishActivity('stuck', `${o.task.skill} 被反射打断，之前已完成部分爬升（净 ${climbed} 格${typeof spent === 'number' ? `，累计爬升 ${spent} 格` : ''}）；没有可靠的续跑状态`);
           return;
         }
         a.index = Math.max(0, a.index - 1);
@@ -1885,7 +1885,7 @@ export class Mind {
         // 持续环境伤害每刻都会来；8 秒内已经停/挂过一次，就不再打断刚开始的逃离动作。
         if (this.hurtEnvThrottled(now)) return;
         if (this.pauseResumableLongRange(cur, `掉血了（血 ${hp}，${why}），长程移动已挂起（可续接）`)) {
-          this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'glance');
+          this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；原委托已挂起，实测进展与 session 保留`, 'glance');
           const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），长程移动已挂起（可续接）`, 0.9, 0);
           if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
           return;
@@ -1896,7 +1896,7 @@ export class Mind {
         }
         this.d.arbiter.cancel('掉血了');
         if (this.activity) this.resumeCheck = this.activity.id;
-        this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；手上的事先停了，怎么脱离由你定`, 'glance');
+        this.requestThink(`正在 ${cur.skill} 时掉血了（血 ${hp}，当时：${why}）；手上的事先停了`, 'glance');
         const n = this.attention.notice('hurt_busy_env', `正在 ${cur.skill} 时掉血（血 ${hp}，${why}），手上的事先停了`, 0.9, 0);
         if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
         return;
@@ -1925,7 +1925,7 @@ export class Mind {
       }
       // 长程移动先把会话挂起：实测进展与 session 保留，回不回来由心智决定。
       if (this.pauseResumableLongRange(cur, `挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`)) {
-        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；原委托已挂起，实测进展与 session 保留；要不要回来续走由你定`, 'deliberate');
+        this.requestThink(`正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}）；原委托已挂起，实测进展与 session 保留`, 'deliberate');
         const n = this.attention.notice('hurt_busy', `正在 ${cur.skill} 时挨打了（血 ${hp}，${hostileText}），长程移动已挂起（可续接）`, 0.9, 0);
         if (n) this.d.bus.publish('notice', 'P1', `注意到：${n.what}`, { salience: n.salience, level: n.level });
         return;

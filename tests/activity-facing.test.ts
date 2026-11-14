@@ -147,6 +147,6 @@ test('both prompt tiers expose the current and previous reference frames separat
     assert.match(system.content, /活动参考系独立于镜头朝向/);
     assert.match(system.content, /核对文字目标方向与坐标换算后的实际方向/);
     assert.match(system.content, /facing:"N" 的 \[-1,0,0\] 是向南/);
-    assert.match(system.content, /明确声明新的 facing（包括 "S"），后退或换向仍由你决定/);
+    assert.match(system.content, /明确声明新的 facing（包括 "S"）；后退\/换向写进步骤或 facing/);
   }
 });

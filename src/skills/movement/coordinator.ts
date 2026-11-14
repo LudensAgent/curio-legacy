@@ -949,7 +949,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           // 冲突必须绑定到复验过的那条边；换了边就只是新的未知边界。
           const contradicted = segment.boundary !== undefined && searchContradictedFor === contradictionKeyOf(segment.boundary, voxel, scope.dim);
           stop = stopOf(contradicted ? 'CONFLICT' : 'UNKNOWN_BOUNDARY', `同一站位 ${cellText(after.pos)}、同一相关证据下搜索仍返回 ${segment.searchStatus}${edge}`
-            + `；${contradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播，下一步由你决定`,
+            + `；${contradicted ? '复验判这条边 OPEN，与搜索结果不一致；' : ''}${segment.searchReason}；本轮不自动重播`,
             { ...(segment.boundary === undefined ? {} : { boundaries: [segment.boundary] }) });
           break;
         }

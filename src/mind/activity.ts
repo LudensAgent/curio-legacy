@@ -786,7 +786,7 @@ export function partialExcavation(step: Pick<Step, 'skill'>, result: SkillResult
   if (!moved && !worked) return null;
   const work = typeof data?.completedSteps === 'number' && typeof data.requestedSteps === 'number'
     ? `已确认 ${data.completedSteps}/${data.requestedSteps} 步；` : '';
-  return `${clipFeedback(result.summary, 200)}；${work}当前脚位 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})。原施工没有续跑状态，是否从此处开新段由你决定`;
+  return `${clipFeedback(result.summary, 200)}；${work}当前脚位 (${end.x.toFixed(2)},${end.y.toFixed(2)},${end.z.toFixed(2)})。原施工没有续跑状态`;
 }
 
 /**

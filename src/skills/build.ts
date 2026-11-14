@@ -96,7 +96,7 @@ export function classifyBlock(memory: WorldMemory, state: { worldId: string; dim
 }
 
 /** 挖到"别人的/人造建筑"时给的事实（只报告，不拦：拆不拆由它定） */
-export const MAN_MADE_NOTE = '这格是人造建材，可能是村庄或别人房子的一部分（不是自然地形，也不是你的矿道）；拆了可能破坏建筑，拆不拆你自己定';
+export const MAN_MADE_NOTE = '这格是人造建材，可能是村庄或别人房子的一部分（不是自然地形，也不是你的矿道）；拆了可能破坏建筑';
 
 /** 自己别的作品占着的地（没盖完的、放弃的、盖好的都算）：新工地不和它们重叠；except 是正在续建的那座 */
 export function ownFootprints(archive: BuildingArchive, worldId: string, dim: string, except?: string): SiteRect[] {
@@ -223,7 +223,7 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '照图施工：有建筑师画好的图纸就写 draft（复杂/审美建筑推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补；觉得够住了就 accept 收工，不想要了就 abandon（是不是“够了”自己判断，不必逐格完美）。',
+  description: '照图施工：有建筑师画好的图纸就写 draft（复杂/审美建筑推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补；觉得够住了就 accept 收工，不想要了就 abandon（不必逐格完美）。',
   argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）｜{"mode":"accept|abandon"}（够住了收工 / 不要了）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。复杂/审美建筑推荐先 {"kind":"design"}；简单结构可直接 spec.design；小型功能设施可用 place_cell/mine_cell 等组合',
   timeoutMs: 600000,
   movement: true,

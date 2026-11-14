@@ -11,8 +11,8 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 test('资源前瞻原则：用途、判断边界、背包/安全/时间并列，不替 Agent 做囤积取舍', () => {
   assert.match(RESOURCE_PRINCIPLE, /资源用来支持后面的行动/);
-  assert.match(RESOURCE_PRINCIPLE, /由你判断/);
-  assert.match(RESOURCE_PRINCIPLE, /背包、安全和时间是一起权衡的事实/);
+  assert.match(RESOURCE_PRINCIPLE, /gather\.count 与 plan\.needs/);
+  assert.match(RESOURCE_PRINCIPLE, /背包、安全和时间是并排的事实/);
   assert.doesNotMatch(RESOURCE_PRINCIPLE, /不为囤积/);
 });
 

@@ -70,7 +70,7 @@ export const assessLandings: Skill<{ radius: number }> = {
     const preview = landings.slice(0, 3).map((landing) =>
       `${landing.id} ${JSON.stringify(landing.descend.target)} drop${landing.drop} ${landing.approach}/${landing.clearance}/${landing.corridor} ${landing.risk}`).join('；');
     const handoff = adjacent === 0
-      ? '当前没有相邻（approach=adjacent）落点：descend_to 只能选相邻落点；先用 move_step 靠近，或用 excavate_run/mine_cell 开挖台阶、place_support/pillar_one 制造一级台阶；由你决定。descend_to 不接受 mode/nearest。'
+      ? '当前没有相邻（approach=adjacent）落点：descend_to 只能选相邻落点；先用 move_step 靠近，或用 excavate_run/mine_cell 开挖台阶、place_support/pillar_one 制造一级台阶。descend_to 不接受 mode/nearest。'
       : `要下行时从相邻且净空清楚的选项里选一个，把它的 target（或 descend.target）原样传给 descend_to：{"target":{"x":数值,"y":数值,"z":数值}}；descend_to 没有 mode/nearest 参数。`;
     return ok(options.length
       ? `看清 ${options.length} 处较低表面；${preview}；相邻 ${adjacent} 处（可直接尝试 descend_to 的 ${ready} 处）；落差、摔伤粗估与未确认项见数据，尚未移动；${handoff}`

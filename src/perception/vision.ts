@@ -1379,7 +1379,7 @@ export class Vision {
           relative_height: l.pos.y + 1 - Math.floor(here.y),
           ...(l.waterTop !== undefined ? { climbable_from_water: l.climbableFromWater, water_surface_y: l.waterTop, height_above_water: l.heightAboveWater } : {}),
           path_confirmed: false,
-          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板或墙体可能挡住；从水里直接爬上岸最多高 1 格，更高的岸需要垫方块或挖台阶（由你决定）',
+          note: '候选落脚点（脚部目标格，由可见地表估计）；尚未确认能沿直线游过去，地下顶板或墙体可能挡住；从水里直接爬上岸最多高 1 格，更高的岸需要垫方块或挖台阶',
         };
       })(),
       last_look_around_s: this.lastSweepAt ? Math.round((now - this.lastSweepAt) / 1000) : null,

@@ -273,7 +273,7 @@ export const travel: Skill<TravelArgs> = {
     };
     try {
       if (s0.riding) {
-        if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return receipt(fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具；是否下船由你决定`));
+        if (args.noBoat || !/(^|_)(boat|raft)$/.test(s0.riding)) return receipt(fail('BAD_ARGS', `正在乘坐 ${s0.riding}，此次出行不能使用当前载具`));
         let result: SkillResult;
         try {
           result = await ride.run(ctx, { to: { x: target.x, z: target.z }, distance: 240 });

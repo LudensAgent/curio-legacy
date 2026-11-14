@@ -571,7 +571,7 @@ export const farm: Skill<{ crop: string; size: number }> = {
 const EXPEDITION_SCAN_RADIUS = 32;
 export const expedition: Skill<{ direction: string; distance: number; find?: string; torches?: boolean; eat_below?: number; dig?: true | string; place?: string; maxEdits?: number }> = {
   name: 'expedition',
-  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；可选 find 指定要找的方块，边走边查路线两侧约 32 格，找到就停并报坐标，走完没看到只说明这段路线附近没有（更远处/遮挡后未知，不是“世界上没有”）。路上要不要在路标插火把、饿到多少吃东西由你在参数里定。回家用 resolve_target 选 base，再 navigate_to 沿路标走。' + MAKE_WAY_DOC + '；dig/place 需要共享空间 VoxelMap，缺失时直接报错且不移动。',
+  description: '远征：朝一个方向长距离行进（100-600 格），每约 64 格记一个路标，沿途记录新发现；可选 find 指定要找的方块，边走边查路线两侧约 32 格，找到就停并报坐标，走完没看到只说明这段路线附近没有（更远处/遮挡后未知，不是“世界上没有”）。路上是否在路标插火把、饿到多少吃东西写在 torches/eat_below 参数里。回家用 resolve_target 选 base，再 navigate_to 沿路标走。' + MAKE_WAY_DOC + '；dig/place 需要共享空间 VoxelMap，缺失时直接报错且不移动。',
   argsDoc: '{"direction": "N|NE|E|SE|S|SW|W|NW", "distance"?: 100-600, "find"?: "要沿路找的方块（如 log、oak_log、crimson_stem）", "torches"?: true（路标处插火把）, "eat_below"?: 2-19（饿到这个数就吃）,' + MAKE_WAY_ARGS_DOC + '}',
   timeoutMs: 900000,
   movement: true,
@@ -622,7 +622,7 @@ export const expedition: Skill<{ direction: string; distance: number; find?: str
     };
     const discover = (hit: { name: string; pos: Vec3Like; dist: number }) => {
       coverage.found = { name: hit.name, pos: { ...hit.pos }, dist: hit.dist };
-      return ok(`远征向 ${args.direction} 走了 ${coverage.travelled} 格，在路线附近发现 ${hit.name} 于 (${hit.pos.x},${hit.pos.y},${hit.pos.z})（约 ${hit.dist} 格外）；已停在发现处，去不去挖由你决定`, resultData({
+      return ok(`远征向 ${args.direction} 走了 ${coverage.travelled} 格，在路线附近发现 ${hit.name} 于 (${hit.pos.x},${hit.pos.y},${hit.pos.z})（约 ${hit.dist} 格外）；已停在发现处`, resultData({
         travelled: coverage.travelled, found: { ...coverage.found }, direction: args.direction,
       }));
     };

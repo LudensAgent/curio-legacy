@@ -99,5 +99,5 @@ test('【专注】展示 material_budget：需要/现有/还差，并标明数�
   assert.match(user.content, /material_budget/);
   assert.match(user.content, /oak_log×16/);
   assert.match(user.content, /还差/);
-  assert.match(user.content, /数量由你定/);
+  assert.match(user.content, /数量写在 count 里/);
 });

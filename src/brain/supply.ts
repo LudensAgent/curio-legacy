@@ -275,7 +275,7 @@ export function oreOpportunityFact(
     const haveText = items.map((n) => `${n}×${have(n)}`).join('、');
     return `${r.seen === 'memory' ? '记得' : '看见'}${r.block}×${r.count}（${r.dir ?? ''}${r.nearest}格），现在有 ${haveText}；可做${info.use}`;
   });
-  return `顺手采集：${parts.join('；')}（采不采、采多少由你按当前目标和余力权衡）`;
+  return `顺手采集：${parts.join('；')}（采不采、采多少按当前目标和余力）`;
 }
 
 /** 镐的档次从低到高；不同档次能挖的方块不同，材料稀缺时先看更便宜的替代。 */
@@ -392,8 +392,8 @@ export function toolTierFact(input: {
   if (scarce < 3) parts.push(`${highZh}坏了做不出新的；${cheapZh}坏了能再做`);
   // 已经有便宜镐（哪怕快坏）时也把“怎么用现有这把”说清；主手已经是它就别再叫它去拿
   parts.push(choice.item
-    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}，或给 mine_cell / excavate_run 写 tool:"${cheapName}"`}。换不换、做不做由你定`
-    : '做不做由你定');
+    ? `${alreadyHeld ? `主手就是${cheapZh}，直接开挖即可` : `要用现有${cheapZh}就先 hold_item ${cheapName}，或给 mine_cell / excavate_run 写 tool:"${cheapName}"`}。换不换、做不做看当前材料和耐久`
+    : '做不做看当前材料和耐久');
 
   // key 只收“会改变建议”的粗状态：held 只区分“主手是不是镐”而不记具体名字，
   // 避免铁镐/石镐来回换手时同一句提示反复重发；缺口只记缺哪些原料而不记数量。

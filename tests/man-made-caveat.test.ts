@@ -24,7 +24,7 @@ test('recent_action_caveats 进入决策提示词的【此刻】，不被摘要�
   t.after(() => memory.close());
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const self = new SelfModel(null);
-  const caveat = '这格是人造建材，可能是村庄或别人房子的一部分（不是自然地形，也不是你的矿道）；拆了可能破坏建筑，拆不拆你自己定';
+  const caveat = '这格是人造建材，可能是村庄或别人房子的一部分（不是自然地形，也不是你的矿道）；拆了可能破坏建筑';
   const [, user] = buildMindMessages({
     tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
     self, memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
@@ -33,7 +33,7 @@ test('recent_action_caveats 进入决策提示词的【此刻】，不被摘要�
   });
   assert.match(user.content, /recent_action_caveats/);
   assert.match(user.content, /人造建材/);
-  assert.match(user.content, /拆不拆你自己定/);
+  assert.doesNotMatch(user.content, /拆不拆你自己定/);
   // 完整 caveat 以独立字段出现，不受 80/160 摘要截断影响
   assert.match(user.content, /拆了可能破坏建筑/);
 });

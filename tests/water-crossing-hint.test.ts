@@ -52,6 +52,6 @@ test('waterCrossingHint：在水边给出从水里直接上岸的高度机制事
   for (const hint of [waterCrossingHint(P(true, null), S([])), waterCrossingHint(P(false, { layers: { 'u0': ['~~'] } }), S([]))]) {
     assert.ok(hint);
     assert.match(hint!, /从水里直接爬上岸，岸顶最多比水面高 1 格/);
-    assert.match(hint!, /更高的岸要先垫方块或挖台阶（由你决定）/);
+    assert.match(hint!, /更高的岸要先垫方块或挖台阶/);
   }
 });

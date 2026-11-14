@@ -55,7 +55,7 @@ function stairHint(stair: ReturnType<typeof stairHandoff>): string {
   const ways = stair.mode === 'stairs_up'
     ? ['pillar_one 原地垫高后再迈', 'place_support 在前方补一级', 'travel_to/navigate_to 走别的已知路（travel_to 写 place 可代为垫高）', `excavate_run stairs_up 朝 ${stair.direction} 开上行阶梯`]
     : ['assess_landings 选落点后 descend_to', 'travel_to/navigate_to 允许 drop 下去', `excavate_run stairs 朝 ${stair.direction} 开下行阶梯`];
-  return `这是 ${stair.steps} 格高差，move_step 不处理；可选：${ways.join('；')}（由你决定）`;
+  return `这是 ${stair.steps} 格高差，move_step 不处理；可选：${ways.join('；')}`;
 }
 
 /**
@@ -1247,7 +1247,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
 /** 原地垫高一格。不挖头顶，不决定要不要继续爬。 */
 const pillarOneSkill: Skill<{ item?: string }> = {
   name: 'pillar_one',
-  description: '原地垫高一格：跳起来往脚下放一块方块并确认真的站上去。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。头顶/侧上方阻挡时返回具体格，由你决定先 mine_cell。只垫一格，不连续爬升，不挖头顶。',
+  description: '原地垫高一格：跳起来往脚下放一块方块并确认真的站上去。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。头顶/侧上方阻挡时返回具体格，可先 mine_cell 该格。只垫一格，不连续爬升，不挖头顶。',
   argsDoc: `{"item":"方块名|any"}（item 必填：已知方块名或字面 any，${ANY_FILL_NOTE}；不会默认自选材料）`,
   timeoutMs: 20000,
   movement: true, bodyMotion: 'vertical',

@@ -204,7 +204,7 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       const gaps = `${found.unreadableSections ? `；${found.unreadableSections} 个区段这次读不到` : ''}${found.truncated ? '；没读完全部区段（期限或数量上限），可能还有更深的' : ''}`;
       const d = found.deepest;
       if (d === null) return ok(`${dim} 里 origin 周围 ${radius} 格内没有身体站过的记录（读了 ${found.scannedSections} 个区段）${gaps}${backlogNote}`, { ...envelope, ...found, ...backlogData });
-      return ok(`${dim} 里 origin 周围 ${radius} 格内身体站过的最低脚格是 (${d.x},${d.y},${d.z})，离 origin 水平 ${Math.round(Math.hypot(d.x + 0.5 - origin.x, d.z + 0.5 - origin.z))} 格${gaps}；只是到访记录，不代表现在还能走到；去不去由你决定${backlogNote}`, { ...envelope, ...found, ...backlogData });
+      return ok(`${dim} 里 origin 周围 ${radius} 格内身体站过的最低脚格是 (${d.x},${d.y},${d.z})，离 origin 水平 ${Math.round(Math.hypot(d.x + 0.5 - origin.x, d.z + 0.5 - origin.z))} 格${gaps}；只是到访记录，不代表现在还能走到${backlogNote}`, { ...envelope, ...found, ...backlogData });
     }
     if (args.metric === 'reach') {
       const radius = args.radius ?? DEEPEST_MAX_RADIUS;
@@ -213,13 +213,13 @@ export const spatialExtrema: Skill<ExtremaArgs> = {
       const gaps = `${found.unreadableSections ? `；${found.unreadableSections} 个区段这次读不到` : ''}${found.truncated ? '；没读完全部区段（期限或数量上限）' : ''}`;
       const list = Object.entries(found.sectors).map(([dir, s]) => `${dir} ${s.distance} 格 (${s.pos.x},${s.pos.y},${s.pos.z})`);
       return ok(list.length
-        ? `${dim} 里离 origin ${radius} 格内、各方位身体站过的最远脚格：${list.join('；')}${gaps}；只是到访记录，不代表现在还能走到，也不代表沿途看全了；去不去由你决定${backlogNote}`
+        ? `${dim} 里离 origin ${radius} 格内、各方位身体站过的最远脚格：${list.join('；')}${gaps}；只是到访记录，不代表现在还能走到，也不代表沿途看全了${backlogNote}`
         : `${dim} 里 origin 周围 ${radius} 格内没有身体站过的记录（读了 ${found.scannedSections} 个区段）${gaps}${backlogNote}`, { ...envelope, ...found, ...backlogData });
     }
     const envelope = { status: 'ok', metric: args.metric, dim, origin: { ...origin }, readOnly: true, executable: false, evidence: 'chunk_visits', currentPassability: 'UNKNOWN' };
     const visits = spatial.session.ledger.chunkVisits(dim);
     const facts = exploredFacts(visits, origin);
     const sectors = Object.entries(facts.sectors).map(([dir, s]) => `${dir} 最远 ${s.farthest!.distance} 格${s.nearestEdge ? `、最近边缘 ${s.nearestEdge.distance} 格` : ''}`);
-    return ok(`${dim} 记录里访问过 ${facts.visitedChunks} 个区块${sectors.length ? `：${sectors.join('；')}` : ''}；只是访问记录，不代表区块里看全了；往哪去由你决定${backlogNote}`, { ...envelope, ...facts, ...backlogData });
+    return ok(`${dim} 记录里访问过 ${facts.visitedChunks} 个区块${sectors.length ? `：${sectors.join('；')}` : ''}；只是访问记录，不代表区块里看全了${backlogNote}`, { ...envelope, ...facts, ...backlogData });
   },
 };

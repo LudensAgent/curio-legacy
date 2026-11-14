@@ -79,7 +79,7 @@ test('召回候选只给用途与验证状态，不催当场试用', (t) => {
   assert.ok(skill);
   assert.doesNotMatch(skill.text, /别手写|直接用|催/);
   assert.match(skill.text, /候选/);
-  assert.match(skill.text, /是否试用由你决定/);
+  assert.match(skill.text, /试用写在 use_skill trial:true 里/);
   assert.match(skill.text, /触发条件/);
 });
 

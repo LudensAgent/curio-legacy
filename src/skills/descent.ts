@@ -52,8 +52,8 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
       }));
       const preview = available.map((candidate) => `${JSON.stringify(candidate.target)} drop${candidate.drop} ${candidate.approach}/${candidate.clearance}/${candidate.corridor}`).join('；');
       return refused(available.length
-        ? `选择的落点当前不可见；2 格内可见落点：${preview}。请把某个 target 原样复制给 descend_to；若都不是 adjacent/clear，先 move_step 靠近或开挖/补台阶（由你决定）`
-        : '2 格内没有可见落点；先 assess_landings 看清，或用 move_step 靠近；脚下超过 1 格落差可用 excavate_run/mine_cell 开台阶，或 place_support 补一级（由你决定）', 'NOT_FOUND', { available });
+        ? `选择的落点当前不可见；2 格内可见落点：${preview}。请把某个 target 原样复制给 descend_to；若都不是 adjacent/clear，先 move_step 靠近或开挖/补台阶`
+        : '2 格内没有可见落点；先 assess_landings 看清，或用 move_step 靠近；脚下超过 1 格落差可用 excavate_run/mine_cell 开台阶，或 place_support 补一级', 'NOT_FOUND', { available });
     }
     const receipt = option.receipt, age = Date.now() - receipt.at;
     if (receipt.worldId !== initial.worldId || receipt.sessionId !== initial.sessionId || receipt.dimension !== initial.dim

@@ -46,9 +46,8 @@ test('采集/探索出门：给这趟在线时间、消耗和清单后面的需�
   assert.match(user, /寻找这块地方的成本已经付过/);
   assert.match(user, /眼前看得见|记得附近有/);
   assert.match(user, /资源用来支持后面的行动/);
-  assert.match(user, /由你判断/);
-  assert.match(user, /资源用来支持后面的行动/);
-  assert.match(user, /由你判断/);
+  assert.match(user, /gather\.count 与 plan\.needs/);
+  assert.match(user, /并排的事实/);
   assert.match(user, /oak_log×\d+/);
 });
 

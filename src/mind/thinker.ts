@@ -383,7 +383,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
         try {
           const condition = validateCondition(normalizeDoneWhen(c), adapter, memory, adapter.state());
           // 清单勾选按当时状态核对，没有段活动的探索回执：exploration（min_distance/find）都不会自动勾。
-          if (containsExploration(condition)) notes.push(`plan.steps[${i}].done_when 用了 exploration：清单勾选时按当前状态核对、没有本段探索回执，exploration（min_distance 或 find）都不会自动勾；要用能按当前状态核对的条件（location_near、self_state、inventory_min 等），或不写，做完由你判断。`);
+          if (containsExploration(condition)) notes.push(`plan.steps[${i}].done_when 用了 exploration：清单勾选时按当前状态核对、没有本段探索回执，exploration（min_distance 或 find）都不会自动勾；要用能按当前状态核对的条件（location_near、self_state、inventory_min 等），或不写，做完看实际结果。`);
           return condition;
         }
         catch (e) { notes.push(`plan.steps[${i}].done_when 无效已忽略：${e instanceof Error ? e.message : String(e)}`); return null; }

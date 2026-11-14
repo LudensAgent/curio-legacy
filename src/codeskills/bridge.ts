@@ -30,7 +30,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.moveTo(x,y,z) 用 navigate_to 走到精确世界坐标：按已观测体素做有界 3D A*（walk/step/drop），整数 x/z 按目标格验收、分数 x/z 按精确连续脚位验收，可上下层；不挖/不放/不搭柱、不换目标。失败回执保留原目标、实测位置和边界缺口；不要对目标邻格换几个 y 反复 moveTo。需要施工或别的移动能力时用 api.act 显式选择。不再支持 range/sprint/avoid → {ok,error?,pos,data?}｜api.act("动作名",{参数}) 用已有动作（navigate_to、advance、plan_route、move_step、assess_landings、descend_to、mine_cell、defend…）→ {ok,code,summary,data?}；data 保留动作返回的实际观测与失败进展，去掉独立的原始 local/around 地图；查看地形仍用 blockAt/region 的可见边界
 - api.useSkill("技能名",{args}?) 调用一份已经验证可靠的技能（reliable_skills 里列的，当积木用：先组合已经管用的，再补新的部分）→ {ok,code,summary}；最多套两层
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
-身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由你决定）：
+身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由这些细动作组合）：
 - api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒 50–1000 的整数, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face（实体：直视；坐标点：只水平朝向它、平视，贴近 0.3 格内不再转身） → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；时长超出 50–1000 会报参数错误（press_keys 的 50–10000 是另一个入口的上限，两者不共用）；
   前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；{unsafe:true} 关掉这个保护
 - api.attack(实体id) 朝它挥一下（4 格内才打得到）→ {ok, sinceLastMs 距上次挥了多久}；挥得太勤伤害很低：剑约 625ms、斧约 1000ms、空手 250ms 才恢复满

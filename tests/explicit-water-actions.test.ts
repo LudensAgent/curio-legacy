@@ -134,7 +134,7 @@ test('swim_to fails before moving when the chosen shore is more than one block a
     assert.match(r.summary, /没有开游/);
     assert.match(r.summary, /比水面高 3 格/);
     assert.match(r.summary, /从水里直接爬上岸最多高 1 格/);
-    assert.match(r.summary, /垫方块\/挖台阶\/改选更低的岸（由你决定）/);
+    assert.match(r.summary, /垫方块\/挖台阶\/改选更低的岸/);
     assert.equal(r.data?.reason, 'SHORE_TOO_HIGH');
     assert.equal(r.data?.climbNeeded, 3);
     assert.equal(r.data?.waterTop, 63);

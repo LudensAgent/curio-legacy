@@ -27,7 +27,7 @@ export function noteFruitlessSearch(ctx: SkillCtx, target: string): number {
 }
 /** 同一处反复没找到时附在回执后的事实：原地再转看到的是同一片视野；要不要、往哪移动由心智定。 */
 export const repeatSearchNote = (target: string, times: number) => times >= 2
-  ? `；这附近已经第 ${times} 次找 ${target} 都没看见，原地再转看到的还是同一片视野；要看新的地方得移动（例如 explore_toward {"direction":"…","until":"${target}"}），往哪走由你定`
+  ? `；这附近已经第 ${times} 次找 ${target} 都没看见，原地再转看到的还是同一片视野；要看新的地方得移动（例如 explore_toward {"direction":"…","until":"${target}"}）`
   : '';
 
 type SightRef = { kind: 'block'; pos: Vec3Like } | { kind: 'entity'; id: number; name: string };

@@ -107,7 +107,7 @@ test('oreOpportunityFact：看见矿 + 现有存量 + 用途，采不采由它�
   assert.match(f!, /看见copper_ore×3（E4格）/);
   assert.match(f!, /copper_ingot×0、raw_copper×0/);
   assert.match(f!, /避雷针\/望远镜\/铜块/);
-  assert.match(f!, /采不采、采多少由你/);
+  assert.match(f!, /采不采、采多少按当前目标和余力/);
   // 深板岩变体算同一种矿
   assert.match(oreOpportunityFact([res('deepslate_iron_ore')], undefined, [])!, /iron_ingot×0/);
   // 箱子里的料也算进存量
@@ -136,7 +136,7 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   assert.match(f.text, /红石\/金\/钻石\/绿宝石才必须铁镐/);
   assert.match(f.text, /铁镐坏了做不出新的；石镐坏了能再做/);
   assert.match(f.text, /要用现有石镐就先 hold_item stone_pickaxe，或给 mine_cell \/ excavate_run 写 tool:"stone_pickaxe"/);
-  assert.match(f.text, /换不换、做不做由你定/);
+  assert.match(f.text, /换不换、做不做看当前材料和耐久/);
   assert.match(f.key, /tier:iron/);
   assert.match(f.key, /cheap:stone:1:ok/);
   // 主手拿着便宜镐时不要再叫它去拿

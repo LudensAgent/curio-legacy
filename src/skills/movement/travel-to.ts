@@ -126,7 +126,7 @@ export const travelTo: Skill<TravelToArgs> = {
       return fail('NOT_CONNECTED', 'travel_to 需要存活且已连接的身体；没有移动', { originalRequest: request, backend });
     }
     if (s0.riding) {
-      return fail('BAD_ARGS', `正在乘坐 ${s0.riding}；travel_to 只委托步行/台阶/下落，不驾驶载具，是否下船由你决定，没有移动`, { originalRequest: request, backend });
+      return fail('BAD_ARGS', `正在乘坐 ${s0.riding}；travel_to 只委托步行/台阶/下落，不驾驶载具，没有移动`, { originalRequest: request, backend });
     }
     const voxel = ctx.spatial?.session?.voxel;
     if (!voxel) {

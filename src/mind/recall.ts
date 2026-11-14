@@ -102,7 +102,7 @@ export function recallLocal(query: string, src: RecallSources, opts: {
       // 候选只是候选：展示用途与验证状态，是否试用、何时试用由 Agent 判断，不催当场调用。
       const candidate = src.book?.candidate(s.name);
       const trial = candidate
-        ? `（候选，尚未验收；用途与触发条件见 {"kind":"skill","name":"${s.name}"}，是否试用由你决定）`
+        ? `（候选，尚未验收；用途与触发条件见 {"kind":"skill","name":"${s.name}"}，试用写在 use_skill trial:true 里）`
         : '';
       // 自写的纯文字做法只是未验证笔记：想起时也标明，不能和已验证/可执行技能混在一起。
       const note = s.source === 'self' && s.behavior === undefined ? '（未验证的文字笔记，不会自动执行）' : '';

@@ -14,7 +14,7 @@ import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { portalAgeText, travelStore } from '../travel/store.ts';
 import { argsLabel, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
-import { FACILITY_LABELS, myFacilities } from './facilities.ts';
+import { FACILITY_LABELS, myFacilities, type Facility } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import { cleanLesson, GOAL_SWITCH_RULE, moodWords, PLAN_NOTE, PLAN_REVISION_MIN, type KnowledgeFact, type PlanAttemptEvidence, type SelfModel } from './self.ts';
 import type { Condition } from '../projects/types.ts';
@@ -228,8 +228,8 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 {"type":"inventory_min","item":"oak_log","count":20}｜{"type":"location_near","dimension":"overworld","pos":{"x":0,"y":64,"z":0},"radius":4}（坐标要来自观察或地标）｜{"type":"self_state","field":"inWater|inLava|onGround|inPortal","equals":false}｜{"type":"self_state","field":"held|riding","equals":"物品名或 null"}｜{"type":"self_state","field":"dim","equals":"the_nether"}｜{"type":"sky_visible","equals":true}｜{"type":"underground","equals":false}｜{"type":"equipment","slot":"hand","item":"stone_pickaxe"}｜{"type":"exploration","min_distance":16}（本段实测离起点至少 16 格或进了新区块；只证明推进量，不证明找到或到达目标）｜{"type":"exploration","find":"oak_log"}（本段实际看见目标）｜{"type":"inventory_full","free_slots":2}（背包只剩 2 格空）｜{"type":"all_of","conditions":[…]}｜{"type":"any_of","conditions":[…]}（哪个先到就收工：“铁够 24 个，或背包装满”）
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
-身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。gather/smelt 的 count 和 done_when 要一致：done_when 达到就会收工（例如 count 16 但 done_when inventory_min 4，会在 4 就停）；要多采就把两边一起写大；整段准备需求写进 plan.needs。开工前就成立的条件会被当成没写。移动可用 location_near 验收连续脚坐标到目标点的三维距离；travel_to 的 range 按格距，两种距离在格边可能不同。纯移动或观察不产生目标物品，只读步骤不改变站位。exploration 的 min_distance（1–256 的整数）只表示这段走了多远/进了多少新区块，是推进量，不是“找到、到达或认出目标”的证明：找下界要塞、遗迹、矿脉这类还不知道位置的目标，不要用它冒充目标达成；找具体方块/物品用 find（本段实际看见），已知坐标用 location_near，目标位置未知或无法当场确认时可省略 done_when，做完看实际观察再决定。min_distance 只能用在这段 steps 里有会移动身体的动作时；只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when。清单（plan.steps）的 done_when 按当前状态自动勾，没有本段探索回执，不能用 exploration；要用 location_near、self_state、inventory_min 等当前状态条件，或只写成果文字、做完自己判断。`;
+身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件按这段活的实际收工目标组合。
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。gather/smelt 的 count 和 done_when 要一致：done_when 达到就会收工（例如 count 16 但 done_when inventory_min 4，会在 4 就停）；要多采就把两边一起写大；整段准备需求写进 plan.needs。开工前就成立的条件会被当成没写。移动可用 location_near 验收连续脚坐标到目标点的三维距离；travel_to 的 range 按格距，两种距离在格边可能不同。纯移动或观察不产生目标物品，只读步骤不改变站位。exploration 的 min_distance（1–256 的整数）只表示这段走了多远/进了多少新区块，是推进量，不是“找到、到达或认出目标”的证明：找下界要塞、遗迹、矿脉这类还不知道位置的目标，不要用它冒充目标达成；找具体方块/物品用 find（本段实际看见），已知坐标用 location_near，目标位置未知或无法当场确认时可省略 done_when，做完看实际观察。min_distance 只能用在这段 steps 里有会移动身体的动作时；只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when。清单（plan.steps）的 done_when 按当前状态自动勾，没有本段探索回执，不能用 exploration；要用 location_near、self_state、inventory_min 等当前状态条件，或只写成果文字、做完看实际结果。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
@@ -240,8 +240,8 @@ activity.done_when 只结束当前活动；next.requires 只决定下一段能�
 取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
-operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量由你定；最多 8 项，单项 1–2304）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
-其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
+operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
@@ -259,13 +259,13 @@ const GOAL_REFUSAL_RULE = '换目标被拒别重复：记 agenda 或阶段回顾
 const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods，不必重抄 steps）。删掉没做完的成果：在阶段回顾里、或这一念明确回应操作者指令（operator doing/adopted）时，可以直接改；平时要改则必须认真想并在 plan 里写 switch_reason，说明等效替代或为什么不再需要，且距上次删改满 ${PLAN_REVISION_MIN} 分钟。只观察停滞不构成删项理由。新增一项随时可以；拆分或合并未完成的项会改变成果文字，按删改处理。删项不会自动完成主目标：删项那一念不收工（阶段回顾里也一样），下一念明确勾完清单才收工。`;
 
 /** 资源的前瞻原则：只陈述资源的用途与判断边界，不给路线或固定数量。 */
-export const RESOURCE_PRINCIPLE = '资源用来支持后面的行动：已经到达资源点、寻找成本付过时，清单后面还要什么、这次顺带补多少，由你判断；背包、安全和时间是一起权衡的事实。';
+export const RESOURCE_PRINCIPLE = '资源用来支持后面的行动：已经到达资源点、寻找成本付过时，清单后面还要什么、这次顺带补多少写在 gather.count 与 plan.needs 里；背包、安全和时间是并排的事实。';
 
 /** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
 const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。${GOAL_SWITCH_RULE}`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
-const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读、再由你决定。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
+const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。显式试用用 use_skill {"name":"…","trial":true,"args":{…}}；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。岩浆或水下呼吸问题属于玩法风险，宿主不自动救援；按当前目标和学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
 
 const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
 - {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}（where：脚下、家旁或坐标）；简单功能设施不必先 design；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
@@ -287,8 +287,8 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resol
 - 站到看见过/记得的附近目标旁 → approach_visible；容器/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）
 - 要到一个确切的格或精确连续脚位 → navigate_to
 移动回执带 sessionId，仍要完成同一目标时原样传回。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖，到过的区块也不等于搜过——隧道里只看得见沿途；段后按实测位置重新判断。
-【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"），后退或换向仍由你决定。
-【原地上下】move_step [0,1,0] 原地上移要求梯子；相邻上下台阶可用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）。assess_landings 返回当前可见的落点候选及未确认项，descend_to 核实所选落点后下降。施工动作会改变地形：pillar_one {"item":"any"}（或指定材料）消耗一块材料垫高，起跳需要头顶上方两格都空；mine_cell [0,-1,0] 挖空脚下支撑后身体会下落，无需再 move_step。上下行也可由【走到哪】中的导航按已观测路线执行，是否施工由你决定。
+【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"）；后退/换向写进步骤或 facing。
+【原地上下】move_step [0,1,0] 原地上移要求梯子；相邻上下台阶可用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）。assess_landings 返回当前可见的落点候选及未确认项，descend_to 核实所选落点后下降。施工动作会改变地形：pillar_one {"item":"any"}（或指定材料）消耗一块材料垫高，起跳需要头顶上方两格都空；mine_cell [0,-1,0] 挖空脚下支撑后身体会下落，无需再 move_step。上下行也可由【走到哪】中的导航按已观测路线执行；施工与否写进步骤。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
 
 const DELIBERATE_MODE = `【每次这样想】
@@ -301,10 +301,10 @@ const CHOOSE = `【选动作】
 - 去某处/找没见过的东西 → 按【走到哪】选；look_around 只看当前视野，explore_toward 才改变位置（until 在本轮视野看见就停）；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…","count":要几个} 查它在哪些箱子、哪只够用，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
-- 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与是否改变地形由你决定。
+- 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与地形改动写进 steps。
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}再 build；简单功能设施用基础动作或 spec.design
-- 上不去的高处由你决定：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。
+- 上不去的高处：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。
 - 目标远于一列/挖不到的距离用 travel_to/navigate_to/explore_toward，别用 move_step/mine_cell 的绝对坐标去够；同列没有可站立面是事实，不是重试信号。
 - 副手用 hold_item {"item":"物品名","to":"off-hand"} 或 equip_armor；slot 只配 to:"hand" 的快捷栏 0–8；方块上用物品用 interact_block {"target","item"}。`;
 
@@ -312,16 +312,16 @@ const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。内部思考有预算：最多比较两套可行方案，同一事实/同一权衡只评估一次；已有足够信息就停止推理并直接给出能执行的 JSON。不要重算已经给出的背包/箱子/目标，也不要列举用不上的配方、去不了的远处选项或已经排除的方案；卡住时先选一个可验证的下一步，做完再看结果。
 - 看【身体】where 和【身边】local 确认地形；地形分类不代表受困或需要离开，按当前目标和实际反馈选择动作，身边一格的操作写确切坐标。
 - 一段活（如“砍 20 根木头”）：routine 1–6 步，可 repeat，done_when 写清何时收工；身体连续执行、自己应变，真卡住才叫你。
-- 从真实结果里学，出乎意料才写 learned；历史失败只作参考，继续、重试或调整由你决定。
-- 你既会被风景吸引、想把见闻记下来，也想把日子过扎实、去更远的地方看看；要做什么、先做什么都由你定。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
+- 从真实结果里学，出乎意料才写 learned；历史失败只作参考，不决定下一步。
+- 你既会被风景吸引、想把见闻记下来，也想把日子过扎实、去更远的地方看看；要做什么、先做什么由你的目标与兴趣决定。喜欢的写 liked，想做的放 agenda。情绪是信号：累了歇、烦了换办法、腻了找新鲜事。
 - 只知道亲眼看到或记得的东西，坐标来自观察或地标，不编。
 - 背包数量、计划和窍门的成败次数不能证明某次行动的具体工具或经过；讲自己的经历要有实际观察依据。
-- 遇到危险如何行动由你或你写下的技能决定；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。
+- 遇到危险按当前目标、技能和动作处理，宿主不自动接管；插火把、顺手吃可用 habits 定成习惯；捡东西需明确安排 pickup_items，pickup 偏好只提醒思考。
 - Skill 是执行经验，不是行动目标或推荐。先按当前目标、身体、环境和记忆决定做什么，再选基础动作，最后才考虑是否查/用 Skill；不要因为最近常用某动作、某动作 Skill 多、或为了用上已学 Skill 而改变方向；目标或环境变了就重新评估基础动作，没有匹配 Skill 时直接用基础动作完成。`;
 
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格；挖空 [0,-1,0] 会下落，无需 move_step。
-- move_step 相对写法只锁定相邻列，±1 内实际脚高由宿主解析（回执 resolvedAt）；绝对 xyz 失败若给出同一列的实际脚高，这是该列的落脚证据；落点有岩浆/火等危险时默认拒绝，allowHazard:true 由你决定；更大落差可用 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报超出层高限制、或 assess_landings 没有相邻落点，只说明该动作范围内的结果，不证明远处没有路线，也不要求改用施工。
+- move_step 相对写法只锁定相邻列，±1 内实际脚高由宿主解析（回执 resolvedAt）；绝对 xyz 失败若给出同一列的实际脚高，这是该列的落脚证据；落点有岩浆/火等危险时默认拒绝，allowHazard:true 显式接受危险落点；更大落差可用 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报超出层高限制、或 assess_landings 没有相邻落点，只说明该动作范围内的结果，不证明远处没有路线，也不要求改用施工。
 - place_cell 指方块占据格；place_support 的参数是补上的支撑格：[1,-1,0] 补 [1,0,0] 脚部目标格下方，上下范围 -2..3，可补下一级 [1,-2,0]。梯子、火把可放进身体格（需有附着面）。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 
@@ -439,7 +439,7 @@ export function waterCrossingHint(p: Percept, s: AgentState): string | null {
   const shore = p.self.inWater
     ? '；在水里要上岸用 swim_path {"mode":"dry_shore","xyz":[脚坐标]}：会沿已看到的水路绕行（不挖不垫）；站在方块 (bx,by,bz) 顶上时写 [bx+0.5, by+1, bz+0.5]'
     : '';
-  return `过水可用的材料：${blocks ? `any 能用的土石类方块 ${blocks} 块` : 'any 能用的土石类方块没有'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}；从水里直接爬上岸，岸顶最多比水面高 1 格；更高的岸要先垫方块或挖台阶（由你决定）`;
+  return `过水可用的材料：${blocks ? `any 能用的土石类方块 ${blocks} 块` : 'any 能用的土石类方块没有'}；${boat ? `背包有船 ${boat} 只` : planks >= 5 ? `木板 ${planks} 块（够造一只船）` : '没有船，木板也不够造（要 5 块木板）'}${shore}；从水里直接爬上岸，岸顶最多比水面高 1 格；更高的岸要先垫方块或挖台阶`;
 }
 
 /** 主目标清单观察在线没进展、最近几段活还卡/没做成：给事实并说明删改清单的条件（不动主目标、不删做完的项、不重写已勾掉的项） */
@@ -591,12 +591,12 @@ export function situationalReminders(ctx: MindContext): string[] {
   const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
   if (pathFails.length >= 3) {
     const recent = pathFails.slice(0, 3).map((f) => `${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 120)}`).join('；');
-    out.push(`【局部恢复】附近记录了 ${pathFails.length} 次移动/规划失败，最近：${recent}。预算耗尽、参数错误、证据变化与已观测阻挡含义不同；结合各次回执和当前目标判断是否续接、调整或停止，由你决定。`);
+    out.push(`【局部恢复】附近记录了 ${pathFails.length} 次移动/规划失败，最近：${recent}。预算耗尽、参数错误、证据变化与已观测阻挡含义不同；结合各次回执和当前目标判断是否续接、调整或停止。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
       const f = repeatFails[0];
-      out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：${f.summary.slice(0, 120)}。这只是该动作的结果；是否重试或调整由你结合当前证据决定，不必把整段活推倒重来`);
+      out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：${f.summary.slice(0, 120)}。这只是该动作的结果；整段活的状态未变`);
     }
   }
   const where = p.self.where?.kind;
@@ -719,8 +719,8 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
         ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
         : '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。',
       ...(full && plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
-        material_budget_note: 'material_budget 是你写在 plan.needs 里的预算；数量由你定，宿主只按配方与背包+记得的箱子算差额，不自动改 gather.count' } : {}),
-      ...(full && plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
+        material_budget_note: 'material_budget 是写在 plan.needs 里的预算；数量写在 count 里，宿主只按配方与背包+记得的箱子算差额，不自动改 gather.count' } : {}),
+      ...(full && plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，对照最近几次判断；继续或换做法写在 methods/activity 里' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(full ? (() => {
         const nextOutcome = plan.steps.find((st) => !st.done);
@@ -819,7 +819,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
       return `${name}×${count}${isTreeSaplingItem(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
     ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾（穿到对应槽才生效）：${wearables.join('；')}` } : {}),
-    ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台/砂轮合成修理：结果耐久 = min(满耐久, 两件耐久之和 + 满耐久5%)；铁砧是 +满耐久12%（耗经验、保留普通附魔）。两件耐久之和超过满耐久时，多出的耐久会被丢掉、合计耐久反而下降，只换来一个空槽；合不合由你定。穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
+    ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台/砂轮合成修理：结果耐久 = min(满耐久, 两件耐久之和 + 满耐久5%)；铁砧是 +满耐久12%（耗经验、保留普通附魔）。两件耐久之和超过满耐久时，多出的耐久会被丢掉、合计耐久反而下降，只换来一个空槽；合不合看材料、耐久和空槽事实。穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
     // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
     ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: s.emptySlots > 0
@@ -892,7 +892,7 @@ function worldKnowledge(ctx: MindContext) {
       ...(record ? { harvests: record.harvests, at: record.cells[0] } : {}),
     };
   }).sort((a, b) => a.dist - b.dist).slice(0, 4);
-  const facilityUse = (kind: 'chest' | 'station') => kind === 'chest' ? 'find_item→take_items/store_items' : 'use_gui/interact_block';
+  const facilityUse = (kind: Facility['kind']) => kind === 'chest' ? 'find_item→take_items/store_items' : kind === 'bed' ? 'sleep' : 'use_gui/interact_block';
   const ownFacilities = myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).filter((f) => f.label !== '我的农田');
   const facilities = ctx.tier === 'deliberate'
     ? ownFacilities.slice(0, 8).map((f) => `${f.text}（${facilityUse(f.kind)}）`)
@@ -980,7 +980,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(remember.length ? { resources_seen_before: remember } : {}),
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
-    ...(ctx.tier === 'glance' && untouched.length ? { unexplored_near: `身边 8 个方向在 32–128 格各抽 7 个采样环，这些方向的到访记录很少（不到四分之一，不分地上地下）：${untouched.join('、')}；只是抽样到访记录，不代表没去过、没有东西、看全或现在能走，往哪去由你判断` } : {}),
+    ...(ctx.tier === 'glance' && untouched.length ? { unexplored_near: `身边 8 个方向在 32–128 格各抽 7 个采样环，这些方向的到访记录很少（不到四分之一，不分地上地下）：${untouched.join('、')}；只是抽样到访记录，不代表没去过、没有东西、看全或现在能走` } : {}),
     ...(ctx.tier === 'glance' && nearbyFacilities.length ? { nearby_facilities: nearbyFacilities } : {}),
     ...(ctx.tier === 'glance' && farmState.length ? {
       nearby_farms: farmState.slice(0, 2),
@@ -989,7 +989,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床见 my_bed；门/工作站用 use_gui/interact_block' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
-      explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读，往哪去由你判断）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
+      explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(currentTrip ? { current_trip: currentTrip, current_trip_note: '本趟=当前这段出行；各方向最远是身体站稳过的脚格，最近探索是任务回执的实测推进；现在能否续走未确认，坐标可直接作为移动目标' } : {}),
     ...(ctx.tier === 'deliberate' && tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
     ...(reachLines(ctx, here, 32).length ? { walked_farthest: { from: `(${ctx.reach!.origin.x},${ctx.reach!.origin.y},${ctx.reach!.origin.z}) 起算`, by_direction: reachLines(ctx, here, 32),
@@ -1055,7 +1055,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
         ...(k.limits?.length ? { limits: k.limits.slice(0, 4) } : {}) })),
       ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine),
-        knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用、采用与否由你判断。' } : {}),
+        knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用按当前世界与目标核对。' } : {}),
       ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
