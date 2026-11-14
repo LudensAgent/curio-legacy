@@ -9,6 +9,7 @@ import { DraftStore, draftsFor } from '../src/building/drafts.ts';
 import { compileBuilding, normalizeSpec } from '../src/building/spec.ts';
 import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
+import { SKILLS } from '../src/skills/index.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from '../src/knowledge/skillbook.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { Perception } from '../src/perception/perception.ts';
@@ -104,6 +105,13 @@ test('自查会指出悬空的屋顶；缺的木料会折成原木数', () => {
   const floating = normalizeSpec({ name: 'f', design: { legend: { C: 'cobblestone', P: 'oak_planks', G: 'glass_pane', D: 'oak_door', T: 'torch', S: 'oak_stairs', '.': 'air' }, layers } });
   assert.ok(critique(floating).some((i) => /悬在半空/.test(i)));
   assert.equal(logsFor([['oak_planks', 8], ['oak_stairs', 8], ['cobblestone', 30]]), 5);
+});
+
+test('build 说明允许简单结构自写 spec，不再要求所有图纸先过建筑师', () => {
+  const build = SKILLS.build;
+  assert.match(build.description, /也可以自己设计/);
+  assert.match(build.argsDoc, /简单结构可直接 spec\.design/);
+  assert.doesNotMatch(build.argsDoc, /不要自己写 spec/);
 });
 
 test('建筑师子代理：独立上下文带设计手册，自查后改进，交回图纸；build 只要 draft ID', async () => {

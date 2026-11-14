@@ -248,8 +248,9 @@ const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、
 /** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
 const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
 
-/** 建筑师规则：查询说明、动作选择和施工提醒共用同一句，避免三处各写一套。 */
-const ARCHITECT_RULE = '请建筑师画图纸（不用自己写图纸）';
+/** 建筑师的适用范围与动作：查询说明、动作选择、环境改造和施工提醒共用同一组文字，避免各写一套。 */
+const ARCHITECT_SCOPE = '大型房屋、前哨、塔等复杂/审美建筑';
+const ARCHITECT_RULE = '请建筑师画图纸';
 
 /** 换主目标被拒后的处理：两档共用，避免同一规则在尾段各写一份。 */
 const GOAL_REFUSAL_RULE = '换目标被拒别重复：记 agenda 或阶段回顾并写 switch_reason，当前主线继续。';
@@ -267,7 +268,7 @@ const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是�
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。你决定何时在 routine 用 use_skill {"name":"…","trial":true,"args":{…}} 显式试用；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读、再由你决定。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。遇到岩浆或水下呼吸问题由你或你学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
 
 const QUERIES = `【先查再做】需要时先输出一个查询 JSON（查询本身不执行身体动作，但等待期间世界仍在运行、身体可能继续动作，每次思考最多 3 次；拿到结果后以最新状态为准），再决定：
-- {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} ${ARCHITECT_RULE}：房子、前哨、仓库、畜栏、塔等要长期用的建筑（where：脚下、家旁或坐标）；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
+- {"kind":"skill","query":"关键词"} 查技能（空查询浏览目录，offset 分页，含收起和停用）；{"kind":"skill","name":"技能名"} 读技能及版本记录，加 "version":30 读历史版本；读取不代表启用或验证｜{"kind":"design","brief":"用途、多大、风格","where":"here|base|x,y,z"} ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}（where：脚下、家旁或坐标）；简单功能设施不必先 design；传送门/末地门不是建筑，用 build_portal 立框点燃，别让建筑师画
 - {"kind":"recipes","item":"物品名","count":1} 看配方和缺口（"uses":"物品" 反查用途）｜{"kind":"moves","names":["动作名"]} 看动作参数；不写 names 列出全部动作（含平时不显示的进阶动作）
 - {"kind":"recall","query":"关键词"} 回想以前的经历、日记、教训和技能｜{"kind":"progress","target":"po_…"} 查某个目标的空间/移动/执行/成本/物品进展（省略 target 看全部；【专注】里只有摘要）｜{"kind":"mechanics","query":"…"} 查底层操作接口
 - {"kind":"knowledge","query":"问题"} 搜索 Wiki 候选；再用 {"kind":"knowledge","id":"文档id"} 看章节目录，加 "section":"章节id" 读正文，续页按 nextCursor 传 cursor。空查询浏览目录，目录续页传 offset。摘录不等于读完或学会；资料不代表现场事实，做法自行判断。`;
@@ -302,7 +303,7 @@ const CHOOSE = `【选动作】
 - 从箱子取/存东西 → 先 find_item {"item":"…","count":要几个} 查它在哪些箱子、哪只够用，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与是否改变地形由你决定。
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
-- design ${ARCHITECT_RULE}，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）
+- ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}再 build；简单功能设施用基础动作或 spec.design
 - 上不去的高处由你决定：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。
 - 目标远于一列/挖不到的距离用 travel_to/navigate_to/explore_toward，别用 move_step/mine_cell 的绝对坐标去够；同列没有可站立面是事实，不是重试信号。
 - 副手用 hold_item {"item":"物品名","to":"off-hand"} 或 equip_armor；slot 只配 to:"hand" 的快捷栏 0–8；方块上用物品用 interact_block {"target","item"}。`;
@@ -360,6 +361,10 @@ ${movesCatalog(28)}`;
 }
 
 /** 瞥一眼的专属说明；放在共用前缀之后，避免改动它时打碎前面的缓存 */
+const WORLD_UNDERSTANDING = `【世界理解】建设/选址/整理/修复时，把空间看成有边界、尺寸、高差、材质、流体、可站立面、水源、光照、通道和占用的区域，不是孤立方块。区分亲眼所见、空间记忆的历史、由周围结构推测的可能、未加载/未观察的未知：未知按【消息怎么读】处理，不把未观察/未加载当空气或已知方块；历史不能当当前。结构先判类型和用途（门、农田、牧场、仓库、道路；传送门看框架、内腔、激活和可通行侧），再判完整性与功能状态，找缺失/阻挡位置，再决定修复/改造/绕开/放弃，完成后验证真实功能。具体机制用 knowledge/mechanics/moves 查。选址先明确用途，再比较面积、高差、水、光、安全、到基地/仓储距离、维护扩建便利性，不要求理论最优。`;
+
+const ENVIRONMENT_MANAGEMENT = `【环境改造】平整/填坑/削坡/台阶、小型农田/灌溉、简单围栏/栅栏门/圈养区、仓库分类/容器整理、工作区布置、简单道路/桥梁/照明/通道、已有设施修补/扩建，可直接规划施工，不必先请建筑师。${ARCHITECT_SCOPE}、整体基地或需图纸的项目，仍适合 design + build。施工前看用途和最低功能、地形/材料/工具/安全、是否需要局部改造；边界/入口/水源/通道按用途定，分段施工，不要求完整蓝图；完成后检查围栏闭合、门可进出、农田的水/光/作物状态符合用途（机制查 knowledge）、通道未堵、容器/工作站可用、未破坏已有设施/通路、留扩建空间，不把放置成功当成设施建成。`;
+
 const GLANCE_MODE = `这次只是抬头看一眼，不必把每个细节重新铺开：
 - 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust，插一件事用 detour——独白、what、expect、noticed 不会改变执行。
 - 手上没活：直接 new 一段，接着【最近】和议程往下玩；可写 next，当前动作仍在执行、结果未知。换事用 switch/new。
@@ -374,6 +379,10 @@ export function deliberateSystem(persona: string, skills: string[] = []): string
   return `${systemCore(persona)}
 
 ${DELIBERATE_MODE}
+
+${WORLD_UNDERSTANDING}
+
+${ENVIRONMENT_MANAGEMENT}
 
 ${FOCUS}
 
@@ -643,8 +652,8 @@ export function situationalReminders(ctx: MindContext): string[] {
   }
   if (ctx.designing) out.push(`建筑师正在画「${ctx.designing.brief.slice(0, 40)}」，画好会告诉你：先攒常用的木头、石头，或做别的事`);
   else if (drafts.length) out.push(`图纸 ${drafts[0].id}「${drafts[0].name}」已经画好：按材料清单攒齐后 build {"draft":"${drafts[0].id}"}`);
-  else if (!unfinished.length && /盖|建|房|住处|庇护|前哨|据点|补给点|仓库|畜栏|围栏|瞭望|塔|围墙|平台/.test(intent))
-    out.push(`要盖长期用的建筑（房子、前哨、仓库、畜栏、塔……）：用 {"kind":"design","brief":"…","where":"here|base"} ${ARCHITECT_RULE}；画图要几现实分钟，一边画一边去攒料。应急的几块自己搭，施工只认露天干地`);
+  else if (!unfinished.length && /盖|建|造|搭|扩建/.test(intent) && /大型|复杂|审美|整体基地|前哨|据点|瞭望|塔楼|高塔/.test(intent))
+    out.push(`要盖${ARCHITECT_SCOPE}：用 {"kind":"design","brief":"…","where":"here|base"} ${ARCHITECT_RULE}；简单围栏/农田/道路/工作区直接施工，不必画图纸。画图要几现实分钟，一边画一边去攒料。应急的几块自己搭，施工只认露天干地`);
   if (p.time.phase === 'dusk' || p.time.phase === 'night') {
     // 只报“天快黑了/天黑了”。床的位置走【记得的地方】my_bed（记忆模块）；“睡觉跳过夜晚”是游戏知识
     out.push(p.time.phase === 'dusk' ? '太阳在落山，天快黑了' : '天黑了');

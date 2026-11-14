@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { EventBus } from '../src/events.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { createActivity } from '../src/mind/activity.ts';
-import { buildMindMessages, deliberateSystem, glanceSystem, type MindContext } from '../src/mind/prompt.ts';
+import { buildMindMessages, deliberateSystem, glanceSystem, situationalReminders, type MindContext } from '../src/mind/prompt.ts';
 import { SelfModel } from '../src/mind/self.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
@@ -52,6 +52,38 @@ test('【专注】在瞥一眼只保留目标/清单/下一项，认真想才展
     assert.ok(deliberate.includes(marker), `认真想应保留 ${marker}`);
   }
   assert.ok(!glance.includes('progress_trend'), '瞥一眼不应展开 progress_trend');
+});
+
+test('认真想有区域/结构理解与功能性建设自主，建筑师只负责复杂/审美建筑', () => {
+  const deliberate = deliberateSystem('P', []);
+  for (const marker of [
+    '【世界理解】',
+    '【环境改造】',
+    '不把未观察/未加载当空气或已知方块',
+    '不把放置成功当成设施建成',
+    '简单功能设施用基础动作或 spec.design',
+    '结构先判类型和用途',
+    '传送门看框架、内腔、激活和可通行侧',
+    '验证真实功能',
+    '不要求完整蓝图',
+    '容器/工作站可用、未破坏已有设施/通路、留扩建空间',
+  ]) assert.ok(deliberate.includes(marker), `缺少环境理解「${marker}」`);
+  const glance = glanceSystem('P', []);
+  assert.ok(!glance.includes('【世界理解】'), '瞥一眼不加载世界理解段');
+  assert.ok(!glance.includes('【环境改造】'), '瞥一眼不加载环境改造段');
+});
+
+test('施工提醒只对复杂/审美建筑推荐建筑师，简单围栏不触发', (t) => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
+  t.after(() => { memory.close(); self.close(); });
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const context = (what: string): MindContext => ({
+    tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
+    activity: createActivity({ what, why: '', kind: 'build', repeat: 1, steps: [{ skill: 'wait', args: { seconds: 1 } }] }, '', 'llm', adapter.state()),
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P',
+  });
+  assert.doesNotMatch(situationalReminders(context('在营地边围一圈木栅栏')).join(' '), /design/);
+  assert.match(situationalReminders(context('盖一座大型前哨')).join(' '), /design/);
 });
 
 test('瞥一眼在非主世界也能看到进阶动作提醒', (t) => {

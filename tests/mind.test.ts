@@ -208,7 +208,7 @@ test('计划说走远找树但只有观察/采集：活动开始时报告计划�
   } });
   assert.ok(w.mind.activity?.planCoverageGap);
   const gap = w.bus.recent().slice().reverse().find((event) => event.type === 'plan_coverage_gap');
-  assert.match(gap?.msg ?? '', /没有会实际移动身体的动作/);
+  assert.match(gap?.msg ?? '', /没有会让身体移动的动作/);
   await w.finish(ok('做完一步'));
   const end = w.bus.recent().slice().reverse().find((event) => event.type === 'attempt_end');
   assert.match(end?.msg ?? '', /计划覆盖缺口/);
