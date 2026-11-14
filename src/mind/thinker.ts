@@ -117,6 +117,9 @@ export function inferKind(steps: Step[]): ActivityKind {
 /** 决定里能当场退回去改的毛病：步骤写错被丢、收工条件无效、next 被忽略 */
 const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已忽略/;
 
+/** llm_invalid 里保留的原始输出长度：足够看清被拒的 step/args，又不把事件日志撑大。 */
+const INVALID_OUTPUT_CHARS = 2000;
+
 /** 只陈述这条条件证明了什么；不改写法、不催着换条件。 */
 const minDistanceNote = (label: string, distance: number) =>
   `${label}.done_when 有个只按 exploration.min_distance=${distance} 判断的分支：这个分支只证明本段离起点至少 ${distance} 格或进了新区块；若这段目标是找到或到达某个目标，单靠它不能证明。`;
@@ -489,7 +492,7 @@ export class Thinker {
       catch (e) {
         invalid++;
         const error = c.finishReason === 'length' ? '输出被截断' : c.text.trim() ? `不是合法 JSON：${(e as Error).message}` : '空回复';
-        this.planner.noteInvalid(ctx.reason, error);
+        this.planner.noteInvalid(ctx.reason, error, c.text.slice(0, INVALID_OUTPUT_CHARS));
         // 查过资料后空回复/无效：把已查到的内容再压一遍交给它，并明确不要重复查询；只补这一次。
         if (knowledgeMemo.last && !knowledgeMemo.retried) {
           knowledgeMemo.retried = true;
@@ -565,7 +568,7 @@ export class Thinker {
         // 模型已提出新决定，不能在新决定无效时擅自执行旧稿。
         firstDraft = null;
         invalid++;
-        this.planner.noteInvalid(ctx.reason, parsed.error);
+        this.planner.noteInvalid(ctx.reason, parsed.error, c.text.slice(0, INVALID_OUTPUT_CHARS));
         if (knowledgeMemo.last && !knowledgeMemo.retried) {
           knowledgeMemo.retried = true;
           messages.push({ role: 'assistant', content: c.text.slice(0, 1500) },

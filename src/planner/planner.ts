@@ -193,11 +193,11 @@ export class Planner {
     }
   }
 
-  /** 心智层的输出没通过校验：计入无效输出统计 */
-  noteInvalid(label: string, error: string) {
+  /** 心智层的输出没通过校验：计入无效输出统计。output 只用于取证（被拒的原始输出），不参与判断。 */
+  noteInvalid(label: string, error: string, output?: string) {
     this.stats.invalid++;
     this.stats.lastError = error;
-    this.bus.publish('llm_invalid', 'P1', `模型输出无效（${label}）：${error}`);
+    this.bus.publish('llm_invalid', 'P1', `模型输出无效（${label}）：${error}`, output === undefined ? undefined : { output });
   }
 
   /** 心智层的只读查询需要的记忆接口 */

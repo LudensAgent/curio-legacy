@@ -237,6 +237,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）","outcome_id":"po_…（可选：推进哪项计划成果）","method_id":"pm_…（可选：采用哪条计划做法）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
+取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量由你定；最多 8 项，单项 1–2304）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
@@ -298,7 +299,9 @@ const CHOOSE = `【选动作】
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与是否改变地形由你决定。
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - design ${ARCHITECT_RULE}，再 build（新盖 {"draft":"图纸ID"}，续建 {"projectId":"作品ID"}）
-- 上不去的高处由你决定：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。`;
+- 上不去的高处由你决定：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。
+- 目标远于一列/挖不到的距离用 travel_to/navigate_to/explore_toward，别用 move_step/mine_cell 的绝对坐标去够；同列没有可站立面是事实，不是重试信号。
+- 副手用 hold_item {"item":"物品名","to":"off-hand"} 或 equip_armor；slot 只配 to:"hand" 的快捷栏 0–8；方块上用物品用 interact_block {"target","item"}。`;
 
 const PRINCIPLES = `【原则】
 - 接着刚才的念头往下想，不反复换主意、不重复刚做完的事。内部思考有预算：最多比较两套可行方案，同一事实/同一权衡只评估一次；已有足够信息就停止推理并直接给出能执行的 JSON。不要重算已经给出的背包/箱子/目标，也不要列举用不上的配方、去不了的远处选项或已经排除的方案；卡住时先选一个可验证的下一步，做完再看结果。
