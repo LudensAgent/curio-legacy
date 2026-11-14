@@ -12,6 +12,9 @@ type ExploreArgs = {
   until?: string;
   segment: number;
   maxLateralDrift: number;
+  /** 相对冻结起点脚高允许的累计净下降；descend:true 时省略表示不限制。 */
+  maxDescent?: number;
+  descend?: true;
   timeoutMs: number;
   sessionId?: string;
   swim?: boolean;
@@ -23,21 +26,23 @@ type ExploreArgs = {
 };
 
 export const MAX_EXPLORE_DISTANCE = 512;
+/** 地表方向探索默认允许的累计净下降（格）：超过就停，要下探需显式 descend:true 或更大 maxDescent。 */
+export const EXPLORE_DEFAULT_MAX_DESCENT = 8;
 /** 方向探索一段最多连续执行多少 transition（同时是 segment 参数默认值）。 */
 const EXPLORE_SEGMENT_STEPS = 48;
 
 /** Directional exploration composes the same voxel coordinator with explicit observation. */
 export const exploreToward: Skill<ExploreArgs> = {
   name: 'explore_toward',
-  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已验证的 walk/step/drop（体素证据缺失时用当前已加载方块即时确认，确认不了才停）与跨越 1 格缺口的 jump（走到起点边缘起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
-  catalog: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","maxLateralDrift"?:48,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（搭桥/开路约每格一次改动）,"sessionId"?}：没有具体目的地时，朝一个方向去没去过的地方、边走边看，until 本轮看见就停；dig/place 同 travel_to`,
-  argsDoc: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多${EXPLORE_SEGMENT_STEPS}步）,"maxLateralDrift"?:48（0-64，0 只直行）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,` + MAKE_WAY_ARGS_DOC + '}；只接受 direction/distance/until/segment/maxLateralDrift/timeoutMs/sessionId/origin/swim/dig/requireTool/place/maxEdits/make，未知参数会被拒绝；until 只认本次实际看见的目标。',
+  description: '沿你指定的 N/E/S/W 方向按共享 VoxelMap 三维路线推进，原方向、距离与横向范围冻结；默认只允许相对出发脚高累计下降 8 格（maxDescent 可调，descend:true 不限），路线会下探更深时在执行前停下并交回事实；优先沿原方向直行，当前方缺少证据就靠近前沿观察，已知阻挡时在授权横向范围内绕行。边走边确认下一段，行进中看到 until 目标就停止；在有证据缺口的停点可再朝原方向寻找一次。距离 16–512 格，只执行已验证的 walk/step/drop（体素证据缺失时用当前已加载方块即时确认，确认不了才停）与跨越 1 格缺口的 jump（走到起点边缘起跳）。未知前沿有界观察后，相关证据变化才继续，否则返回边界。默认不下水，swim:true 时才涉水并代为游泳；' + MAKE_WAY_DOC + '。回执保留 sessionId、原目标、累计预算和实测进展，续接须带原 sessionId。只接受声明的参数，其他参数一律拒绝。',
+  catalog: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","maxLateralDrift"?:48,"maxDescent"?:8,"descend"?:true,"swim"?:true,"dig"?:true|"工具名","place"?:"方块名|any","maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（搭桥/开路约每格一次改动）,"sessionId"?}：没有具体目的地时，朝一个方向去没去过的地方、边走边看，until 本轮看见就停；默认不允许下探超过出发脚高 8 格，descend:true 明确下洞；dig/place 同 travel_to`,
+  argsDoc: `{"direction":"N|E|S|W","distance":16-512,"until"?:"log|stem|方块或生物名","segment"?:16-48（规划前瞻，本段最多${EXPLORE_SEGMENT_STEPS}步）,"maxLateralDrift"?:48（0-64，0 只直行）,"maxDescent"?:8（0-64；相对出发脚高允许的累计净下降，超过则在执行前停下）,"descend"?:true（不限下降；与 maxDescent 互斥）,"timeoutMs"?:300000（30000-600000）,"sessionId"?,"origin"?:{x,y,z},"swim"?:false（true 时允许涉水，并在水中或水边用 swim_path 游向已观察到、沿委托有推进的岸边站立格，没有岸时游向前方水面点；会消耗氧气、不潜水、每次调用最多 8 段，回执 swimLegs 记录每段游泳）,` + MAKE_WAY_ARGS_DOC + '}；只接受 direction/distance/until/segment/maxLateralDrift/maxDescent/descend/timeoutMs/sessionId/origin/swim/dig/requireTool/place/maxEdits/make，未知参数会被拒绝；until 只认本次实际看见的目标；续接时 maxDescent/descend 必须与原委托相同（改下降授权算新委托）。',
   timeoutMs: 600000,
   movement: true,
   outcomeBoundary: true,
   validate(raw, adapter) {
     const a = obj(raw);
-    const allowedKeys = new Set(['direction', 'distance', 'until', 'segment', 'maxLateralDrift', 'timeoutMs', 'sessionId', 'origin', 'swim', 'dig', 'requireTool', 'place', 'maxEdits', 'make']);
+    const allowedKeys = new Set(['direction', 'distance', 'until', 'segment', 'maxLateralDrift', 'maxDescent', 'descend', 'timeoutMs', 'sessionId', 'origin', 'swim', 'dig', 'requireTool', 'place', 'maxEdits', 'make']);
     const unknown = Object.keys(a).filter((key) => !allowedKeys.has(key));
     if (unknown.length) return { ok: false, error: `explore_toward 不认识参数 ${unknown.join('、')}；只接受 ${[...allowedKeys].join('、')}` };
     const direction = String(a.direction ?? '').toUpperCase();
@@ -46,6 +51,9 @@ export const exploreToward: Skill<ExploreArgs> = {
     if (a.until !== undefined && (typeof a.until !== 'string' || !a.until.trim() || a.until.length > 40)) return { ok: false, error: 'until 需要 1–40 字的方块/生物名或类别' };
     if (a.segment !== undefined && (!Number.isInteger(a.segment) || a.segment < 16 || a.segment > 48)) return { ok: false, error: 'segment 需要 16–48 的整数' };
     if (a.maxLateralDrift !== undefined && (!Number.isInteger(a.maxLateralDrift) || a.maxLateralDrift < 0 || a.maxLateralDrift > 64)) return { ok: false, error: 'maxLateralDrift 需要 0–64 的整数，0 表示沿原方向直行' };
+    if (a.maxDescent !== undefined && (!Number.isInteger(a.maxDescent) || a.maxDescent < 0 || a.maxDescent > 64)) return { ok: false, error: 'maxDescent 需要 0–64 的整数（相对出发脚高允许的累计净下降）' };
+    if (a.descend !== undefined && typeof a.descend !== 'boolean') return { ok: false, error: 'descend 需要 true 或 false' };
+    if (a.descend === true && a.maxDescent !== undefined) return { ok: false, error: 'descend:true 与 maxDescent 只能写一个' };
     if (a.timeoutMs !== undefined && (!Number.isInteger(a.timeoutMs) || a.timeoutMs < 30000 || a.timeoutMs > 600000)) return { ok: false, error: 'timeoutMs 需要 30000–600000 的整数' };
     if (a.sessionId !== undefined && (typeof a.sessionId !== 'string' || !a.sessionId.trim())) return { ok: false, error: 'sessionId 需要非空字符串' };
     if (a.swim !== undefined && typeof a.swim !== 'boolean') return { ok: false, error: 'swim 需要 true 或 false' };
@@ -57,6 +65,7 @@ export const exploreToward: Skill<ExploreArgs> = {
       direction: direction as CardinalDirection, distance: a.distance,
       origin: { x: origin.x as number, y: origin.y as number, z: origin.z as number },
       segment: a.segment ?? EXPLORE_SEGMENT_STEPS, maxLateralDrift: a.maxLateralDrift ?? 48, timeoutMs: a.timeoutMs ?? 300000,
+      ...(a.descend === true ? { descend: true as const } : { maxDescent: (a.maxDescent as number | undefined) ?? EXPLORE_DEFAULT_MAX_DESCENT }),
       ...(a.until === undefined ? {} : { until: (a.until as string).trim().toLowerCase() }),
       ...(a.sessionId === undefined ? {} : { sessionId: (a.sessionId as string).trim() }),
       ...(a.swim === true ? { swim: true } : {}),
@@ -87,7 +96,11 @@ export const exploreToward: Skill<ExploreArgs> = {
     let last: SkillResult | undefined;
     try {
       const outcome = await runMovementCoordinator({ ...ctx, deadline }, {
-        intent: { kind: 'advance', direction: args.direction, distance: args.distance, maxLateralDrift: args.maxLateralDrift, allowed: ['walk', 'step', 'drop', 'jump'], historical: true },
+        intent: {
+          kind: 'advance', direction: args.direction, distance: args.distance, maxLateralDrift: args.maxLateralDrift,
+          allowed: ['walk', 'step', 'drop', 'jump'], historical: true,
+          ...(args.descend === true ? {} : { maxDescent: args.maxDescent }),
+        },
         rolling: true, checkSighting, maxSegments: Math.min(1024, 32 + Math.ceil(args.distance / 2)),
         maxStepsPerSegment: Math.min(EXPLORE_SEGMENT_STEPS, args.segment),
         invocationMaxTransitions: maxTransitions, maxTransitions,

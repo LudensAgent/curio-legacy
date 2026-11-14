@@ -87,6 +87,8 @@ export type SegmentRequest = {
   searchLimits?: { maxNodes?: number; maxEdges?: number };
   /** advance 的横向授权走廊；搜索与每个 transition 都按它检查。 */
   corridor?: { origin: Vec3Like; bearing: { x: number; z: number }; maxLateral: number };
+  /** advance 的纵向授权：路线最低脚高不得低于 fromY - maxDescent；缺省不限制。 */
+  descentBudget?: { fromY: number; maxDescent: number };
   /** 搜索/执行阶段切换；调用方据此只在“静止规划”阶段抑制卡死反射。 */
   onPhase?: (phase: 'searching' | 'executing') => void;
 };
@@ -160,6 +162,8 @@ export interface SegmentReceipt {
     risk?: true;
   };
   disallowed?: LandSearchTransition;
+  /** 路线超出纵向授权，执行前停下；不是搜索或地形失败。 */
+  descentNotAuthorized?: { lowestY: number; fromY: number; maxDescent: number };
   problemKind?: PrimitiveProblemKind;
   failureCode?: FailureCode;
   /** 兼容既有回执的分类：start_drift / step_failed / effect_not_confirmed / max_steps / ... */
@@ -365,6 +369,7 @@ export async function runNavigationSegment(ctx: SkillCtx, request: SegmentReques
     ...(result.problemKind === undefined ? {} : { problemKind: result.problemKind }),
     ...(result.search.policy?.rejectedEdges === undefined ? {} : { policyRejectedEdges: result.search.policy.rejectedEdges }),
     ...(result.disallowed === undefined ? {} : { disallowed: true }),
+    ...(result.descentNotAuthorized === undefined ? {} : { descentBudgetExceeded: true }),
     ...(result.problemKind === 'UNSUPPORTED_ENVIRONMENT' ? { modeGap: true } : {}),
   });
   result.searchFailure = movementFailureOfSearch(result.searchStatus, {
@@ -546,6 +551,22 @@ async function runNavigationSegmentInner(
     if (request.allowed.includes('drop') && Math.abs(dropTo.x - from.x) + Math.abs(dropTo.z - from.z) === 1
       && drop > 0.25 && drop <= 4.01 && lateralOf({ x: dropTo.x + 0.5, y: dropTo.y, z: dropTo.z + 0.5 }) <= corridorLimit) {
       const physicalTo = { x: dropTo.x + 0.5, y: dropTo.y, z: dropTo.z + 0.5 };
+      // 直接下落也是身体执行，必须和普通路线一样受纵向授权约束；否则 maxDescent:0–3 时
+      // 这个 ≤4 格的快速掉落会绕过检查。
+      if (request.descentBudget !== undefined) {
+        const { fromY, maxDescent } = request.descentBudget;
+        const lowestY = Math.min(dropStart.y, physicalTo.y);
+        if (lowestY < fromY - maxDescent - 1e-6) {
+          return {
+            waypoint, outcome: 'unsupported', measuredStart: start, measuredEnd: start,
+            chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+            evidenceMode: 'current', searches, planned: [], confirmed: [], remaining: [], pathLength: 0,
+            arrived: false, directDrop: false, boundarySummary, stopCode: 'descent_not_authorized',
+            descentNotAuthorized: { lowestY, fromY, maxDescent },
+            detail: `直接下落会到 y=${lowestY.toFixed(2)}（出发脚高 ${fromY.toFixed(2)}，低 ${(fromY - lowestY).toFixed(2)} 格），本次只授权下降 ${maxDescent} 格；没有执行`,
+          };
+        }
+      }
       // 1×1 回退只按格心落地；格心起点才能用单位 drop 几何复验真实动作。
       if (dropStart.x !== from.x + 0.5 || dropStart.z !== from.z + 0.5) {
         return {
@@ -743,8 +764,26 @@ async function runNavigationSegmentInner(
       detail: `第一段是 ${disallowed.kind}，不在 allowed（${request.allowed.join('、')}）`,
     };
   }
-  request.onPhase?.('executing');
   const transitions = planned.slice(0, request.maxTransitions);
+  // 纵向授权：本段真正要走的这段路线低于冻结起点允许的下降量，就一步都不走，把事实交回。
+  // 只看这一段（后续分段会按新位置重新规划并各自检查）；搜索/到达口径本身不改。
+  if (request.descentBudget !== undefined && transitions.length > 0) {
+    const { fromY, maxDescent } = request.descentBudget;
+    const lowestY = transitions.reduce((low, transition) => Math.min(low, transition.from.y, transition.to.y), start.y);
+    if (lowestY < fromY - maxDescent - 1e-6) {
+      return {
+        waypoint, outcome: 'unsupported', measuredStart: start, measuredEnd: start,
+        chosen: null, search: strict, searchStatus: strict.status, searchReason: strict.reason,
+        evidenceMode: 'current', searches,
+        planned, confirmed: [], remaining: planned, pathLength: 0, arrived: false, directDrop: false,
+        boundarySummary, stopCode: 'descent_not_authorized',
+        descentNotAuthorized: { lowestY, fromY, maxDescent },
+        ...(route.policy === undefined ? {} : { policy: route.policy }),
+        detail: `这一段路线会下到 y=${lowestY.toFixed(2)}（出发脚高 ${fromY.toFixed(2)}，低 ${(fromY - lowestY).toFixed(2)} 格），本次只授权下降 ${maxDescent} 格；没有移动`,
+      };
+    }
+  }
+  request.onPhase?.('executing');
   let truncated = transitions.length < planned.length;
   const confirmed: TransitionReceipt[] = [];
   let pathLength = 0;

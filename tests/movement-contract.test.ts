@@ -74,6 +74,7 @@ test('协调器停止原因映射：成功为 null，其余不折叠成走不通
     MODE_GAP: 'DELEGATION_RESTRICTION',
     DELEGATION_RESTRICTION: 'DELEGATION_RESTRICTION',
     TOOL_REQUIRED: 'TOOL_MISSING',
+    DESCENT_NOT_AUTHORIZED: 'DELEGATION_RESTRICTION',
     CONFLICT: 'CONFLICT',
     NO_PROGRESS: 'NO_PROGRESS',
     LATERAL_DRIFT: 'DELEGATION_RESTRICTION',
@@ -109,6 +110,7 @@ test('真实回执边界用统一分类：预算、冲突、驻留不再各自�
   assert.equal(code('RESIDENCY_NOT_READY'), 'PATH_NOT_FOUND');
   assert.equal(code('PHYSICAL_FAILURE'), 'EFFECT_NOT_CONFIRMED');
   assert.equal(code('TOOL_REQUIRED'), 'TOOL_MISSING', '缺工具要保留专门分类，不折叠成走不通');
+  assert.equal(code('DESCENT_NOT_AUTHORIZED'), 'PATH_NOT_FOUND', '未能满足的是本次下降授权，仍是一类委托限制');
   assert.equal(code('SCOPE_CHANGED'), 'WRONG_DIMENSION');
   assert.equal(failureCodeOfMovement('NO_PATH_EVIDENCE'), 'NOT_FOUND');
 });

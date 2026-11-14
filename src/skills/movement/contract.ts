@@ -55,6 +55,8 @@ export type SegmentFailureContext = {
   policyRejectedEdges?: number;
   disallowed?: boolean;
   modeGap?: boolean;
+  /** 路线（含直接下落回退）超出 advance 的纵向授权，执行前停下。 */
+  descentBudgetExceeded?: boolean;
 };
 
 const SEARCH_FAILURE: Record<LandSearchStatus, MovementFailure | null> = {
@@ -98,7 +100,8 @@ const SEGMENT_FAILURE: Record<SegmentOutcome, MovementFailure | null> = {
 /** Map one segment outcome. Body/policy/target sub-kinds refine `unsupported`. */
 export function movementFailureOfSegment(outcome: SegmentOutcome, context: SegmentFailureContext = {}): MovementFailure | null {
   if (outcome !== 'unsupported') return SEGMENT_FAILURE[outcome];
-  if (context.disallowed === true || context.modeGap === true || (context.policyRejectedEdges ?? 0) > 0) return 'DELEGATION_RESTRICTION';
+  if (context.descentBudgetExceeded === true || context.disallowed === true || context.modeGap === true
+    || (context.policyRejectedEdges ?? 0) > 0) return 'DELEGATION_RESTRICTION';
   if (context.problemKind === 'UNSUPPORTED_ENVIRONMENT') return 'BODY_CAPABILITY';
   return 'TARGET_UNRESOLVED';
 }
@@ -119,6 +122,7 @@ const STOP_FAILURE: Record<StopReason, MovementFailure | null> = {
   MODE_GAP: 'DELEGATION_RESTRICTION',
   DELEGATION_RESTRICTION: 'DELEGATION_RESTRICTION',
   TOOL_REQUIRED: 'TOOL_MISSING',
+  DESCENT_NOT_AUTHORIZED: 'DELEGATION_RESTRICTION',
   CONFLICT: 'CONFLICT',
   NO_PROGRESS: 'NO_PROGRESS',
   LATERAL_DRIFT: 'DELEGATION_RESTRICTION',

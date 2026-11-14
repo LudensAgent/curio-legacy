@@ -872,6 +872,8 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         historical: session.intent.historical,
         ...(request.swim === true ? { wade: true } : {}),
         ...(corridorOf(session) === undefined ? {} : { corridor: corridorOf(session)! }),
+        ...(session.intent.kind === 'advance' && session.intent.maxDescent !== undefined
+          ? { descentBudget: { fromY: session.frozenOrigin.y, maxDescent: session.intent.maxDescent } } : {}),
         maxTransitions: perSegment,
         allowUnknownCorridor: request.allowUnknownCorridor,
         deadline,
@@ -1179,6 +1181,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         break;
       }
       if (segment.outcome === 'unsupported') {
+        // 纵向授权不足：路线本身可达，只是会下探超过本次授权；一步没走，交回事实。
+        if (segment.descentNotAuthorized !== undefined) {
+          stop = stopOf('DESCENT_NOT_AUTHORIZED',
+            `${segment.detail ?? '前方路线超出本次下降授权'}；要下探请新建委托并写 descend:true 或想要的 maxDescent（同一 session 不能改下降授权，更小或更大的值都算新委托）`, { descentNotAuthorized: segment.descentNotAuthorized });
+          break;
+        }
         const modeGap = segment.problemKind === 'UNSUPPORTED_ENVIRONMENT';
         // 只是危险策略拒绝了几条边（火、岩浆旁）：先绕向别的前沿点，而不是当成目标无法解析。
         if (!modeGap && (segment.search.policy?.rejectedEdges ?? 0) > 0) {

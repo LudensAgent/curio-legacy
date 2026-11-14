@@ -29,6 +29,63 @@ test('方向探索保留距离，明确拒绝不支持的对角/施工能力与�
   assert.equal(exploreToward.validate({ direction: 'E', distance: 40, make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
 
+/** 一条先下降 10 格再走平的隧道：地表搜索如果不限制下降，就会沿它进洞。 */
+function descendingTunnelFixture() {
+  const fixture = voxelNavigationFixture(40);
+  const { adapter, map } = fixture;
+  let sequence = 10_000;
+  const put = (x: number, y: number, z: number, name: string) => map.observe({
+    worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+    observedAt: Date.now() + sequence, sequence: ++sequence, source: 'vision', evidence: 'seen',
+    stateComplete: true, state: { name, properties: {} }, pos: { x, y, z },
+  });
+  for (let x = 3; x <= 40; x++) {
+    const foot = x <= 12 ? 63 - (x - 2) : 53;
+    const width = x >= 13 ? [-1, 0, 1] : [0];
+    for (const z of [-1, 0, 1]) {
+      if (!width.includes(z)) { for (let y = 40; y <= 66; y++) put(x, y, z, 'stone'); continue; }
+      for (let y = 40; y <= 66; y++) put(x, y, z, y === foot - 1 ? 'stone' : y >= foot && y <= foot + 3 ? 'air' : 'stone');
+    }
+  }
+  return fixture;
+}
+
+test('方向探索默认不允许下探超过出发脚高 8 格：执行前停住并回报，授权后照常走', async (t) => {
+  const blocked = descendingTunnelFixture();
+  t.after(() => blocked.ctx.memory.close());
+  const stopped = await exploreToward.run(blocked.ctx, argsOf({ direction: 'E', distance: 40, segment: 16 }, blocked.adapter));
+  assert.equal(stopped.status, 'failed', stopped.summary);
+  const stop = stopped.data?.stop as { reason?: string; detail?: string; descentNotAuthorized?: { lowestY: number; fromY: number; maxDescent: number } } | undefined;
+  assert.equal(stop?.reason, 'DESCENT_NOT_AUTHORIZED');
+  assert.match(stopped.summary, /下到 y=/);
+  assert.deepEqual(stop?.descentNotAuthorized, { lowestY: 53, fromY: 64, maxDescent: 8 });
+  assert.match(String(stop?.detail), /出发脚高 64\.00，低 11\.00 格/);
+  assert.deepEqual(blocked.adapter.pos, { x: 0.5, y: 64, z: 0.5 }, '授权不足时一步都不走');
+
+  const allowed = descendingTunnelFixture();
+  t.after(() => allowed.ctx.memory.close());
+  const moved = await exploreToward.run(allowed.ctx, argsOf({ direction: 'E', distance: 40, segment: 16, maxDescent: 20 }, allowed.adapter));
+  assert.equal(moved.status, 'succeeded', moved.summary);
+  assert.equal(allowed.adapter.pos.y, 53, '授权后走完整条下坡路');
+  assert.ok(allowed.adapter.pos.x > 30);
+
+  const free = descendingTunnelFixture();
+  t.after(() => free.ctx.memory.close());
+  const unlimited = await exploreToward.run(free.ctx, argsOf({ direction: 'E', distance: 40, segment: 16, descend: true }, free.adapter));
+  assert.equal(unlimited.status, 'succeeded', unlimited.summary);
+  assert.equal(free.adapter.pos.y, 53);
+});
+
+test('方向探索的下降授权参数：descend 与 maxDescent 互斥，范围 0–64', () => {
+  const adapter = new FakeAdapter();
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, descend: true, maxDescent: 4 }, adapter).ok, false);
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, maxDescent: -1 }, adapter).ok, false);
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, maxDescent: 65 }, adapter).ok, false);
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, descend: 'yes' }, adapter).ok, false);
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, descend: true }, adapter).ok, true);
+  assert.equal(exploreToward.validate({ direction: 'E', distance: 40, maxDescent: 12 }, adapter).ok, true);
+});
+
 test('方向探索跨四个规划窗口沿冻结方向推进 64 格，途中不为窗口停下扫视', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(80);
   t.after(() => ctx.memory.close());

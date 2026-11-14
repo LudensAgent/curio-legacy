@@ -33,6 +33,8 @@ export type MovementIntent =
       maxLateralDrift: number;
       allowed: MoveMode[];
       historical: boolean;
+      /** 相对冻结起点脚高允许的累计净下降；缺省表示不限制（只有 explore_toward 会写默认值）。 */
+      maxDescent?: number;
     };
 
 export type MoveScope = { worldId: string; dim: string; sessionId: string };
@@ -59,6 +61,8 @@ export type StopReason =
   | 'DELEGATION_RESTRICTION'
   /** requireTool 生效时停在需要工具才能采集的方块上；拿到工具/改授权后可续接。 */
   | 'TOOL_REQUIRED'
+  /** explore_toward 的下行授权不够：路线最低点低于允许范围，执行前停住。 */
+  | 'DESCENT_NOT_AUTHORIZED'
   /** 同一站位、同一相关证据下，搜索与复验给出不一致结论；本轮不自动重播。 */
   | 'CONFLICT'
   | 'NO_PROGRESS'
@@ -136,6 +140,8 @@ export interface StopReceipt {
   blocker?: unknown;
   boundaries?: unknown[];
   modeGap?: unknown;
+  /** 纵向授权不足时的结构化事实：本段最低脚高、出发脚高、允许下降。 */
+  descentNotAuthorized?: { lowestY: number; fromY: number; maxDescent: number };
 }
 
 export interface MovementSession {
@@ -206,6 +212,7 @@ export function intentKeyOf(intent: MovementIntent): string {
     : {
         kind: intent.kind, direction: intent.direction, distance: intent.distance,
         maxLateralDrift: intent.maxLateralDrift, allowed: [...intent.allowed].sort(), historical: intent.historical,
+        ...(intent.maxDescent === undefined ? {} : { maxDescent: intent.maxDescent }),
       });
 }
 
