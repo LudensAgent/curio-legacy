@@ -332,6 +332,8 @@ test('mind：excavate_run 的计划步数进入本轮工具预算', () => {
   assert.match(fact, /本次约 16 格：铁镐预计耗 16 耐久/);
   assert.match(fact, /改用石镐预计耗 16/);
   assert.match(fact, /这次计划用铁镐挖普通石材（stone）/);
+  assert.match(fact, /continue 只按原参数继续；要换工具，用 adjust 把这一步的 tool 改成要用的工具/);
+  assert.match(fact, /要插入挖矿步，用 adjust\/new 加 mine_cell\/gather/);
   memory.close();
 });
 

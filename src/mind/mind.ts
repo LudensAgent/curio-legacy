@@ -2076,10 +2076,13 @@ export class Mind {
     // 新开挖计划的本轮预算不该被 30 秒节流吞掉；同一计划仍按 key 去重。
     const planChanged = excavationJob !== undefined && scoped !== this.toolFactKey;
     const toolFact = scoped && changed && (planChanged || factNow - this.toolFactAt >= Mind.TOOL_FACT_MIN_GAP_MS) ? tierFact : null;
-    if (toolFact) {
+    const toolFactText = toolFact === null ? null
+      : toolFact.text + (excavationJob === undefined ? ''
+        : `；${thoughtRunning?.skill === 'excavate_run' && thoughtRunning.planId === this.activity?.id ? '当前步骤正在执行' : '这段计划还没开始'}：continue 只按原参数继续；要换工具，用 adjust 把这一步的 tool 改成要用的工具；要插入挖矿步，用 adjust/new 加 mine_cell/gather；continue 不会做这两件事`);
+    if (toolFact && toolFactText !== null) {
       this.toolFactKey = scoped; this.toolFactAt = factNow;
       // 只在真正投放时打一次点；buildMindMessages 可能因升层/重试被调用多次，不能放在提示词构建里重复发
-      this.d.bus.publish('notice', 'P3', toolFact.text, { level: 'note', salience: 0.3, kind: 'tool_tradeoff' });
+      this.d.bus.publish('notice', 'P3', toolFactText, { level: 'note', salience: 0.3, kind: 'tool_tradeoff' });
     }
     const ctx: MindContext = {
       tier, reason: reflect ? `${reason}；做完了好几段活，顺便回头看看哪些办法好用、哪些该改` : reason,
@@ -2114,7 +2117,7 @@ export class Mind {
       ...(this.progressGate && tier === 'deliberate' ? { progressGate: this.safe(() => this.progressGateFacts(), null) } : {}),
       ...(this.d.behaviors && tier === 'deliberate' ? { learnedSkills: this.safe(() => this.d.behaviors!.overview().filter((l) => !/已收起|已停用/.test(l)), []), instincts: this.safe(() => instinctNote(), '') } : {}),
       ...(this.d.thinker.designing ? { designing: { brief: this.d.thinker.designing.brief, minutes: Math.round((Date.now() - this.d.thinker.designing.startedAt) / 60_000) } } : {}),
-      toolFact: toolFact?.text ?? null,
+      toolFact: toolFactText,
       repeatedFailures: [...this.failuresByTarget].filter(([key, f]) => f.n >= 2 && !nearbyFailKeys.has(key))
         .sort((a, b) => b[1].n - a[1].n).slice(0, 10).map(([key, f]) => `${key.replace(':', ' ')} ×${f.n}（10 现实分钟内）`),
       recentActionFailures: nearbyFailures.map((f, index, list) => {
