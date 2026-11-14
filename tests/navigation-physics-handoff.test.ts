@@ -32,7 +32,7 @@ function setup(
   groundTop: (x: number, z: number) => number,
   from: Vec3Like,
   bounds: { x0: number; x1: number; z0: number; z1: number },
-  opts: { blockName?: (x: number, y: number, z: number) => string } = {},
+  opts: { blockName?: (x: number, y: number, z: number) => string; y0?: number; y1?: number } = {},
 ) {
   const blockName = opts.blockName ?? ((x: number, y: number, z: number) => (y <= groundTop(x, z) ? 'stone' : 'air'));
   const world = {
@@ -188,7 +188,8 @@ function setup(
     return sectionRef(dim, x, y, z);
   };
   let sequence = 0;
-  for (let x = bounds.x0; x <= bounds.x1; x++) for (let z = bounds.z0; z <= bounds.z1; z++) for (let y = 58; y <= 68; y++) {
+  const y0 = opts.y0 ?? 58, y1 = opts.y1 ?? 68;
+  for (let x = bounds.x0; x <= bounds.x1; x++) for (let z = bounds.z0; z <= bounds.z1; z++) for (let y = y0; y <= y1; y++) {
     const pos = { x, y, z };
     map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
       observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
@@ -353,6 +354,26 @@ test('真实物理：连续上台阶从格列远端起步也能跳上去，不�
   assert.ok(stopped <= 2, `贴墙起跳时每级台阶最多 1 帧速度归零，实际 ${stopped} 帧`);
   assert.equal(back, 0, '中间没有后退修正');
   assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [9, 66, 0]);
+});
+
+test('真实物理：三格高封闭楼梯井里连续上台阶，不逐格重搜', { timeout: 60_000 }, async (t) => {
+  // 1 格宽、3 格净高的楼梯井：身体 AABB 半宽 0.3，后缘压回来向格列就会撞到低一层格列的天花板。
+  // 执行器若在目标格列边缘交接，下一步的当前证据复验会判 BLOCKED，于是每走一格就整段重搜。
+  const floorTop = (x: number) => 63 + Math.max(0, x);
+  const blockName = (x: number, y: number, z: number) => {
+    if (z !== 0) return 'stone';
+    const floor = floorTop(x);
+    return y <= floor ? 'stone' : y <= floor + 3 ? 'air' : 'stone';
+  };
+  const { ctx, timer, entity, frames, dispatches, controlEvents } = setup(floorTop, { x: 0.5, y: 64, z: 0.5 },
+    { x0: -2, x1: 8, z0: -1, z1: 1 }, { blockName, y0: 56, y1: 76 });
+  t.after(() => { clearInterval(timer); ctx.memory.close(); });
+  const result = await navigateTo.run(ctx, { to: { x: 4, y: 68, z: 0 }, allowed: ['walk', 'step'], historical: false, maxSteps: 16, allowUnknownCorridor: false });
+  assert.equal(result.status, 'succeeded', result.summary);
+  logRun(t, 'stairwell', frames, dispatches, controlEvents, result);
+  assert.equal(result.data?.replanCount, undefined, `不在每级台阶后整段重搜：${result.summary}`);
+  assert.equal((result.data?.counters as { searches: number }).searches, 1, '整段楼梯只搜索一次');
+  assert.deepEqual([Math.floor(entity.position.x), entity.position.y, Math.floor(entity.position.z)], [4, 68, 0]);
 });
 
 test('真实物理：上一级台阶后接平地，起跳不越过台阶上的落点，一路不停车', { timeout: 30_000 }, async (t) => {

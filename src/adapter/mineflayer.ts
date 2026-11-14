@@ -1047,6 +1047,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
         opts.maxDropDown,
         opts.settleAtTarget !== false,
         opts.passColumn === true,
+        opts.departureClearance,
         opts.keepControls === true,
         opts.onCheckpoint,
       );
@@ -1355,6 +1356,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     maxDropDown = 1,
     settleAtTarget = true,
     passColumn = false,
+    departureClearance?: number,
     keepControls = false,
     onCheckpoint?: (measured: Vec3Like) => boolean,
   ): Promise<'arrived' | 'overshot' | 'timeout' | 'blocked'> {
@@ -1385,7 +1387,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
           && (target.centerRadius === undefined || Math.hypot(p.x - tx, p.z - tz) <= target.centerRadius);
       }
       if (passColumn) {
-        return Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
+        return Math.floor(p.x) === fx && Math.floor(p.z) === fz && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical
+          && (departureClearance === undefined || departureClearedAt(p));
       }
       return Math.hypot(p.x - target.x, p.z - target.z) <= FEET_ARRIVAL_TOLERANCE.horizontal
         && Math.abs(p.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical;
@@ -1398,11 +1401,27 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 中间点脚位窗：冲过了一点但仍站在目标格内、脚高相符，也算到位（交接后从实测位置复验下一段）。
     const overshotInColumn = () => !settleAtTarget && mode === 'feet' && b.entity.onGround
       && Math.abs(b.entity.position.y - target.y) <= FEET_ARRIVAL_TOLERANCE.vertical
-      && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz;
+      && Math.floor(b.entity.position.x) === fx && Math.floor(b.entity.position.z) === fz
+      && (departureClearance === undefined || departureClearedAt(b.entity.position));
     const passedPoint = () => -(b.entity.position.x - tx) * Math.sin(heading) - (b.entity.position.z - tz) * Math.cos(heading) > 0;
     const settled = () => (atEndpoint() || overshotInColumn() && passedPoint()) && alongRemaining() <= 0;
     const p0 = b.entity.position;
     const p0y = p0.y;
+    // 格列交接不能停在来向一侧的格列边缘：1 格宽楼梯井里，身体后缘压回低一层格列后，
+    // 下一步的竖直抬升会撞上那一列的天花板（库的 step 保守模型判 BLOCKED），整段路线
+    // 就要重搜。调用方按下一步的真实复验结果给出允许的浅量；冲过计划点不算问题。
+    const departureClearedAt = (p: Vec3Like) => {
+      if (departureClearance === undefined) return true;
+      const advance = (from: number, to: number, at: number) => {
+        const fromCell = Math.floor(from), toCell = Math.floor(to);
+        if (fromCell === toCell) return Number.POSITIVE_INFINITY;
+        const plane = fromCell < toCell ? toCell : toCell + 1;
+        return fromCell < toCell ? at - plane : plane - at;
+      };
+      const required = (from: number, to: number) => Math.max(0, advance(from, to, to) - departureClearance - 1e-6);
+      return advance(p0.x, target.x, p.x) >= required(p0.x, target.x)
+        && advance(p0.z, target.z, p.z) >= required(p0.z, target.z);
+    };
     const dist = () => Math.hypot(tx - b.entity.position.x, tz - b.entity.position.z);
     if (Date.now() >= deadline) return 'timeout';
     // A horizontal jump is a single, already-proved gap crossing at the same
@@ -1631,9 +1650,18 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       }
     }
     checkPosition();
+    // physicsTick 可能没赶上落地那一帧（下落/制动循环先读到 settled）：连续路线已经预验过下一步时，
+    // 这里同样确认交接，避免每落一次地都退回停车、下一段重新起步。
+    const arrive = () => {
+      if (!continued && !settleAtTarget && onCheckpoint?.(b.entity.position) === true) {
+        continued = true;
+        crossedCheckpoint = true;
+      }
+      return 'arrived' as const;
+    };
     // 已复验的连续路线中间点只确认真实落地/端点，不把每格都当作最终停车点。
     // 上面的 finally 仍释放本次控制；宿主同步复验下一段后可立即接续而不等速度归零。
-    if (!settleAtTarget && settled()) return 'arrived';
+    if (!settleAtTarget && settled()) return arrive();
     // 连续脚位允许有限次低速修正：制动估计偏差可能让身体停在目标外几厘米，
     // 格心模式仍保留旧的越段即停语义。
     if (overshot && (mode === 'cell' || dist() > 0.6)) return 'overshot';
@@ -1649,7 +1677,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     while (Date.now() < deadline) {
       check();
       checkPosition();
-      if (!settleAtTarget && settled()) return 'arrived';
+      if (!settleAtTarget && settled()) return arrive();
       if (settled() && stopped()) {
         if (++stable >= 2) return 'arrived';
       } else {

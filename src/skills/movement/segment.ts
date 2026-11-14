@@ -1245,10 +1245,38 @@ async function runNavigationSegmentInner(
       continuous = windowEnd || nextExecutable
         && [transition, next!].every(smallEdge)
         && (transition.kind !== 'drop' || drop <= 1 + FEET_ARRIVAL_TOLERANCE.vertical);
+      // 下一步是台阶时，先按当前证据确认从计划点往回退到哪里仍然能走：1 格宽楼梯井里，
+      // 身体后缘压回来向格列会让下一步的竖直抬升撞上低一层格列的天花板，整段被判 BLOCKED。
+      // 返回交接点最多允许比计划点浅多少；计划点附近本来就都能走时不加要求。
+      const stepHandoffClearance = (edge: LandSearchTransition): number | undefined => {
+        const dx = edge.to.x - edge.from.x, dz = edge.to.z - edge.from.z;
+        const axis = Math.abs(dx) >= Math.abs(dz) ? 'x' as const : 'z' as const;
+        const dir = Math.sign(axis === 'x' ? dx : dz);
+        if (dir === 0) return undefined;
+        const coord = edge.from[axis];
+        const depth = dir > 0 ? coord - Math.floor(coord) : Math.floor(coord) + 1 - coord;
+        const maxBack = depth - 0.02;
+        const opens = (back: number) => {
+          if (back < 0.05 || back > maxBack) return false;
+          const start = { ...edge.from, [axis]: coord - dir * back };
+          const check = verifyLandRoute(voxel, { ...currentRequest, measuredStart: start }, [edge], Date.now()).transitions[0]!;
+          if (check.status === 'OPEN') return true;
+          const live = LIVE_FALLBACK.has(check.status)
+            ? liveEdgeStatus(ctx.adapter, start, edge.to, edge.kind, { wade: request.wade === true }) : undefined;
+          return live?.status === 'open';
+        };
+        for (const back of [maxBack, 0.3, 0.2, 0.1]) {
+          if (opens(back)) return back >= maxBack - 1e-9 ? undefined : back;
+        }
+        return 0;
+      };
+      const departureClearance = continuous && next !== undefined && next.kind === 'step' && sharesHeading(transition, next)
+        ? stepHandoffClearance(next) : undefined;
       // 原目标是一个格子时，最后一步只需站进这一格并停稳，不必对准计划里的连续点。
       cellFinish = next === undefined && !directionalFinish && request.goal.kind === 'cell' && smallEdge(transition)
         && goalReached(request.goal, transition.to, true);
       // 台阶与落差有腾空段，落点难精确命中：站进目标格列即交接，下一段从实测位置复验。
+      // 下一步也是台阶时，交接还要满足 stepHandoffClearance 给出的来向格列清空量。
       passColumn = cellFinish || continuous && (sameHeading || turnCleared || transition.kind === 'drop' || transition.kind === 'step' || windowEnd);
       // 连续路线的下一步已在 tick 外确认；到达本点时只读取这个结果，有效就保持运动键，
       // 由紧接着的下一段身体控制接续。同向、已确认净空的转弯、台阶与一格落差都保留速度；
@@ -1276,6 +1304,7 @@ async function runNavigationSegmentInner(
             timeoutMs: Math.min(transition.kind === 'drop' && drop > 1 + FEET_ARRIVAL_TOLERANCE.vertical ? 6000 : 3000, Math.floor(remaining)),
             ...(continuous ? { settleAtTarget: false } : {}),
             ...(passColumn ? { passColumn: true } : {}),
+            ...(departureClearance === undefined || !passColumn || cellFinish ? {} : { departureClearance }),
             ...(keepControls ? { keepControls: true } : {}),
             // 允许 drop 时，身体滑下边缘的实测落差按搜索同一上限（maxDrop 4）放行：落地后由执行偏差从实测位置重搜，
             // 不在半空判失败；未允许 drop 时仍只容一格。
