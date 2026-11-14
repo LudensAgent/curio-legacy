@@ -9,6 +9,7 @@ import type { ChatMessage } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
+import { PERSISTENT_VERIFY_GUIDANCE } from './verify-guidance.ts';
 
 /**
  * 造技能：从经历里总结出新技能（或者重写管这件事却没做好的旧技能），后台单独请模型写，写下就生效。
@@ -548,6 +549,7 @@ chronic_shortages 是这两个小时里一再缺的东西：想想能不能把�
 - 能用现有可靠技能就组合它们；固定的几步优先 steps。需要参数化试验时，心智已有 experiment_method（有界参数程序、观测后置条件和试验证据），不能把 program 当成此处尚不支持的 skill 字段；适合这种试验就输出 none，在 why 说明可检验的设想，交给心智选择。确实需要计算（找路、挑方向、挑落脚点）或循环时保留 code，也可以不写 when，做成由心智 use_skill 调用的做法。
 - steps 和 code 候选都必须同时写 verify：做完以后看一眼世界、确认真的做成了（脱船就看还在不在船上，出坑就看头顶见不见天，清背包就看那几样少了没有）；判定没通过算这次没做成，会记进成败、交给后台改进。判定至少要调用一次 api.* 观察世界，不能写成恒真（return true）或只信代码返回 ok。
 - verify 核对调用方指定的原目标和实际前后观测，不能只信代码返回 ok、自己算出的目标或仅仅发生了移动；未做事的 skipped 不等于目标已完成，无法观察时说明不能确认。循环必须有明确退出条件和次数/时间边界。
+- ${PERSISTENT_VERIFY_GUIDANCE}
 - 调用类技能（不写 when）有要调用方给的参数时，写 "args":{"参数名":"意思"} 声明；代码里读 args.参数名，verify 里拿 args.args.参数名 核对目标（别拿代码自己算出来、放进返回值的目标比）。
 - existing_skills 里已经有管这件事的技能、只是没做好：用同一个名字重写它，别重复造。
 - reliable_skills 是已经验证可靠的技能（积木）：代码里用 api.useSkill 调用它们，能组合现成的就别从底层动作重写一遍；新技能可以比它们高一层（比如“开一条巷道找铁并带回来”调用挖巷道的那份）。

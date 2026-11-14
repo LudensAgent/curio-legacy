@@ -6,10 +6,11 @@ import { setImmediate } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { CodeImprover } from '../src/codeskills/improver.ts';
 import { SkillSmith } from '../src/codeskills/smith.ts';
+import { PERSISTENT_VERIFY_GUIDANCE } from '../src/codeskills/verify-guidance.ts';
 import { EventBus } from '../src/events.ts';
 import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
-import type { Completion } from '../src/planner/llm.ts';
+import type { ChatMessage, Completion } from '../src/planner/llm.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 const flush = async () => { for (let i = 0; i < 12; i++) await setImmediate(); };
@@ -114,4 +115,33 @@ test('后台改进返回相同完整候选时保留证据，不误报生成新�
   assert.deepEqual(engine.statsOf(candidate.name), before);
   assert.ok(bus.recent().some((event) => event.type === 'skill_improve_kept'));
   assert.ok(!bus.recent().some((event) => event.type === 'skill_improved'));
+});
+
+test('写技能与改进提示共用持续处境自动技能的判定口径', async (t) => {
+  const { adapter, engine, bus, book } = setup(t);
+  const systems: string[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
+    systems.push(messages[0].content);
+    return { text: JSON.stringify({ none: true, why: '测试不写技能' }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(planner, engine, book, bus, () => adapter.state());
+  t.after(() => smith.stop());
+  smith.report('noted', Date.now(), '低血时有远程怪就举盾', 0);
+  await flush();
+  assert.ok(systems.some((s) => s.includes(PERSISTENT_VERIFY_GUIDANCE)));
+
+  const skill = { name: 'repair-trigger', description: '低血时观察脚下', when: { hp_below: 8 },
+    code: 'const s = await api.state(); return s.feet;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "已死亡";' };
+  assert.ok(engine.write(skill).ok);
+  const improveSystems: string[] = [];
+  const improver = new CodeImprover({ autonomous: true, noteInvalid() {}, async complete(messages: ChatMessage[]) {
+    improveSystems.push(messages[0].content);
+    return { text: JSON.stringify({ keep: true, why: '没有改动' }), latencyMs: 1 };
+  } }, engine, bus);
+  assert.equal(improver.consider(skill.name, 'requested'), null);
+  await flush();
+  assert.ok(improveSystems.some((s) => s.includes(PERSISTENT_VERIFY_GUIDANCE)));
+  assert.match(PERSISTENT_VERIFY_GUIDANCE, /可观察改善/);
+  assert.match(PERSISTENT_VERIFY_GUIDANCE, /不能只核对时间用完/);
+  assert.match(PERSISTENT_VERIFY_GUIDANCE, /返回没成并交回心智/);
 });
