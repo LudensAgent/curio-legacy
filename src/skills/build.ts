@@ -485,7 +485,7 @@ export const sleepSkill: Skill<{ at?: Vec3Like; place?: boolean }> = {
   name: 'sleep',
   description: '天黑后睡床跳过黑夜、设重生点（黄昏会在床边等）。{} 睡手边的床；at 走去那张床睡；place 放下背包里的床睡（挑附近有顶的地方）。床拆下来（dig）会掉成床物品，捡起来就在背包里。只限主世界。',
   argsDoc: '{}｜{"at":{x,y,z}}｜{"place":true}',
-  timeoutMs: 120000, movement: false,
+  timeoutMs: 120000, movement: false, bodyMotion: 'horizontal',
   validate(raw) {
     const a = obj(raw);
     const at = a.at ?? a.bed;

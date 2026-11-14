@@ -223,3 +223,12 @@ export function conditionDeficit(condition: Condition, state: AgentState, worldI
   const deficits = condition.conditions.map((c) => conditionDeficit(c, state, worldId, observations, percept));
   return deficits.some((n) => n === null) ? null : deficits.reduce<number>((sum, n) => sum + n!, 0);
 }
+
+/** 只按 min_distance 收口的分支只证明推进量，不证明找到目标：返回距离用于事实提醒，不改条件。
+ *  any_of 的任一分支单独成立就会收工，所以任一分支只写 min_distance 都要提醒；all_of 要所有分支都成立，单靠它不算。 */
+export function minDistanceOnly(condition: Condition): number | null {
+  if (condition.type === 'exploration') return condition.find === undefined ? condition.min_distance ?? null : null;
+  if (condition.type === 'any_of') return condition.conditions.map(minDistanceOnly).find((distance): distance is number => distance !== null) ?? null;
+  if (condition.type === 'all_of' && condition.conditions.length === 1) return minDistanceOnly(condition.conditions[0]);
+  return null;
+}

@@ -466,7 +466,7 @@ const mineCellSkill: Skill<MineArgs> = {
   catalog: '{"at":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"tool"?:"物品名"，"autoTool"?true，"wet"?/"lava"?/"fall"?/"allowUnknownAdjacent"?:true：挖掉身边指定的一格（[0,-1,0] 是脚下支撑）；autoTool 由身体挑工具；液体邻格、挖脚下落差、邻格未看清要显式授权',
   argsDoc: '{"at":[前,上,右], "facing"?:"N|E|S|W", "tool"?:"物品注册名（只用这一把；不掉落也挖并报 noDrop）", "autoTool"?true（由身体按方块从背包挑合适的工具装备到主手；不写 tool 时默认只用当前手持）, "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true} 或 {"xyz":[x,y,z], "facing"?:"N|E|S|W", "tool"?:"物品注册名", "autoTool"?true, "wet"?true, "lava"?true, "fall"?true, "allowUnknownAdjacent"?true}（xyz 是整数方块格坐标；前后/左右 ±2，上下 -1..3；[0,-1,0] 是脚部支撑格）',
   timeoutMs: 30000,
-  movement: false,
+  movement: false, bodyMotion: 'vertical',
   // 计划录入只检查写法；目标是否在挖得到的范围、邻格和落点由执行前按最新位置确认。
   validatePlan(raw, adapter) {
     const a = obj(raw);
@@ -889,7 +889,7 @@ const placeSupportSkill: Skill<SupportArgs> = {
   description: '在指定格形成可站立支撑（[前,上,右] 或 xyz）。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。已有可站立顶面（整块、半砖、雪层等）就算满足，不要求与 item 同名，也不再消耗材料；只有空气/可替换植物才放 item。支持脚下一格和脚下两格；当前站位看不到参照面时会后退/侧移或潜行到支撑块边缘再放。脚下两格的边缘放置需要支撑块下方那一格是同层实心参照方块；没有就如实失败，改用 descend_to 或换到能看见参照面的站位。成功回执返回 consumed=放置前后目标材料总数之差；失败回执返回每次尝试的实际站位与参照面事实。只放这一格，不换材料、不换目标，不自动清障/垫高。',
   argsDoc: `{"at":[前,上,右], "item":"方块名|any", "facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z], "item":"方块名|any"}（item 必填：已知方块名或字面 any，${ANY_FILL_NOTE}；xyz 是整数方块格坐标；前后/左右 ±2，上下 -2..3）`,
   timeoutMs: 20000,
-  movement: true,
+  movement: true, bodyMotion: 'none',
   // 计划录入只检查写法；目标是否在放置范围由执行前按最新位置确认。
   validatePlan(raw, adapter) {
     const a = obj(raw);
@@ -1250,7 +1250,7 @@ const pillarOneSkill: Skill<{ item?: string }> = {
   description: '原地垫高一格：跳起来往脚下放一块方块并确认真的站上去。必须用 item 指定方块名或显式 "any"，不会默认替你选材料。头顶/侧上方阻挡时返回具体格，由你决定先 mine_cell。只垫一格，不连续爬升，不挖头顶。',
   argsDoc: `{"item":"方块名|any"}（item 必填：已知方块名或字面 any，${ANY_FILL_NOTE}；不会默认自选材料）`,
   timeoutMs: 20000,
-  movement: true,
+  movement: true, bodyMotion: 'vertical',
   validate(raw, adapter) {
     const a = obj(raw);
     const explicit = a.item ?? a.block;

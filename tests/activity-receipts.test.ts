@@ -7,12 +7,14 @@ const state = (inventory: { name: string; count: number }[] = []) => ({ pos: { .
 const make = (what: string, steps: { skill: string; args?: unknown }[], extra: Record<string, unknown> = {}) =>
   createActivity({ what, why: '', kind: 'gather', repeat: 1, steps, ...extra }, '', 'llm', state());
 
-test('计划声称走远/换地方，却只有观察或采集：报告计划覆盖缺口', () => {
+test('计划声称走远/换地方，只有观察时报告覆盖缺口；采集会走到看见的方块', () => {
   const onlyLook = make('沿地表走远找树，砍 6 根原木', [
     { skill: 'look_around', args: { for: 'log' } },
     { skill: 'gather', args: { block: 'log' } },
   ]);
-  assert.match(planCoverageGap(onlyLook) ?? '', /没有会实际移动身体的动作/);
+  assert.equal(planCoverageGap(onlyLook), null, 'gather 会走到看得见的方块');
+  const lookOnly = make('沿地表走远找树', [{ skill: 'look_around', args: { for: 'log' } }]);
+  assert.match(planCoverageGap(lookOnly) ?? '', /没有会让身体移动的动作/);
 
   const moved = make('沿地表走远找树，砍 6 根原木', [
     { skill: 'move_step', args: { at: [1, 0, 0] } },

@@ -8,11 +8,12 @@ import { queryMechanics } from '../methods/mechanics.ts';
 import { boundedJson } from '../planner/prompt.ts';
 import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
-import { evaluateCondition, validateCondition } from '../projects/conditions.ts';
+import { evaluateCondition, minDistanceOnly, validateCondition } from '../projects/conditions.ts';
 import type { Condition } from '../projects/types.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { validatePlanSkill } from '../skills/types.ts';
 import { buildMindMessages, buildReflectionMessages, moveDetails, moveDirectory, type MindContext } from './prompt.ts';
+import { NO_ARBITRARY_TRAVEL_STEPS, NON_OBSERVING_STEPS, NON_PRODUCING_STEPS } from './step-capability.ts';
 import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
@@ -116,30 +117,6 @@ export function inferKind(steps: Step[]): ActivityKind {
 /** 决定里能当场退回去改的毛病：步骤写错被丢、收工条件无效、next 被忽略 */
 const FIXABLE_NOTE = /丢掉了不能执行的步骤|done_when 无效|next 已忽略/;
 
-// 只用“已知不会产生物品/不会移动”的技能集合做否定判断；未知的自学/代码技能一律当作可能，
-// 避免把合法的自定义步骤误判成不可能完成。
-const NON_PRODUCING_STEPS = new Set([
-  'look', 'look_around', 'resolve_target', 'plan_route', 'navigate_to', 'advance', 'move_step', 'press_keys',
-  'descend_to', 'assess_landings', 'find_item', 'observe_portal', 'inspect_block', 'wait', 'sleep',
-  'eat', 'store_items', 'toss_item', 'place_cell', 'place_support', 'pillar_one', 'swim_path',
-  'boat_path', 'travel_portal', 'recall_portal', 'guard', 'spatial_query', 'spatial_extrema',
-  'remember_place', 'sign_text', 'edit_book',
-]);
-const NON_MOVING_STEPS = new Set([
-  'look', 'look_around', 'resolve_target', 'plan_route', 'assess_landings', 'find_item',
-  'observe_portal', 'inspect_block', 'wait', 'sleep', 'eat', 'craft', 'remember_place',
-  'spatial_query', 'spatial_extrema', 'sign_text', 'edit_book',
-]);
-
-/** 只按 min_distance 收口的分支只证明推进量，不证明找到目标：返回距离用于事实提醒，不改条件。
- *  any_of 的任一分支单独成立就会收工，所以任一分支只写 min_distance 都要提醒；all_of 要所有分支都成立，单靠它不算。 */
-const minDistanceOnly = (condition: Condition): number | null => {
-  if (condition.type === 'exploration') return condition.find === undefined ? condition.min_distance ?? null : null;
-  if (condition.type === 'any_of') return condition.conditions.map(minDistanceOnly).find((distance): distance is number => distance !== null) ?? null;
-  if (condition.type === 'all_of' && condition.conditions.length === 1) return minDistanceOnly(condition.conditions[0]);
-  return null;
-};
-
 /** 只陈述这条条件证明了什么；不改写法、不催着换条件。 */
 const minDistanceNote = (label: string, distance: number) =>
   `${label}.done_when 有个只按 exploration.min_distance=${distance} 判断的分支：这个分支只证明本段离起点至少 ${distance} 格或进了新区块；若这段目标是找到或到达某个目标，单靠它不能证明。`;
@@ -155,18 +132,14 @@ function doneWhenGap(condition: Condition, skills: Set<string>): string | null {
         ? `done_when 需要背包里有 ${condition.item}×${condition.count}，但这几步（${[...skills].join('、') || '无'}）都不会产生物品（只读/纯移动/消耗类）；把能产生它的采集/制作/拾取动作放进这段活，或换一个这段活能确认的收工条件`
         : null;
     case 'location_near':
-      return [...skills].every((skill) => NON_MOVING_STEPS.has(skill))
-        ? `done_when 需要到达 (${condition.pos.x},${condition.pos.y},${condition.pos.z}) 附近，但这几步（${[...skills].join('、') || '无'}）都不会移动（resolve_target/plan_route/look_around 只读，不算移动）；把移动步骤放进这段活，或换一个这段活能确认的收工条件`
+      return [...skills].every((skill) => NO_ARBITRARY_TRAVEL_STEPS.has(skill))
+        ? `done_when 需要到达 (${condition.pos.x},${condition.pos.y},${condition.pos.z}) 附近，但这几步（${[...skills].join('、') || '无'}）不能保证到达指定坐标（只读、查询或只能走到已知目标）；把移动步骤放进这段活，或换一个这段活能确认的收工条件`
         : null;
     case 'exploration': {
-      if (condition.min_distance !== undefined && [...skills].every((skill) => NON_MOVING_STEPS.has(skill))) {
-        return `done_when 要求本段实测离起点 ${condition.min_distance} 格，但这几步（${[...skills].join('、') || '无'}）都不会移动；把会实际移动的步骤放进这段活，或改用 find`;
+      if (condition.min_distance !== undefined && [...skills].every((skill) => NO_ARBITRARY_TRAVEL_STEPS.has(skill))) {
+        return `done_when 要求本段实测离起点 ${condition.min_distance} 格，但这几步（${[...skills].join('、') || '无'}）不能保证带来这段实测的移动距离（只会走到已知目标）；把会实际移动的步骤放进这段活，或改用 find`;
       }
-      const nonObserving = new Set(['move_step', 'navigate_to', 'advance', 'travel_to', 'approach_visible', 'press_keys', 'descend_to', 'excavate_run',
-        'pillar_one', 'place_cell', 'place_support', 'craft', 'smelt', 'sleep', 'eat', 'wait', 'store_items',
-        'travel_portal', 'recall_portal', 'boat_path', 'swim_path', 'resolve_target', 'plan_route', 'assess_landings',
-        'find_item', 'remember_place', 'sign_text', 'edit_book']);
-      if (condition.find !== undefined && [...skills].every((skill) => nonObserving.has(skill))) {
+      if (condition.find !== undefined && [...skills].every((skill) => NON_OBSERVING_STEPS.has(skill))) {
         return `done_when 要求本段实际看见 ${condition.find}，但这几步（${[...skills].join('、') || '无'}）都不会观察目标；把观察/搜索/采集步骤放进这段活，或改用 min_distance`;
       }
       return null;

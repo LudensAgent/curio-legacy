@@ -599,7 +599,7 @@ export const craft: Skill<{ item: string; count: number; batchSize?: number; ext
   description: '会自己走到已加载的已知工作台旁（不必先 go_near）。合成指定物品，默认只使用现有材料和已放好的工作台；缺少前置材料或工作台就报告缺口。make:true 显式允许补做两层以内的材料并制造、放置临时工作台，用完收回。count 是本次产物总个数；batchSize 可自主指定每批执行配方的次数（一次配方可能产出多个物品），省略时按材料容量批量执行。',
   argsDoc: '{"item": "<物品名>", "count"?: 1-64, "batchSize"?: 1-64（每批配方次数）, "make"?: true（允许补材料和准备工作台）, "extra"?: true（已有同类设施、床或经用装备仍要再做）}',
   timeoutMs: 60000,
-  movement: false,
+  movement: false, bodyMotion: 'horizontal',
   validate(raw, adapter) {
     const a = obj(raw);
     const raw0 = String(a.item ?? '').trim().replace(/^minecraft:/, '');

@@ -2,14 +2,15 @@ import type { AgentState } from '../adapter/types.ts';
 import type { Step } from '../arbiter/arbiter.ts';
 import type { Percept } from '../perception/perception.ts';
 import { FACINGS, feetCell, toWorld, type Facing } from '../perception/local.ts';
-import { evaluateCondition, type ConditionPerception } from '../projects/conditions.ts';
+import { evaluateCondition, minDistanceOnly, type ConditionPerception } from '../projects/conditions.ts';
 import { FOOD_VALUE } from '../skills/food.ts';
 import { SKILLS } from '../skills/index.ts';
 import { STANCE_MOVES } from '../skills/stance.ts';
 import { PLACEABLE } from '../skills/survival.ts';
-import type { SkillResult } from '../skills/types.ts';
+import { bodyMotionOf, type SkillResult } from '../skills/types.ts';
 import { shortId } from '../util.ts';
 import { hitsResourceTarget } from './progress-ledger.ts';
+import { QUERY_ONLY_STEPS } from './step-capability.ts';
 import type { Activity, ActivityDraft, ActivityOutcome, ActivityRecord, ActivityStep, CollectionReceipt, NavigationProgress, NavigationRequest } from './types.ts';
 
 /**
@@ -1219,20 +1220,45 @@ function searchIntentOf(a: Activity): boolean {
     || hasExplorationCondition(a.doneWhen) || SEARCH_WORDS.test(a.what);
 }
 
-/**
- * 计划声称要走远/换地方/找远处的资源，却没有任何会实际改变身体位置的动作：
- * 这是计划覆盖缺口，只提示，不替 Agent 改步骤或阻止执行。
- */
-export function planCoverageGap(a: Activity): string | null {
-  const travelIntent = /走远|走一段|远行|远走|探路|探索|找树|找.*(树|木|原木|菌柄|log|wood)|换.*(地方|方向)|过去|走到|前往|搜索|搜寻|search|explore|scout|wander/i.test(a.what);
-  const changesPosition = a.steps.some((step) => {
-    if (['move_step', 'navigate_to', 'advance', 'travel_to', 'explore_toward', 'approach_visible', 'swim_path', 'boat_path', 'go_near', 'descend_to', 'excavate_run', 'expedition', 'travel_portal', 'recall_portal', 'use_end_gateway'].includes(step.skill)) return true;
-    if (step.skill !== 'press_keys') return false;
+/** 动作能否让身体实际移动；竖直移动（垫高/下落）也算，未知技能当作可能，避免误判。
+ *  这里只排除“完全不会动”的计划；竖直移动是否足以到远处，交给实际回执，不在地面判断。 */
+const stepMovesBody = (step: ActivityStep) => {
+  if (step.skill === 'press_keys') {
     const keys = (step.args as { keys?: Record<string, unknown> } | undefined)?.keys ?? {};
     return ['forward', 'back', 'left', 'right', 'sprint'].some((key) => keys[key] === true);
-  });
-  if (!travelIntent || changesPosition) return null;
-  return '目标需要走到/换地方/扩大观察范围，但步骤里没有会实际移动身体的动作；只转头、观察或采集不会改变位置，不能当作远行或远处搜索';
+  }
+  const skill = SKILLS[step.skill];
+  return skill ? bodyMotionOf(skill) !== 'none' : true;
+};
+
+/** “走过去/去某处”的旅行词；排除“看过去/望过去/去看”等观察措辞。 */
+const GO_OR_PASS = String.raw`(?<![看望扫转])过去|(?<![看过望回])去(?!看|找)`;
+const TRAVEL_INTENT = new RegExp(
+  `走远|走一段|远行|远走|到远处|往远处|向远处|朝远处|远处的|没去过|走到|走向|走过去|前往|${GO_OR_PASS}|探索|搜索|搜寻|换.*(地方|方向)|探路|search|explore|scout|wander`,
+  'i',
+);
+const MOVES_TOWARD = new RegExp(`走到|走向|走过去|前往|${GO_OR_PASS}`);
+
+/**
+ * 计划声称要走远/换地方/搜索远处目标，却没有任何会让身体移动的动作：
+ * 这是计划覆盖缺口，只提示，不替 Agent 改步骤或阻止执行。
+ * 去看见/记得目标的动作（gather/take_items/sleep…）也算身体移动；只要身体能动，
+ * 就不替 Agent 判断它选的动作能不能覆盖到目标，交给实际回执。
+ */
+export function planCoverageGap(a: Activity): string | null {
+  // 只有目标明确要求去远处/换地方/搜索时才检查；“环顾四周找树”“看过去查一下”是本地观察/查询，
+  // 不因为出现“找树”这个词就要求移动。“看过去/望过去/去看”不是走过去。
+  if (!TRAVEL_INTENT.test(a.what)) return null;
+  // 纯观察措辞（环顾/转头/看/查看/确认）不需要移动；“找/搜索/探索”即使带“远处”仍是搜索意图。
+  const observationOnly = a.steps.every((step) => ['look', 'look_around', 'inspect_block'].includes(step.skill));
+  const observingWording = /环顾|转头/.test(a.what)
+    || (/看|查看|看清|确认|观察|望/.test(a.what) && !/找|搜索|搜寻|探索|寻找/.test(a.what));
+  const movesToward = MOVES_TOWARD.test(a.what);
+  if (observationOnly && observingWording && !movesToward) return null;
+  if (!a.steps.some(stepMovesBody)) {
+    return '目标需要走到/换地方，但步骤里没有会让身体移动的动作；只转头、观察或查询不会改变站位，要到那里需要移动动作';
+  }
+  return null;
 }
 
 /** 进展信号：取得点名目标、真正看见搜索目标、新区块、清单勾项或出行前沿。
@@ -1497,11 +1523,16 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
     partial_progress_recorded: true,
     not_counted_as_completed: '被取消的这一步不会记为完成，也不会自动续跑到原目标',
   } : null;
+  const stepSkills = a.steps.map((s) => s.skill);
+  // 整段都是查询/观察时给一句能力事实；普通移动/生产活动不需要这条提示。
+  const queryOnly = stepSkills.length > 0 && stepSkills.every((skill) => QUERY_ONLY_STEPS.has(skill));
+  const distanceOnly = a.doneWhen ? minDistanceOnly(a.doneWhen) : null;
   return {
     what: a.what, why: a.why, kind: a.kind,
     ...(a.facing ? { facing: a.facing } : {}),
     ...(a.outcomeId ? { outcome_id: a.outcomeId } : {}), ...(a.methodId ? { method_id: a.methodId } : {}),
     routine: a.steps.map((s) => `${s.skill} ${argsLabel(s)}${s.id ? ` #${s.id}` : ''}${s.optional ? '（顺手）' : ''}`),
+    ...(queryOnly ? { step_capability: '本段只有查询/观察，不会改变背包或站位；要产出用采集/制作/拾取，要移动用移动动作。' } : {}),
     round: `${a.iteration + 1}/${a.repeat}`, next_step: a.index,
     elapsed_real_s: Math.round((Date.now() - a.startedAt) / 1000),
     ...(running ? { running_step: { skill: running.skill, args: running.args, source: running.source, elapsed_real_s: Math.round((Date.now() - running.startedAt) / 1000) } } : {}),
@@ -1517,6 +1548,7 @@ export function describeActivity(a: Activity, state: AgentState, percept?: Perce
       note: done.status === 'satisfied'
         ? `收工条件成立只在步骤之间结束这段活，不会取消正在执行的 ${running && running.source !== 'filler' && running.source !== 'reflex' ? running.skill : '动作'}；它也不证明原委托的其他目标已完成`
         : '收工条件只在步骤之间检查，不会取消正在执行的动作',
+      ...(distanceOnly !== null ? { progress_note: `只按 exploration.min_distance=${distanceOnly} 判断：只证明推进量，不证明找到/到达目标。` } : {}),
     } } : {}),
     ...(a.attemptOnly ? { attempt_only: a.attemptOnly.reason, original_done_when: a.attemptOnly.originalDoneWhen } : {}),
     ...(a.planCoverageGap ? { plan_coverage_gap: a.planCoverageGap } : {}),

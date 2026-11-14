@@ -73,7 +73,7 @@ test('局部 look_around 未见只否定这次观察，不推出区域/维度为
   assert.equal(record.resource?.located, false);
   assert.equal(record.resource?.acquired, null, '寻找类目标没有取得语义');
   assert.equal(record.resource?.goalIncomplete, true, '资源目标未完成只是缺口，不是“区域没有资源”');
-  assert.match(planCoverageGap(look) ?? '', /不能当作远行或远处搜索/);
+  assert.match(planCoverageGap(look) ?? '', /没有会让身体移动的动作/);
 
   const { mind, activity } = searchHarness();
   mind.noteProgressOutcome(activity(), { outcome: 'done', gained: {}, summary: failure.summary }, false);

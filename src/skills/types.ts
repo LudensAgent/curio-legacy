@@ -113,6 +113,9 @@ export interface SkillCtx {
 
 export type Validation<A> = { ok: true; args: A } | { ok: false; error: string };
 
+/** 动作能否把身体带到目标位置（侧移不算）；只用于覆盖缺口的反馈判断。 */
+export type BodyMotion = 'horizontal' | 'vertical' | 'none';
+
 export interface Skill<A = any> {
   name: string;
   /** 给 LLM 看的说明 */
@@ -127,7 +130,14 @@ export interface Skill<A = any> {
   timeoutMs: number;
   /** 是否属于移动型技能（用于卡死检测） */
   movement: boolean;
-  /** Knowledge/archive queries do not count as failed physical project attempts. */
+  /**
+   * 动作本身能否把身体带到目标位置（不只是原地交互或侧移；竖直移动也算）。省略时按 movement 推导：
+   * movement=true 视为 horizontal，false 视为 none；走到已知工作台/床、原地垫高等例外单独标注。
+   */
+  bodyMotion?: BodyMotion;
+  /** Knowledge/archive queries do not count as failed physical project attempts.
+   *  同时被 step-capability 当作“查询/观察”标记：只给不移动、不产出物品的技能标这一项；
+   *  若将来有会移动/产出的只读技能，需要在 step-capability 里显式排除。 */
   readOnly?: boolean;
   /** 下一步取决于本次实际发现/产出；自主计划在结果返回后重新选择，不能预设成功后的尾部。 */
   outcomeBoundary?: boolean;
@@ -139,6 +149,11 @@ export interface Skill<A = any> {
    */
   validatePlan?(raw: unknown, adapter: GameAdapter): Validation<A>;
   run(ctx: SkillCtx, args: A): Promise<SkillResult>;
+}
+
+/** 动作的身体位移能力；未声明时按 movement 推导，不维护第二份手写名单。 */
+export function bodyMotionOf(skill: Pick<Skill, 'movement' | 'bodyMotion'>): BodyMotion {
+  return skill.bodyMotion ?? (skill.movement ? 'horizontal' : 'none');
 }
 
 /** Preserve shared execution options even when a skill normalizes its own arguments. */
