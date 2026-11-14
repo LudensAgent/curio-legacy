@@ -506,7 +506,8 @@ test('standing on a partial support is a capability gap that returns BAD_ARGS wi
   assert.equal(result.failureCode, 'BAD_ARGS', '按规格 capability → BAD_ARGS + unsupportedGeometry + remediation');
   assert.equal(result.data?.unsupportedGeometry, true);
   assert.match(result.summary, /半格/);
-  assert.deepEqual(result.data?.remediation, { action: 'move_step', at: { x: 0, y: 63, z: 0 }, reason: 'fractional_foot_support' });
+  assert.deepEqual(result.data?.remediation, { action: 'move_step', at: { x: 1, y: 64, z: 0 }, reason: 'fractional_foot_support' });
+  assert.match(result.summary, /先走 move_step \{"xyz":\[1,64,0\]\} 到相邻整块脚位/);
   assert.equal(world.digs.length, 0);
 });
 

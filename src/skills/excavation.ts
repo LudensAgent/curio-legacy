@@ -55,6 +55,32 @@ const hazardLabel = (name: string) => name === 'water' || name === 'lava' || nam
 const voxel = (pos: Vec3Like): Vec3Like => ({ x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) });
 const liquid = (name: string) => ['water', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass'].includes(name);
 
+/** 半格脚位附近已确认能站的整块脚位；返回的是目标脚高，不是方块格。未知/被占的相邻格不拿来建议。 */
+function adjacentWholeFoot(adapter: SkillCtx['adapter'], pos: Vec3Like): Vec3Like | null {
+  const at = stateAt(adapter);
+  const supportY = Math.floor(pos.y);
+  const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+  const candidates = dirs.flatMap(([dx, dz]) => [supportY + 1, supportY, supportY + 2, supportY - 1].map((footY) => {
+    const x = Math.floor(pos.x) + dx, z = Math.floor(pos.z) + dz;
+    const support = at({ x, y: footY - 1, z });
+    const top = support === null ? null : supportTop(support.name, support.properties ?? {});
+    const worldTop = top === null ? null : footY - 1 + top;
+    if (worldTop === null || !Number.isInteger(worldTop) || Math.abs(worldTop - footY) > 0.01) return null;
+    const body = bodyProbe(footY, x, z, at);
+    if (body.blockers.length || body.unknown.length) return null;
+    return { x, y: footY, z };
+  }));
+  return candidates.find((cell): cell is Vec3Like => cell !== null) ?? null;
+}
+
+/** 半格脚位的补救不是“在当前格再迈一步”，而是先给出相邻整块脚位；找不到就如实不猜。 */
+function fractionalFootRemediation(adapter: SkillCtx['adapter'], pos: Vec3Like): Remediation {
+  const whole = adjacentWholeFoot(adapter, pos);
+  return whole === null
+    ? { action: 'move_step', at: voxel(pos), reason: 'fractional_foot_support' }
+    : { action: 'move_step', at: whole, reason: 'fractional_foot_support' };
+}
+
 /** 授权开关：wet/lava 只放行相邻液体流入；allowFalling 适用于工作面（默认接受）与落点/身体/上方。 */
 type RiskAuthorization = 'wet' | 'lava' | 'allowFalling';
 
@@ -399,7 +425,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     standingCell(ctx, origin.pos, ledger, args);
     if (Math.abs(origin.pos.y - Math.round(origin.pos.y)) > 0.01) {
       const stop = new ExcavationStop('BAD_ARGS', `当前脚高 y=${origin.pos.y.toFixed(2)}，站在半格/非整块支撑上；整格阶梯/通道会挖掉这层支撑，未实现半格脚高转换，未开始`, true, 'capability');
-      stop.remediation = { action: 'move_step', at: voxel(origin.pos), reason: 'fractional_foot_support' };
+      const remediation = fractionalFootRemediation(adapter, origin.pos);
+      stop.remediation = remediation;
+      if (remediation.at.x !== voxel(origin.pos).x || remediation.at.y !== voxel(origin.pos).y || remediation.at.z !== voxel(origin.pos).z) {
+        stop.message += `；先走 move_step {"xyz":[${remediation.at.x},${remediation.at.y},${remediation.at.z}]} 到相邻整块脚位`;
+      }
       throw stop;
     }
     ctx.memory.setWorld(origin.worldId);
@@ -455,7 +485,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
       standingCell(ctx, current.pos, ledger, args);
       if (Math.abs(current.pos.y - Math.round(current.pos.y)) > 0.01) {
         const stop = new ExcavationStop('BAD_ARGS', `脚高 y=${current.pos.y.toFixed(2)} 站在半格/非整块支撑上；整格开挖未实现半格脚高转换`, true, 'capability');
-        stop.remediation = { action: 'move_step', at: here, reason: 'fractional_foot_support' };
+        const remediation = fractionalFootRemediation(adapter, current.pos);
+        stop.remediation = remediation;
+        if (remediation.at.x !== here.x || remediation.at.y !== here.y || remediation.at.z !== here.z) {
+          stop.message += `；先走 move_step {"xyz":[${remediation.at.x},${remediation.at.y},${remediation.at.z}]} 到相邻整块脚位`;
+        }
         throw stop;
       }
       let next = { x: here.x + direction.x, y: here.y + (args.mode === 'stairs' ? -1 : args.mode === 'stairs_up' ? 1 : 0), z: here.z + direction.z };

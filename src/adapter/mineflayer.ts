@@ -1468,7 +1468,10 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     // 整块高度差不能只靠平走：原版自动跨步只有 0.6 格，一步上整块要起跳。
     // 同脚高但超过相邻格的距离由调用方证实的水平 jump 消耗一次起跳。
     // 只在这段身体控制里补一次跳跃；目标/落点仍由调用方决定。
-    const stepUp = !horizontalJump && target.y > p0y + 0.6;
+    // 从土径/半砖/雪层这类分数脚高起步时，相邻整块常常只高 0.0625~0.5 格；
+    // 原版自动跨步在这种“身体已经压到台阶边”的站位会卡住，仍然需要一次起跳。
+    const startOnPartial = Math.abs(p0y - Math.round(p0y)) > 0.01;
+    const stepUp = !horizontalJump && (target.y > p0y + 0.6 || (startOnPartial && target.y > p0y + 0.01));
     const needsJump = stepUp || (horizontalJump && initialDistance > 1.2);
     // 上台阶：身体贴近目标格列、脚仍低于目标高度时按住跳跃，升上去就松开。起点可能在上一格列远端，
     // 固定时长的一次起跳会在离台阶还远处用掉。水平跳跃仍是一次起跳。

@@ -14,6 +14,7 @@ import { buildMindMessages, buildReflectionMessages } from '../src/mind/prompt.t
 import { DEFAULT_MOOD, feel, moodWords, SelfModel } from '../src/mind/self.ts';
 import { embeddedQuery, parseDecision, Thinker } from '../src/mind/thinker.ts';
 import { Perception } from '../src/perception/perception.ts';
+import { feetCell } from '../src/perception/local.ts';
 import { Vision } from '../src/perception/vision.ts';
 import type { ChatMessage, Completion } from '../src/planner/llm.ts';
 import { Planner } from '../src/planner/planner.ts';
@@ -402,6 +403,35 @@ test('长程移动仍在跑时，不包含该步骤的 adjust 被拒绝，原任
   assert.equal(w.mind.activity?.steps.length, 1);
   assert.ok(w.bus.recent().some((event) => event.type === 'activity_adjust' && /调整被拒绝/.test(event.msg)),
     '把拒绝事实交回给心智');
+});
+
+test('同一半格脚位被 excavate_run 拒绝后，先要求换整块脚位，不原样重开', async (t) => {
+  const w = fixture(t);
+  w.adapter.pos = { x: -513.3, y: 106.9375, z: -281.3 };
+  (w.mind as any).footSupportHold = {
+    at: Date.now(), worldId: w.adapter.worldId, sessionId: w.adapter.sessionId, dim: w.adapter.dim,
+    feet: feetCell(w.adapter.pos),
+  };
+  const activity = createActivity({
+    what: '朝南开挖整格下行阶梯', why: '测试', kind: 'gather', repeat: 1,
+    steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'south', steps: 18 } }],
+  }, '', 'llm', w.adapter.state());
+  const decision = { kind: 'new' as const, activity, notes: [] as string[], monologue: '继续挖' };
+  assert.equal((w.mind as any).enforceFootSupport(decision, {}), false);
+  assert.equal(decision.activity, undefined);
+  assert.equal(decision.kind, 'continue');
+  assert.match(decision.notes[0]!, /先 move_step 到相邻整块脚位/);
+  assert.ok(w.bus.recent().some((event) => event.type === 'foot_support_hold'));
+
+  // 先 move_step 的草案照常放行；换到整块脚位后 hold 自动清除
+  const moving = createActivity({
+    what: '先站到整块地面', why: '测试', kind: 'other', repeat: 1,
+    steps: [{ skill: 'move_step', args: { at: [1, 1, 0], facing: 'E' } }, { skill: 'excavate_run', args: { mode: 'stairs', direction: 'south', steps: 18 } }],
+  }, '', 'llm', w.adapter.state());
+  assert.equal((w.mind as any).enforceFootSupport({ kind: 'new', activity: moving, notes: [] }, {}), true);
+  w.adapter.pos = { x: -513.3, y: 107, z: -281.3 };
+  assert.equal((w.mind as any).enforceFootSupport({ kind: 'new', activity, notes: [] }, {}), true);
+  assert.equal((w.mind as any).footSupportHold, null);
 });
 
 test('挂起回执晚于插曲开始/续接时，按 taskId 与步骤实例归还，不结束当前活动', async (t) => {

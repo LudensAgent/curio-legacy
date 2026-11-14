@@ -8,6 +8,7 @@ import { compileBuilding, normalizeSpec } from '../building/spec.ts';
 import { KNOW_HOW_LESSON_KEY_PREFIX, type Hazard, type WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
 import { durationText, realSecondsToTicks, type Perception, type Percept } from '../perception/perception.ts';
+import { feetCell } from '../perception/local.ts';
 import type { MySkillInfo } from '../planner/prompt.ts';
 import { evaluateCondition, observationReady, observeCondition } from '../projects/conditions.ts';
 import { SKILLS } from '../skills/index.ts';
@@ -228,6 +229,8 @@ export class Mind {
   private noProgressRuns: { at: number; signature: string; sourceKey?: string; what: string; outcome: string; summary: string; dim?: string }[] = [];
   /** 最近一次局部动作/落点失败：它只否定这一步，不能单独证明整个来源或维度没有资源。 */
   private lastLocalFailure: { at: number; skill: string; code: string | null; summary: string; worldId: string; sessionId: string; dim: string; pos: { x: number; y: number; z: number }; chunks?: number } | null = null;
+  /** 同一半格脚位上 excavate_run 被 capability 拒绝；先要求换到整块，不原样重开。 */
+  private footSupportHold: { at: number; worldId: string; sessionId: string; dim: string; feet: { x: number; y: number; z: number } } | null = null;
   /** 最近一次被证据放行的换维：只记来源/目标/理由；目标未知时等实际换维后再补上。 */
   private lastSourceSwitch: { at: number; from: string; to: string | null; reason: string; worldId: string; sessionId: string } | null = null;
   /** 最近一次实测新区块进展：只记区域标识与新区块数，不复制格点/几何。 */
@@ -1389,6 +1392,34 @@ export class Mind {
   }
 
   /**
+   * 同一半格脚位的 excavate_run 已经明确报 capability gap：先要求把脚位换到整块，
+   * 不原样重开整格阶梯。只拦活动第一步是 excavate_run 的草案；先 move_step 的草案照常放行。
+   */
+  private enforceFootSupport(decision: MindDecision, info: ApplyFlags): boolean {
+    const hold = this.footSupportHold;
+    if (!hold || info.operator || info.urgent || info.emergency || this.order) return true;
+    const state = this.safe(() => this.d.adapter.state(), null);
+    if (!state) return true;
+    const feet = feetCell(state.pos);
+    const same = state.worldId === hold.worldId && state.sessionId === hold.sessionId && state.dim === hold.dim
+      && feet.x === hold.feet.x && feet.y === hold.feet.y && feet.z === hold.feet.z;
+    if (Date.now() - hold.at > 2 * 60_000 || !same || Math.abs(state.pos.y - Math.round(state.pos.y)) <= 0.01) {
+      this.footSupportHold = null;
+      return true;
+    }
+    const activity = decision.activity;
+    if (!activity || activity.steps[0]?.skill !== 'excavate_run') return true;
+    const note = `当前脚高 y=${state.pos.y.toFixed(2)} 仍是半格；刚才 excavate_run 在同一格被 capability 拒绝。先 move_step 到相邻整块脚位，再开阶梯；这次不能原样重开 excavate_run`;
+    decision.notes.push(note);
+    this.d.bus.publish('foot_support_hold', 'P2', note, { skill: 'excavate_run', pos: { ...state.pos } });
+    this.requestThink(note, 'deliberate');
+    decision.activity = undefined;
+    decision.next = undefined;
+    decision.kind = 'continue';
+    return false;
+  }
+
+  /**
    * 闸门真正加在动作入口：无进展列表里已经出现过的动作签名，拒绝一次并要求重想。
    * 连续两次仍选同一条路时解除闸门，避免把模型困死；选择不同地点/方法则放行并清除。
    */
@@ -1601,6 +1632,13 @@ export class Mind {
     if (result.status === 'failed' && !observationMiss) {
       this.lastFailure = { skill: step.skill, code: result.failureCode, summary: result.summary };
       const failedState = this.d.adapter.state();
+      const remediation = (result.data as { remediation?: { reason?: unknown } } | undefined)?.remediation;
+      if (step.skill === 'excavate_run' && remediation?.reason === 'fractional_foot_support') {
+        this.footSupportHold = {
+          at: Date.now(), worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim,
+          feet: feetCell(failedState.pos),
+        };
+      }
       this.recentActionFailures.push({ step: structuredClone(step), code: result.failureCode ?? null, summary: clipFeedback(result.summary),
         pos: { ...failedState.pos }, worldId: failedState.worldId, sessionId: failedState.sessionId, dim: failedState.dim, at: Date.now(),
         scope: 'step', implication: '这次失败只否定这个动作/落点，不否定其他方向、其他来源或整个维度' });
@@ -2363,6 +2401,7 @@ export class Mind {
     // 先看“局部失败 → 换维度/来源”是否有新证据，再看无进展闸门。
     if (!this.enforceSourceSwitchEvidence(decision, info)) return;
     // 无进展闸门在动作入口生效：签名和最近无进展的做法相同就拒绝一次，要求换地点/方法或改计划。
+    if (!this.enforceFootSupport(decision, info)) return;
     if (!this.enforceProgressGate(decision, info)) return;
     if (decision.next) {
       const current = this.d.adapter.state();
