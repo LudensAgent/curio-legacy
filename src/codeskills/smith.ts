@@ -100,7 +100,7 @@ export function cycleKey(names: string[]): string {
 interface Owner { skill: string; version: string; at: number; kind: ForgeKind; headline: string }
 
 const KEEP = new Set(['task_start', 'task_end', 'hurt', 'notice', 'reflex', 'reflex_gaveup', 'instinct', 'thought', 'attempt_end', 'activity_start', 'activity_adjust',
-  'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled', 'skill_aftermath', 'new_environment', 'activity_suspend']);
+  'death', 'death_items', 'game_message', 'body_adapt', 'stuck', 'skill_written', 'skill_forged', 'skill_disabled', 'skill_aftermath', 'skill_stalled', 'new_environment', 'activity_suspend']);
 
 /** 吃亏的程度：自适应的阈值（看它平时痛到什么程度） */
 export class PainMeter {

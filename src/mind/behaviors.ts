@@ -279,6 +279,10 @@ function toBehavior(k: KnowSkill, adapter: GameAdapter, deferCompile = false): B
 
 /** 恢复技能按“哪个动作、什么错误码”失败来归类 */
 const recoverySig = (f: { skill: string; code?: string | null }) => `${f.skill}:${f.code ?? ''}`;
+/** 背包内容签名：只用来判断这次运行有没有改变物品，不关心槽位顺序。 */
+const inventoryKey = (inv: { name: string; count: number }[]) => inv.map((item) => `${item.name}:${item.count}`).sort().join('|');
+/** 连续计数按技能名 + 版本分开：稳定版和候选版不会互相覆盖。 */
+const streakKey = (name: string, version: string) => `${name}@${version}`;
 
 export class BehaviorEngine {
   private behaviors = new Map<string, Behavior>();
@@ -313,14 +317,19 @@ export class BehaviorEngine {
   private doneListener = (o: TaskOutcome) => this.onDone(o);
   private lastHurtAt = 0;
   /** 自动技能做完后补充事后观测，不把后来受伤或死亡直接归因成技能失败。 */
-  private aftermath = new Map<string, { taskId: string; behavior: Behavior; hp: number; at: number; summary?: string; data?: Record<string, unknown>; context: string; pos?: { x: number; y: number; z: number }; interrupted?: string; nearest?: number }>();
+  private aftermath = new Map<string, { taskId: string; behavior: Behavior; hp: number; at: number; summary?: string; data?: Record<string, unknown>; context: string; pos: { x: number; y: number; z: number }; inv: string; interrupted?: string; nearest: number }>();
   private recoveries = new Map<string, { behavior: Behavior; data?: Record<string, unknown>; ignored?: boolean; invocationRecorded?: boolean }>();
   /** 最近一次记成成功的运行身份（技能、版本、维度、arbiter 任务 id）：调用方事后判定收工条件未满足时，只降级这一条。 */
   private lastCredit: { name: string; version: string; dim: string; taskId: string; entry: RunRecord } | null = null;
   /** 同一版本连续空转的次数与最近一次时间：超过重置窗口重新从 1 数；第二次起硬暂停。 */
-  private idleStreak = new Map<string, { version: string; streak: number; lastIdleAt: number }>();
+  private idleStreak = new Map<string, { streak: number; at: number }>();
+  /** 同一版本连续无进展的事后观测：触发处境仍在、血量/距离/位置/背包都没改善。 */
+  private stalls = new Map<string, { streak: number; at: number }>();
   static readonly IDLE_STREAK_RESET_MS = 5 * 60_000;
   static readonly IDLE_STREAK_ESCALATE = 2;
+  static readonly STALL_WINDOW_MS = 5 * 60_000;
+  static readonly STALL_ESCALATE = 2;
+  static readonly STALL_HOLD_MS = 2 * 60_000;
   static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
@@ -422,7 +431,7 @@ export class BehaviorEngine {
     // 事后评判：至少等 12 秒，而且等它做完（找吃的、挖洞要好一会儿），最多等两分钟
     for (const [name, a] of this.aftermath) {
       const busy = this.running(cur)?.name === name;
-      if (now - a.at >= BehaviorEngine.AFTERMATH_MS && (!busy || now - a.at >= 120_000)) this.judge(name, false);
+      if (now - a.at >= BehaviorEngine.AFTERMATH_MS && (!busy || now - a.at >= 120_000)) this.judge(name, false, now);
     }
     // 救命类的候选也允许在要命条件下自动接手（事后按结果判定启用还是收起），其余候选仍只显式试用
     const auto = this.list().filter((b) => b.mode === 'auto' && this.enabled(b))
@@ -460,6 +469,7 @@ export class BehaviorEngine {
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
       if (evalPredicate(b.when!, s)) matches.push(b);
+      else this.stalls.delete(streakKey(b.name, this.versionOf(b))); // 触发处境已经解除：不再拿旧的无进展计数继续累计
     }
     if (matches.length > 1) {
       // 几个技能同时想接手：优先级之外也看实际管不管用（成功率高的先上），并记下谁和谁抢（给整理用）
@@ -474,7 +484,7 @@ export class BehaviorEngine {
         offHand: s.state.equipment?.find((e) => e.slot === 'off-hand')?.name ?? null };
       const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, ...(b.candidate ? { trial: true } : {}), args: { trigger } } }, 'reflex');
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
-      this.aftermath.set(b.name, { taskId: r.id, behavior: b, hp: s.state.hp, at: now, pos: { ...s.state.pos }, nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
+      this.aftermath.set(b.name, { taskId: r.id, behavior: b, hp: s.state.hp, at: now, pos: { ...s.state.pos }, inv: inventoryKey(s.state.inventory), nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });
@@ -547,6 +557,20 @@ export class BehaviorEngine {
     return h && h.until > now && h.version === this.versionOf(b) ? h : null;
   }
 
+  private bumpStreak(map: Map<string, { streak: number; at: number }>, name: string, version: string, now: number, window: number) {
+    const key = streakKey(name, version);
+    const prev = map.get(key);
+    const streak = prev && now - prev.at < window ? prev.streak + 1 : 1;
+    map.set(key, { streak, at: now });
+    return { key, streak };
+  }
+
+  private clearStreaks(name: string) {
+    for (const map of [this.idleStreak, this.stalls]) {
+      for (const key of [...map.keys()].filter((k) => k.startsWith(`${name}@`))) map.delete(key);
+    }
+  }
+
   /** 拉锯时被叫停的技能（给控制台和测试看）：旧版本的暂停不算在当前版本头上 */
   heldNow(now = Date.now()): string[] {
     return [...this.holds].flatMap(([name, h]) => {
@@ -611,7 +635,7 @@ export class BehaviorEngine {
       this.aftermath.delete(name);
       this.recoveries.delete(name);
       this.holds.delete(name);
-      this.idleStreak.delete(name);
+      this.clearStreaks(name);
       this.waitSaid.delete(name);
       this.lastFired.delete(name);
       this.usage = this.usage.filter((entry) => !entry.tag.startsWith(`${name}@`));
@@ -789,8 +813,8 @@ export class BehaviorEngine {
     if (!this.behaviors.has(w.skill.name)) this.reload();
     const b = opts.by ? this.candidates.get(w.skill.name) : this.behaviors.get(w.skill.name);
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
-    // 稳定版重写会换掉自动接手的执行内容：旧版本的暂停/空转计数不应继续压着它。候选版本不解除稳定版的暂停。
-    if (!opts.by) { this.holds.delete(b.name); this.idleStreak.delete(b.name); }
+    // 稳定版重写会换掉自动接手的执行内容：旧版本的暂停/空转/无进展计数不应继续压着它。候选版本不解除稳定版的暂停。
+    if (!opts.by) { this.holds.delete(b.name); this.clearStreaks(b.name); }
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
       if (!opts.by) { st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; }
@@ -981,7 +1005,8 @@ export class BehaviorEngine {
     const returned = result.data?.result;
     const skipped = result.status === 'succeeded' && !!(result.data?.noop === true || returned && typeof returned === 'object' && 'skipped' in returned && returned.skipped);
     // 产生了实际效果（或明确失败/取消）就不再算“连续空转”；下一次空转从 1 重新数。
-    if (!skipped) this.idleStreak.delete(name);
+    // 只有能确定实际执行版本时才清对应版本；归属未知的运行不误清别的版本。
+    if (!skipped && b) this.idleStreak.delete(streakKey(name, this.versionOf(b)));
     this.touch(name, (st) => {
       st.lastUsedAt = now;
       st.uses = (st.uses ?? 0) + 1;
@@ -1124,9 +1149,7 @@ export class BehaviorEngine {
     // 什么都没做的接手不算一次“来回”：否则在别的技能的地盘上让位（水下让给换气）也会被误判成拉锯
     for (let i = this.fires.length - 1; i >= 0; i--) if (this.fires[i].name === name) { this.fires.splice(i, 1); break; }
     const version = this.versionOf(b);
-    const prev = this.idleStreak.get(name);
-    const streak = prev?.version === version && now - prev.lastIdleAt < BehaviorEngine.IDLE_STREAK_RESET_MS ? prev.streak + 1 : 1;
-    this.idleStreak.set(name, { version, streak, lastIdleAt: now });
+    const { streak } = this.bumpStreak(this.idleStreak, name, version, now, BehaviorEngine.IDLE_STREAK_RESET_MS);
     this.touch(name, (st) => { st.fired = Math.max(0, st.fired - 1); st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
     const escalated = streak >= BehaviorEngine.IDLE_STREAK_ESCALATE;
     this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: escalated ? `连续 ${streak} 次空转` : '条件成立接手后什么都没做就返回', version, ...(escalated ? {} : { closer: Number.isFinite(nearest) ? nearest : Infinity }) });
@@ -1136,28 +1159,55 @@ export class BehaviorEngine {
   /** 自动技能的事后观测：12 秒后（或死亡时）补记事实——死了、又掉多少血、触发处境是否还在。
    *  成败已在 onDone 按执行结果（含声明判定 verify）记下，这里不再用“没死、掉血少、处境解除”替技能目标定成败，
    *  也不把后来的死亡、掉血自动归因成这项技能的失败。事实单独报给心智与整理，归因由 Agent 决定。 */
-  private judge(name: string, died: boolean) {
+  private judge(name: string, died: boolean, now = Date.now()) {
     const a = this.aftermath.get(name);
     this.aftermath.delete(name);
     if (!a) return;
     const b = a.behavior;
-    const version = b.version ?? this.stats[b.name]?.rev ?? 1;
-    const hp = this.adapter.state().hp;
+    const version = this.versionOf(b);
+    const versionNumber = Number(version);
+    const state = this.adapter.state();
+    const hp = state.hp;
     const lost = Math.max(0, a.hp - hp);
     const situation = b.when ? situationOf(b.when) : null;
+    let s: Sense | null = null;
+    if (!died) { try { s = this.sense(null); } catch { s = null; } }
     // 三态：true 触发处境还在；false 确认解除；null 判断不了（死了、没有处境可查、或读世界失败）——不能误说成“解除了”。
     let still: boolean | null = null;
-    if (!died && situation) { try { still = evalPredicate(situation, this.sense(null)); } catch { still = null; } }
+    if (situation && s) { try { still = evalPredicate(situation, s); } catch { still = null; } }
     // 观测区间是「触发到判断」：净掉血是触发以来的，不是“做完后”；死亡按是否已完成区分执行阶段。
     const completed = a.summary !== undefined;
+    const nearest = s ? Math.min(Infinity, ...s.hostiles.map((h) => h.dist)) : Infinity;
+    const nearestText = Number.isFinite(nearest) ? Math.round(nearest * 10) / 10 : null;
     const facts = [
       died ? (completed ? '做完后不久就死了' : '执行期间就死了') : '',
       lost >= 1 ? `从触发到现在净掉了 ${Math.round(lost)} 点血` : '',
       still === true ? '触发它的情况还在' : still === false ? '触发它的情况解除了' : '',
     ].filter(Boolean).join('；');
+    let stalled: number | undefined;
+    const stallKey = streakKey(name, version);
+    if (!died && completed && b.mode === 'auto' && b.when && still === true) {
+      // 宿主独立于技能自己的 verify 看这次有没有让触发处境变好；没有改善才累计，避免把“没掉血”直接当成功或失败。
+      const movedDist = Math.hypot(state.pos.x - a.pos.x, state.pos.z - a.pos.z);
+      const dy = Math.abs(state.pos.y - a.pos.y);
+      const pulledAwayDist = Number.isFinite(a.nearest) && Number.isFinite(nearest) ? nearest - a.nearest : 0;
+      const improved = hp >= a.hp + 1 || pulledAwayDist >= 2 || movedDist >= 1 || dy >= 1 || a.inv !== inventoryKey(state.inventory);
+      if (improved) this.stalls.delete(stallKey);
+      else {
+        const { streak } = this.bumpStreak(this.stalls, name, version, now, BehaviorEngine.STALL_WINDOW_MS);
+        stalled = streak;
+        if (streak >= BehaviorEngine.STALL_ESCALATE) {
+          const why = `连续 ${streak} 次触发后，触发它的情况还在，血量/距离/位置/背包没有改善`;
+          this.holds.set(name, { until: now + BehaviorEngine.STALL_HOLD_MS, why, version });
+          this.stalls.delete(stallKey);
+          this.bus.publish('skill_stalled', 'P2', `技能「${name}」连续 ${streak} 次触发后，触发它的情况还在；血量、最近威胁距离、位置和背包都没有改善，先让它 ${BehaviorEngine.STALL_HOLD_MS / 1000} 秒不自动接手（其它技能不受影响）；改写同名技能会恢复`,
+            { name, version: versionNumber, taskId: a.taskId, stalled: streak, still, hp: Math.round(hp * 10) / 10, nearest: nearestText, lost: Math.round(lost) });
+        }
+      }
+    } else if (died || still === false) this.stalls.delete(stallKey);
     const context = a.context ? `；触发时：${a.context}` : '';
-    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」v${version} 事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}${context}`,
-      { name, version, taskId: a.taskId, died, lost: Math.round(lost), still, context: a.context });
+    this.bus.publish('skill_aftermath', 'P3', `技能「${name}」v${versionNumber} 事后观测：${facts}${a.summary ? `（它做了：${a.summary.slice(0, 80)}）` : ''}${context}`,
+      { name, version: versionNumber, taskId: a.taskId, died, lost: Math.round(lost), still, hp: Math.round(hp * 10) / 10, nearest: nearestText, context: a.context, ...(stalled ? { stalled } : {}) });
   }
 
   private record(b: Behavior, okRun: boolean, summary: string, data: Record<string, any>, taskId?: string) {

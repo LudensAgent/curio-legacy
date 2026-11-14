@@ -55,6 +55,7 @@ export class Attention {
         return null;
       }
       case 'skill_loop': return this.notice(`skill_loop:${String(d.a ?? '')}:${String(d.b ?? '')}`, ev.msg, 0.65, 300_000);
+      case 'skill_stalled': return this.notice(`skill_stalled:${String(d.name ?? '')}@${String(d.version ?? '')}`, ev.msg, 0.6, 120_000);
       case 'reflex_gaveup': return this.notice('reflex_gaveup', ev.msg, 0.8, 20_000);
       case 'skill_forged': return this.notice(`skill_forged:${String(d.name ?? '')}`, d.candidate ? `${ev.msg}；尚未启用，由我选择时机用 use_skill {name:"${String(d.name ?? '')}",trial:true} 试用` : `${ev.msg}（身体以后会自己这么做）`, 0.4, 0);
       case 'skill_merged': return this.notice(`skill_merged:${String(d.into ?? '')}`, ev.msg, 0.3, 0);
