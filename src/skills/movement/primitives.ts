@@ -516,10 +516,14 @@ const mineCellSkill: Skill<MineArgs> = {
     const dim = origin.dim;
     const feet = feetCell(raw);
     const support = supportCell(raw);
-    const digsSupport = args.xyz !== undefined
-      ? args.xyz.x === support.x && args.xyz.y === support.y && args.xyz.z === support.z
+    // 消费点统一成 Vec3：活动步骤可能带着未规范化的 xyz（线上出现过数组写法）；validate 仍是第一道校验。
+    const rawXyz = (args as { xyz?: unknown }).xyz;
+    const targetXyz = rawXyz === undefined ? undefined : absValue(rawXyz) ?? undefined;
+    if (rawXyz !== undefined && !targetXyz) return fail('BAD_ARGS', 'xyz 需要 [x,y,z] 三个有限数字或 {x,y,z}');
+    const digsSupport = targetXyz !== undefined
+      ? targetXyz.x === support.x && targetXyz.y === support.y && targetXyz.z === support.z
       : args.at[0] === 0 && args.at[2] === 0 && args.at[1] === -1;
-    const pos = args.xyz !== undefined ? { ...args.xyz } : digsSupport ? support : toWorld(feet, args.facing, args.at);
+    const pos = targetXyz !== undefined ? { ...targetXyz } : digsSupport ? support : toWorld(feet, args.facing, args.at);
     const loaded = adapter.blockAt(pos);
     const ownCell = pos.x === feet.x && pos.z === feet.z && (pos.y === feet.y || pos.y === feet.y + 1);
     if (loaded === null) return fail('NOT_FOUND', `[${args.at}] 那一格还没加载（区块没载入），看不见也没法挖`, { ...after(ctx, args.facing, pos), noop: true, obscured: true, unknown: true, ...problemOf('TARGET_STATE_UNKNOWN', 'precondition'), ...effectUnconfirmed('block_removed') });

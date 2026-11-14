@@ -487,6 +487,14 @@ export function decisionReminders(ctx: MindContext): string[] {
       out.push(`矿石的历史账（最近 ${t.trips} 段活）：拿到 ${t.units} 个矿石/粗矿/矿物，一共走了 ${t.walked} 格（最近平均每段活 ${t.recentWalked} 格${lastAgo(t.lastAt)}）；现在背包里有 ${inv} 个矿石/粗矿/锭（实时）${chest ? `；记得的箱子（上次打开时）还有 ${chest} 个矿石/粗矿/锭` : ''}${rawBlocks ? `；粗矿块 ${rawBlocks} 个（背包+记得的箱子合计）按块计，未折算成粗铁` : ''}`);
     }
   }
+  // 掉落物没进背包：把丢失事实和可用的找回方式贴出来；是否回去捡由 Agent 定，不把“挖掉”当成“拿到”。
+  const lost = ctx.lastRecord?.collection;
+  if (lost?.lost) {
+    const item = lost.items[0] ?? lost.block;
+    out.push(`上一段采集有 ${lost.lost} 块 ${lost.items.join('/')} 掉落物没进背包（目标 ${lost.target}，现有 ${lost.final}${lost.targetMet ? '，已达成' : '，未达成'}）；如果还要，用 pickup_items {"radius":8,"item":"${item}","remembered":true} 走回最近见过的掉落点；找不到就换地方或继续，别把挖掉当成拿到`);
+  } else if (/掉落物没捡到|掉落物没进背包/.test(ctx.lastRecord?.summary ?? '')) {
+    out.push('上一段回执提到掉落物没捡到；如果还要，用 pickup_items {"radius":8,"remembered":true} 走回最近见过的掉落点；找不到就换地方或继续，别把挖掉当成拿到');
+  }
   // 站在这一趟的起点附近（通常刚到门边）时，把以前推到过的最远处贴在末尾：要不要从那里接着推由它定。
   const reach = ctx.reach;
   if (ctx.tier === 'deliberate' && reach && reach.dim === p.self.dim && Math.hypot(here.x - reach.origin.x, here.z - reach.origin.z) <= 24) {

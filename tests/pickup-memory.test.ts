@@ -59,6 +59,15 @@ test('pickup_items: explicitly permitted remembered pickup reports the actual in
   assert.deepEqual(b.forgot, [7], 'at the location but still unseen: forget the missing drop');
 });
 
+test('pickup_items: 指名没找到时提示 remembered:true，但不自行走回记忆点', async (t) => {
+  const w = ctxWith({ picks: false });
+  t.after(() => w.ctx.memory.close());
+  const result = await pickupItems.run(w.ctx, { radius: 12, item: 'white_bed' });
+  assert.equal(result.status, 'failed');
+  assert.match(result.summary, /remembered:true/);
+  assert.equal(w.memoryReads(), 0, '没有显式许可就不使用记忆点');
+});
+
 test('remembered pickup respects the declared three-dimensional radius without adding eight blocks', async (t) => {
   for (const target of [{ x: 7, y: 64, z: 0 }, { x: 0, y: 71, z: 0 }, { x: 5, y: 68, z: 0 }]) {
     const w = ctxWith({ picks: true, target });

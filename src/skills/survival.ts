@@ -457,7 +457,7 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
     const collected = increases.filter(({ name }) => wanted(name)).reduce((sum, item) => sum + item.count, 0);
     if (args.item && collected === 0) {
       const block = senses.knownBlocks([args.item], args.radius)[0];
-      return fail('NOT_FOUND', `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}`,
+      return fail('NOT_FOUND', `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}${args.remembered ? '' : '；如果它刚掉在视野外，可加 remembered:true 走回两分钟内见过的掉落点'}`,
         { gained, collected, visits, ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
     }
     if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained, collected, visits });
