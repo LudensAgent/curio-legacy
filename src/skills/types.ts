@@ -258,10 +258,10 @@ export const fail = (failureCode: FailureCode, summary: string, data?: Record<st
   data,
 });
 
-/** 未预期异常的前三层调用栈：失败回执带上它，TypeError 才能定位到真正抛错的那一层。 */
+/** 未预期异常的前八层调用栈：三层只够看到库内部那一层，看不到是谁把它调起来的。 */
 export function traceOf(e: unknown): string | undefined {
   return e instanceof Error && typeof e.stack === 'string'
-    ? e.stack.split('\n').slice(1, 4).map((line) => line.trim().replace(/^at\s+/, '')).join(' | ')
+    ? e.stack.split('\n').slice(1, 9).map((line) => line.trim().replace(/^at\s+/, '')).join(' | ')
     : undefined;
 }
 
