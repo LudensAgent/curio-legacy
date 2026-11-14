@@ -35,6 +35,9 @@ import { config } from '../config.ts';
 import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots.ts';
 import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
+import { EXCAVATION_CHECKPOINT_LABEL, EXCAVATION_ENTRY_LABEL } from '../skills/excavation.ts';
+/** 旧开挖入口/进度点：只是历史记录，不代表现在仍连通。 */
+const isTunnelLabel = (label: string) => label === EXCAVATION_ENTRY_LABEL || label.startsWith(EXCAVATION_CHECKPOINT_LABEL);
 /** 查过的资料：出处 + 一句摘录 + 读取时间；只作外部参考，不是现场事实。 */
 const knowledgeFactLine = (fact: KnowledgeFact) => {
   const minutes = Math.max(0, Math.round((Date.now() - fact.at) / 60_000));
@@ -494,6 +497,12 @@ export function decisionReminders(ctx: MindContext): string[] {
     out.push(`下矿的账：${got.length ? `挖到 ${got.join(' ')}` : '还没挖到矿'}；背包空 ${p.emptySlots} 格${picks.length ? `；${picks.join('、')}` : ''}；身边${seen.length ? `看得见 ${seen.join('、')}` : '没看见矿'}${remembered ? `，48 格内记得 ${remembered} 处矿点` : ''}。清单后面几项还要不要这些料，一起掂量再决定收不收工`);
     tripShown = true;
   }
+  // 下矿意图出现时，把镐的总耐久和换一把的材料缺口放在一起；是否回地面补镐仍由 Agent 判断。
+  const mining = ctx.tier === 'deliberate' && !tripShown && MINING_INTENT.test(intent);
+  if (mining) {
+    const picks = durabilityFacts(s.inventory, ['pickaxe'], p.storage?.stock);
+    out.push(`镐的余量：${picks.length ? picks.join('、') : '背包里没有镐'}`);
+  }
   // 木料/矿石的历史账：只陈述账本里的段活数、数量、路程和现有量。
   // 只在认真想时出现，瞥一眼不重复；现有量的背包是实时读的，箱子是上次打开时的记录，分开写。
   const materials = ctx.materials;
@@ -878,7 +887,8 @@ function worldKnowledge(ctx: MindContext) {
   };
   // 自己的设施（箱子、工作站、床）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
-  const places = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId && !FACILITY_LABELS.has(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
+  const marks = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId);
+  const places = marks.filter((l) => !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
     .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
@@ -916,6 +926,12 @@ function worldKnowledge(ctx: MindContext) {
   const facilities = listedFacilities.map((f) => `${f.text}（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`);
   const nearbyFacilities = ctx.tier === 'glance'
     ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`)
+    : [];
+  // 旧开挖入口/进度点单独列出：它们是历史实测坐标，不是新挖一条巷子的命令。
+  const tunnels = ctx.tier === 'deliberate'
+    ? marks.filter((l) => isTunnelLabel(l.label))
+      .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
+      .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格${facilityAge(l.ts)}`)
     : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
@@ -1002,7 +1018,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '历史开挖入口/进度点（坐标来自当时的实测），不代表现在仍连通；是否复用、如何核实由你决定' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),

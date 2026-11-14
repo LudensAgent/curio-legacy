@@ -84,6 +84,36 @@ test('设施表超过 8 项时仍保留远处的床', (t) => {
   assert.match(user.content, /我的箱子 \(71,64,0\).*find_item/, '床边的箱子也保留');
 });
 
+test('旧开挖入口/进度点单独列出，和普通地点分开', (t) => {
+  const { context, memory, close } = harness();
+  t.after(close);
+  const checkpoint = memory.addLandmark('waypoint', '实际开挖进度（tunnel/east）', 'overworld', { x: 5, y: 11, z: 0 }, 0);
+  const entry = memory.addLandmark('waypoint', '实际开挖入口', 'overworld', { x: 6, y: 11, z: 0 }, 0);
+  assert.ok(checkpoint && entry);
+  const [, user] = buildMindMessages(context('deliberate'));
+  assert.match(user.content, /"my_tunnels"/);
+  assert.match(user.content, new RegExp(`实际开挖进度（tunnel/east）\\[${checkpoint.id}\\] \\(5,11,0\\)`));
+  assert.match(user.content, new RegExp(`实际开挖入口\\[${entry.id}\\] \\(6,11,0\\)`));
+  assert.match(user.content, /不代表现在仍连通/);
+  const places = user.content.match(/"places":\[(.*?)\],"my_tunnels"/s)?.[1] ?? '';
+  assert.doesNotMatch(places, /实际开挖进度|实际开挖入口/, '旧开挖点只走 my_tunnels，不在 places 重复');
+});
+
+test('下矿意图同时给出镐的总耐久余量', (t) => {
+  const { context, close } = harness();
+  t.after(close);
+  const base = context('deliberate');
+  base.self.addAgenda('下矿挖钻石', 'goal', 'today');
+  const state = { ...base.state, inventory: [
+    { name: 'stone_pickaxe', count: 2, durability: { left: 45, max: 131 }, durabilities: [45, 45] },
+  ] };
+  const percept = { ...base.percept, self: { ...base.percept.self, sky_visible: false, where: { kind: 'underground', text: '地下' } } };
+  const ctx = { ...base, state, percept } as unknown as MindContext;
+  const [, user] = buildMindMessages(ctx);
+  assert.match(user.content, /镐的余量/);
+  assert.match(user.content, /约还能挖 90 格/);
+});
+
 test('瞥一眼只给附近设施与附近农田，不展开完整设施/农田表', (t) => {
   const { context, close } = harness();
   t.after(close);
