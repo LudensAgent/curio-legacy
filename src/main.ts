@@ -113,6 +113,9 @@ try {
     snapshotLimits: {
       maxBytes: config.spatial.snapshotMaxBytes,
       maxObservedCells: config.spatial.maxObservedCells,
+      // Sections/palette 也由宿主配置传下去，保留策略按同一组数值算水位。
+      maxVoxelSections: config.spatial.maxVoxelSections,
+      maxPaletteEntries: config.spatial.maxPaletteEntries,
       // 库默认 32MiB；facts 含 gone 历史会持续增长，不显式放宽会让整次 checkpoint
       // 在写入前失败，voxel/journal/ledger 也一起不落盘。
       maxFactBytes: config.spatial.maxFactBytes,

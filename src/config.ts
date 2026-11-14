@@ -93,6 +93,16 @@ const maxObservedCells = num('SPATIAL_MAX_OBSERVED_CELLS', 4_100_000);
 if (!Number.isSafeInteger(maxObservedCells) || maxObservedCells < 1 || maxObservedCells > 16_000_000) {
   throw new Error(`SPATIAL_MAX_OBSERVED_CELLS 必须是 [1,16000000] 内的整数，收到：${maxObservedCells}`);
 }
+// 体素容量上限的另外两项（库默认 10,000 / 200,000）。暴露出来是为了让保留策略
+// 与库的可重开校验使用同一组数值；不写时保持库默认，不悄悄放宽。
+const maxVoxelSections = num('SPATIAL_MAX_SECTIONS', 10_000);
+if (!Number.isSafeInteger(maxVoxelSections) || maxVoxelSections < 1 || maxVoxelSections > 200_000) {
+  throw new Error(`SPATIAL_MAX_SECTIONS 必须是 [1,200000] 内的整数，收到：${maxVoxelSections}`);
+}
+const maxPaletteEntries = num('SPATIAL_MAX_PALETTE', 200_000);
+if (!Number.isSafeInteger(maxPaletteEntries) || maxPaletteEntries < 1 || maxPaletteEntries > 4_000_000) {
+  throw new Error(`SPATIAL_MAX_PALETTE 必须是 [1,4000000] 内的整数，收到：${maxPaletteEntries}`);
+}
 // 单次 checkpoint 的体素 dirty 批次上限；默认 16MiB，必须不超过总快照上限。
 // 小于总量时一次保存只提交有界前缀，剩余 dirty 由后续批次提交。
 const voxelBatchMb = num('SPATIAL_VOXEL_BATCH_MB', 16);
@@ -213,6 +223,10 @@ export const config = {
     maxFactBytes,
     /** 整库已提交体素的观测格数上限；默认 410 万，可用 SPATIAL_MAX_OBSERVED_CELLS 调整。 */
     maxObservedCells,
+    /** 整库已提交体素的 Section 数上限；默认 10,000，可用 SPATIAL_MAX_SECTIONS 调整。 */
+    maxVoxelSections,
+    /** 整库已提交体素的 palette 条目上限；默认 200,000，可用 SPATIAL_MAX_PALETTE 调整。 */
+    maxPaletteEntries,
     /** 单次 checkpoint 的体素 dirty 批次上限；默认 16MiB，可用 SPATIAL_VOXEL_BATCH_MB 调整。 */
     voxelBatchMb,
     voxelBatchMaxBytes,
