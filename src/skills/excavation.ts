@@ -4,7 +4,7 @@ import { config } from '../config.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable, shapeKnown, supportTop, type ObservedState, type StateAt } from '../perception/geometry.ts';
 import { feetCell } from '../perception/local.ts';
-import { codeFromError, fail, isAbort, obj, ok, type FailureCode, type Skill, type SkillCtx } from './types.ts';
+import { codeFromError, fail, isAbort, obj, ok, traceOf, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
 
@@ -696,7 +696,9 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
     const structured = error instanceof ExcavationStop
       ? { ...(error.supportMissing ? { supportMissing: error.supportMissing } : {}), ...(remediation ? { remediation } : {}), ...(error.refill ? { refill: error.refill } : {}), ...(error.fillAttempts ? { fillAttempts: error.fillAttempts } : {}) }
       : {};
-    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported, ...stop, ...(cavity ? { cavity } : {}), ...structured });
+    // 非施工停止的异常（TypeError 等）没有可读原因：带上前三层调用栈，否则只剩一句 “reading 'x'”。
+    const trace = error instanceof ExcavationStop ? undefined : traceOf(error);
+    return fail(error instanceof ExcavationStop ? error.code : codeFromError(error), `有界开挖停止：${msg}${hint}`, { ...details(), ...unsupported, ...stop, ...(cavity ? { cavity } : {}), ...structured, ...(trace ? { trace } : {}) });
   }
 }
 

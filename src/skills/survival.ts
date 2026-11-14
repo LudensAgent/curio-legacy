@@ -1,5 +1,5 @@
 import { sleep, throwIfAborted } from '../util.ts';
-import { clampInt, codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx, type SkillResult } from './types.ts';
+import { clampInt, codeFromError, fail, isAbort, obj, ok, traceOf, type Skill, type SkillCtx, type SkillResult } from './types.ts';
 import { lookAround } from './movement.ts';
 import { sleepSkill } from './build.ts';
 import { findStation } from './stations.ts';
@@ -215,7 +215,8 @@ async function digPit(ctx: SkillCtx, args: { until: 'day' | 'healed' }): Promise
       if (sealedProblem) return fail('ERROR', sealedProblem);
     } catch (e) {
       if (isAbort(e)) throw e;
-      return fail(codeFromError(e), `挖避难所出错：${(e as Error).message}`);
+      const trace = traceOf(e);
+      return fail(codeFromError(e), `挖避难所出错：${(e as Error).message}`, trace ? { trace } : undefined);
     }
 
     ctx.bus.publish('shelter', 'P2', `躲进了地下避难所 (${x}, ${y - 3}, ${z})，等待${args.until === 'day' ? '天亮' : '回血'}`);

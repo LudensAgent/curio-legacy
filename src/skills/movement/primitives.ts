@@ -10,7 +10,7 @@ import { isDangerousBlock } from '../../spatial/land-search.ts';
 import { markSelfModified } from '../../spatial/shared-session.ts';
 import { ANY_FILL_NOTE, PLACEABLE, PLACEABLE_DOC } from '../survival.ts';
 import { isStation, rememberStation } from '../stations.ts';
-import { codeFromError, fail, isAbort, obj, ok, type Skill, type SkillCtx } from '../types.ts';
+import { codeFromError, fail, isAbort, obj, ok, traceOf, type Skill, type SkillCtx } from '../types.ts';
 import { absValue, after, facingArg, parseRel, relValue, toRel, visibleCells, visibleStates, type Rel } from './coordinates.ts';
 import { consumptionReceipt, consumptionText, countItems, inspectBody, inspectStandableBelow, inspectSupport, inspectSupportDigRisk, reconcileBlockMutation, stateAt, stateReader } from './facts.ts';
 import { effectConfirmed, effectUnconfirmed, placementMayHaveExecuted, placementProblem, problemOf, REFERENCE_PROBLEMS, withExecutionLink, type PrimitiveProblemKind } from './receipt.ts';
@@ -639,8 +639,11 @@ const mineCellSkill: Skill<MineArgs> = {
       if (!effect.matched) {
         const now = effect.state?.name ?? null;
         const code = String((e as Error).message).startsWith('TOOL_MISSING') ? 'TOOL_MISSING' : codeFromError(e);
+        // 适配器抛出的原生异常（TypeError 等）没有可读原因：带上前三层调用栈，
+        // 让这类失败能定位到真正抛错的那一层，而不是只剩一句 “reading 'x'”。
+        const trace = traceOf(e);
         return fail(code, `挖 [${args.at}] 的 ${before} 没成：${why(e)}`, {
-          ...after(ctx, args.facing, pos), adapterError: why(e), now,
+          ...after(ctx, args.facing, pos), adapterError: why(e), now, ...(trace ? { trace } : {}),
           ...problemOf(effect.kind === 'unknown' ? 'EFFECT_UNKNOWN' : 'EFFECT_NOT_CONFIRMED', 'reconciliation'), ...effectUnconfirmed('block_removed', effect.kind !== 'unknown'),
         });
       }

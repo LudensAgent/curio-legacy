@@ -258,6 +258,13 @@ export const fail = (failureCode: FailureCode, summary: string, data?: Record<st
   data,
 });
 
+/** 未预期异常的前三层调用栈：失败回执带上它，TypeError 才能定位到真正抛错的那一层。 */
+export function traceOf(e: unknown): string | undefined {
+  return e instanceof Error && typeof e.stack === 'string'
+    ? e.stack.split('\n').slice(1, 4).map((line) => line.trim().replace(/^at\s+/, '')).join(' | ')
+    : undefined;
+}
+
 /** 把底层异常归类为失败码。AbortedError 交给上层处理为 cancelled。 */
 export function codeFromError(e: any): FailureCode {
   const name = String(e?.name ?? '');
