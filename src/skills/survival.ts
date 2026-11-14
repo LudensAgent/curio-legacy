@@ -386,6 +386,8 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
     const origin = { ...adapter.state().pos };
     const tried = new Set<number>();
     const chased = new Map<number, number>();
+    // 走到掉落物跟前失败时的真实原因；只用于回执，不据此改目标。
+    const approachErrors = new Map<number, string>();
     const inv = () => {
       const m = new Map<string, number>();
       for (const i of adapter.state().inventory) m.set(i.name, (m.get(i.name) ?? 0) + i.count);
@@ -424,7 +426,10 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
             await adapter.moveTo({ kind: 'near', pos: mem.pos, range: 1 }, { signal, timeoutMs: 8000 });
             visits++;
             ctx.progress(Math.min(1, visits / 10), `回去捡刚才看见的 ${mem.name}`);
-          } catch (e) { if (isAbort(e)) throw e; }
+          } catch (e) {
+            if (isAbort(e)) throw e;
+            approachErrors.set(mem.id, (e as Error).message.slice(0, 220));
+          }
           const eye = adapter.eye();
           if (eye) {
             const dx = mem.pos.x - eye.x, dz = mem.pos.z - eye.z, dy = mem.pos.y + 0.2 - eye.y;
@@ -445,6 +450,7 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
         ctx.progress(Math.min(1, visits / 10), `去捡 ${item.name.replace(/^item:/, '')}`);
       } catch (e) {
         if (isAbort(e)) throw e;
+        approachErrors.set(item.id, (e as Error).message.slice(0, 220));
       }
       await sleep(250, signal);
     }
@@ -468,9 +474,12 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
           .map((d) => ({ id: d.id, name: dropName(d.name), pos: d.pos, ageMs: d.ageMs })) : []),
       ].map((d) => [d.id, d])).values()].slice(0, 3); // 回执最多列三处，避免同类掉落刷屏
       const dropped = known.length ? `；记得/看见 ${describeDrops(known, adapter.state().pos)}，但没有走到或没捡起来` : '';
+      // 走路到不了时把身体报的导航原因一并交回：是没路、没证据还是超时，由 Agent 决定换手段。
+      const failed = known.flatMap((d) => { const why = approachErrors.get(d.id); return why ? [`${d.name}：${why}`] : []; });
+      const whyText = failed.length ? `；身体没能接近：${failed.slice(0, 2).join('；')}` : '';
       const prefix = known.length ? `没能捡到 ${args.item} 掉落物` : `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物`;
-      return fail('NOT_FOUND', `${prefix}${dropped}${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}${args.remembered ? '' : '；如果它刚掉在视野外，可加 remembered:true 走回最近五分钟见过的掉落点'}`,
-        { gained, collected, visits, ...(known.length ? { lostDrops: known.map(({ name, pos, ageMs }) => ({ name, pos, ...(ageMs !== undefined ? { ageMs } : {}) })) } : {}), ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
+      return fail('NOT_FOUND', `${prefix}${dropped}${whyText}${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}${args.remembered ? '' : '；如果它刚掉在视野外，可加 remembered:true 走回最近五分钟见过的掉落点'}`,
+        { gained, collected, visits, ...(known.length ? { lostDrops: known.map(({ name, pos, ageMs }) => ({ name, pos, ...(ageMs !== undefined ? { ageMs } : {}) })) } : {}), ...(failed.length ? { approachErrors: failed } : {}), ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
     }
     if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained, collected, visits });
     return visits ? ok(`走过去了 ${visits} 处掉落物，但背包没有变化（可能被捡走了或够不着）`, { gained, collected, visits }) : ok('附近没有看得见的掉落物', { gained, collected, visits });

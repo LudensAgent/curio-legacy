@@ -311,7 +311,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           const r = receipt(dug, lost);
           return held() > initial
             ? ok(`${briefly(r)}${lost ? dropText(lastLostDrops) : ''}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug: dug - lost, skippedUnreachable: skippedUnreachable.size, collection: r })
-            : fail('PATH_NOT_FOUND', `${briefly(r)}；${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size, collection: r });
+            : fail('PATH_NOT_FOUND', `${briefly(r)}${lost ? dropText(lastLostDrops) : ''}；${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size, collection: r });
         }
         // 看不见目标：不替它决定往下挖（直上直下挖是最危险的挖法），只说脚下踩着的是什么，挖不挖、往哪挖由它定
         if (canDigDown && !underNote) {
@@ -349,7 +349,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         const r = receipt(dug, lost);
         return held() > initial
           ? ok(`看不到更多 ${args.block}${looked}，${briefly(r)}${lost ? dropText(lastLostDrops) : ''}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, dug: dug - lost, ...(skipped ? { skippedUnsafe: { ...risky } } : {}), collection: r }, manMadeCaveat)
-          : fail('NOT_FOUND', `未达成：${briefly(r)}；${skipped
+          : fail('NOT_FOUND', `未达成：${briefly(r)}${lost ? dropText(lastLostDrops) : ''}；${skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
             : `眼前看不见 ${args.block}${looked}${staleNote}${remembered || '；尚未定位该资源，不代表其他地点也没有'}${underNote}${remembered ? '' : repeatSearchNote(args.block, times)}`}`, {
@@ -394,14 +394,14 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
           adapter.stopAll();
           const current = adapter.state();
           const r = receipt(dug, lost);
-          return fail('PATH_NOT_FOUND', `前往 ${pick.name} 时进入水中，已停止采集；${briefly(r)}，氧气 ${current.oxygen}/20`,
+          return fail('PATH_NOT_FOUND', `前往 ${pick.name} 时进入水中，已停止采集；${briefly(r)}${lost ? dropText(lastLostDrops) : ''}，氧气 ${current.oxygen}/20`,
             { dug: dug - lost, target: pick.pos, pos: current.pos, inWater: current.inWater, oxygen: current.oxygen, collection: r });
         }
         if (++failsInRow >= 4) {
           const r = receipt(dug, lost);
           return held() > initial
             ? ok(`多次失败后停止，${briefly(r)}${lost ? dropText(lastLostDrops) : ''}`, { dug: dug - lost, collection: r })
-            : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}；${briefly(r)}`, { collection: r });
+            : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}；${briefly(r)}${lost ? dropText(lastLostDrops) : ''}`, { collection: r });
         }
         continue;
       }

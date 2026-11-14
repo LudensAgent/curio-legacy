@@ -139,7 +139,7 @@ export class Attention {
     // 转头后重见同一实体不再提醒；同种物品的新实体仍交给下一次思考判断。
     // 同批合成一条，新批次保留到现有思考调度统一取走，不用物品名冷却吞掉新信息。
     if (freshDrops.length) out.push(this.notice(`drops:${freshDrops.flatMap((d) => d.ids).sort((a, b) => a - b).join(',')}`,
-      `地上有掉落物：${freshDrops.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格${d.tossed_by_me ? '，自己刚扔的' : ''}）`).join('、')}；要捡用 pickup_items`, considerPickup ? 0.5 : 0.4, 0, now));
+      `附近有掉落物：${freshDrops.slice(0, 4).map((d) => `${d.item}×${d.count}（${d.dir ?? ''}${d.dist}格${d.dy > 0 ? `，上方 ${d.dy} 格` : d.dy < 0 ? `，下方 ${-d.dy} 格` : ''}${d.tossed_by_me ? '，自己刚扔的' : ''}）`).join('、')}；要捡用 pickup_items`, considerPickup ? 0.5 : 0.4, 0, now));
     return out.filter((n): n is Noticing => !!n);
   }
 

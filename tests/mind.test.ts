@@ -879,7 +879,7 @@ for (const pick of [false, true]) test(`新掉落先触发轻量判断，模型$
   await w.tick();
   assert.equal(w.pending.length, 2);
   assert.equal(w.pending[1].hint.tier, 'light');
-  assert.match(JSON.stringify(w.pending[1].messages), /地上有掉落物：cobblestone/);
+  assert.match(JSON.stringify(w.pending[1].messages), /附近有掉落物：cobblestone/);
   assert.equal(w.arbiter.info()?.id, current.id, '判断期间手上的动作继续');
   assert.deepEqual(w.adapter.pos, start);
   assert.ok(w.bus.recent().every((e) => e.type !== 'task_start' || e.data?.skill !== 'pickup_items'));

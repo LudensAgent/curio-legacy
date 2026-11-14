@@ -266,6 +266,21 @@ test('挖到矿但掉落没进包时，回执带上仍记得的掉落坐标和�
   } finally { ctx.memory.close(); }
 });
 
+test('挖掉唯一一块矿但掉落没进包时，NOT_FOUND 回执也带上掉落坐标和高度', async () => {
+  const w = new DropWorld();
+  w.dropsFor = () => [];
+  placeOre(w, 1);
+  const ctx = makeCtx(w, { senses: {
+    recentDrops: () => [{ id: 7, name: 'raw_iron', pos: { x: 1, y: 68, z: 0 }, ageMs: 5000 }],
+  } });
+  try {
+    const result = await gather.run(ctx, { block: 'iron_ore', count: 1 });
+    assert.equal(result.status, 'failed', result.summary);
+    assert.match(result.summary, /未达成/);
+    assert.match(result.summary, /记得掉落物：raw_iron \(1,68,0\)，在上方 4 格/, '失败摘要也要给出坐标，不只放在 data 里');
+  } finally { ctx.memory.close(); }
+});
+
 test('后续成功只捡到新挖方块自己的掉落时，不会把仍丢失的旧掉落误报成已找回', async () => {
   const w = new DropWorld();
   w.dropsFor = () => w.digs.length >= 3 ? ['raw_iron'] : [];

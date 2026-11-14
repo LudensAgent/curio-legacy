@@ -124,8 +124,10 @@ test('pickup_items 失败时报告仍记得的掉落坐标、高度差和见过�
   assert.match(result.summary, /raw_iron \(3,58,0\)/);
   assert.match(result.summary, /在脚下 6 格/);
   assert.match(result.summary, /5 秒前见过/);
+  assert.match(result.summary, /身体没能接近：raw_iron：PATH_NOT_FOUND 走不到坑底/, '回执给出真实的导航失败原因');
   assert.equal(asked, 300_000, '拾取记忆窗口与掉落物寿命一致');
   assert.deepEqual(result.data?.lostDrops, [{ name: 'raw_iron', pos: { x: 3, y: 58, z: 0 }, ageMs: 5000 }]);
+  assert.deepEqual(result.data?.approachErrors, ['raw_iron：PATH_NOT_FOUND 走不到坑底']);
 });
 
 test('pickup_items 报告视野内但在拾取半径外的目标掉落坐标', async (t) => {

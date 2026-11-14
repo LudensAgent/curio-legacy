@@ -16,7 +16,7 @@ const baseline = (() => {
 const percept = (drops: NonNullable<Percept['vision']>['visible_drops']) => ({
   ...baseline, vision: { ...baseline.vision!, visible_drops: drops },
 });
-const drop = (id: number, item = 'cobblestone') => ({ ids: [id], item, count: 1, dist: 3, dir: 'N' });
+const drop = (id: number, item = 'cobblestone') => ({ ids: [id], item, count: 1, dist: 3, dir: 'N', dy: 0 });
 
 test('the grouped visual summary keeps each visible drop entity ID', () => {
   const adapter = new FakeAdapter(), vision = new Vision(adapter);
@@ -71,6 +71,14 @@ test('the pickup preference decides between a light reconsideration and a passiv
   const active = attention.fromPercept(percept([drop(2, 'coal')]), 2, true);
   assert.equal(active[0].salience, 0.5);
   assert.equal(active[0].level, 'reconsider');
+});
+
+test('掉落物提醒带上实际高度差，不把头顶的掉落物说成地上', () => {
+  const attention = new Attention();
+  attention.fromPercept(percept([]), 0, true);
+  const notices = attention.fromPercept(percept([{ ...drop(1), dy: 3 }]), 1, true);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].what, /附近有掉落物：cobblestone×1（N3格，上方 3 格）/);
 });
 
 test('multiple new drops in the same observation are one combined notice', () => {
