@@ -288,8 +288,8 @@ export class BehaviorEngine {
   private usage: { at: number; tag: string }[] = [];
   /** 最近身体自己接手（自动/恢复）的记录：认出来回拉锯 */
   private fires: { at: number; name: string; doing: string | null }[] = [];
-  /** 拉锯时先让一边歇一会儿（不是停用：过了这段时间照常） */
-  private holds = new Map<string, { until: number; why: string; closer?: number }>();
+  /** 拉锯/空转时先让一边歇一会儿（不是停用：过了这段时间照常）；版本变了就不再压住新版本。 */
+  private holds = new Map<string, { until: number; why: string; closer?: number; version: string }>();
   private loopSaid = new Map<string, number>();
   /** 恢复技能 × 失败种类 → 最近一次没帮上（或跳过）的时刻 */
   private recentMiss = new Map<string, number>();
@@ -317,6 +317,10 @@ export class BehaviorEngine {
   private recoveries = new Map<string, { behavior: Behavior; data?: Record<string, unknown>; ignored?: boolean; invocationRecorded?: boolean }>();
   /** 最近一次记成成功的运行身份（技能、版本、维度、arbiter 任务 id）：调用方事后判定收工条件未满足时，只降级这一条。 */
   private lastCredit: { name: string; version: string; dim: string; taskId: string; entry: RunRecord } | null = null;
+  /** 同一版本连续空转的次数与最近一次时间：超过重置窗口重新从 1 数；第二次起硬暂停。 */
+  private idleStreak = new Map<string, { version: string; streak: number; lastIdleAt: number }>();
+  static readonly IDLE_STREAK_RESET_MS = 5 * 60_000;
+  static readonly IDLE_STREAK_ESCALATE = 2;
   static readonly AFTERMATH_MS = 12_000;
   /** 代码技能失败或心智要求改进时调用（main 接到后台改进器） */
   improve: ImproveHook | null = null;
@@ -431,8 +435,8 @@ export class BehaviorEngine {
     const matches: Behavior[] = [];
     for (const b of auto) {
       if (b.priority <= floor || running?.name === b.name) continue;
-      const hold = this.holds.get(b.name);
-      if (hold && hold.until > now) {
+      const hold = this.activeHold(b, now);
+      if (hold) {
         // 白白接手后歇着的：怪比那时又近了 2 格以上、或者挨了打，情况变了，照常接手
         if (hold.closer === undefined) continue;
         s ??= this.sense(cur);
@@ -524,7 +528,7 @@ export class BehaviorEngine {
       record(loop.a, loop.b); record(loop.b, loop.a);
       if (loser) {
         const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
-        this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why });
+        this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why, version: this.versionOf(loser) });
         // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）才恢复
         this.touch(loser.name, (st) => { st.advisory = { since: now, why, version: this.versionOf(loser) }; });
       }
@@ -537,8 +541,19 @@ export class BehaviorEngine {
     }
   }
 
-  /** 拉锯时被叫停的技能（给控制台和测试看） */
-  heldNow(now = Date.now()): string[] { return [...this.holds].filter(([, h]) => h.until > now).map(([n]) => n); }
+  /** 当前版本仍有效的暂停；同名新版本不受旧暂停影响。 */
+  private activeHold(b: Behavior, now: number) {
+    const h = this.holds.get(b.name);
+    return h && h.until > now && h.version === this.versionOf(b) ? h : null;
+  }
+
+  /** 拉锯时被叫停的技能（给控制台和测试看）：旧版本的暂停不算在当前版本头上 */
+  heldNow(now = Date.now()): string[] {
+    return [...this.holds].flatMap(([name, h]) => {
+      const b = this.get(name) ?? this.get(name, true);
+      return h.until > now && b && h.version === this.versionOf(b) ? [name] : [];
+    });
+  }
 
   /** 同时满足条件时的选择分：优先级 + 实际成功率（没用过的按五五开） */
   choiceScore(b: Behavior): number {
@@ -596,6 +611,7 @@ export class BehaviorEngine {
       this.aftermath.delete(name);
       this.recoveries.delete(name);
       this.holds.delete(name);
+      this.idleStreak.delete(name);
       this.waitSaid.delete(name);
       this.lastFired.delete(name);
       this.usage = this.usage.filter((entry) => !entry.tag.startsWith(`${name}@`));
@@ -673,7 +689,7 @@ export class BehaviorEngine {
     if (!rec.length) return null;
     const s = this.sense(this.arbiter?.info() ?? null, failure);
     // 几个都对得上时，和自动技能一样按“优先级 + 实际成功率”挑，不是排在前面的就先上
-    const hit = rec.filter((b) => (this.holds.get(b.name)?.until ?? 0) <= now && evalPredicate(b.when!, s))
+    const hit = rec.filter((b) => !this.activeHold(b, now) && evalPredicate(b.when!, s))
       .sort((a, b) => this.choiceScore(b) - this.choiceScore(a))[0];
     if (!hit) return null;
     // 按它以往的成败“掷一次骰子”（Beta 后验抽样）：常成功的几乎总会上，老失败的偶尔还给它机会、多数时候直接交还给心智。
@@ -773,6 +789,8 @@ export class BehaviorEngine {
     if (!this.behaviors.has(w.skill.name)) this.reload();
     const b = opts.by ? this.candidates.get(w.skill.name) : this.behaviors.get(w.skill.name);
     if (!b) return { ok: false, error: '技能写下了，但格式不对没有生效' };
+    // 稳定版重写会换掉自动接手的执行内容：旧版本的暂停/空转计数不应继续压着它。候选版本不解除稳定版的暂停。
+    if (!opts.by) { this.holds.delete(b.name); this.idleStreak.delete(b.name); }
     // 修订就是重新给它一次机会：新版本从零记，旧版本的成败留着（好拿来比）
     this.touch(b.name, (st) => {
       if (!opts.by) { st.disabled = false; delete st.lastError; delete st.retired; delete st.advisory; delete st.retiredAt; delete st.disabledAt; }
@@ -962,6 +980,8 @@ export class BehaviorEngine {
     const now = Date.now();
     const returned = result.data?.result;
     const skipped = result.status === 'succeeded' && !!(result.data?.noop === true || returned && typeof returned === 'object' && 'skipped' in returned && returned.skipped);
+    // 产生了实际效果（或明确失败/取消）就不再算“连续空转”；下一次空转从 1 重新数。
+    if (!skipped) this.idleStreak.delete(name);
     this.touch(name, (st) => {
       st.lastUsedAt = now;
       st.uses = (st.uses ?? 0) + 1;
@@ -1073,7 +1093,7 @@ export class BehaviorEngine {
     if (b.candidate) {
       // 试用中的反射接手后什么都没做：和稳定版一样记 idle 并歇一会儿，否则冷却一过又会打断手上的事。
       if (this.recordInvocation(name, o.result, b, o.task.id) && o.task.source === 'reflex') {
-        this.noteIdle(name, pending?.nearest, pending?.interrupted);
+        this.noteIdle(name, b, pending?.nearest, pending?.interrupted);
         if (pending) this.aftermath.delete(name);
       }
       return;
@@ -1086,7 +1106,7 @@ export class BehaviorEngine {
     }
     if (skipped) {
       // no-op（身体什么都没做）：不记 ok/fail；反射触发的记 idle 信号（收窄 when、歇一会儿别反复空转），非反射的只是这次没成
-      if (o.task.source === 'reflex') this.noteIdle(name, pending?.nearest, pending?.interrupted);
+      if (o.task.source === 'reflex') this.noteIdle(name, b, pending?.nearest, pending?.interrupted);
       if (pending) this.aftermath.delete(name);
       if (recovery) recovery.ignored = true;
       return;
@@ -1098,14 +1118,19 @@ export class BehaviorEngine {
     this.record(b, okRun, o.result.summary, (o.result.data ?? {}) as Record<string, any>, o.task.id);
   }
 
-  /** 反射技能触发后什么都没做：记 idle（整理技能的据此收窄 when）、歇一会儿，怪更近或挨打时照常接手 */
-  private noteIdle(name: string, nearest: number | undefined, interrupted?: string) {
+  /** 反射技能触发后什么都没做：记 idle（整理技能的据此收窄 when）、歇一会儿；第一次允许威胁更近或挨打时重试，连续空转则不再被同一处境唤醒 */
+  private noteIdle(name: string, b: Behavior, nearest: number | undefined, interrupted?: string) {
     const now = Date.now();
     // 什么都没做的接手不算一次“来回”：否则在别的技能的地盘上让位（水下让给换气）也会被误判成拉锯
     for (let i = this.fires.length - 1; i >= 0; i--) if (this.fires[i].name === name) { this.fires.splice(i, 1); break; }
+    const version = this.versionOf(b);
+    const prev = this.idleStreak.get(name);
+    const streak = prev?.version === version && now - prev.lastIdleAt < BehaviorEngine.IDLE_STREAK_RESET_MS ? prev.streak + 1 : 1;
+    this.idleStreak.set(name, { version, streak, lastIdleAt: now });
     this.touch(name, (st) => { st.fired = Math.max(0, st.fired - 1); st.idleInterrupts = (st.idleInterrupts ?? 0) + 1; st.idleAt = now; });
-    this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: '条件成立接手后什么都没做就返回', closer: Number.isFinite(nearest) ? nearest : Infinity });
-    this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回${interrupted ? `（打断了「${interrupted}」）` : ''}，先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒（怪更近或挨打时照常接手）；它的 when 可能比代码里的判断宽`, { name, ...(interrupted ? { interrupted } : {}), times: this.stats[name]?.idleInterrupts });
+    const escalated = streak >= BehaviorEngine.IDLE_STREAK_ESCALATE;
+    this.holds.set(name, { until: now + BehaviorEngine.HOLD_MS, why: escalated ? `连续 ${streak} 次空转` : '条件成立接手后什么都没做就返回', version, ...(escalated ? {} : { closer: Number.isFinite(nearest) ? nearest : Infinity }) });
+    this.bus.publish('instinct_idle', 'P3', `技能「${name}」接手后什么都没做就返回${interrupted ? `（打断了「${interrupted}」）` : ''}，连续第 ${streak} 次；先歇 ${BehaviorEngine.HOLD_MS / 1000} 秒${escalated ? '，暂停期间不再因为威胁靠近或挨打就立刻重试' : '（怪更近或挨打时照常接手）'}；它的 when 或执行可能对不上当前处境`, { name, ...(interrupted ? { interrupted } : {}), streak, escalated, times: this.stats[name]?.idleInterrupts });
   }
 
   /** 自动技能的事后观测：12 秒后（或死亡时）补记事实——死了、又掉多少血、触发处境是否还在。
