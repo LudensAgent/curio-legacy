@@ -384,42 +384,65 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
 };
 
 // ===================================================================== 查库存
-export const findItem: Skill<{ item: string }> = {
+export const findItem: Skill<{ item: string; count?: number }> = {
   name: 'find_item',
-  description: '查某样东西现在在哪：背包多少、最近的那个箱子（距离优先、其次数量最多）多少、箱子合计与总计多少。只读，不开箱不移动；没打开过的箱子内容未知',
-  argsDoc: '{"item":"<物品名>"}',
+  description: '查某样东西现在在哪：背包多少，记得的箱子各有多少（按远近列出坐标；带 count 时标出哪只单独够用），箱子里合计与总计多少。只读，不开箱不移动；没打开过的箱子内容未知',
+  argsDoc: '{"item":"<物品名>","count"?:1-9999（要几个：用来判断哪只箱子单独够用）}',
   timeoutMs: 3000,
   movement: false,
   readOnly: true,
   validate(raw, adapter) {
-    const item = String(obj(raw).item ?? '').trim().replace(/^minecraft:/, '');
+    const input = obj(raw);
+    const item = String(input.item ?? '').trim().replace(/^minecraft:/, '');
     if (!adapter.isKnownItem(item)) return { ok: false, error: `未知物品：${item}` };
-    return { ok: true, args: { item } };
+    if (input.count !== undefined && !Number.isFinite(Number(input.count))) return { ok: false, error: 'count 需要正整数' };
+    return { ok: true, args: { item, ...(input.count !== undefined ? { count: clampInt(input.count, 1, 9999, 1) } : {}) } };
   },
   async run(ctx, args) {
     const s = ctx.adapter.state();
     const backpack = s.inventory.filter((i) => i.name === args.item).reduce((n, i) => n + i.count, 0);
-    const recalls = ctx.memory.recallChests(args.item, { dim: s.dim, from: s.pos });
-    const inChests = recalls.reduce((n, r) => n + r.count, 0);
+    // 所有维度都查：只查当前维度却说「哪里都没有」，会把记在别的维度的箱子说丢。
+    const recalls = ctx.memory.recallChests(args.item, { from: s.pos });
+    const here = recalls.filter((r) => r.chest.dim === s.dim);
+    const elsewhere = recalls.filter((r) => r.chest.dim !== s.dim);
+    const inChests = here.reduce((n, r) => n + r.count, 0);
     const total = backpack + inChests;
-    // 只返回最近的那个箱子，距离相同再挑数量最多的
-    const nearest = recalls.slice().sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity) || b.count - a.count)[0];
-    if (!backpack && !nearest) {
+    const need = args.count;
+    // 距离用三维：同一基地上下层、坡上坡下的箱子不会被水平距离算成一样近。
+    const dist3 = (pos: Vec3Like) => Math.round(Math.hypot(pos.x - s.pos.x, pos.y - s.pos.y, pos.z - s.pos.z));
+    const sorted = here.slice().sort((a, b) => dist3(a.chest.pos) - dist3(b.chest.pos) || b.count - a.count);
+    const chests = sorted.slice(0, 8).map((r) => {
+      const dist = dist3(r.chest.pos);
+      return { pos: r.chest.pos, count: r.count, dist, ...(r.chest.note ? { note: r.chest.note } : {}),
+        observedAt: r.observedAt, ...(r.chest.contents.possiblyStale === true ? { possiblyStale: true } : {}),
+        ...(need !== undefined ? { enough: r.count >= need } : {}) };
+    });
+    // 带数量时优先指向「单独够用」的那只，否则仍按最近；完整清单同时给出，选哪只由 Agent 决定。
+    const chosen = (need !== undefined ? sorted.find((r) => r.count >= need) : undefined) ?? sorted[0];
+    const chest = chosen ? { pos: chosen.chest.pos, count: chosen.count, dist: dist3(chosen.chest.pos), ...(chosen.chest.note ? { note: chosen.chest.note } : {}), observedAt: chosen.observedAt, ...(chosen.chest.contents.possiblyStale === true ? { possiblyStale: true } : {}) } : null;
+    const target = chest ? { x: chest.pos.x, y: chest.pos.y, z: chest.pos.z } : null;
+    if (!backpack && !recalls.length) {
       // 只查“打开过的记录”不等于箱子是空的：把附近未打开的容器说清楚，
       // 否则模型会把“不记得”误读成“箱子里没有”，转头去别处找。
       const unopened = containerCandidates(ctx).filter((candidate) => candidate.contents.includes('未打开过')).slice(0, 3);
       const facts = containerFacts(unopened);
-      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录的箱子）${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
-        item: args.item, backpack: 0, chest: null, total: 0, ...(unopened.length ? { unopened } : {}),
+      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录、所有维度）${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
+        item: args.item, backpack: 0, chest: null, chests: [], target: null, inChests: 0, total: 0, ...(unopened.length ? { unopened } : {}),
       });
     }
-    const chest = nearest ? { pos: nearest.chest.pos, count: nearest.count, dist: nearest.dist ?? Math.round(Math.hypot(nearest.chest.pos.x - s.pos.x, nearest.chest.pos.z - s.pos.z)), note: nearest.chest.note, observedAt: nearest.observedAt } : null;
-    const target = chest ? { x: chest.pos.x, y: chest.pos.y, z: chest.pos.z } : null;
-    const chestText = chest ? `${chest.note ? `${chest.note}的箱子` : '箱子'} (${chest.pos.x},${chest.pos.y},${chest.pos.z}) 有 ${args.item}×${chest.count}（${chest.dist} 格外）` : '';
+    const label = (c: typeof chests[number]) => `${c.note ? `${c.note}的箱子` : '箱子'} (${c.pos.x},${c.pos.y},${c.pos.z}) ×${c.count}${need !== undefined ? (c.enough ? `（够 ${need}）` : `（不够 ${need}）`) : ''}${c.possiblyStale ? '（未确认全量）' : ''}（${c.dist} 格外）`;
+    const listText = chests.length ? `；记得 ${here.length > chests.length ? `${chests.length}/${here.length}` : `${chests.length}`} 只箱子有它：${chests.map(label).join('、')}` : '';
+    const shortText = need !== undefined && !sorted.some((r) => r.count >= need) && inChests > 0 ? `；没有单只箱子够 ${need}（箱子里合计×${inChests}）` : '';
+    const dimsText = elsewhere.length ? `；其他维度：${elsewhere.slice(0, 4).map((r) => describeRecall(r)).join('；')}` : '';
     const useText = target
-      ? `；用 go_near {"target":${JSON.stringify(target)}} 到旁边，再 take_items {"item":"${args.item}","target":${JSON.stringify(target)}}`
+      ? `；用 go_near {"target":${JSON.stringify(target)}} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
       : '';
-    return ok(`${args.item}：背包×${backpack}${chestText ? `；最近的${chestText}` : ''}；箱子里合计×${inChests}、总计×${total}${useText}`, { item: args.item, backpack, chest, target, inChests, total });
+    const enoughText = need !== undefined && backpack >= need ? `；背包已够 ${need}` : '';
+    return ok(`${args.item}：背包×${backpack}${listText}；箱子里合计×${inChests}、总计×${total}${enoughText}${shortText}${dimsText}${useText}`, {
+      item: args.item, backpack, chest, chests, target, inChests, total,
+      ...(need !== undefined ? { needed: need } : {}),
+      ...(elsewhere.length ? { elsewhere: elsewhere.slice(0, 8).map((r) => ({ dim: r.chest.dim, pos: r.chest.pos, count: r.count })) } : {}),
+    });
   },
 };
 
