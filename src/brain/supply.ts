@@ -43,6 +43,17 @@ const withChests = (inv: Inv, stock?: Stock): Inv => {
 
 const DIFFICULTY_ZH: Record<string, string> = { peaceful: '和平', easy: '简单', normal: '普通', hard: '困难' };
 
+/** Agent 写的材料预算 → 按配方与背包+记得的箱子算每项差额；不改数量、不自动采集。 */
+export function budgetFacts(needs: readonly { item: string; count: number; why?: string }[], inv: Inv, stock?: Stock): string[] {
+  let pool = withChests(inv, stock);
+  return needs.flatMap((n) => {
+    const have = pool.filter((i) => i.name === n.item).reduce((sum, i) => sum + i.count, 0);
+    const plan = materialPlan(n.item, n.count, pool);
+    pool = plan.leftover;
+    return [`${n.item}×${n.count}${n.why ? `（${n.why}）` : ''}：现有 ${have}；${describePlan(plan)}`];
+  });
+}
+
 const FOOD = /^(bread|cooked_beef|cooked_porkchop|cooked_chicken|cooked_mutton|cooked_cod|cooked_salmon|apple|baked_potato|carrot|beef|porkchop|chicken|mutton|rabbit|cooked_rabbit|potato|sweet_berries|melon_slice|cookie|pumpkin_pie|beetroot|dried_kelp)$/;
 const BRIDGE_BLOCKS = /^(cobblestone|cobbled_deepslate|stone|dirt|sand|gravel|netherrack|.*_planks)$/;
 

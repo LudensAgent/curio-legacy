@@ -1,6 +1,6 @@
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
+import { budgetFacts, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -239,7 +239,7 @@ const OUTPUT = `只输出一个 JSON 对象：
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
-operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}]}；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量由你定；最多 8 项，单项 1–2304）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼，由你决定是否调用 pickup_items；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
@@ -651,6 +651,8 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       checklist_note: ctx.tier === 'glance'
         ? '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。'
         : `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`,
+      ...(plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
+        material_budget_note: 'material_budget 是你写在 plan.needs 里的预算；数量由你定，宿主只按配方与背包+记得的箱子算差额，不自动改 gather.count' } : {}),
       ...(plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(() => {

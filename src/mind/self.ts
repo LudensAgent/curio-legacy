@@ -109,7 +109,11 @@ export interface PlanAttempt {
   evidence?: PlanAttemptEvidence;
 }
 
+export interface PlanNeed { /** 物品注册名（如 oak_log）；数量由 Agent 自己定。 */ item: string; count: number; why?: string }
+
 export interface FocusPlan { agendaId: string; goal: string; steps: PlanOutcome[]; setAt: number; updatedAt: number;
+  /** Agent 写的材料预算：宿主只按配方/库存算差额，不自动改采集数量。 */
+  needs?: PlanNeed[];
   /** 做法与尝试记录；旧存档没有这两个字段时按空列表处理。 */
   methods?: PlanMethod[]; attempts?: PlanAttempt[];
   /** 上一次真正推进（定下清单或勾掉一项）的时间 */
@@ -300,6 +304,13 @@ export const REVIEW_GAP_DEFAULT_MS = REVIEW_GAP_RANGE_MIN[0] * 60_000;
  * 也是“停滞多久值得看看清单”的阈值。阶段回顾/操作者指令不受此限；只加项不受限。 */
 export const PLAN_REVISION_MIN = 15;
 
+const cleanNeeds = (raw: PlanNeed[] | undefined): PlanNeed[] | undefined => raw?.flatMap((n) => {
+  const item = typeof n.item === 'string' ? n.item.trim().replace(/^minecraft:/, '').slice(0, 60) : '';
+  const count = Math.floor(Number(n.count));
+  if (!item || !Number.isFinite(count) || count < 1) return [];
+  return [{ item, count: Math.min(2304, count), ...(typeof n.why === 'string' && n.why.trim() ? { why: n.why.trim().slice(0, 60) } : {}) }];
+}).slice(0, 8);
+
 /** 持久化的“我”：性格、情绪、议程、窍门、实验、日记、最近的念头。重启后接着上次的心思玩。 */
 export class SelfModel {
   data: SelfData;
@@ -317,6 +328,11 @@ export class SelfModel {
     }
     // 旧存档的清单可能带模型抄回来的展示 id：读入时归一，按文字对勾选/ID/done_when 才不会失配。
     for (const st of this.data.plan?.steps ?? []) { const text = cleanPlanStep(st.text); if (text) st.text = text; }
+    // 预算是持久化边界：旧存档/手改存档里的越界值在这里收紧一次。
+    if (this.data.plan?.needs) {
+      const cleaned = cleanNeeds(this.data.plan.needs);
+      if (cleaned?.length) this.data.plan.needs = cleaned; else delete this.data.plan.needs;
+    }
     if (file) { this.timer = setInterval(() => this.flush(), 5000); this.timer.unref?.(); }
   }
 
@@ -517,7 +533,7 @@ export class SelfModel {
    * 定下（或改写）主目标的清单。focus 是议程 ID 或一句话（一句话就新建一个今天的目标）。
    * 旧清单里同名、已经勾掉的项保持勾掉。
    */
-  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = [], opts: { promote?: boolean; methods?: { text: string; outcome?: number }[]; methodDrop?: string[] } = {}): FocusPlan | null {
+  setPlan(focus: string, steps: string[], conditions: (import('../projects/types.ts').Condition | null)[] = [], opts: { promote?: boolean; methods?: { text: string; outcome?: number }[]; methodDrop?: string[]; needs?: PlanNeed[] } = {}): FocusPlan | null {
     const id = focus.startsWith('a_') ? focus : this.addAgenda(focus, 'goal', 'today')?.id;
     const item = id ? this.data.agenda.find((a) => a.id === id) : undefined;
     // 主目标只能是“想做的事”：随手记下的点子、疑问不会自己变成要一直推进的目标；
@@ -541,7 +557,9 @@ export class SelfModel {
     const cleanedTexts = cleaned.map((c) => c.text);
     const removedUnfinished = !!old && old.steps.some((st) => !st.done && !cleanedTexts.includes(st.text));
     const revisedAt = removedUnfinished ? [...(old.revisedAt ?? []), Date.now()].slice(-20) : old?.revisedAt;
+    const needs = opts.needs === undefined ? old?.needs : cleanNeeds(opts.needs);
     this.data.plan = { agendaId: item.id, goal: item.text, steps: outcomes, setAt: old?.setAt ?? Date.now(), updatedAt: Date.now(),
+      ...(needs?.length ? { needs } : {}),
       // 只有勾掉一项才算推进；改写清单（哪怕改得面目全非）不算，不然改一次就把“多久没推进”清零了
       progressAt: old ? old.progressAt ?? old.setAt : Date.now(),
       ...(old?.methods !== undefined || opts.methods !== undefined ? { methods: this.mergeMethods(old?.methods, opts.methods, outcomes, opts.methodDrop) } : {}),
@@ -583,6 +601,17 @@ export class SelfModel {
     return [...next, ...previous.filter((m) => !seen.has(m.id)).map((m) => dropped.includes(m.id)
       ? { ...m, status: 'dropped' as const, updatedAt: now }
       : m.status === 'active' ? { ...m, status: 'paused' as const, updatedAt: now } : m)];
+  }
+
+  /** 只改材料预算，不动成果清单/做法/改写计时。 */
+  updatePlanNeeds(needs: PlanNeed[]): FocusPlan | null {
+    const p = this.plan();
+    if (!p) return null;
+    const cleaned = cleanNeeds(needs);
+    if (cleaned?.length) p.needs = cleaned; else delete p.needs;
+    p.updatedAt = Date.now();
+    this.touch();
+    return p;
   }
 
   /** 只改做法，不动成果清单、不改写计时。 */

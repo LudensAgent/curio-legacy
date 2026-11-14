@@ -405,6 +405,8 @@ export interface MindDecision {
     methods?: { text: string; outcome?: number }[];
     /** 明确停用的做法 id（pm_…）。 */
     methodDrop?: string[];
+    /** Agent 写的材料预算；宿主只算差额，不自动改采集数量。 */
+    needs?: { item: string; count: number; why?: string }[];
     switchReason?: string;
   };
   /** 整个换掉手上的事的理由（有主目标时 switch 必须写） */

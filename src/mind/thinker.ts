@@ -443,9 +443,16 @@ export function parsePlan(raw: unknown, condition?: (c: unknown, i: number) => i
   const methodDrop = (Array.isArray(o.method_drop) ? o.method_drop : o.method_drop !== undefined ? [o.method_drop] : [])
     .filter((x: unknown): x is string => typeof x === 'string' && /^pm_[A-Za-z0-9_-]{1,64}$/.test(x)).slice(0, 8);
   const focus = str(o.focus ?? o.agenda_id, 100), goal = str(o.goal, 100), switchReason = str(o.switch_reason, 120);
-  if (!steps.length && !done.length && methods === undefined && !methodDrop.length) return null;
+  // 只做形状解析；数量/条目上限由 setPlan 的 cleanNeeds 在存储边界处理。
+  const needs = Array.isArray(o.needs) ? o.needs.flatMap((x: unknown) => {
+    if (!x || typeof x !== 'object') return [];
+    const n = x as Record<string, unknown>;
+    return [{ item: str(n.item ?? n.name, 60), count: Number(n.count), ...(str(n.why, 60) ? { why: str(n.why, 60) } : {}) }];
+  }) : undefined;
+  if (!steps.length && !done.length && methods === undefined && !methodDrop.length && needs === undefined) return null;
   return { ...(focus ? { focus } : {}), ...(goal ? { goal } : {}), ...(steps.length ? { steps } : {}), ...(conditions.some(Boolean) ? { conditions } : {}), ...(done.length ? { done } : {}),
     ...(methods !== undefined ? { methods } : {}), ...(methodDrop.length ? { methodDrop } : {}),
+    ...(needs !== undefined ? { needs } : {}),
     ...(switchReason ? { switchReason } : {}) };
 }
 

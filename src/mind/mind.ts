@@ -137,6 +137,8 @@ const RESUMABLE_LONG_RANGE = new Set(['explore_toward', 'travel_to']);
 /** 一次决定落到身体时的上下文：危险紧急、操作者指令照做、或提前规划。 */
 type ApplyFlags = { urgent?: boolean; emergency?: boolean; operator?: boolean; nearEnd?: boolean };
 
+const needsText = (needs?: { item: string; count: number }[]) => needs?.length ? needs.map((n) => `${n.item}×${n.count}`).join('、') : '无';
+
 export class Mind {
   activity: Activity | null = null;
   suspended: Activity[] = [];
@@ -2623,19 +2625,23 @@ export class Mind {
     if (!p) return;
     const cur = this.d.self.plan();
     // 只改做法：成果清单原样保留，不触发清单改写保护，也不重置停滞计时。
-    if (!p.steps?.length && cur && (p.methods !== undefined || p.methodDrop?.length)) {
+    if (!p.steps?.length && cur && (p.methods !== undefined || p.methodDrop?.length || p.needs !== undefined)) {
       const focus = p.focus ?? p.goal;
       // 只改做法不能顺带换主目标：归属写错会把旧做法记到新计划上。
       if (focus && focus !== cur.agendaId && focus !== cur.goal) {
-        decision.notes.push(`只改做法时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；${GOAL_SWITCH_RULE}（要换主目标还要同时写 steps）`);
+        decision.notes.push(`只改做法或预算时 focus 必须指向当前主目标「${cur.goal.slice(0, 30)}」；${GOAL_SWITCH_RULE}（要换主目标还要同时写 steps）`);
         return; // 拒绝整条 plan，不能顺手勾掉当前计划的项
       }
-      this.applyPlanMethods(p);
+      if (p.methods !== undefined || p.methodDrop?.length) this.applyPlanMethods(p);
+      if (p.needs !== undefined) {
+        const withNeeds = this.d.self.updatePlanNeeds(p.needs)!;
+        this.d.bus.publish('plan_needs', 'P2', `材料预算更新：${needsText(withNeeds.needs)}`, { needs: withNeeds.needs ?? [] });
+      }
       return this.applyPlanDone(decision);
     }
-    // 先 agenda 后 plan 的顺序下，刚换到的新目标可能还没有清单；做法不能静默丢掉。
-    if (!p.steps?.length && !cur && (p.methods !== undefined || p.methodDrop?.length)) {
-      decision.notes.push('只改做法时当前没有清单可挂：先给主目标写 steps，再写 methods');
+    // 先 agenda 后 plan 的顺序下，刚换到的新目标可能还没有清单；做法/预算不能静默丢掉。
+    if (!p.steps?.length && !cur && (p.methods !== undefined || p.methodDrop?.length || p.needs !== undefined)) {
+      decision.notes.push('只改做法/预算时当前没有清单可挂：先给主目标写 steps，再写 methods/needs');
       return this.applyPlanDone(decision);
     }
     let droppedUnfinished = false;
@@ -2690,13 +2696,14 @@ export class Mind {
         }
       }
       // 模型自己写了 focus（不是沿用手上的活或议程）：它挑中的点子可以升成目标
-      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus, methods: p.methods, methodDrop: p.methodDrop }) : null;
+      const set = focus ? this.d.self.setPlan(focus, p.steps, p.conditions ?? [], { promote: !!p.focus && p.focus === focus, methods: p.methods, methodDrop: p.methodDrop, needs: p.needs }) : null;
       if (set && same && p.switchReason) this.d.self.think(`改了「${set.goal}」的清单：${p.switchReason}`, 'monologue');
       if (set) {
         // 认真写了新计划（换清单或换主目标）就是对无进展循环的回应：闸门放行。
         this.progressGate = null;
         this.progressGateRejects = 0;
         this.d.bus.publish('plan_set', 'P2', `主目标「${set.goal}」：${set.steps.map((st) => `${st.done ? '☑' : '☐'}${st.text}`).join(' ')}`, { agendaId: set.agendaId });
+        if (p.needs !== undefined) this.d.bus.publish('plan_needs', 'P2', `材料预算：${needsText(set.needs)}`, { needs: set.needs ?? [] });
       }
       else {
         const item = focus?.startsWith('a_') ? this.d.self.agenda().find((a) => a.id === focus) : undefined;

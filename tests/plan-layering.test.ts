@@ -116,7 +116,7 @@ test('只改做法时 focus 指向别的主目标会被拒绝，不污染新计�
   const other = self.addAgenda('备好食物', 'goal', 'today')!;
   const { apply } = applyPlanHarness(self);
   const d = apply({ focus: other.id, methods: [{ text: '去农田收麦子' }], done: [0] });
-  assert.match(d.notes.join('；'), /只改做法时 focus 必须指向当前主目标/);
+  assert.match(d.notes.join('；'), /只改做法或预算时 focus 必须指向当前主目标/);
   assert.equal(self.plan()!.agendaId, a.agendaId);
   assert.deepEqual(self.plan()!.methods!.map((m) => m.text), ['沿北向开巷']);
   assert.equal(self.plan()!.steps[0]!.done, false, '被拒绝的 plan 不能顺手勾掉当前计划的项');
