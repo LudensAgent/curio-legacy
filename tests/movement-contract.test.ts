@@ -6,7 +6,7 @@ import type { StopReason } from '../src/skills/movement/session.ts';
 import {
   failureCodeOfMovement, movementFailureOfError, movementFailureOfSearch, movementFailureOfSegment, movementFailureOfStop,
 } from '../src/skills/movement/contract.ts';
-import { resumeAuthorizationAllowed } from '../src/skills/movement/coordinator.ts';
+import { policyRejectionNotes, resumeAuthorizationAllowed } from '../src/skills/movement/coordinator.ts';
 import type { MovementAuthorization } from '../src/skills/movement/session.ts';
 
 test('搜索终态映射：证据缺口、几何无路、预算、取消分开', () => {
@@ -73,6 +73,7 @@ test('协调器停止原因映射：成功为 null，其余不折叠成走不通
     ACTION_FAILURE: 'UNKNOWN',
     MODE_GAP: 'DELEGATION_RESTRICTION',
     DELEGATION_RESTRICTION: 'DELEGATION_RESTRICTION',
+    TOOL_REQUIRED: 'TOOL_MISSING',
     CONFLICT: 'CONFLICT',
     NO_PROGRESS: 'NO_PROGRESS',
     LATERAL_DRIFT: 'DELEGATION_RESTRICTION',
@@ -107,8 +108,20 @@ test('真实回执边界用统一分类：预算、冲突、驻留不再各自�
   assert.equal(code('CONFLICT'), 'PATH_NOT_FOUND');
   assert.equal(code('RESIDENCY_NOT_READY'), 'PATH_NOT_FOUND');
   assert.equal(code('PHYSICAL_FAILURE'), 'EFFECT_NOT_CONFIRMED');
+  assert.equal(code('TOOL_REQUIRED'), 'TOOL_MISSING', '缺工具要保留专门分类，不折叠成走不通');
   assert.equal(code('SCOPE_CHANGED'), 'WRONG_DIMENSION');
   assert.equal(failureCodeOfMovement('NO_PATH_EVIDENCE'), 'NOT_FOUND');
+});
+
+test('策略拒绝回执：含第一条边与可改项；没有开路授权时不承诺顺手灭火', () => {
+  const policy = { rejectedEdges: 3, firstRejection: { from: { x: 0, y: 64, z: 0 }, to: { x: 1, y: 64, z: 0 }, reason: 'host policy rejects recorded dangerous block fire at the destination feet cell' } };
+  const clearable = policyRejectionNotes(policy, true);
+  assert.match(clearable.lead, /拒绝 3 条边/);
+  assert.match(clearable.lead, /第一条 \(0,64,0\)→\(1,64,0\)/);
+  assert.match(clearable.remedy, /宿主会顺手打灭/);
+  assert.match(policyRejectionNotes(policy, false).remedy, /没有开路授权/);
+  const none = policyRejectionNotes(undefined, true);
+  assert.equal(none.lead, ''); assert.equal(none.remedy, ''); assert.equal(none.danger, '');
 });
 
 test('续接授权只能收窄：放弃施工、同材料、更小 maxEdits 可以；新增/换材料/放大不行', () => {
@@ -128,4 +141,6 @@ test('续接授权只能收窄：放弃施工、同材料、更小 maxEdits 可�
   assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'any' } }) }), auth({ makeWay: way({ place: { item: 'dirt' } }) })), true, 'any 可以收窄到具体材料');
   assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ place: { item: 'dirt' } }) }), auth({ makeWay: way({ place: { item: 'any' } }) })), false, '不能从具体材料放宽到 any');
   assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way() }), auth({ makeWay: way({ maxEdits: 20 }) })), false, '不能放大 maxEdits');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: {} }) }), auth({ makeWay: way({ dig: {}, requireTool: true }) })), true, '新增必须用工具是收窄');
+  assert.equal(resumeAuthorizationAllowed(auth({ makeWay: way({ dig: {}, requireTool: true }) }), auth({ makeWay: way({ dig: {} }) })), false, '不能把必须用工具放宽成允许空手');
 });

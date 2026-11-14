@@ -1825,6 +1825,14 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     return this.bot.inventory.items().some((i: any) => ids.includes(i.type));
   }
 
+  harvestTools(pos: Vec3Like): string[] {
+    if (!this.ready) return [];
+    const tools = this.bot.blockAt(this.vec(pos))?.harvestTools;
+    return tools === undefined ? [] : Object.keys(tools)
+      .map((id) => this.mcData.items[Number(id)]?.name)
+      .filter((name): name is string => typeof name === 'string');
+  }
+
   /** 它亲手拿到主手的工具（按种类记：pickaxe → iron_pickaxe）：之后自动换工具时照它的选择来 */
   private toolChoice = new Map<string, string>();
   private noteToolChoice(name: string) {

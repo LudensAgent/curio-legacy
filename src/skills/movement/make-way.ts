@@ -9,6 +9,11 @@ import { isDangerousBlock, isWaterBlock } from '../../spatial/land-edge-policy.t
  */
 export type MakeWayOptions = {
   dig?: { tool?: string };
+  /**
+   * 显式声明“必须用工具才挖”：只对需要工具才能采集的方块生效（canHarvest 为假），
+   * 没有可用工具就停在那一格并交回事实；空手可采集的方块不受影响。
+   */
+  requireTool?: true;
   place?: { item: string };
   /** 只顺手打灭挡路的火/灵魂火：不授权挖普通方块或放置；普通路线被火挡住时由协调器自动启用。 */
   fire?: true;
@@ -253,7 +258,7 @@ export async function planMakeWay(
 /** 默认与上限：一次调用最多为开路改动这么多格（挖开 + 放置合计）。长距离探索常需要连续搭桥，默认按最大可走距离给足。 */
 export const MAKE_WAY_DEFAULT_EDITS = 512, MAKE_WAY_MAX_EDITS = 512;
 /** 开路参数的说明片段，三个入口共用，与 parseMakeWay 一致。 */
-export const MAKE_WAY_ARGS_DOC = `"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 由身体按方块从背包挑合适的工具，写工具名只用那一把；施工临时换的工具/建材在交回前会还原成原来的主手；火/灵魂火没有碰撞，不在这项授权内也会顺手打灭）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（默认 ${MAKE_WAY_DEFAULT_EDITS}；本次调用最多挖开+放置这么多格。搭桥/长距离开路通常每格约一次改动，长距离目标要按距离留足额度；续接只能收窄，不退还同一移动委托已经用掉的累计施工额度）`;
+export const MAKE_WAY_ARGS_DOC = `"dig"?:true|"工具名"（普通路线走不通时允许挖开挡路的格；true 由身体按方块从背包挑合适的工具，写工具名只用那一把；施工临时换的工具/建材在交回前会还原成原来的主手；火/灵魂火没有碰撞，不在这项授权内也会顺手打灭）,"requireTool"?:true（只在写了 dig 时有意义：需要工具才能采集的方块，背包里没有可用工具就停在那一格并回报，不空手慢挖；泥土、沙、原木这类空手可采集的仍照旧）,"place"?:"方块名|any"（允许补脚下支撑/原地垫高，只用这种方块；any 只用泥土、下界岩、圆石等土石类填充方块）,"maxEdits"?:1-${MAKE_WAY_MAX_EDITS}（默认 ${MAKE_WAY_DEFAULT_EDITS}；本次调用最多挖开+放置这么多格。搭桥/长距离开路通常每格约一次改动，长距离目标要按距离留足额度；续接只能收窄，不退还同一移动委托已经用掉的累计施工额度）`;
 /** 开路参数的行为说明，三个入口共用。 */
 export const MAKE_WAY_DOC = '默认不挖不放；写了 dig/place 时，先按已记录体素走普通路线，走不通（阻挡/无路/无进展，或路线只被火/灵魂火挡住）才在已记录体素上规划代价最小的挖开/补支撑/原地垫高路线（未观察格、液体及其邻格、其余危险格、上方压着沙砾的格不挖；火/灵魂火没有碰撞，无论有没有 dig 授权，挡路时都顺手打灭），每次只执行到第一处挖开/放置就回到普通路线、按新看到的格重新规划（挖进看不见的岩体时邻格可能藏着岩浆等液体，这是授权 dig 承担的风险），用 mine_cell/place_support/pillar_one 施工，迈步用连续脚位身体控制；施工临时换的工具/建材在交回前还原成原来的主手；每一步迈出前都用当前已加载方块确认落点支撑、扫掠与危险格，确认不了或看到阻挡就停下交回，不会先迈出去再报错；回执 makeWay.edits 逐条记录挖开了什么、在哪放了什么';
 
@@ -262,27 +267,33 @@ export function parseMakeWay(a: Record<string, unknown>): { ok: true; value: Mak
   if (a.dig !== undefined && a.dig !== true && a.dig !== false && (typeof a.dig !== 'string' || a.dig.trim() === '')) return { ok: false, error: 'dig 需要 true/false 或工具名' };
   if (a.place !== undefined && (typeof a.place !== 'string' || a.place.trim() === '')) return { ok: false, error: 'place 需要方块名或 "any"' };
   if (a.maxEdits !== undefined && (!Number.isInteger(a.maxEdits) || (a.maxEdits as number) < 1 || (a.maxEdits as number) > MAKE_WAY_MAX_EDITS)) return { ok: false, error: `maxEdits 需要 1–${MAKE_WAY_MAX_EDITS} 的整数` };
+  if (a.requireTool !== undefined && typeof a.requireTool !== 'boolean') return { ok: false, error: 'requireTool 需要 true 或 false' };
   const dig = a.dig === true ? {} : typeof a.dig === 'string' ? { tool: a.dig.trim() } : undefined;
   const place = typeof a.place === 'string' ? { item: a.place.trim() } : undefined;
+  if (a.requireTool === true && dig === undefined) return { ok: false, error: 'requireTool 只在写了 dig 时有意义' };
   if (dig === undefined && place === undefined) {
     if (a.maxEdits !== undefined) return { ok: false, error: 'maxEdits 只在写了 dig 或 place 时有意义' };
     return { ok: true, value: undefined };
   }
-  return { ok: true, value: { ...(dig === undefined ? {} : { dig }), ...(place === undefined ? {} : { place }), maxEdits: (a.maxEdits as number | undefined) ?? MAKE_WAY_DEFAULT_EDITS } };
+  return { ok: true, value: {
+    ...(dig === undefined ? {} : { dig }), ...(a.requireTool === true ? { requireTool: true as const } : {}),
+    ...(place === undefined ? {} : { place }), maxEdits: (a.maxEdits as number | undefined) ?? MAKE_WAY_DEFAULT_EDITS,
+  } };
 }
 
 /** 把开路授权还原成平铺的委托参数：校验结果必须能再次通过校验（计划录入后、执行前会再校验一次）。 */
-export function makeWayArgs(opts: MakeWayOptions | undefined): { dig?: true | string; place?: string; maxEdits?: number } {
+export function makeWayArgs(opts: MakeWayOptions | undefined): { dig?: true | string; requireTool?: true; place?: string; maxEdits?: number } {
   if (opts === undefined) return {};
   return {
     ...(opts.dig === undefined ? {} : { dig: opts.dig.tool ?? true }),
+    ...(opts.requireTool === true ? { requireTool: true as const } : {}),
     ...(opts.place === undefined ? {} : { place: opts.place.item }),
     maxEdits: opts.maxEdits,
   };
 }
 
 /** 已校验的平铺参数 → 交给协调器的开路授权；没有授权返回空对象。 */
-export function makeWayRequest(args: { dig?: true | string; place?: string; maxEdits?: number }): { makeWay?: MakeWayOptions } {
+export function makeWayRequest(args: { dig?: true | string; requireTool?: true; place?: string; maxEdits?: number }): { makeWay?: MakeWayOptions } {
   const parsed = parseMakeWay(args);
   return parsed.ok && parsed.value !== undefined ? { makeWay: parsed.value } : {};
 }

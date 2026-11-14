@@ -410,6 +410,57 @@ test('施工额度按会话累计：恢复后只剩余额，且不能借旧 sess
   assert.equal(adapter.actions.filter((action) => action.startsWith('dig:')).length, digCount, '额度用尽后不再自动开新的施工预算');
 });
 
+test('requireTool：需要工具才能采集的方块没有可用工具就停在那一格，不空手挖', async (t) => {
+  clearMovementSessions();
+  const { adapter, map, ctx } = voxelNavigationFixture(12);
+  t.after(() => ctx.memory.close());
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  let sequence = 30000;
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) {
+    const pos = { x: 6, y, z };
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: 'minecraft:stone', properties: {} }, pos });
+    adapter.blocks.push({ name: 'stone', pos });
+  }
+  const target = { x: 10, y: 64, z: 0 };
+  Object.assign(adapter, { canHarvest: () => false, harvestTools: () => ['stone_pickaxe'] });
+  const blocked = await travelTo.run(ctx, argsOf({ to: target, range: 1, dig: true, requireTool: true, maxEdits: 8 }, adapter));
+  assert.equal(blocked.status, 'failed', blocked.summary);
+  assert.equal(blocked.failureCode, 'TOOL_MISSING');
+  assert.equal((blocked.data?.stop as { reason: string }).reason, 'TOOL_REQUIRED');
+  assert.match(blocked.summary, /需要镐类工具/);
+  assert.equal(adapter.actions.filter((action) => action.startsWith('dig:')).length, 0, '缺工具时不空手挖');
+  assert.equal(findMovementSession(blocked.data?.sessionId as string) !== undefined, true, '同一会话可以拿工具后续接');
+
+  Object.assign(adapter, { canHarvest: () => true });
+  const allowed = await travelTo.run(ctx, argsOf({ to: target, range: 1, dig: true, requireTool: true, maxEdits: 8 }, adapter));
+  assert.notEqual((allowed.data?.stop as { reason?: string } | undefined)?.reason, 'TOOL_REQUIRED', `有工具时不应因缺工具停下：${allowed.summary}`);
+  assert.notEqual(allowed.failureCode, 'TOOL_MISSING');
+  assert.ok(adapter.actions.some((action) => action.startsWith('dig:')), `有工具时照常挖：${allowed.status} ${allowed.summary}`);
+});
+
+test('requireTool：目标格未加载时不判成缺工具，交给 NOT_FOUND', async (t) => {
+  clearMovementSessions();
+  const { adapter, map, ctx } = voxelNavigationFixture(12);
+  t.after(() => ctx.memory.close());
+  Object.assign(ctx.spatial!, { markModified: () => ({ status: 'written', report: { sections: [] }, deliveryError: null }) });
+  let sequence = 40000;
+  for (const z of [-1, 0, 1]) for (const y of [64, 65]) {
+    const pos = { x: 6, y, z };
+    map.observe({ worldId: adapter.worldId, dim: adapter.dim, sessionId: adapter.sessionId,
+      observedAt: Date.now(), sequence: ++sequence, source: 'vision', evidence: 'seen', stateComplete: true,
+      state: { name: 'minecraft:stone', properties: {} }, pos });
+    adapter.blocks.push({ name: 'stone', pos });
+  }
+  Object.assign(adapter, { canHarvest: () => false, harvestTools: () => ['stone_pickaxe'] });
+  const read = adapter.blockAt.bind(adapter);
+  adapter.blockAt = ((pos) => pos.x === 6 ? null : read(pos)) as unknown as typeof adapter.blockAt;
+  const result = await travelTo.run(ctx, argsOf({ to: { x: 10, y: 64, z: 0 }, range: 1, dig: true, requireTool: true, maxEdits: 8 }, adapter));
+  assert.notEqual(result.failureCode, 'TOOL_MISSING', result.summary);
+  assert.notEqual((result.data?.stop as { reason?: string } | undefined)?.reason, 'TOOL_REQUIRED');
+});
+
 test('开路执行中被挂起：已确认的改动计入会话额度，恢复不重新获得预算', async (t) => {
   clearMovementSessions();
   const { adapter, map, ctx } = voxelNavigationFixture(12);

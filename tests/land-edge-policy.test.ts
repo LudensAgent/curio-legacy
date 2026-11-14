@@ -6,7 +6,7 @@ import type {
   LandSearchPolicyEdge,
   LandSearchPolicyRead,
 } from 'curio-minecraft-3d-memory/navigation';
-import { hostLandEdgePolicy, isConstructionFixablePolicyRejection, isDangerousBlock, LAVA_EDGE_COST } from '../src/spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, isConstructionFixablePolicyRejection, isDangerousBlock, isFirePolicyRejection, LAVA_EDGE_COST, policyRemedy } from '../src/spatial/land-edge-policy.ts';
 
 type Hazard = LandSearchPolicyEdge['hazards'][number];
 type CellEntry = readonly [x: number, y: number, z: number, cell: LandSearchPolicyCell];
@@ -262,6 +262,50 @@ test('跨缺口跳跃：超出不疾跑起跳能力的宽缺口不规划；落�
   assert.match(rejectionReason(hostLandEdgePolicy.evaluate(gap, overFire.read)), /miss would land in recorded fire at \(-73,66,-19\)/);
   const overFloor = fakeReader([[-73, 68, -19, recorded('minecraft:air')], [-73, 67, -19, recorded('netherrack')], [-73, 66, -19, recorded('fire')]], 128, supports);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(gap, overFloor.read)), 0, '缺口下先碰到实心地面，落空也落在地面上');
+});
+
+const remedy = (reason: string) => policyRemedy(reason, { fireClearable: true });
+
+test('策略拒绝的可改项：只说哪种授权能改变这条边，任何授权都改不了也如实说', () => {
+  const to = at(95.29, 70, -39.55);
+  const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
+  const remedyOf = (entries: readonly CellEntry[] = [], supports: readonly { x: number; y: number; z: number }[] = []) =>
+    remedy(rejectionReason(hostLandEdgePolicy.evaluate(edge, fakeReader(entries, 64, supports).read)));
+
+  const headWater = rejectionReason(hostLandEdgePolicy.evaluate(edge, fakeReader([[95, 71, -40, recorded('water')]], 64, []).read));
+  assert.match(headWater, /destination head cell \(submersion\)/);
+  assert.match(remedy(headWater), /swim:true 只放宽脚格水/);
+  assert.match(remedy(headWater), /授权也改不了/);
+  assert.match(remedy(headWater), /swim_path 的水面路线/);
+  assert.match(remedy('host policy rejects geometric submersion hazard; only fall is allowed'), /淹头\/淹没/);
+
+  assert.match(remedyOf([[95, 70, -40, recorded('water')]]), /swim:true 会让这条边变成涉水边/);
+
+  const wet = hostLandEdgePolicy.evaluate(edgeAt(to, { hazards: [hazard('water_contact')] }), fakeReader().read);
+  assert.match(remedy(rejectionReason(wet)), /water_contact 这类边要 swim:true 才允许/);
+  assert.match(remedy('host policy rejects geometric water_contact, lava_contact hazard; only fall is allowed'), /只放宽 water_contact，lava_contact 仍拒绝/);
+  assert.doesNotMatch(remedy('host policy rejects geometric lava_contact hazard; only fall, water_contact is allowed'), /swim:true/,
+    '允许列表里的 water_contact 不算这条边的可改项');
+
+  assert.match(remedyOf([[95, 69, -40, unavailableCell]]), /只有 place 能补/);
+
+  const wide = edgeAt(at(-70.39, 69, -18.55), { kind: 'jump', from: at(-73.39, 69, -18.55) });
+  const wideReason = rejectionReason(hostLandEdgePolicy.evaluate(wide, fakeReader([], 64, [at(-70.39, 69, -18.55), at(-71.5, 69, -18.5)]).read));
+  assert.match(remedy(wideReason), /place 能搭桥缩短缺口/);
+
+  assert.match(remedyOf([[95, 69, -40, recorded('minecraft:fire')]]), /place 会把方块直接放在火的位置上/);
+  assert.match(remedy('host policy rejects a gap jump whose miss would land in recorded fire at (-73,66,-19)'), /不会改变这条 jump/);
+  assert.match(remedy('host policy rejects recorded dangerous block fire at the destination feet cell'), /宿主会顺手打灭，不需要为此加 dig\/place 授权/);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block minecraft:soul_fire at the destination feet cell'), true);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block fire at the destination feet cell'), true);
+  assert.equal(isFirePolicyRejection('host policy rejects recorded dangerous block campfire at the destination feet cell'), false);
+
+  assert.match(remedyOf([[95, 69, -40, recorded('lava')]]), /本次委托的授权不会改变这条边/);
+  assert.match(remedyOf([[95, 69, -40, recorded('campfire')]]), /危险格（岩浆等）/);
+  assert.match(remedy('host policy rejects geometric current hazard; only fall is allowed'), /危险格（岩浆等）/);
+  assert.match(remedy('host policy rejects recorded dangerous block minecraft:lava at the destination support cell'), /危险格（岩浆等）/);
+  assert.match(policyRemedy('host policy rejects recorded dangerous block fire at the destination feet cell', { fireClearable: false }), /没有开路授权，宿主不会打灭/);
+  assert.equal(remedy('some future host policy reason'), '', '未知原因不猜');
 });
 
 test('策略拒绝分类：缺中心支撑/宽缺口可由授权 place 修，危险格与未授权涉水仍交回', () => {

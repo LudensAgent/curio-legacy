@@ -57,6 +57,8 @@ export type StopReason =
   | 'MODE_GAP'
   /** 宿主的授权/走廊/风险策略拒绝了唯一可用边；不是目标无法解析。 */
   | 'DELEGATION_RESTRICTION'
+  /** requireTool 生效时停在需要工具才能采集的方块上；拿到工具/改授权后可续接。 */
+  | 'TOOL_REQUIRED'
   /** 同一站位、同一相关证据下，搜索与复验给出不一致结论；本轮不自动重播。 */
   | 'CONFLICT'
   | 'NO_PROGRESS'

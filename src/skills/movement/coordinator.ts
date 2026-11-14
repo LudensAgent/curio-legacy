@@ -2,7 +2,7 @@ import { evidenceStale } from 'curio-minecraft-3d-memory';
 import type { LandSearchPolicyEdge } from 'curio-minecraft-3d-memory/navigation';
 import type { Vec3Like } from '../../adapter/types.ts';
 import { feetCell } from '../../perception/local.ts';
-import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, isDangerPolicyRejection, isFirePolicyRejection, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
+import { hostLandEdgePolicy, hostWadingEdgePolicy, isConstructionFixablePolicyRejection, isDangerPolicyRejection, isFirePolicyRejection, policyRemedy, supportCellsUnder, sweptBodyCells } from '../../spatial/land-edge-policy.ts';
 import { isSuspendAbort, shortId, sleep } from '../../util.ts';
 import { fail, isAbort, ok, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult, type SkillStatus } from '../types.ts';
 import { bearingOf, closeReasonOf, progressMeterOf, progressOf, summaryOf, waypointOf } from './intent.ts';
@@ -19,6 +19,7 @@ import { liveEdgeStatus } from './live-edge.ts';
 import { isDiggableFire, MAKE_WAY_MAX_EDITS, planMakeWay, type MakeWayOptions, type MakeWayStep } from './make-way.ts';
 import { mineCell, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
+import { toolRequirementText } from './tool-requirement.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, makeWayEditBudget as makeWayEditBudgetOf, releaseSessionLease,
   type MovementAuthorization, type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
@@ -108,6 +109,8 @@ export type MakeWayLegReceipt = {
   from: Vec3Like; to: Vec3Like; planned: number; executed: number; failure?: string; stale?: true;
   /** 这一段的停止原因是本次委托剩余的施工额度用尽，而不是开路/身体失败。 */
   budgetExhausted?: true;
+  /** 这一段停在“需要工具才能挖”的那一格；不是身体或路线失败。 */
+  toolRequired?: true;
 };
 /** 普通路线以这些原因停下时，授权了开路就先试开路。 */
 // CONFLICT（搜索说证据不足、复验却判边 OPEN）同样是“普通搜索走不下去”：授权了施工时交给开路，
@@ -193,6 +196,7 @@ export async function runMakeWay(
   let executed = 0;
   let failure: string | undefined;
   let budgetExhausted = false;
+  let toolRequired = false;
   // 连续直行的 move 交接：上一格在 physicsTick 里保留了前进键，下一格直接接续；
   // 转弯、施工步或最后一步仍正常停稳。开路的普通路线不再退化成每格一次 move_step。
   let previousMoveHandedOff = false;
@@ -208,6 +212,16 @@ export async function runMakeWay(
         failure = fireOnly ? `本次调用顺手打灭火的额度（${fireBudget} 处）已用尽` : `本次委托剩余的施工改动额度（${remainingEdits} 次）已用尽`;
         budgetExhausted = true;
         break outer;
+      }
+      // requireTool：只在真的要挖这一格时核对需要工具才有产出的方块；未加载的格子不判，
+      // 交给 mine_cell 的 NOT_FOUND，不把“没看清”当成“缺工具”。
+      if (opts.requireTool === true) {
+        const live = ctx.adapter.blockAt(cell);
+        if (live !== null && !ctx.adapter.canHarvest(cell)) {
+          failure = `需要工具才能挖：${toolRequirementText(ctx.adapter, cell, live)}`;
+          toolRequired = true;
+          break outer;
+        }
       }
       // 规划时已排除已记录的液体邻格；墙后看不见的邻格是授权 dig 承担的风险，不再按“当前视野没看清”拦。
       // dig:true 没有指定工具时交给身体按方块挑（会临时装备），挖完在交回前还原这段开路开始时的主手。
@@ -317,6 +331,7 @@ export async function runMakeWay(
     from, to: { ...ctx.adapter.state().pos }, planned: steps.length, executed,
     ...(failure === undefined ? {} : { failure }),
     ...(budgetExhausted ? { budgetExhausted: true as const } : {}),
+    ...(toolRequired ? { toolRequired: true as const } : {}),
   };
 }
 
@@ -359,17 +374,38 @@ const canResume = (reason: StopReason) =>
   reason === 'BUDGET_EXHAUSTED' || reason === 'TIMEOUT' || reason === 'NO_PROGRESS' || reason === 'UNKNOWN_BOUNDARY'
   || reason === 'BLOCKED' || reason === 'NO_PATH' || reason === 'RESIDENCY_NOT_READY'
   || reason === 'PHYSICAL_FAILURE' || reason === 'TARGET_UNRESOLVED' || reason === 'ROUTE_INVALIDATED' || reason === 'CONFLICT'
-  || reason === 'SUSPENDED' || reason === 'MAKE_WAY_BUDGET_EXHAUSTED';
+  || reason === 'SUSPENDED' || reason === 'MAKE_WAY_BUDGET_EXHAUSTED' || reason === 'TOOL_REQUIRED';
 
 /** 终止后仍允许同一 session 续接的原因；其余终态必须新建意图。 */
 const RESUMABLE_REASONS: ReadonlySet<StopReason> = new Set([
   'BUDGET_EXHAUSTED', 'TIMEOUT', 'NO_PROGRESS', 'UNKNOWN_BOUNDARY',
   'BLOCKED', 'NO_PATH', 'RESIDENCY_NOT_READY', 'PHYSICAL_FAILURE', 'TARGET_UNRESOLVED', 'ROUTE_INVALIDATED', 'CONFLICT',
-  'SUSPENDED', 'MAKE_WAY_BUDGET_EXHAUSTED',
+  'SUSPENDED', 'MAKE_WAY_BUDGET_EXHAUSTED', 'TOOL_REQUIRED',
 ]);
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const cellText = (p: Vec3Like) => `(${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)})`;
+
+export type PolicyRejectionFacts = {
+  rejectedEdges: number;
+  firstRejection?: { from: Vec3Like; to: Vec3Like; reason: string };
+};
+
+/**
+ * 策略拒绝的回执事实：被哪条边拒绝、危险格提示、以及这次委托能改它的授权。
+ * 只陈述事实；不选路线、不改授权。
+ */
+export function policyRejectionNotes(policy: PolicyRejectionFacts | undefined, fireClearable: boolean) {
+  const rejection = policy?.firstRejection;
+  const lead = policy === undefined || rejection === undefined ? ''
+    : `被宿主边缘策略拒绝 ${policy.rejectedEdges} 条边，第一条 ${cellText(rejection.from)}→${cellText(rejection.to)}：${rejection.reason}；`;
+  return {
+    lead,
+    detail: lead === '' ? '' : `；${lead.slice(0, -1)}`,
+    danger: rejection !== undefined && isDangerPolicyRejection(rejection.reason) ? '本次委托没有授权踩过危险格（火/岩浆等）；' : '',
+    remedy: rejection === undefined ? '' : policyRemedy(rejection.reason, { fireClearable }),
+  };
+}
 
 /** 续接可以收窄授权，不能借旧 sessionId 扩大 swim/施工权限。 */
 export function resumeAuthorizationAllowed(original: MovementAuthorization, resumed: MovementAuthorization): boolean {
@@ -381,6 +417,8 @@ export function resumeAuthorizationAllowed(original: MovementAuthorization, resu
   // dig: 原来没授权 -> 现在授权的是扩大；原来限定了工具，续接不能换成不限工具或别的工具。
   if (b.dig !== undefined && a.dig !== undefined && a.dig.tool !== undefined && b.dig.tool !== a.dig.tool) return false;
   if (b.dig !== undefined && a.dig === undefined) return false;
+  // requireTool: 新增“必须用工具”是收窄；原来要求了，续接不能放宽成允许空手。
+  if (a.requireTool === true && b.requireTool !== true) return false;
   // place: 原来没授权 -> 现在授权的是扩大；原来限定材料，续接只能同名或放弃；原来 any 可以收窄到具体材料。
   if (b.place !== undefined && a.place === undefined) return false;
   if (b.place !== undefined && a.place !== undefined && a.place.item !== 'any' && b.place.item !== a.place.item) return false;
@@ -1148,18 +1186,14 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
           if (detoured === 'cancelled') { stop = cancellationStop(ctx, '绕行时父任务取消'); break; }
           if (detoured === 'moved') continue;
         }
-        const policyLead = segment.search.policy?.firstRejection === undefined ? ''
-          : `被宿主边缘策略拒绝 ${segment.search.policy.rejectedEdges} 条边，第一条 ${cellText(segment.search.policy.firstRejection.from)}→${cellText(segment.search.policy.firstRejection.to)}：${segment.search.policy.firstRejection.reason}；`;
-        const policyDetail = policyLead === '' ? '' : `；${policyLead.slice(0, -1)}`;
-        const dangerNote = segment.search.policy?.firstRejection !== undefined
-          && isDangerPolicyRejection(segment.search.policy.firstRejection.reason)
-          ? '本次委托没有授权踩过危险格（火/岩浆等）；' : '';
+        const fireClearable = request.makeWay !== undefined || request.makeWayAvailable === true;
+        const { lead: policyLead, detail: policyDetail, danger: dangerNote, remedy: remedyNote } = policyRejectionNotes(segment.search.policy, fireClearable);
         stop = modeGap
           ? stopOf('MODE_GAP', `${segment.detail ?? '需要当前不支持的移动模式'}；不自动切换游泳/船/攀爬模式${policyDetail}`, { modeGap: { problem: segment.problemKind } })
           : segment.failure === 'DELEGATION_RESTRICTION'
             // 具体哪条策略拒绝了哪条边，比库的泛化 UNSUPPORTED 说明更能让心智决定
             // 换方向、授权施工还是接受风险；放在最前面，避免被长摘要截掉。
-            ? stopOf('DELEGATION_RESTRICTION', `${policyLead}${dangerNote}${segment.detail ?? '授权/策略拒绝可走边'}`)
+            ? stopOf('DELEGATION_RESTRICTION', `${policyLead}${dangerNote}${remedyNote}${segment.detail ?? '授权/策略拒绝可走边'}`)
             : stopOf('TARGET_UNRESOLVED', `${segment.detail ?? 'waypoint/脚高无法解析'}${policyDetail}`);
         break;
       }
@@ -1428,6 +1462,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     reportProgress();
     // 计划过时（身体在规划期间移动了）：不算失败，按实测位置回到普通路线重来；次数受 MAX_MAKE_WAY_LEGS 约束。
     if (leg.stale) { stop = null; continue; }
+    // 缺工具是本次委托授权的缺口，不是路线/身体失败：即使这一段先走近了，也立刻交回，
+    // 不把“走到了墙前”算成开路成功再重试。交给 Agent 决定拿工具、改授权或换路。
+    if (leg.toolRequired === true) {
+      stop = stopOf('TOOL_REQUIRED', `${stop.detail}；试过开路但${leg.failure ?? '需要工具才能挖'}`);
+      break;
+    }
     if (leg.executed === 0) {
       if (ctx.signal.aborted) {
         stop = cancellationStop(ctx, '开路执行时父任务取消；已确认的改动与位移保留');

@@ -171,7 +171,7 @@ export function isDangerPolicyRejection(reason: string): boolean {
 
 /** 策略拒绝是否由火/灵魂火引起：授权 dig 时它们可以被打掉，其余危险格不行。 */
 export function isFirePolicyRejection(reason: string): boolean {
-  return /(recorded dangerous block|gap jump whose miss would land in recorded) (fire|soul_fire)\b/.test(reason);
+  return /(recorded dangerous block|gap jump whose miss would land in recorded) (minecraft:)?(soul_fire|fire)\b/.test(reason);
 }
 
 /**
@@ -181,6 +181,42 @@ export function isFirePolicyRejection(reason: string): boolean {
 export function isConstructionFixablePolicyRejection(reason: string): boolean {
   return reason.includes('stance supported only by a neighbouring column')
     || (reason.includes('cannot clear a') && reason.includes('horizontal gap jump'));
+}
+
+/**
+ * 这条策略拒绝能由哪种委托授权改变（事实，不是建议）：回执据此告诉代理换什么授权、
+ * 还是任何授权都改不了，免得它反复用同一种授权重试同一条边。未知原因返回空串，不猜。
+ */
+export function policyRemedy(reason: string, opts: { fireClearable: boolean }): string {
+  const geometric = reason.match(/geometric (.+?) hazard/)?.[1]?.split(', ') ?? [];
+  if (geometric.includes('submersion') || reason.includes('destination head cell (submersion)')) {
+    return '淹头/淹没：swim:true 只放宽脚格水和几何 water_contact，这条边授权也改不了；swim:true 的游泳段走 swim_path 的水面路线，不走这条边；';
+  }
+  if (reason.includes('destination feet cell; wading was not delegated')) return '脚格是水：swim:true 会让这条边变成涉水边；';
+  const stillRejected = geometric.filter((kind) => kind !== 'water_contact');
+  if (geometric.includes('water_contact')) {
+    return stillRejected.length === 0
+      ? '几何碰到水：water_contact 这类边要 swim:true 才允许；'
+      : `几何碰到水：swim:true 只放宽 water_contact，${stillRejected.join('、')} 仍拒绝这条边；`;
+  }
+  if (isConstructionFixablePolicyRejection(reason)) {
+    return reason.includes('horizontal gap jump')
+      ? '缺口超过 2 格：place 能搭桥缩短缺口；'
+      : '脚底中心缺支撑：只有 place 能补（那一格可放置时才有效）；';
+  }
+  if (isFirePolicyRejection(reason) && reason.includes('gap jump whose miss would land in recorded')) {
+    return '落空路径下方是火：宿主顺手灭火只处理身体要占的格，不会改变这条 jump；';
+  }
+  if (isFirePolicyRejection(reason) && reason.includes('destination support cell')) {
+    return '支撑格是火：place 会把方块直接放在火的位置上（火可替换），不会自动打灭；';
+  }
+  if (isFirePolicyRejection(reason)) {
+    return opts.fireClearable
+      ? '这格是火：宿主会顺手打灭，不需要为此加 dig/place 授权；'
+      : '这格是火：本次委托没有开路授权，宿主不会打灭；';
+  }
+  if (isDangerPolicyRejection(reason) || geometric.length > 0) return '危险格（岩浆等）：本次委托的授权不会改变这条边；';
+  return '';
 }
 
 export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-only.dry.lava-neighbor-3.v6', new Set(['fall']), false);

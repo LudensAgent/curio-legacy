@@ -6,6 +6,7 @@ import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable,
 import { feetCell } from '../perception/local.ts';
 import { codeFromError, fail, isAbort, obj, ok, traceOf, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
+import { toolRequirementText } from './movement/tool-requirement.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
 
 import { EXCAVATION_WAYPOINT_CAP } from '../memory/store.ts';
@@ -27,6 +28,8 @@ export interface ExcavationArgs {
   lava?: boolean;
   /** 接受工作面/落点上方的沙砾、沙子等下落方块；不写则在下落方块前停下。 */
   allowFalling?: boolean;
+  /** 必须用工具才挖：只对需要工具才能采集的方块生效，没有可用工具就停在该格并回报；默认允许空手。 */
+  requireTool?: boolean;
 }
 
 export type ExcavationStopKind = 'impossible' | 'risk' | 'capability' | 'missing_support' | 'unknown' | 'budget';
@@ -569,6 +572,11 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
         workCheck();
         const before = adapter.blockAt(pos) ?? '';
         if (AIR.has(before)) continue;
+        // requireTool：只在真要挖这一格时核对需要工具才有采集的方块；未加载（before 为空）不判，
+        // 交给挖后复核的 NOT_FOUND 路径，不把“没看清”当成“缺工具”。
+        if (args.requireTool === true && before !== '' && !adapter.canHarvest(pos)) {
+          throw new ExcavationStop('TOOL_MISSING', `安全通道开挖缺工具：${toolRequirementText(adapter, pos, before)}`, false, 'capability');
+        }
         // 指定了工具就交给适配器：只装备这一把，不自动换别的工具；不掉落也照挖，真实失败原因原样报出
         const result = await adapter.dig(pos, signal, args.tool ? { tool: args.tool } : undefined);
         // 先确认这一格是否真的挖空，再检查会话/期限：已经发生的挖掘要计进部分效果，
@@ -722,11 +730,12 @@ export const excavationSkill: Skill<ExcavationArgs> = {
     for (const flag of ['wet', 'lava', 'allowFalling'] as const) {
       if (value[flag] !== undefined && typeof value[flag] !== 'boolean') return { ok: false, error: `${flag} 需要布尔值` };
     }
+    if (value.requireTool !== undefined && typeof value.requireTool !== 'boolean') return { ok: false, error: 'requireTool 需要 true 或 false' };
     return { ok: true, args: {
       entry: value.entry, mode, direction: value.direction as ExcavationArgs['direction'], steps,
       ...(tool !== undefined ? { tool } : {}), ...(typeof fill === 'string' ? { fill } : {}),
       ...(value.wet === true ? { wet: true } : {}), ...(value.lava === true ? { lava: true } : {}),
-      ...(value.allowFalling === true ? { allowFalling: true } : {}),
+      ...(value.allowFalling === true ? { allowFalling: true } : {}), ...(value.requireTool === true ? { requireTool: true } : {}),
     } };
   },
   run: excavatePath,

@@ -19,6 +19,8 @@ export type MovementFailure =
   | 'NO_PATH_GEOMETRY'
   /** Authorization/policy/allowed-kind/corridor excludes otherwise open edges. */
   | 'DELEGATION_RESTRICTION'
+  /** 委托声明了 requireTool，而背包里没有能采集目标方块的可用工具。 */
+  | 'TOOL_MISSING'
   /** Body control cannot complete an already-proven transition (step/jump/ladder/drop). */
   | 'BODY_CAPABILITY'
   /** Search/step/observation/material/deadline budget was exhausted. */
@@ -116,6 +118,7 @@ const STOP_FAILURE: Record<StopReason, MovementFailure | null> = {
   ACTION_FAILURE: 'UNKNOWN',
   MODE_GAP: 'DELEGATION_RESTRICTION',
   DELEGATION_RESTRICTION: 'DELEGATION_RESTRICTION',
+  TOOL_REQUIRED: 'TOOL_MISSING',
   CONFLICT: 'CONFLICT',
   NO_PROGRESS: 'NO_PROGRESS',
   LATERAL_DRIFT: 'DELEGATION_RESTRICTION',
@@ -144,6 +147,7 @@ const FAILURE_CODE: Record<MovementFailure, FailureCode> = {
   NO_PATH_EVIDENCE: 'NOT_FOUND',
   NO_PATH_GEOMETRY: 'PATH_NOT_FOUND',
   DELEGATION_RESTRICTION: 'PATH_NOT_FOUND',
+  TOOL_MISSING: 'TOOL_MISSING',
   BODY_CAPABILITY: 'EFFECT_NOT_CONFIRMED',
   BUDGET: 'TIMEOUT',
   RESIDENCY: 'PATH_NOT_FOUND',

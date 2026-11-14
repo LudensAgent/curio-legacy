@@ -100,6 +100,23 @@ test('stairs clear the three-cell transition and verify each real landing; resul
   assert.deepEqual(world.pos, { x: 4.5, y: 60, z: 0.5 });
 });
 
+test('requireTool：需要工具才有采集的方块缺工具时停在原格、不挖；空手可采集的不受影响', async () => {
+  const world = new ExcavationWorld();
+  Object.assign(world, { canHarvest: () => false, harvestTools: () => ['iron_pickaxe'] });
+  const result = await excavationSkill.run(context(world), args({ steps: 1, requireTool: true }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.equal(result.failureCode, 'TOOL_MISSING');
+  assert.match(result.summary, /需要镐类工具/);
+  assert.equal(world.digs.length, 0, '缺工具时不空手挖');
+  assert.deepEqual(world.pos, { x: 0.5, y: 64, z: 0.5 }, '停在原格，没有先挖再报');
+
+  const soft = new ExcavationWorld();
+  Object.assign(soft, { canHarvest: () => true });
+  const softRun = await excavationSkill.run(context(soft), args({ steps: 1, requireTool: true }));
+  assert.equal(softRun.status, 'succeeded', softRun.summary);
+  assert.ok(soft.digs.length > 0, '空手可采集的方块照旧挖');
+});
+
 test('excavation refuses unsafe, partial or unknown floors and adjacent liquids before digging', async () => {
   for (const name of ['water', 'lava', 'gravel', 'magma_block', 'stone_slab', 'nether_portal', null]) {
     const world = new ExcavationWorld(), adapter: GameAdapter = world;

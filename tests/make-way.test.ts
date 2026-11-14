@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { VoxelMap } from 'curio-minecraft-3d-memory';
-import { parseMakeWay, planMakeWay } from '../src/skills/movement/make-way.ts';
+import { MAKE_WAY_DEFAULT_EDITS, makeWayArgs, parseMakeWay, planMakeWay } from '../src/skills/movement/make-way.ts';
 
 const W = 'w', D = 'overworld';
 function world() {
@@ -134,6 +134,16 @@ test('parseMakeWay：只有写了 dig/place 才授权；参数非法时拒绝', 
   assert.equal(parseMakeWay({ maxEdits: 4 }).ok, false);
   assert.equal(parseMakeWay({ dig: true, maxEdits: 512 }).ok, true, '长距离探索的施工额度上限是 512');
   assert.equal(parseMakeWay({ dig: true, maxEdits: 513 }).ok, false);
+});
+
+test('parseMakeWay：requireTool 只在写了 dig 时有意义，且能原样往返再校验', () => {
+  assert.deepEqual(parseMakeWay({ dig: true, requireTool: true }), { ok: true, value: { dig: {}, requireTool: true, maxEdits: MAKE_WAY_DEFAULT_EDITS } });
+  assert.deepEqual(parseMakeWay({ dig: 'stone_pickaxe', requireTool: true }), { ok: true, value: { dig: { tool: 'stone_pickaxe' }, requireTool: true, maxEdits: MAKE_WAY_DEFAULT_EDITS } });
+  assert.equal(parseMakeWay({ requireTool: true }).ok, false, '没有 dig 的 requireTool 是无效授权');
+  assert.equal(parseMakeWay({ dig: true, requireTool: 'yes' }).ok, false, 'requireTool 只接受 boolean');
+  const parsed = parseMakeWay({ dig: true, requireTool: true, maxEdits: 6 });
+  assert.ok(parsed.ok && parsed.value !== undefined);
+  assert.deepEqual(parseMakeWay(makeWayArgs(parsed.value)), parsed, 'makeWayArgs 往返必须再次通过校验');
 });
 
 test('坑底长着树苗：同时授权 dig 时先打掉树苗再垫高；只授权 place 时不在这格垫高', async () => {

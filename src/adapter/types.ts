@@ -480,6 +480,8 @@ export interface GameAdapter {
   stopAll(): void;
 
   canHarvest(pos: Vec3Like): boolean;
+  /** 这一格需要哪些工具才能采集（空手采集不到掉落时非空）；只用于回执说明，不改变判定。 */
+  harvestTools?(pos: Vec3Like): string[];
   /** 估算用某个工具（null = 空手）挖一个方块需要的毫秒数；未知返回 null */
   digTimeEstimate(block: string, tool: string | null): number | null;
   /** 用背包里 itemNames 中的第一种方块，放到 pos（需要相邻有实心方块可依附） */
