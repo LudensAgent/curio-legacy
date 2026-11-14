@@ -365,6 +365,8 @@ const WORLD_UNDERSTANDING = `【世界理解】建设/选址/整理/修复时，
 
 const ENVIRONMENT_MANAGEMENT = `【环境改造】平整/填坑/削坡/台阶、小型农田/灌溉、简单围栏/栅栏门/圈养区、仓库分类/容器整理、工作区布置、简单道路/桥梁/照明/通道、已有设施修补/扩建，可直接规划施工，不必先请建筑师。${ARCHITECT_SCOPE}、整体基地或需图纸的项目，仍适合 design + build。施工前看用途和最低功能、地形/材料/工具/安全、是否需要局部改造；边界/入口/水源/通道按用途定，分段施工，不要求完整蓝图；完成后检查围栏闭合、门可进出、农田的水/光/作物状态符合用途（机制查 knowledge）、通道未堵、容器/工作站可用、未破坏已有设施/通路、留扩建空间，不把放置成功当成设施建成。`;
 
+const SUSTAINED_OPERATION = `【持续运营】Task（这一批）≠ Project（建成设施）≠ Ongoing Operation（维持生产）；建成不等于经营完成。农业：需求/选址/地形/耕地/水源/光照/通道/播种/看成熟/收割/按种子库存需求补种/整理/按消耗扩建、缩减或暂停；不按现实时间推断成熟，没看见成熟不声称可收。畜牧：发现动物/判断建群/选址围栏/门与食物/引导/确认动物在内部且边界闭合/保留繁殖种群/按条件繁殖/按需取产物/查数量空间食物。维护在回基地/经过设施/等待或完成/储备下降/看到损坏堵塞成熟逃逸/准备远行时进入注意；普通维护可延后，紧急损坏或即将失去关键资产才打断主线。farm 动作只管开垦/收割/补种，不管围栏/水源/光照。`;
+
 const GLANCE_MODE = `这次只是抬头看一眼，不必把每个细节重新铺开：
 - 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust，插一件事用 detour——独白、what、expect、noticed 不会改变执行。
 - 手上没活：直接 new 一段，接着【最近】和议程往下玩；可写 next，当前动作仍在执行、结果未知。换事用 switch/new。
@@ -383,6 +385,8 @@ ${DELIBERATE_MODE}
 ${WORLD_UNDERSTANDING}
 
 ${ENVIRONMENT_MANAGEMENT}
+
+${SUSTAINED_OPERATION}
 
 ${FOCUS}
 
@@ -873,7 +877,25 @@ function worldKnowledge(ctx: MindContext) {
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
     .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 8)
     .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
-  const facilities = ctx.tier === 'deliberate' ? myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).slice(0, 8).map((f) => f.text) : [];
+  // 农田状态单独走 my_farms，设施列表里不再重复列“我的农田”地标。
+  // Percept.farms 与 memory.farms() 同序（farmInfo 按 memory 顺序生成），用索引取 harvests/坐标，避免同形农田串账。
+  const farmRecords = m.farms().filter((f) => f.dim === p.self.dim && f.cells.length);
+  const farmState = p.farms.map((f, i) => {
+    const record = farmRecords[i];
+    return {
+      crop: f.crop, cells: f.cells, dist: f.dist, mature: f.mature,
+      minutes_since_planted: f.minutes_since_planted,
+      ...(record ? { harvests: record.harvests, at: record.cells[0] } : {}),
+    };
+  }).sort((a, b) => a.dist - b.dist).slice(0, 4);
+  const facilityUse = (kind: 'chest' | 'station') => kind === 'chest' ? 'find_item→take_items/store_items' : 'use_gui/interact_block';
+  const ownFacilities = myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).filter((f) => f.label !== '我的农田');
+  const facilities = ctx.tier === 'deliberate'
+    ? ownFacilities.slice(0, 8).map((f) => `${f.text}（${facilityUse(f.kind)}）`)
+    : [];
+  const nearbyFacilities = ctx.tier === 'glance'
+    ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}）`)
+    : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
   // 最近几次死亡地点（事实，不分维度）：Agent 自己判断要不要回到最远点继续，还是绕开
@@ -902,6 +924,7 @@ function worldKnowledge(ctx: MindContext) {
         : `记录格现为 ${nowBlock}（区块数据，非视野所见）`;
       return {
         id: e.id, kind: e.kind, pos: e.pos, from_here: bearing(e.pos),
+        use: 'observe_portal/travel_portal',
         portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
         recorded_ago: portalAgeText(e.observedAt),
         ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
@@ -946,7 +969,7 @@ function worldKnowledge(ctx: MindContext) {
   const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
   return {
     home: `${home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家'}${baseAlias}`,
-    ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
+    ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格（sleep）；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
     ...(builds.length ? { my_builds: builds.map(describeBuild) } : {}),
     // 建筑师画好、还没盖的图纸：一直惦记着
     ...(drafts.length ? { my_drafts: drafts.map((d) => `${d.id}「${d.name}」${d.size.width}×${d.size.depth}，用料 ${Object.entries(d.materials).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => `${n}×${c}`).join('、')}`) } : {}),
@@ -954,7 +977,14 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(ctx.tier === 'glance' && untouched.length ? { unexplored_near: `身边 8 个方向在 32–128 格各抽 7 个采样环，这些方向的到访记录很少（不到四分之一，不分地上地下）：${untouched.join('、')}；只是抽样到访记录，不代表没去过、没有东西、看全或现在能走，往哪去由你判断` } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities } : {}), ...(portals.length ? { portals } : {}), explored_around: around,
+    ...(ctx.tier === 'glance' && nearbyFacilities.length ? { nearby_facilities: nearbyFacilities } : {}),
+    ...(ctx.tier === 'glance' && farmState.length ? {
+      nearby_farms: farmState.slice(0, 2),
+      nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
+    } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床见 my_bed；门/工作站用 use_gui/interact_block' } : {}),
+      ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
+      ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读，往哪去由你判断）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
     ...(currentTrip ? { current_trip: currentTrip, current_trip_note: '本趟=当前这段出行；各方向最远是身体站稳过的脚格，最近探索是任务回执的实测推进；现在能否续走未确认，坐标可直接作为移动目标' } : {}),
     ...(ctx.tier === 'deliberate' && tripsHere.length ? { my_trips_in_this_dimension: tripsHere } : {}),
