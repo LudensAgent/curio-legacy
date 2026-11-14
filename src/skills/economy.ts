@@ -36,8 +36,8 @@ function noteFurnace(ctx: SkillCtx, l: import('../adapter/types.ts').FurnaceLeav
 
 export const smelt: Skill<{ item: string; count: number; make?: boolean }> = {
   name: 'smelt',
-  description: `用已有熔炉烧指定物品，燃料按煤/木炭/木板/原木选择；缺熔炉默认返回缺口。make:true 才允许制造和放置熔炉（消耗8圆石或背包熔炉）。可烧生铁、生肉、原木、沙子、圆石等`,
-  argsDoc: '{"item": "raw_iron|beef|oak_log|sand|…", "count"?: 1-64, "make"?:true（允许缺熔炉时就地做一个，消耗 8 圆石）}',
+  description: `用已有熔炉烧指定物品，燃料按煤/木炭/木板/原木选择；缺熔炉默认返回缺口。make:true 才允许制造和放置熔炉（消耗8圆石或背包熔炉）。count 是这段活要烧掉的总数。可烧生铁、生肉、原木、沙子、圆石等`,
+  argsDoc: '{"item": "raw_iron|beef|oak_log|sand|…", "count"?: 1-64（这段活要烧掉的总数）, "make"?:true（允许缺熔炉时就地做一个，消耗 8 圆石）}',
   timeoutMs: 600000,
   movement: false,
   validate(raw) {

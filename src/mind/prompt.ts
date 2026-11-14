@@ -229,7 +229,7 @@ const CONDITIONS = `done_when 的写法（可选，写错会被忽略）：
 清包验收：{"type":"inventory_space_min","free_slots":5} 表示至少腾出 5 格空位（空位 ≥ 5）；inventory_full 表示空位 ≤ 指定数量，用于采集到近满，不能用来确认腾出空位。
 高度范围：{"type":"position_y","max":30}（脚的位置 y ≤ 30），也可写 min 或同时写 min、max。
 身体状态仅表示当前快照：inWater=false 只表示采样时身体未接触水，不证明已上岸、持续站稳或完成换气；onGround=true 只表示当前触地，也可能在水底。氧气恢复程度看 oxygen 数值；条件及其组合由你按实际目标选择。
-写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。开工前就成立的条件会被当成没写。移动可用 location_near 验收连续脚坐标到目标点的三维距离；travel_to 的 range 按格距，两种距离在格边可能不同。纯移动或观察不产生目标物品，只读步骤不改变站位。exploration 的 min_distance（1–256 的整数）只表示这段走了多远/进了多少新区块，是推进量，不是“找到、到达或认出目标”的证明：找下界要塞、遗迹、矿脉这类还不知道位置的目标，不要用它冒充目标达成；找具体方块/物品用 find（本段实际看见），已知坐标用 location_near，目标位置未知或无法当场确认时可省略 done_when，做完看实际观察再决定。min_distance 只能用在这段 steps 里有会移动身体的动作时；只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when。清单（plan.steps）的 done_when 按当前状态自动勾，没有本段探索回执，不能用 exploration；要用 location_near、self_state、inventory_min 等当前状态条件，或只写成果文字、做完自己判断。`;
+写与这段活实际收工目标相符的条件；条件只证明它自身成立，不证明描述里的其他目标达成。gather/smelt 的 count 和 done_when 要一致：done_when 达到就会收工（例如 count 16 但 done_when inventory_min 4，会在 4 就停）；要多采就把两边一起写大；整段准备需求写进 plan.needs。开工前就成立的条件会被当成没写。移动可用 location_near 验收连续脚坐标到目标点的三维距离；travel_to 的 range 按格距，两种距离在格边可能不同。纯移动或观察不产生目标物品，只读步骤不改变站位。exploration 的 min_distance（1–256 的整数）只表示这段走了多远/进了多少新区块，是推进量，不是“找到、到达或认出目标”的证明：找下界要塞、遗迹、矿脉这类还不知道位置的目标，不要用它冒充目标达成；找具体方块/物品用 find（本段实际看见），已知坐标用 location_near，目标位置未知或无法当场确认时可省略 done_when，做完看实际观察再决定。min_distance 只能用在这段 steps 里有会移动身体的动作时；只看、只评估、只查询的活写 find 或省略；没把握就省略 done_when。清单（plan.steps）的 done_when 按当前状态自动勾，没有本段探索回执，不能用 exploration；要用 location_near、self_state、inventory_min 等当前状态条件，或只写成果文字、做完自己判断。`;
 
 const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
@@ -249,6 +249,9 @@ const OPERATOR = `【操作者】控制台里的操作者（直播的主人）�
 
 /** 清单删改的统一规则：系统提示与【专注】/改清单提示引用同一段文字，避免口径漂移。 */
 const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods，不必重抄 steps）。删掉没做完的成果：在阶段回顾里、或这一念明确回应操作者指令（operator doing/adopted）时，可以直接改；平时要改则必须认真想并在 plan 里写 switch_reason，说明等效替代或为什么不再需要，且距上次删改满 ${PLAN_REVISION_MIN} 分钟。只观察停滞不构成删项理由。新增一项随时可以；拆分或合并未完成的项会改变成果文字，按删改处理。删项不会自动完成主目标：删项那一念不收工（阶段回顾里也一样），下一念明确勾完清单才收工。`;
+
+/** 资源的前瞻原则：只陈述资源的用途与判断边界，不给路线或固定数量。 */
+export const RESOURCE_PRINCIPLE = '资源用来支持后面的行动：已经到达资源点、寻找成本付过时，清单后面还要什么、这次顺带补多少，由你判断；背包、安全和时间是一起权衡的事实。';
 
 /** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
 const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。${GOAL_SWITCH_RULE}`;
@@ -512,7 +515,7 @@ export function decisionReminders(ctx: MindContext): string[] {
       const seenHere = p.nearby.resources.filter((r) => r.seen === 'now').slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
       const rememberedHere = p.nearby.resources.filter((r) => r.seen === 'memory').slice(0, 3).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
       const site = seenHere.length ? `眼前看得见 ${seenHere.join('、')}` : rememberedHere.length ? `记得附近有 ${rememberedHere.join('、')}` : null;
-      const line = `这次出门的账：寻找这块地方的成本已经付过；${tripLine ? `${tripLine}；` : ''}${home ? `家「${home.label}」在${home.dir}边 ${home.dist} 格；` : ''}背包空 ${p.emptySlots} 格${consumption ? `；${consumption}` : ''}${site ? `；${site}` : ''}；清单还没做的「${pending.slice(0, 3).join('」「')}」。这次准备带回多少、够不够后面几步，由你定；空槽/安全/时间由你权衡`;
+      const line = `这次出门的账：寻找这块地方的成本已经付过；${tripLine ? `${tripLine}；` : ''}${home ? `家「${home.label}」在${home.dir}边 ${home.dist} 格；` : ''}背包空 ${p.emptySlots} 格${consumption ? `；${consumption}` : ''}${site ? `；${site}` : ''}；清单还没做的「${pending.slice(0, 3).join('」「')}」。${RESOURCE_PRINCIPLE}`;
       out.push(line);
       ctx.log?.(line, { kind: 'trip_account' });
     }

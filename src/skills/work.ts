@@ -142,8 +142,8 @@ function inDeepWater(ctx: SkillCtx): boolean {
 
 export const gather: Skill<{ block: string; count: number; for?: { item: string; count: number }; note?: string; dig?: boolean }> = {
   name: 'gather',
-  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。count 是采到背包里一共有多少个（先扣掉已有的，只采缺口）；写 for（要做的东西和数量）时按配方算缺多少原材料，已经够了就不采；看不见的不会去挖（没有透视），也不会自己往下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
-  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "count"?: 1-32（目标总数，会扣掉背包已有的）, "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
+  description: '前往【看见过或正看见】的指定方块并挖掘、拾取。count 是这段活结束时背包里这类物品的目标总数（包含已有的，只采缺口）；写 for（要做的东西和数量）时按配方算缺多少原材料，已经够了就不采；看不见的不会去挖（没有透视），也不会自己往下挖。block 可用别名：log(任意原木)、stone、dirt、coal、iron、ore',
+  argsDoc: '{"block": "log|stone|coal|iron|<方块名>", "count"?: 1-32（这段活结束时背包里这类物品的目标总数，包含已有的；只采缺口；超过 32 会截到 32，更多分多次）, "for"?: {"item":"要做的东西（物品 ID）","count":1} | "物品名", "dig"?: true（路上挡着的土石挖穿、垫方块过去）}',
   timeoutMs: 180000,
   movement: true,
   outcomeBoundary: true,
