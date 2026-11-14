@@ -14,6 +14,13 @@ test('瞥一眼和认真想共用同一段静态系统前缀', () => {
   for (const marker of ['你就是这个 Minecraft 角色本人', '【操作者】', '【消息怎么读】', '【原则】', '【选动作】', '【决定】', '【输出】', '【动作】参数必须合法：', '- mine_cell ']) {
     assert.ok(shared.includes(marker), `共用前缀缺少「${marker}」`);
   }
+  // 地形核对只在共用原则里出现一次：两档尾段不再各留一份，避免重复与口径漂移
+  const terrain = '地形分类不代表受困或需要离开';
+  assert.ok(shared.includes(terrain), '地形核对应属于共用前缀');
+  for (const [name, system] of [['deliberate', deliberate], ['glance', glance]] as const) {
+    assert.equal(system.split(terrain).length - 1, 1, `${name} 里地形核对应只有一份`);
+  }
+  assert.ok(glance.includes('这一档也要确认地形'), '瞥一眼应保留短句提醒');
   // 档位从同一处分叉，各自的尾段不打断前面的缓存
   assert.ok(deliberate.slice(i).trimStart().startsWith('【每次这样想】'));
   assert.ok(glance.slice(i).trimStart().startsWith('这次只是抬头看一眼'));
