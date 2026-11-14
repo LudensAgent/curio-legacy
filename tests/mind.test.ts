@@ -374,6 +374,36 @@ test('绕路时挂起长程移动，回来带同一 sessionId 续接原委托', 
   assert.equal(w.mind.activity?.id, original.id);
 });
 
+test('长程移动仍在跑时，不包含该步骤的 adjust 被拒绝，原任务不被静默取消', async (t) => {
+  const w = fixture(t);
+  const previous = SKILLS.explore_toward;
+  SKILLS.explore_toward = {
+    name: 'explore_toward', description: '测试长程移动', argsDoc: '{}', timeoutMs: 60000, movement: true,
+    validate: (raw: any) => ({ ok: true as const, args: { direction: 'W', distance: 64, ...(raw?.sessionId ? { sessionId: raw.sessionId } : {}) } }),
+    run: async () => new Promise<SkillResult>(() => {}),
+  };
+  t.after(() => { if (previous) SKILLS.explore_toward = previous; else delete SKILLS.explore_toward; });
+
+  await w.tick();
+  await w.reply(0, { monologue: '向西走', decision: 'new', activity: { what: '向西探索', steps: [{ skill: 'explore_toward', args: { direction: 'W', distance: 64 } }] } });
+  await w.tick();
+  const original = w.mind.activity!;
+  assert.equal(w.arbiter.info()?.skill, 'explore_toward');
+
+  w.mind.attention.notice('adjust-test', '测试调整', 0.6);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  const adjustAt = w.pending.length - 1;
+  await w.reply(adjustAt, { monologue: '改做别的', decision: 'adjust', activity: { what: '改做别的', steps: [step(9)] } });
+  await w.tick();
+
+  assert.equal(w.mind.activity?.id, original.id, '被拒绝的 adjust 不改写活动');
+  assert.equal(w.arbiter.info()?.skill, 'explore_toward', '在途长程移动没有被取消');
+  assert.equal(w.mind.activity?.steps.length, 1);
+  assert.ok(w.bus.recent().some((event) => event.type === 'activity_adjust' && /调整被拒绝/.test(event.msg)),
+    '把拒绝事实交回给心智');
+});
+
 test('挂起回执晚于插曲开始/续接时，按 taskId 与步骤实例归还，不结束当前活动', async (t) => {
   const w = fixture(t);
   const previous = SKILLS.explore_toward;

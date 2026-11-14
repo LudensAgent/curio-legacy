@@ -2371,6 +2371,16 @@ export class Mind {
       const keepsPrefix = running?.planId === a.id && currentIndex > 0 && sameRunning(draft.steps[currentIndex], runningOld)
         && a.steps.slice(0, currentIndex).every((step, i) => sameRunning(draft.steps[i], step));
       const runningIndex = keepsPrefix ? currentIndex : firstIsRunning ? 0 : -1;
+      // 长程移动还在跑、且草案没有保留它：不要静默取消。低血/紧急/操作者明确指令除外；
+      // 其余情况要求 Agent 重新想清楚是 continue、保留该步骤，还是用 detour/switch 明确处理。
+      if (!info.operator && !info.urgent && !info.emergency
+        && running?.planId === a.id && runningIndex < 0 && RESUMABLE_LONG_RANGE.has(running.skill)) {
+        const stepId = runningOld?.id ?? running.stepId;
+        this.d.bus.publish('activity_adjust', 'P2',
+          `调整被拒绝：${running.skill} 正在执行且尚未失败，草案没有保留它${stepId === undefined ? '' : ` #${stepId}`}；先 continue、保留该步骤，或用 detour/switch 明确处理`,
+          { planId: a.id, skill: running.skill, ...(stepId === undefined ? {} : { stepId }) });
+        return;
+      }
       // 全部校验通过后再取消旧任务：拒绝非法调整不得取消原动作，避免原动作被取消后活动仍被记为 done。
       if (running?.planId === a.id && runningIndex < 0) {
         this.d.arbiter.cancel('改了做法');
