@@ -251,6 +251,9 @@ const OPERATOR = `【操作者】控制台里的操作者（直播的主人）�
 /** 建筑师规则：查询说明、动作选择和施工提醒共用同一句，避免三处各写一套。 */
 const ARCHITECT_RULE = '请建筑师画图纸（不用自己写图纸）';
 
+/** 换主目标被拒后的处理：两档共用，避免同一规则在尾段各写一份。 */
+const GOAL_REFUSAL_RULE = '换目标被拒别重复：记 agenda 或阶段回顾并写 switch_reason，当前主线继续。';
+
 /** 清单删改的统一规则：系统提示与【专注】/改清单提示引用同一段文字，避免口径漂移。 */
 const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods，不必重抄 steps）。删掉没做完的成果：在阶段回顾里、或这一念明确回应操作者指令（operator doing/adopted）时，可以直接改；平时要改则必须认真想并在 plan 里写 switch_reason，说明等效替代或为什么不再需要，且距上次删改满 ${PLAN_REVISION_MIN} 分钟。只观察停滞不构成删项理由。新增一项随时可以；拆分或合并未完成的项会改变成果文字，按删改处理。删项不会自动完成主目标：删项那一念不收工（阶段回顾里也一样），下一念明确勾完清单才收工。`;
 
@@ -290,7 +293,8 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resol
 const DELIBERATE_MODE = `【每次这样想】
 1. 【此刻】要紧的（危险、快饿死、卡住）先处理。
 2. 看【手上的活】里的 continue_effect：只有当你核对后决定原样执行剩余计划时才 continue（continue 不改变动作）；要改变当下动作，用 adjust/detour/switch 并写出 steps，独白、what、expect、注意到的事不会改变执行。
-3. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。`;
+3. 拿不准就先查（knowledge / skill / moves / recipes / recall）；输出前核对动作名和参数。
+这是综合判断：先看当前目标和阶段是否仍成立、这段活推进了什么；再想接下来一段需要什么（资源、装备、空间），环境里有没有可用、需组织或需维护的对象，当前最有价值的下一步是什么（继续主线、补给、建设还是维护）。只查与当前决策有关的层面，已有足够事实就停，不重述全部历史/背包/设施。可以换做法、资源来源、布局和下一段活动；改主目标仍按【专注】的换目标规则，一次失败不默认目标失效，一个新发现不自动换主线。不把长期发展变成无限囤积、无限建设或每念重开计划。${GOAL_REFUSAL_RULE}`;
 
 const CHOOSE = `【选动作】
 - 去某处/找没见过的东西 → 按【走到哪】选；look_around 只看当前视野，explore_toward 才改变位置（until 在本轮视野看见就停）；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
@@ -358,11 +362,12 @@ ${movesCatalog(28)}`;
 /** 瞥一眼的专属说明；放在共用前缀之后，避免改动它时打碎前面的缓存 */
 const GLANCE_MODE = `这次只是抬头看一眼，不必把每个细节重新铺开：
 - 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust，插一件事用 detour——独白、what、expect、noticed 不会改变执行。
-- 手上没活：直接 new 一段，接着【最近】的结果和议程往下玩；边做边想下一段可写 next，当前动作仍在执行、结果未知。小改用 adjust，插一件事用 detour，彻底换事用 switch/new。
-- 这一档也要确认地形：按【原则】核对【身体】where 和【身边】local。
+- 手上没活：直接 new 一段，接着【最近】和议程往下玩；可写 next，当前动作仍在执行、结果未知。换事用 switch/new。
+- 普通观察/资源/设施/局部失败：记录事实，保持手上的活；不启动多阶段项目。
+- 这一档也要确认地形：按【原则】
 - 要翻技能书、请建筑师、查配方/游戏资料或想得更深：直接输出查询，如 {"kind":"knowledge","query":"问题"}、{"kind":"design","brief":"…"}、{"kind":"skill","name":"…"}、{"kind":"deliberate","reason":"…"}（转成认真想）。knowledge 先搜候选再读章节，摘录不等于读完或学会；资料不代表现场事实。
-- 有【专注】的主目标时，可用 detour 暂时插一段并自动回来；想立即改做法用 adjust。瞥一眼不直接放下手上的活：new/switch 会排到这段之后；有危险时直接做避险动作，原来的活会先挂起保留，回来由你决定要不要接着做，不会清空暂停记录。非紧急时，要永久放下当前活动就转成认真想；紧急时原活动会挂起保留，回来再决定。做完清单一项写 "plan":{"done":[序号]}。
-- 技能书在文末：需要时先用 skill 查询；文字笔记不能直接 use_skill，只有可执行技能或可试用候选能调用。
+- 有【专注】时可 detour 插一段再回；想改做法用 adjust。瞥一眼不直接放下手上的活：new/switch 会排到这段之后；已有排好的 next 时再写 new/switch 会被丢弃。有危险直接避险，原活动挂起保留，回来再决定，不清空暂停记录；紧急只授权中断，不等于永久放弃。非紧急永久放下活动或改清单，转认真想。${GOAL_REFUSAL_RULE}做完清单一项写 "plan":{"done":[序号]}。
+- 技能书在文末：先用 skill 查询；文字笔记不能 use_skill，只有可执行/候选能用。
 - 刚从卡住里找到办法、想把它变成身体的习惯：转成认真想（{"kind":"deliberate","reason":"写技能"}）。`;
 
 export function deliberateSystem(persona: string, skills: string[] = []): string {
@@ -672,40 +677,50 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   if (!item && !plan) return null;
   const goal = plan?.goal ?? item!.text;
   const next = plan?.steps.findIndex((st) => !st.done) ?? -1;
-  const stall = plan ? ctx.self.planStallInfo() : null;
+  const full = ctx.tier === 'deliberate';
+  // 认真想专属字段：goal_age、methods、recent_attempts、material_budget、method_review_note、
+  // progress_trend、no_progress/activities/rewrites。新增战略/复盘字段时必须同时加 full 守卫，
+  // 否则会重新漏回瞥一眼。
+  const stall = plan && full ? ctx.self.planStallInfo() : null;
   return {
     goal, agenda_id: plan?.agendaId ?? item!.id,
-    ...(plan ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000), checklist: plan.steps.map((st, i) => {
-      const held = !st.done ? gearAlreadyHeldInText(st.text, ctx.state.inventory, ctx.state.equipment) : null;
-      return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.id ? ` ${st.id}` : ''}${held ? PLAN_NOTE.held(held) : ''}${st.done && st.auto ? PLAN_NOTE.autoDone : !st.done && st.doneWhen ? PLAN_NOTE.autoPending : ''}`;
-    }), ...(next >= 0 ? { next_item: next } : {}),
-      ...(plan.methods?.some((m) => m.status === 'active') ? { methods: plan.methods.filter((m) => m.status === 'active').map((m) => ({
+    ...(plan ? {
+      ...(full ? { goal_age_wall_clock_min: Math.round((Date.now() - plan.setAt) / 60000) } : {}),
+      checklist: plan.steps.map((st, i) => {
+        const held = !st.done ? gearAlreadyHeldInText(st.text, ctx.state.inventory, ctx.state.equipment) : null;
+        return `${i}. [${st.done ? 'x' : ' '}] ${st.text}${st.id ? ` ${st.id}` : ''}${held ? PLAN_NOTE.held(held) : ''}${st.done && st.auto ? PLAN_NOTE.autoDone : !st.done && st.doneWhen ? PLAN_NOTE.autoPending : ''}`;
+      }),
+      ...(next >= 0 ? { next_item: next } : {}),
+      ...(full && plan.methods?.some((m) => m.status === 'active') ? { methods: plan.methods.filter((m) => m.status === 'active').map((m) => ({
         id: m.id, text: m.text, ...(m.outcomeId ? { outcome: m.outcomeId } : {}), attempts: m.attempts,
         ...(Object.keys(m.stopReasons).length ? { stopped: m.stopReasons } : {}),
         ...(m.lastEvidence ? { last_evidence: attemptEvidenceText(m.lastEvidence) } : {}),
       })) } : {}),
-      ...(plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
+      ...(full && plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
-      checklist_note: ctx.tier === 'glance'
-        ? '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。'
-        : `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`,
-      ...(plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
+      checklist_note: full
+        ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
+        : '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。',
+      ...(full && plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
         material_budget_note: 'material_budget 是你写在 plan.needs 里的预算；数量由你定，宿主只按配方与背包+记得的箱子算差额，不自动改 gather.count' } : {}),
-      ...(plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
+      ...(full && plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，由你对照最近几次判断，继续或换做法也由你决定' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
-      ...(() => {
+      ...(full ? (() => {
         const nextOutcome = plan.steps.find((st) => !st.done);
         const trend = nextOutcome ? ctx.self.progressSummary(nextOutcome.id) : null;
         return trend ? { progress_trend: trend } : {};
-      })(),
+      })() : {}),
       // 进展的事实交给它自己判断：多久没勾掉一项、这期间做了几段活
-      no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
-      activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,
-      // 改写清单不算推进：把这段时间改了几次、上次改在多久前摆出来，改不改仍由它定
-      ...(() => {
-        const rewrites = (plan.revisedAt ?? []).filter((t) => t > (plan.progressAt ?? plan.setAt));
-        return rewrites.length ? { checklist_rewrites_since_progress: rewrites.length, last_rewrite_wall_clock_min_ago: Math.round((Date.now() - rewrites.at(-1)!) / 60000) } : {};
-      })() } : { checklist: '还没有：写 plan' }),
+      ...(full ? {
+        no_progress_observed_online_min: Math.round(stall!.minutes), ...(stall!.historyUnknown ? { earlier_online_time: '未知' } : {}),
+        activities_since_progress: ctx.self.history(60).filter((r) => r.at > (plan.progressAt ?? plan.setAt)).length,
+        // 改写清单不算推进：把这段时间改了几次、上次改在多久前摆出来，改不改仍由它定
+        ...(() => {
+          const rewrites = (plan.revisedAt ?? []).filter((t) => t > (plan.progressAt ?? plan.setAt));
+          return rewrites.length ? { checklist_rewrites_since_progress: rewrites.length, last_rewrite_wall_clock_min_ago: Math.round((Date.now() - rewrites.at(-1)!) / 60000) } : {};
+        })(),
+      } : {}),
+    } : { checklist: '还没有：写 plan' }),
     ...(ctx.activity ? { current_activity_for_goal: ctx.activity.agendaId === (plan?.agendaId ?? item!.id) } : {}),
     ...(ctx.suspended.length ? { will_resume_after_detour: ctx.suspended.map((a) => a.what) } : {}),
   };
@@ -1058,7 +1073,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   if (ctx.toolFact) reminders.unshift(ctx.toolFact);
   // 进阶动作（下界/末地或已有末影物品才出现）和当前活动用到、目录里没给完整参数的动作：作为提醒补在 user 消息里，
   // system 目录保持字节稳定以命中前缀缓存（见 movesCatalog 注释）。
-  if (!glance && advanced) {
+  if (advanced) {
     const line = advancedMovesLine();
     if (line) reminders.push(line);
   }
