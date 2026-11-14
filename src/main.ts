@@ -34,6 +34,7 @@ import { EpisodicMemory } from './memory/episodic.ts';
 import { SharedSpatialSession, type ShutdownResult } from './spatial/shared-session.ts';
 import { capabilitySummary } from './spatial/capabilities.ts';
 import { spatialForegroundActive } from './spatial/foreground.ts';
+import { RetentionRunner } from './spatial/retention-runner.ts';
 import {
   DEFAULT_SPATIAL_CHECKPOINT_BATCHES,
   DEFAULT_SPATIAL_CHECKPOINT_INTERVAL_MS,
@@ -238,6 +239,26 @@ try {
   }) + '\n');
   process.exit(1);
 }
+// 保存成功后按水位遗忘最不重要的已提交体素（manual 模式、会话不忙、有冷却）。
+// 选择与执行分开：RetentionRunner 只读目录/事实/账本/地标，交给 planRetention 选列，
+// 再调用 pruneSections；失败只发布事实，不影响保存本身。
+const retention = new RetentionRunner({
+  worldId: adapter.state().worldId,
+  session: spatial.session,
+  settings: config.spatial.retention,
+  limits: {
+    maxVoxelSections: config.spatial.maxVoxelSections,
+    maxObservedCells: config.spatial.maxObservedCells,
+    maxPaletteEntries: config.spatial.maxPaletteEntries,
+    maxBytes: config.spatial.snapshotMaxBytes,
+  },
+  memory,
+  bus,
+  current: () => { const state = adapter.state(); return { dim: state.dim, pos: state.pos }; },
+});
+spatial.setAfterCheckpoint(() => retention.run().then(() => undefined).catch((error: unknown) => {
+  bus.publish('spatial_retention_error', 'P1', `空间记忆裁剪失败：${error instanceof Error ? error.message : String(error)}`);
+}));
 const vision = new Vision(adapter, config.vision, spatial);
 // Task-level journal wiring remains an explicit seam in Arbiter. It is not
 // injected in production until a real evidence source exists; the previous

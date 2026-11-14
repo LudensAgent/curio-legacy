@@ -114,6 +114,39 @@ const voxelBatchMaxBytes = Math.round(voxelBatchMb * 1024 * 1024);
 // 方块变化由感知重写同一格覆盖，不靠计时判断“还算不算数”。
 const voxelValidityMs = 100 * 365 * 86_400_000;
 
+// 空间记忆保留（遗忘）：checkpoint 成功后按水位裁剪已提交体素，默认开启。
+// trigger/target 是各项容量上限的比例；target 必须低于 trigger，留出下一轮增长余量。
+// maxSectionsPerPass 不能超过库单批上限 512（一次 pruneSections 调用）。
+const retentionEnabled = bool('SPATIAL_RETENTION_ENABLED', true);
+const retentionTrigger = num('SPATIAL_RETENTION_TRIGGER', 0.85);
+if (!(retentionTrigger > 0.1 && retentionTrigger <= 1)) {
+  throw new Error(`SPATIAL_RETENTION_TRIGGER 必须在 (0.1, 1] 内，收到：${retentionTrigger}`);
+}
+const retentionTarget = num('SPATIAL_RETENTION_TARGET', 0.65);
+if (!(retentionTarget > 0 && retentionTarget < retentionTrigger)) {
+  throw new Error(`SPATIAL_RETENTION_TARGET 必须在 (0, trigger) 内，收到：${retentionTarget}`);
+}
+const retentionMaxSectionsPerPass = num('SPATIAL_RETENTION_MAX_SECTIONS_PER_PASS', 256);
+if (!Number.isInteger(retentionMaxSectionsPerPass) || retentionMaxSectionsPerPass < 1 || retentionMaxSectionsPerPass > 512) {
+  throw new Error(`SPATIAL_RETENTION_MAX_SECTIONS_PER_PASS 需要 1–512 的整数（库单批上限），收到：${retentionMaxSectionsPerPass}`);
+}
+const retentionMaxCellsPerPass = num('SPATIAL_RETENTION_MAX_CELLS_PER_PASS', 200_000);
+if (!Number.isInteger(retentionMaxCellsPerPass) || retentionMaxCellsPerPass < 1 || retentionMaxCellsPerPass > 5_000_000) {
+  throw new Error(`SPATIAL_RETENTION_MAX_CELLS_PER_PASS 需要 1–5000000 的整数，收到：${retentionMaxCellsPerPass}`);
+}
+const retentionKeepHalo = num('SPATIAL_RETENTION_KEEP_HALO', 1);
+if (!Number.isInteger(retentionKeepHalo) || retentionKeepHalo < 0 || retentionKeepHalo > 8) {
+  throw new Error(`SPATIAL_RETENTION_KEEP_HALO 需要 0–8 的整数，收到：${retentionKeepHalo}`);
+}
+const retentionKeepVisits = num('SPATIAL_RETENTION_KEEP_VISITS', 64);
+if (!Number.isInteger(retentionKeepVisits) || retentionKeepVisits < 0 || retentionKeepVisits > 4096) {
+  throw new Error(`SPATIAL_RETENTION_KEEP_VISITS 需要 0–4096 的整数，收到：${retentionKeepVisits}`);
+}
+const retentionCooldownMs = num('SPATIAL_RETENTION_COOLDOWN_MS', 60_000);
+if (retentionCooldownMs < 0) {
+  throw new Error(`SPATIAL_RETENTION_COOLDOWN_MS 必须是非负数，收到：${retentionCooldownMs}`);
+}
+
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
 const MODES: readonly string[] = ['local', 'live', 'test'];
@@ -232,6 +265,17 @@ export const config = {
     voxelBatchMaxBytes,
     /** 体素证据有效期：等同不过期（库要求有限值）；不可配置。 */
     voxelValidityWindowMs: voxelValidityMs,
+    /** 已提交体素的有界保留（遗忘）策略；调度在 checkpoint 成功后执行。 */
+    retention: {
+      enabled: retentionEnabled,
+      trigger: retentionTrigger,
+      target: retentionTarget,
+      maxSectionsPerPass: retentionMaxSectionsPerPass,
+      maxCellsPerPass: retentionMaxCellsPerPass,
+      keepHalo: retentionKeepHalo,
+      keepVisits: retentionKeepVisits,
+      cooldownMs: retentionCooldownMs,
+    },
   },
   /** 心智层：像真人一样一段一段地玩、边做边想 */
   mind: {

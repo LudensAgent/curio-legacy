@@ -68,6 +68,14 @@ export class Attention {
         return this.notice(`skill_aftermath:${String(d.name ?? '')}`, ev.msg, died ? 0.75 : lost >= 4 ? 0.6 : 0.4, 60_000);
       }
       case 'lesson': return d.source === 'observed' ? this.notice(`lesson:${ev.msg.slice(0, 30)}`, ev.msg, 0.3, 300_000) : null;
+      case 'spatial_retention': {
+        const deleted = Number(d.deleted ?? 0);
+        if (deleted <= 0) return this.notice('spatial_retention_kept', ev.msg, 0.3, 600_000);
+        const dims = Array.isArray(d.dims) ? d.dims.map(String) : [];
+        const dimText = dims.length > 1 ? `${dims[0]} 等 ${dims.length} 个维度` : dims[0] ?? '空间记忆';
+        const cells = Number(d.observedCells ?? 0);
+        return this.notice(`spatial_retention:${deleted}`, `空间记忆裁剪：忘了 ${dimText} 的 ${deleted} 个 Section（约 ${cells} 格）；这些区域现在未记录（不是空气，不代表可通行）；基地/资源/容器/传送门/自建/热点/当前路线保留`, 0.3, 600_000);
+      }
       default: return null;
     }
   }

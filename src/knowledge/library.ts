@@ -97,10 +97,16 @@ export class KnowledgeBase {
 
     const controls: KnowledgeDocument = { id: 'agent-controls', title: '身体操作手册', kind: 'control', edition: 'java', versions: [this.version],
       aliases: ['操作', '接口', '动作', '身体', '工具参数', 'controls', 'mineflayer', 'mineflyer'],
-      sources: [{ url: 'repo:src/skills/index.ts', title: '当前注册技能接口' }],
+      sources: [
+        { url: 'repo:src/skills/index.ts', title: '当前注册技能接口' },
+        { url: 'repo:docs/spatial-memory-retention-20261114.md', title: '宿主空间记忆保留策略' },
+      ],
       versionNote: '按当前注册接口生成，包含基础操作和已有复合动作；接口存在不代表 Agent 已学会对应策略。moves/mechanics 可继续查询参数，recipes 可查结构化配方。',
-      sections: Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name) && !isSkillDisabled(skill.name)).map((skill) => ({ id: skill.name, title: skill.name,
-        text: `${skill.description}\n参数：${skill.argsDoc}\n移动型：${skill.movement ? '是' : '否'}；只读：${skill.readOnly === true ? '是' : '否'}；时限：${skill.timeoutMs} 毫秒。` })) };
+      sections: [...Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name) && !isSkillDisabled(skill.name)).map((skill) => ({ id: skill.name, title: skill.name,
+        text: `${skill.description}\n参数：${skill.argsDoc}\n移动型：${skill.movement ? '是' : '否'}；只读：${skill.readOnly === true ? '是' : '否'}；时限：${skill.timeoutMs} 毫秒。` })),
+        { id: 'spatial-memory-retention', title: '空间记忆的保留与遗忘',
+          text: '空间库只保留有限数量的已观测 Section。保存达到容量水位后，宿主会遗忘一部分最旧、且不在基地/资源点/容器/传送门/自建方块/热点区域/当前路线附近的已提交 Section。被遗忘的区域回到“未记录”（UNKNOWN）：不代表空气，不代表可通行，也不代表不可通行；再次经过时会重新观察。事实、容器账本、地标和经历不会被删除；这些地点的已观测格子若被遗忘，通往它们的旧路线也不再保留。遗忘由宿主按资源预算执行，不是游戏机制，也不改变你已选择的目标。' },
+      ] };
     const documents = [...this.documents.filter((document) => document.versions.includes(this.version)), controls];
     const offset = Number(input.offset ?? 0);
     const budget = Math.min(maxBytes, id && sectionId ? 6000 : 2400);

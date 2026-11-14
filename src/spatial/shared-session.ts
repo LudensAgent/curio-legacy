@@ -525,6 +525,14 @@ export class SharedSpatialSession {
   private admitted = false;
   private pausedFlag = false;
   private closingFlag = false;
+
+  /** checkpoint 返回前执行的宿主钩子（有界保留/遗忘）；不参与保存结果。 */
+  private afterCheckpoint: (() => Promise<void>) | null = null;
+
+  /** 注册 checkpoint 返回前执行的钩子；关闭期间不调用。 */
+  setAfterCheckpoint(hook: (() => Promise<void>) | null): void {
+    this.afterCheckpoint = hook;
+  }
   private attachment: Attachment | null = null;
   private nextToken = 1;
   private shutdownPromise: Promise<ShutdownResult> | null = null;
@@ -1094,6 +1102,15 @@ export class SharedSpatialSession {
             sample: [],
             error: free.error,
           };
+    }
+    // 保存和换出都完成后再做有界遗忘；关闭期间不触发。钩子失败由注册方自己报告，
+    // 不得让一次成功的保存因为遗忘失败变成拒绝。
+    if (!this.closingFlag && this.afterCheckpoint !== null) {
+      try {
+        await this.afterCheckpoint();
+      } catch {
+        // 钩子同步抛出或返回 rejected promise 都只属于遗忘；注册方负责报告自己的失败。
+      }
     }
     return result;
   }
