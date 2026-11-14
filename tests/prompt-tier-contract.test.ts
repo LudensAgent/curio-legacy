@@ -86,6 +86,17 @@ test('施工提醒只对复杂/审美建筑推荐建筑师，简单围栏不触�
   assert.match(situationalReminders(context('盖一座大型前哨')).join(' '), /design/);
 });
 
+test('出发准备只进入认真想：整趟需求、准备标准与停止准备', () => {
+  const deliberate = deliberateSystem('P', []);
+  for (const marker of ['【出发准备】', '整趟', '返程与紧急余量', '准备足够就出发', '不为更稳妥无限追加', '一次失败不证明准备标准需要降低']) {
+    assert.ok(deliberate.includes(marker), `缺少出发准备「${marker}」`);
+  }
+  const start = deliberate.indexOf('【出发准备】');
+  const block = deliberate.slice(start, deliberate.indexOf('【专注】', start));
+  assert.doesNotMatch(block, /\d+\s*(个|块|组|支|把|根|件)/, '出发准备不写固定数量');
+  assert.ok(!glanceSystem('P', []).includes('【出发准备】'), '瞥一眼不加载出发准备段');
+});
+
 test('瞥一眼在非主世界也能看到进阶动作提醒', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus(), self = new SelfModel(null);
   t.after(() => { memory.close(); self.close(); });
