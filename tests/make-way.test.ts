@@ -241,3 +241,36 @@ test('普通路线失败后，搜索到一条不改方块、只走过去的更�
   assert.ok(plan.every((step) => step.dig.length === 0 && step.place === undefined && step.kind !== 'pillar'));
   assert.ok(plan.at(-1)!.to.x >= 7, `应当真的走近目标，实际 ${JSON.stringify(plan.at(-1))}`);
 });
+
+test('1×1 通道头顶受阻时，开路第一步必须挖这一格；绕路计划不接受', async () => {
+  const w = corridor(8);
+  w.put(1, 65, 0, 'stone'); // 1 宽通道里，身体往东迈第一步时头顶被石头挡住
+  const start = { x: 0, y: 64, z: 0 }, target = { x: 8.5, y: 64, z: 0.5 };
+  const plan = await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16, blocker: { x: 1, y: 65, z: 0 } }, any);
+  assert.ok(plan !== null);
+  assert.ok(plan[0]!.dig.some((cell) => cell.x === 1 && cell.y === 65 && cell.z === 0), JSON.stringify(plan));
+
+  const withoutBlocker = await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16 }, any);
+  assert.ok(withoutBlocker !== null, '没有当前 blocker 时同一路线仍可开路');
+  const offRoute = await planMakeWay(w.map, D, start, target, { dig: {}, maxEdits: 16, blocker: { x: 7, y: 65, z: 0 } }, any);
+  assert.equal(offRoute, null, '第一步不处理当前 blocker 的绕行计划不能当作开路成功');
+});
+
+test('1×1 竖井头顶受阻时，开路第一步仍先处理头顶那一格', async () => {
+  const w = world();
+  for (let y = 63; y <= 69; y++) {
+    for (let x = -1; x <= 1; x++) for (let z = -1; z <= 1; z++) {
+      const shaft = x === 0 && z === 0;
+      w.put(x, y, z, shaft ? (y === 63 || y === 66 ? 'stone' : 'air') : 'stone');
+    }
+  }
+  const start = { x: 0, y: 64, z: 0 }, target = { x: 0.5, y: 67, z: 0.5 };
+  const inShaft = (cell: { x: number; z: number }) => cell.x === 0 && cell.z === 0;
+  const plan = await planMakeWay(w.map, D, start, target, { dig: {}, place: { item: 'cobblestone' }, maxEdits: 16, blocker: { x: 0, y: 66, z: 0 } }, inShaft);
+  assert.ok(plan !== null);
+  assert.ok(plan[0]!.dig.some((cell) => cell.x === 0 && cell.y === 66 && cell.z === 0), JSON.stringify(plan));
+  assert.ok(plan.every((step) => step.to.x === 0 && step.to.z === 0), '竖井里不能绕到侧壁');
+
+  const offRoute = await planMakeWay(w.map, D, start, target, { dig: {}, place: { item: 'cobblestone' }, maxEdits: 16, blocker: { x: 0, y: 68, z: 0 } }, inShaft);
+  assert.equal(offRoute, null, '第一步不处理当前 blocker 的计划不能当作开路成功');
+});

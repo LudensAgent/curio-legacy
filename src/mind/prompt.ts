@@ -927,12 +927,14 @@ function worldKnowledge(ctx: MindContext) {
   const nearbyFacilities = ctx.tier === 'glance'
     ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`)
     : [];
-  // 旧开挖入口/进度点单独列出：它们是历史实测坐标，不是新挖一条巷子的命令。
-  const tunnels = ctx.tier === 'deliberate'
+  // 旧开挖入口/进度点单独列出，并区分“入口”（当时开始开挖的位置）和“深层进度前端”。
+  const tunnelRows = ctx.tier === 'deliberate'
     ? marks.filter((l) => isTunnelLabel(l.label))
-      .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) })).sort((a, b) => a.d - b.d).slice(0, 8)
-      .map(({ l, d }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格${facilityAge(l.ts)}`)
+      .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)), entry: l.label === EXCAVATION_ENTRY_LABEL }))
+      .sort((a, b) => a.d - b.d)
     : [];
+  const tunnels = [...tunnelRows.filter((row) => row.entry), ...tunnelRows.filter((row) => !row.entry)].slice(0, 8)
+    .map(({ l, d, entry }) => `${entry ? '入口' : '深层进度前端'} ${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${d}格${facilityAge(l.ts)}`);
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
   // 最近几次死亡地点（事实，不分维度）：Agent 自己判断要不要回到最远点继续，还是绕开
@@ -1018,7 +1020,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '历史开挖入口/进度点（坐标来自当时的实测），不代表现在仍连通；是否复用、如何核实由你决定' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),

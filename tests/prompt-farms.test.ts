@@ -92,8 +92,9 @@ test('旧开挖入口/进度点单独列出，和普通地点分开', (t) => {
   assert.ok(checkpoint && entry);
   const [, user] = buildMindMessages(context('deliberate'));
   assert.match(user.content, /"my_tunnels"/);
-  assert.match(user.content, new RegExp(`实际开挖进度（tunnel/east）\\[${checkpoint.id}\\] \\(5,11,0\\)`));
-  assert.match(user.content, new RegExp(`实际开挖入口\\[${entry.id}\\] \\(6,11,0\\)`));
+  assert.match(user.content, new RegExp(`深层进度前端 实际开挖进度（tunnel/east）\\[${checkpoint.id}\\] \\(5,11,0\\)`));
+  assert.match(user.content, new RegExp(`入口 实际开挖入口\\[${entry.id}\\] \\(6,11,0\\)`));
+  assert.match(user.content, /两者都只是历史坐标/);
   assert.match(user.content, /不代表现在仍连通/);
   const places = user.content.match(/"places":\[(.*?)\],"my_tunnels"/s)?.[1] ?? '';
   assert.doesNotMatch(places, /实际开挖进度|实际开挖入口/, '旧开挖点只走 my_tunnels，不在 places 重复');

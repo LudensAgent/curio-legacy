@@ -17,6 +17,8 @@ export type MakeWayOptions = {
   place?: { item: string };
   /** 只顺手打灭挡路的火/灵魂火：不授权挖普通方块或放置；普通路线被火挡住时由协调器自动启用。 */
   fire?: true;
+  /** 当前普通路线报告的阻挡格；规划出的第一步必须处理这一格，不能拿绕路当解决。 */
+  blocker?: Vec3Like;
   maxEdits: number;
   /**
    * 协调器在普通搜索已失败后调用时置 true：若搜索找到一条不改方块、但确实
@@ -32,7 +34,10 @@ export type MakeWayStep = { kind: 'move' | 'pillar'; to: Cell; dig: Cell[]; plac
 
 /** 各动作的代价：能少挖少放就少挖少放，已知可走的格优先。 */
 const COST = { move: 1, stepUp: 1, dropPerBlock: 0.5, dig: 4, place: 3, pillar: 4, unknown: 2 } as const;
-const MAX_NODES = 6000, MAX_RADIUS = 40, MAX_RISE = 16;
+const MAX_NODES = 6000, MAX_RADIUS = 40;
+/** 单次开路搜索允许相对起点上升的格数；travel_to 的“垂直差过大”提示复用同一界限。 */
+export const MAKE_WAY_MAX_RISE = 16;
+const MAX_RISE = MAKE_WAY_MAX_RISE;
 /** 开路步由连续脚位身体控制执行，它只处理同层/±1；更深的落差不在开路计划里，交回 Agent 选 descend_to 或允许 drop 的路线。 */
 const MAX_DROP = 1;
 /** 每扫这么久让出一次主线程。 */
@@ -247,6 +252,16 @@ export async function planMakeWay(
   const steps: MakeWayStep[] = [];
   for (let n: Node | null = closest; n !== null && n.step !== null; n = n.parent) steps.push(n.step);
   steps.reverse();
+  // 普通路线报告的阻挡必须由这次开路的第一步处理；否则只是绕开它，不能算解决当前阻挡。
+  if (opts.blocker !== undefined) {
+    const first = steps[0];
+    const blockerKey = keyOf(opts.blocker);
+    const touchesBlocker = first !== undefined && (
+      first.dig.some((cell) => keyOf(cell) === blockerKey)
+      || (first.place !== undefined && keyOf(first.place) === blockerKey)
+    );
+    if (!touchesBlocker) return null;
+  }
   // 含挖/放/垫高的部分路线照旧返回。“不改动方块、只走过去”的路线默认丢弃，
   // 保持“开路=施工计划”的语义；协调器在普通搜索已失败后传入 allowPlainRoute，
   // 此时若这条纯移动路线真的走到目标附近（h<=1）就返回它——普通搜索可能因为

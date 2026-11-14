@@ -11,7 +11,7 @@ import { observedFootY, verifyLandRoute, type LandSearchBoundary } from '../../s
 import { cellGoal, goalFromIntent, stanceFor, type NavigationGoal } from './goal.ts';
 import { isClimbableBlockName, walkLandRules } from '../../adapter/land-rules.ts';
 import { failureCodeOfMovement, movementFailureOfStop } from './contract.ts';
-import { runNavigationSegment, type SegmentReceipt } from './segment.ts';
+import { blockerCellOf, runNavigationSegment, type SegmentReceipt } from './segment.ts';
 import { findSwimTarget, waterAhead } from './swim-leg.ts';
 import { farthestFrontier } from './frontier.ts';
 import { supportTop } from '../../perception/geometry.ts';
@@ -116,6 +116,7 @@ export type MakeWayLegReceipt = {
 // CONFLICT（搜索说证据不足、复验却判边 OPEN）同样是“普通搜索走不下去”：授权了施工时交给开路，
 // 开路逐步用当前方块确认、每段只做一处改动并产生新证据，不会原地重播同一次搜索。
 const MAKE_WAY_STOPS = new Set<StopReason>(['BLOCKED', 'NO_PATH', 'NO_PROGRESS', 'DETOUR_TOO_LARGE', 'TARGET_UNRESOLVED', 'UNKNOWN_BOUNDARY', 'CONFLICT']);
+const AIR = /^(air|cave_air|void_air)$/;
 /** 一次调用最多开路几段（每段只做到第一处改动，因此一段至多一次改动）；与施工上限一致，避免段数先于额度截断长距离搭桥。 */
 const MAX_MAKE_WAY_LEGS = MAKE_WAY_MAX_EDITS;
 /** 没有 dig/place 授权时，普通路线被火挡住可顺手打灭的上限；火没有碰撞，不属于开挖/搭建委托。 */
@@ -1399,6 +1400,10 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     // 这两种本来就该由显式授权的 place 修（补支撑/搭桥），不是不能走。危险格、涉水未授权
     // 等其余拒绝仍按限制交回，不能靠垫一块绕过。
     const lastSegment = session.lastSegment as SegmentReceipt | undefined;
+    // 普通路线报告的阻挡格：开路第一步必须处理它，执行后还要复核；不把绕路当成已解决。
+    const routeBlocker = lastSegment?.blocker;
+    const blockerCell = blockerCellOf(routeBlocker);
+    const blockerName = blockerCell === undefined ? null : ctx.adapter.blockAt(blockerCell);
     const policyFixable = makeWay?.place !== undefined
       && stop?.reason === 'DELEGATION_RESTRICTION'
       && lastSegment?.search.policy?.firstRejection !== undefined
@@ -1433,15 +1438,19 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
     const start = feetCell(here);
     // 普通搜索已经失败，这里也接受“不改方块、但确实走到目标附近”的纯移动路线；
     // 否则会把一条真实存在的通路丢掉，误报“找不到路线”。
-    const steps = await planMakeWay(voxel, scope.dim, start, target, { ...activeMakeWay, allowPlainRoute: !fireOnly }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
-      { signal: ctx.signal, deadlineMs: deadline });
+    const steps = await planMakeWay(voxel, scope.dim, start, target, {
+      ...activeMakeWay, allowPlainRoute: !fireOnly,
+      ...(blockerCell !== undefined ? { blocker: blockerCell } : {}),
+    }, (cell) => withinCorridor({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }),
+    { signal: ctx.signal, deadlineMs: deadline });
     if (steps === null && ctx.signal.aborted) { stop = cancellationStop(ctx, '开路规划时父任务取消'); break; }
     if (steps === null && Date.now() >= deadline) { stop = stopOf('TIMEOUT', '开路规划到达原期限'); break; }
     if (steps === null) {
       // 说清试过开路、用了哪些授权、缺哪种手段：是否补授权由调用方决定。
       const granted = [activeMakeWay.fire === true ? '打灭挡路的火' : null, activeMakeWay.dig === undefined ? null : 'dig', activeMakeWay.place === undefined ? null : `place(${activeMakeWay.place.item})`].filter((x): x is string => x !== null);
       const missing = [activeMakeWay.dig === undefined ? 'dig（挖开挡路格）' : null, activeMakeWay.place === undefined ? 'place（补脚下支撑/原地垫高）' : null].filter((x): x is string => x !== null);
-      stop = stopOf(stop.reason, `${stop.detail}；${fireOnly ? '试过顺手打灭挡路的火' : '试过开路'}：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}`);
+      const blockerText = blockerCell === undefined || blockerName === null || AIR.test(blockerName) ? '' : `；当前阻挡 ${blockerName}${cellText(blockerCell)} 没有被这次开路的第一处改动处理（不拿绕路当解决）`;
+      stop = stopOf(stop.reason, `${stop.detail}；${fireOnly ? '试过顺手打灭挡路的火' : '试过开路'}：已授权 ${granted.join('、')}${missing.length ? `，未授权 ${missing.join('、')}` : ''}；已记录体素里找不到只用这些手段、离目标更近至少 3 格的路线${makeWayLegs.length ? '（前面几段已开过路）' : ''}${blockerText}`);
       break;
     }
     const editsBefore = makeWayEdits.length;
@@ -1484,6 +1493,12 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       } else {
         stop = stopOf(stop.reason, `${stop.detail}；试过开路（计划 ${leg.planned} 步）但第一步就没成：${leg.failure ?? '未知原因'}`);
       }
+      break;
+    }
+    // 开路后复核同一条普通路线 blocker：仍被同一方块挡住就交回事实，不再继续重规划。
+    const afterBlockerName = blockerCell === undefined ? null : ctx.adapter.blockAt(blockerCell);
+    if (blockerCell !== undefined && blockerName !== null && !AIR.test(blockerName) && afterBlockerName === blockerName) {
+      stop = stopOf('BLOCKED', `${stop.detail}；试过开路，但当前阻挡 ${blockerName}${cellText(blockerCell)} 仍在；本次停止重规划，后续处理由你决定`, { blocker: routeBlocker });
       break;
     }
     // 开出了路：从新位置回到普通路线。之前停在原地的搜索已由实际迈步证明不是空搜。

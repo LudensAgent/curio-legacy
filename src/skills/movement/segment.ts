@@ -22,6 +22,9 @@ import { liveEdgeStatus, liveTurnStatus } from './live-edge.ts';
 import { boundaryProbeCells } from './observation.ts';
 import type { MoveMode } from './session.ts';
 
+/** blocker 的观察格：已记录具体阻挡方块时优先用它，否则退回计划目标格。 */
+export const blockerCellOf = (blocker: SegmentReceipt['blocker']): Vec3Like | undefined => blocker?.obstacle ?? blocker?.cell;
+
 /**
  * 单段执行器：只完成“一次搜索 + 一段前缀/路线”，持有跨段 session 的协调循环不在这里。
  * 搜索由库的有界 A* 提供；执行按 transition 的连续脚位使用身体控制完成，

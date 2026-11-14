@@ -3,9 +3,10 @@ import { observedFootY } from '../../spatial/land-search.ts';
 import { travelStore } from '../../travel/store.ts';
 import { cancelledNav, fail, isAbort, navReceipt, obj, ok, runSkill, validateSkill, type NavOutcome, type Skill, type SkillResult } from '../types.ts';
 import { navigateTo } from './navigate.ts';
-import type { SegmentReceipt } from './segment.ts';
+import { blockerCellOf, type SegmentReceipt } from './segment.ts';
 import { findMovementSession } from './session.ts';
-import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, MAKE_WAY_MAX_EDITS, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
+import { MAKE_WAY_ARGS_DOC, MAKE_WAY_DOC, MAKE_WAY_MAX_EDITS, MAKE_WAY_MAX_RISE, makeWayArgs, makeWayRequest, parseMakeWay } from './make-way.ts';
+import { isConstructionFixablePolicyRejection } from '../../spatial/land-edge-policy.ts';
 import type { MakeWayEdit } from './coordinator.ts';
 
 type TravelTarget =
@@ -282,12 +283,35 @@ export const travelTo: Skill<TravelToArgs> = {
     const movedFacts = facts();
     const stop = (moved.data?.stop ?? {}) as { reason?: string };
     const stopReason = typeof stop.reason === 'string' ? stop.reason : undefined;
+    const lastSegment = moved.data?.lastSegment as SegmentReceipt | undefined;
+    // 计划过时后的重搜段没有执行级阻挡；navigate_to 会把本次调用最近一次实测阻挡带到 data.blocker。
+    const blocker = (lastSegment?.blocker ?? moved.data?.blocker) as SegmentReceipt['blocker'];
+    const blockerCell = blockerCellOf(blocker);
+    const blockerName = blockerCell === undefined ? null : ctx.adapter.blockAt(blockerCell);
+    const verticalGap = Math.floor(goalY) - Math.floor(end.y);
+    const policyRejection = lastSegment?.search.policy?.firstRejection;
+    const gapRejected = policyRejection !== undefined && isConstructionFixablePolicyRejection(policyRejection.reason)
+      && policyRejection.reason.includes('horizontal gap jump');
+    const headBlocked = blocker?.problem === 'HEAD_BLOCKED';
+    const needsExplicitAscent = headBlocked && verticalGap > MAKE_WAY_MAX_RISE;
+    const ascentHint = needsExplicitAscent
+      ? `当前 ${at(end)}，目标垂直差 ${verticalGap} 格，最近一次遇到头部阻挡${blockerCell === undefined ? '' : ` ${blockerName ?? '未知方块'}${at(blockerCell)}`}；已确认 ${lastSegment?.confirmed?.length ?? 0} 段移动，入口/深层进度点见 my_tunnels；普通路线只覆盖 walk/step/drop/jump，需要显式上行施工（例如 excavate_run stairs_up / pillar_one / place_support）或先走 my_tunnels 的实际开挖入口`
+      : '';
+    const gapHint = gapRejected && args.place === undefined
+      ? `路线缺口超过跳跃能力，这次没有 place 授权；需要 place 搭桥，或先走 my_tunnels 里的实际开挖入口`
+      : '';
+    const routeHint = [ascentHint, gapHint].filter(Boolean).join('；');
     const routeFacts = {
       ...moved.data,
       ...movedFacts,
       navigation: moved.data,
       ...(stopReason === undefined ? {} : { stopReason }),
       ...(moved.failureCode === undefined ? {} : { navigationFailureCode: moved.failureCode }),
+      verticalGap,
+      ...(blockerCell === undefined ? {} : { blocker: { ...(blocker ?? {}), name: blockerName } }),
+      ...(needsExplicitAscent ? { needsExplicitAscent: true } : {}),
+      ...(gapRejected && policyRejection !== undefined ? { routeGap: { reason: policyRejection.reason } } : {}),
+      ...(routeHint ? { routeHint } : {}),
     };
 
     if (moved.status === 'cancelled') {
@@ -317,7 +341,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const outcome: NavOutcome = moved.failureCode === 'TIMEOUT' ? 'TIMEOUT' : movedFacts.closer > 0 ? 'PARTIAL' : 'FAILED';
     return receipt({
       ...moved, status: 'failed', failureCode: moved.failureCode ?? 'EFFECT_NOT_CONFIRMED',
-      summary: 'travel_to 原目标尚未满足；' + moved.summary,
+      summary: 'travel_to 原目标尚未满足；' + moved.summary + (routeHint ? `；${routeHint}` : ''),
       data: { ...routeFacts, outcome },
     }, outcome);
   },

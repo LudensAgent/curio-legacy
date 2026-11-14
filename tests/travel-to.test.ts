@@ -503,3 +503,51 @@ test('开始前取消即使已在范围内，也不翻译为到达', async (t) =
   assert.equal(result.status, 'cancelled');
   assert.equal(adapter.actions.length, 0);
 });
+
+test('深目标遇到 HEAD_BLOCKED 时 travel_to 交回垂直差、blocker 和上行/搭桥缺口', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture();
+  t.after(() => ctx.memory.close());
+  t.mock.method(navigateTo, 'run', async () => {
+    adapter.pos = { x: -522.2, y: 6, z: -269.3 };
+    return {
+      status: 'failed' as const, failureCode: 'EFFECT_NOT_CONFIRMED' as const, summary: '路线仍被头部阻挡',
+      data: {
+        lastSegment: {
+          blocker: { problem: 'HEAD_BLOCKED', cell: { x: -523, y: 7, z: -271 }, obstacle: { x: -523, y: 8, z: -269 }, reason: 'collision with stone' },
+          search: { policy: { firstRejection: { reason: 'cannot clear a 3.0-block horizontal gap jump (limit 2)' } } },
+        },
+      },
+    };
+  });
+  const result = await travelTo.run(ctx, argsOf({ to: { x: -528, y: 103, z: -262 }, range: 3 }, adapter));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.data?.verticalGap, 97);
+  assert.equal(result.data?.needsExplicitAscent, true);
+  assert.match(result.summary, /垂直差 97 格/);
+  assert.match(result.summary, /HEAD_BLOCKED|头部阻挡/);
+  assert.match(result.summary, /显式上行施工/);
+  assert.match(result.summary, /place 搭桥/);
+  assert.match(result.summary, /实际开挖入口/);
+
+  const near = await travelTo.run(ctx, argsOf({ to: { x: -528, y: 20, z: -262 }, range: 3 }, adapter));
+  assert.equal(near.data?.needsExplicitAscent, undefined, '垂直差不超过开路局部预算时不冒充“需要显式上行”');
+});
+
+test('最后一段是重搜段时，travel_to 仍从 data.blocker 交回阻挡事实', async (t) => {
+  const { adapter, ctx } = voxelNavigationFixture();
+  t.after(() => ctx.memory.close());
+  t.mock.method(navigateTo, 'run', async () => {
+    adapter.pos = { x: -522.2, y: 6, z: -269.3 };
+    return {
+      status: 'failed' as const, failureCode: 'EFFECT_NOT_CONFIRMED' as const, summary: '重搜段没有执行级阻挡',
+      data: {
+        blocker: { problem: 'HEAD_BLOCKED', obstacle: { x: -523, y: 8, z: -269 }, reason: 'collision with stone' },
+        lastSegment: { search: { policy: { firstRejection: { reason: 'cannot clear a 3.0-block horizontal gap jump (limit 2)' } } } },
+      },
+    };
+  });
+  const result = await travelTo.run(ctx, argsOf({ to: { x: -528, y: 103, z: -262 }, range: 3 }, adapter));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.data?.needsExplicitAscent, true);
+  assert.match(result.summary, /头部阻挡/);
+});
