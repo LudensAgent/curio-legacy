@@ -28,7 +28,7 @@ const harness = () => {
     activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
     audience: null, notes: [], mySkills: [], persona: 'P',
   });
-  return { context, close };
+  return { context, memory, close };
 };
 
 test('持续运营只进入认真想：区分 Task/Project/Ongoing Operation，成熟以观察为准', () => {
@@ -54,11 +54,34 @@ test('农田状态进入认真想的 user 消息；未知成熟度不伪装成 0
   assert.match(user.content, /my_facilities/);
   assert.match(user.content, /use_gui\/interact_block/);
   assert.match(user.content, /容器先 find_item 查线索/);
-  assert.match(user.content, /床见 my_bed/);
+  assert.match(user.content, /床也会列在这里/);
   assert.doesNotMatch(situationalReminders(context('deliberate')).join(' '), /农田|成熟/, '普通农田状态不进入每念提醒');
 
   const [, known] = buildMindMessages(context('deliberate', [{ crop: 'wheat', cells: 1, dist: 12, mature: 0, minutes_since_planted: 10 }]));
   assert.match(known.content, /"mature":0/, '实际观察到的 0 成熟数照实显示');
+});
+
+test('自己的床和邻近箱子一起进入设施表，带坐标和记录时间', (t) => {
+  const { context, memory, close } = harness();
+  t.after(close);
+  memory.addLandmark('discovery', '我的床', 'overworld', { x: 70, y: 64, z: 0 }, 2);
+  memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 71, y: 64, z: 0 }, 0.1);
+  const [, user] = buildMindMessages(context('deliberate'));
+  assert.match(user.content, /床 \(70,64,0\) 70格（sleep；/);
+  assert.match(user.content, /我的箱子 \(71,64,0\).*find_item/);
+  assert.match(user.content, /记下/);
+  assert.match(user.content, /"my_bed":"\(70,64,0\) 70格/);
+});
+
+test('设施表超过 8 项时仍保留远处的床', (t) => {
+  const { context, memory, close } = harness();
+  t.after(close);
+  for (let i = 0; i < 12; i++) memory.addLandmark('discovery', '我的箱子', 'overworld', { x: i + 1, y: 64, z: 2 }, 0.1);
+  memory.addLandmark('discovery', '我的床', 'overworld', { x: 70, y: 64, z: 0 }, 2);
+  memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 71, y: 64, z: 0 }, 0.1);
+  const [, user] = buildMindMessages(context('deliberate'));
+  assert.match(user.content, /床 \(70,64,0\) 70格（sleep/);
+  assert.match(user.content, /我的箱子 \(71,64,0\).*find_item/, '床边的箱子也保留');
 });
 
 test('瞥一眼只给附近设施与附近农田，不展开完整设施/农田表', (t) => {

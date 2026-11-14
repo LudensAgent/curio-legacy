@@ -893,13 +893,29 @@ function worldKnowledge(ctx: MindContext) {
       ...(record ? { harvests: record.harvests, at: record.cells[0] } : {}),
     };
   }).sort((a, b) => a.dist - b.dist).slice(0, 4);
+  const facilityAge = (at: number | undefined) => {
+    if (at === undefined) return '';
+    const minutes = Math.max(0, Math.round((Date.now() - at) / 60_000));
+    const age = minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`;
+    return `；${age}记下`;
+  };
+  const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const facilityUse = (kind: Facility['kind']) => kind === 'chest' ? 'find_item→take_items/store_items' : kind === 'bed' ? 'sleep' : 'use_gui/interact_block';
-  const ownFacilities = myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station']).filter((f) => f.label !== '我的农田');
-  const facilities = ctx.tier === 'deliberate'
-    ? ownFacilities.slice(0, 8).map((f) => `${f.text}（${facilityUse(f.kind)}）`)
+  // myBed 先用当前方块核对床还在不在；再列设施，避免同一念里 my_bed 已删、my_facilities 还列着。
+  const ownFacilities = myFacilities(m, { worldId: s.worldId, dim: p.self.dim, pos: here }, ['chest', 'station', 'bed']).filter((f) => f.label !== '我的农田');
+  // 床和床边同一小片的设施优先保留，避免远处前哨的床/箱子被身边一堆工作站挤出 8 项列表。
+  const near = (a: Facility, b: Facility) => Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y, a.pos.z - b.pos.z) <= 6;
+  const beds = ownFacilities.filter((f) => f.kind === 'bed');
+  const reserved = [
+    ...beds,
+    ...ownFacilities.filter((f) => f.kind !== 'bed' && beds.some((bed) => near(f, bed))),
+  ];
+  const listedFacilities = ctx.tier === 'deliberate'
+    ? [...reserved, ...ownFacilities.filter((f) => !reserved.includes(f))].slice(0, 8).sort((a, b) => a.dist - b.dist)
     : [];
+  const facilities = listedFacilities.map((f) => `${f.text}（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`);
   const nearbyFacilities = ctx.tier === 'glance'
-    ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}）`)
+    ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`)
     : [];
   const danger = m.hazards(p.self.dim).map((h) => ({ h, d: Math.round(Math.hypot(h.pos.x - here.x, h.pos.z - here.z)) })).filter((e) => e.d < 96).slice(0, 4)
     .map(({ h, d }) => `${h.kind} @(${h.pos.x},${h.pos.y},${h.pos.z}) ${d}格，出过 ${h.count} 次事`);
@@ -908,7 +924,6 @@ function worldKnowledge(ctx: MindContext) {
     const ago = death.seconds_ago < 90 ? `${death.seconds_ago} 秒前` : death.seconds_ago < 3600 ? `${Math.round(death.seconds_ago / 60)} 分钟前` : `${Math.round(death.seconds_ago / 3600)} 小时前`;
     return `${death.dim} (${death.pos[0]},${death.pos[1]},${death.pos[2]})，${death.cause}，${ago}`;
   });
-  const bed = myBed(m, { dim: p.self.dim, worldId: s.worldId, pos: here }, ctx.blockAt);
   const portalSnapshot = travelStore(m).snapshot(s.worldId);
   const endpointById = new Map(portalSnapshot.endpoints.map((e) => [e.id, e]));
   // 只列当前维度、离自己最近的几处门：别的维度的门走不过去，只在 leads_to 里说明落点；
@@ -974,7 +989,7 @@ function worldKnowledge(ctx: MindContext) {
   const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
   return {
     home: `${home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家'}${baseAlias}`,
-    ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格（sleep）；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
+    ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格（sleep${facilityAge(bed.observedAt)}）；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
     ...(builds.length ? { my_builds: builds.map(describeBuild) } : {}),
     // 建筑师画好、还没盖的图纸：一直惦记着
     ...(drafts.length ? { my_drafts: drafts.map((d) => `${d.id}「${d.name}」${d.size.width}×${d.size.depth}，用料 ${Object.entries(d.materials).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => `${n}×${c}`).join('、')}`) } : {}),
@@ -987,7 +1002,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床见 my_bed；门/工作站用 use_gui/interact_block' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),

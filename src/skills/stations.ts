@@ -51,13 +51,13 @@ export function forgetStationAt(memory: StationMemory, dim: string, cells: Vec3L
 
 /** 自己放过/睡过的床（当前世界、当前维度里最近的一张）：放下后床就不在背包里了，但它还在那儿；给了 blockAt 就顺便核对它还在不在 */
 export function myBed(memory: StationMemory,
-  state: { dim: string; worldId: string; pos: Vec3Like }, blockAt?: (p: Vec3Like) => string | null): { pos: Vec3Like; dist: number } | null {
-  let best: { pos: Vec3Like; dist: number } | null = null;
+  state: { dim: string; worldId: string; pos: Vec3Like }, blockAt?: (p: Vec3Like) => string | null): { pos: Vec3Like; dist: number; observedAt?: number } | null {
+  let best: { pos: Vec3Like; dist: number; observedAt?: number } | null = null;
   for (const l of memory.landmarks()) {
     if (l.label !== '我的床' || l.dim !== state.dim || (l.worldId && l.worldId !== state.worldId)) continue;
     if (!stillThere(memory, l, state.pos, blockAt, (n) => n.endsWith('_bed'))) continue;
     const d = Math.round(dist3(state.pos, l.pos));
-    if (!best || d < best.dist) best = { pos: { ...l.pos }, dist: d };
+    if (!best || d < best.dist) best = { pos: { ...l.pos }, dist: d, ...(l.ts !== undefined ? { observedAt: l.ts } : {}) };
   }
   return best;
 }

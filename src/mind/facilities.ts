@@ -56,7 +56,8 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     if (isContainerLandmark(l.label)) continue;
     const kind: FacilityKind = l.label === '我的床' ? 'bed' : 'station';
     if (!want(kind)) continue;
-    out.push({ kind, label: l.label, pos: l.pos, dist: flat(l.pos, s.pos), text: `${l.label.replace(/^我的/, '')} ${at(l.pos)} ${flat(l.pos, s.pos)}格` });
+    out.push({ kind, label: l.label, pos: l.pos, dist: flat(l.pos, s.pos), observedAt: l.ts,
+      text: `${l.label.replace(/^我的/, '')} ${at(l.pos)} ${flat(l.pos, s.pos)}格` });
   }
   return out.sort((a, b) => a.dist - b.dist);
 }
