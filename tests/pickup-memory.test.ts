@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { MoveTarget, Vec3Like } from '../src/adapter/types.ts';
+import type { EntityInfo, MoveTarget, Vec3Like } from '../src/adapter/types.ts';
 import { pickupItems } from '../src/skills/survival.ts';
 import { throwIfAborted } from '../src/util.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
@@ -109,4 +109,33 @@ test('remembered pickup also stays within the original radius after a visible pi
   assert.equal(world.inv.get('cobblestone'), 1);
   assert.equal(world.pos.x, 5);
   assert.equal(result.data?.visits, 1);
+});
+
+test('pickup_items 失败时报告仍记得的掉落坐标、高度差和见过时间', async (t) => {
+  const world = new TestWorld();
+  world.moveTo = async (goal, opts) => { throwIfAborted(opts.signal); throw new Error('PATH_NOT_FOUND 走不到坑底'); };
+  let asked = 0;
+  const ctx = makeCtx(world, { senses: {
+    recentDrops: (maxAgeMs = 0) => { asked = maxAgeMs; return [{ id: 9, name: 'raw_iron', pos: { x: 3, y: 58, z: 0 }, ageMs: 5000 }]; },
+  } });
+  t.after(() => ctx.memory.close());
+  const result = await pickupItems.run(ctx, { radius: 12, item: 'raw_iron', remembered: true });
+  assert.equal(result.status, 'failed', result.summary);
+  assert.match(result.summary, /raw_iron \(3,58,0\)/);
+  assert.match(result.summary, /在脚下 6 格/);
+  assert.match(result.summary, /5 秒前见过/);
+  assert.equal(asked, 300_000, '拾取记忆窗口与掉落物寿命一致');
+  assert.deepEqual(result.data?.lostDrops, [{ name: 'raw_iron', pos: { x: 3, y: 58, z: 0 }, ageMs: 5000 }]);
+});
+
+test('pickup_items 报告视野内但在拾取半径外的目标掉落坐标', async (t) => {
+  const world = new TestWorld();
+  const ctx = makeCtx(world, { senses: {
+    perceivedEntities: (): EntityInfo[] => [{ id: 11, name: 'item:raw_iron', kind: 'item', pos: { x: 20, y: 64, z: 0 }, dist: 20 }],
+  } });
+  t.after(() => ctx.memory.close());
+  const result = await pickupItems.run(ctx, { radius: 4, item: 'raw_iron' });
+  assert.equal(result.status, 'failed', result.summary);
+  assert.match(result.summary, /raw_iron \(20,64,0\)/);
+  assert.deepEqual(result.data?.lostDrops, [{ name: 'raw_iron', pos: { x: 20, y: 64, z: 0 } }]);
 });

@@ -242,3 +242,46 @@ test('for 配方模式：目标物按配方缺的原材料记，回执给出实�
     assert.match(result.summary, /iron_pickaxe/);
   } finally { ctx.memory.close(); }
 });
+
+test('挖到矿但掉落没进包时，回执带上仍记得的掉落坐标和脚下高差', async () => {
+  const w = new DropWorld();
+  w.dropsFor = () => [];
+  placeOre(w, 1, 2, 3);
+  let asked = 0;
+  const ctx = makeCtx(w, { senses: {
+    recentDrops: (maxAgeMs = 0) => { asked = maxAgeMs; return [{ id: 7, name: 'raw_iron', pos: { x: w.digs.length, y: 58, z: 0 }, ageMs: 5000 }]; },
+  } });
+  try {
+    const result = await gather.run(ctx, { block: 'iron_ore', count: 3 });
+    assert.equal(result.status, 'failed', result.summary);
+    assert.equal(asked, 300_000, '采集回执也看五分钟内的掉落记录');
+    assert.match(result.summary, /raw_iron \(1,58,0\)/);
+    assert.match(result.summary, /在脚下 6 格/);
+    const collection = result.data?.collection as Record<string, unknown>;
+    assert.deepEqual(collection.lostDrops, [
+      { name: 'raw_iron', pos: { x: 1, y: 58, z: 0 }, ageMs: 5000 },
+      { name: 'raw_iron', pos: { x: 2, y: 58, z: 0 }, ageMs: 5000 },
+      { name: 'raw_iron', pos: { x: 3, y: 58, z: 0 }, ageMs: 5000 },
+    ], '三次丢失的坐标累积，不只保留最后一次');
+  } finally { ctx.memory.close(); }
+});
+
+test('后续成功只捡到新挖方块自己的掉落时，不会把仍丢失的旧掉落误报成已找回', async () => {
+  const w = new DropWorld();
+  w.dropsFor = () => w.digs.length >= 3 ? ['raw_iron'] : [];
+  placeOre(w, 1, 2, 3);
+  const ctx = makeCtx(w, { senses: {
+    recentDrops: () => [
+      { id: 1, name: 'raw_iron', pos: { x: 1, y: 58, z: 0 }, ageMs: 5000 },
+      { id: 2, name: 'raw_iron', pos: { x: 2, y: 58, z: 0 }, ageMs: 5000 },
+    ],
+  } });
+  try {
+    const result = await gather.run(ctx, { block: 'iron_ore', count: 3 });
+    assert.equal(result.status, 'succeeded', result.summary);
+    const collection = result.data?.collection as Record<string, unknown>;
+    assert.equal(collection.lost, 2);
+    assert.equal((collection.lostDrops as unknown[]).length, 2);
+    assert.match(result.summary, /raw_iron \(1,58,0\)/);
+  } finally { ctx.memory.close(); }
+});

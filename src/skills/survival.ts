@@ -5,6 +5,7 @@ import { sleepSkill } from './build.ts';
 import { findStation } from './stations.ts';
 import { canSleepAt } from '../perception/perception.ts';
 import { creatureSpotsNear } from '../memory/creature-spots.ts';
+import { DROP_MEMORY_MS, dropName, describeDrops, type KnownDrop } from './drop-facts.ts';
 
 /**
  * item:"any" 与程序自动挑选垫脚/封顶方块时允许用的方块：常见的土石类填充方块（不含会下落的沙子沙砾），
@@ -369,7 +370,7 @@ export const hunt: Skill<{ animal?: string; count: number }> = {
 // ------------------------------------------------------------------ pickup_items
 export const pickupItems: Skill<{ radius: number; item?: string; remembered?: boolean }> = {
   name: 'pickup_items',
-  description: '捡起调用起点 radius 范围内看得见的掉落物（可指定 item）；remembered:true 还会走回两分钟内见过的掉落位置查找，范围不变。报告实际进了背包的东西',
+  description: '捡起调用起点 radius 范围内看得见的掉落物（可指定 item）；remembered:true 还会走回最近五分钟内见过的掉落位置查找，范围不变。报告实际进了背包的东西',
   argsDoc: '{"radius"?: 4-24, "item"?: "<物品名>", "remembered"?: boolean（默认 false）}',
   timeoutMs: 60000,
   movement: true,
@@ -414,7 +415,7 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
       // 显式允许追查记忆时，才走回最近亲眼见过的位置；仍限于调用起点的半径。
       if (!item && args.remembered && senses.recentDrops) {
         const here = adapter.state().pos;
-        const mem = senses.recentDrops(120_000)
+        const mem = senses.recentDrops(DROP_MEMORY_MS)
           .filter((d) => wanted(d.name, d.pos) && (chased.get(d.id) ?? 0) < 2)
           .sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z))[0];
         if (mem) {
@@ -458,8 +459,18 @@ export const pickupItems: Skill<{ radius: number; item?: string; remembered?: bo
     const collected = increases.filter(({ name }) => wanted(name)).reduce((sum, item) => sum + item.count, 0);
     if (args.item && collected === 0) {
       const block = senses.knownBlocks([args.item], args.radius)[0];
-      return fail('NOT_FOUND', `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}${args.remembered ? '' : '；如果它刚掉在视野外，可加 remembered:true 走回两分钟内见过的掉落点'}`,
-        { gained, collected, visits, ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
+      // 感知提示可能说“地上有 raw_iron”，但拾取动作找不到可走的实体；把仍记得的坐标和高度差一起报出来。
+      const known: KnownDrop[] = [...new Map([
+        // 报告范围比拾取半径大：即使掉落物在半径外，也要说明“看见在哪里”，不要退化成“附近没有”。
+        ...senses.perceivedEntities(Math.max(args.radius, 24)).filter((e) => e.kind === 'item' && dropName(e.name) === args.item)
+          .map((e) => ({ id: e.id, name: dropName(e.name), pos: e.pos })),
+        ...(args.remembered ? (senses.recentDrops?.(DROP_MEMORY_MS) ?? []).filter((d) => wanted(d.name, d.pos))
+          .map((d) => ({ id: d.id, name: dropName(d.name), pos: d.pos, ageMs: d.ageMs })) : []),
+      ].map((d) => [d.id, d])).values()].slice(0, 3); // 回执最多列三处，避免同类掉落刷屏
+      const dropped = known.length ? `；记得/看见 ${describeDrops(known, adapter.state().pos)}，但没有走到或没捡起来` : '';
+      const prefix = known.length ? `没能捡到 ${args.item} 掉落物` : `${visits ? `走过去了 ${visits} 处掉落物，但没有捡到` : '附近没有看得见的'} ${args.item} 掉落物`;
+      return fail('NOT_FOUND', `${prefix}${dropped}${block ? `；已知放置方块在 (${block.pos.x},${block.pos.y},${block.pos.z})，搬走要先精确挖下该方块，再捡掉落物` : '；不能把已放置的方块当成掉落物，也不要假设已经拿到'}${args.remembered ? '' : '；如果它刚掉在视野外，可加 remembered:true 走回最近五分钟见过的掉落点'}`,
+        { gained, collected, visits, ...(known.length ? { lostDrops: known.map(({ name, pos, ageMs }) => ({ name, pos, ...(ageMs !== undefined ? { ageMs } : {}) })) } : {}), ...(block ? { blockTarget: { name: block.name, pos: block.pos } } : {}) });
     }
     if (gained.length) return ok(`捡到了 ${gained.join('、')}`, { gained, collected, visits });
     return visits ? ok(`走过去了 ${visits} 处掉落物，但背包没有变化（可能被捡走了或够不着）`, { gained, collected, visits }) : ok('附近没有看得见的掉落物', { gained, collected, visits });

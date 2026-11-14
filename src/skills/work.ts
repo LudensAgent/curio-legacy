@@ -11,6 +11,7 @@ import { config } from '../config.ts';
 import { FOOD_VALUE, foodNote } from './food.ts';
 import { ITEM_ZH } from '../observer/item-zh.ts';
 import type { InvItem } from '../adapter/types.ts';
+import { DROP_MEMORY_MS, dropName, describeDrops, type KnownDrop } from './drop-facts.ts';
 
 const key = (p: { x: number; y: number; z: number }) => `${p.x},${p.y},${p.z}`;
 
@@ -179,11 +180,22 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
     let targetItems = [...drops];
     let target = args.count;
     let initial = 0;
+    const lostDrops = new Map<string, KnownDrop>();
+    let lastLostDrops: KnownDrop[] = [];
     const held = () => adapter.state().inventory.filter((i) => targetItems.includes(i.name)).reduce((a, i) => a + i.count, 0);
+    // 掉落物没进包时，把看得见和最近见过的目标掉落坐标留下；只读报告，不走去，也不替 Agent 决定怎么过去。
+    const missingDrops = () => {
+      const seen = senses.perceivedEntities(16).filter((e) => e.kind === 'item' && targetItems.includes(dropName(e.name)))
+        .map((e) => ({ id: e.id, name: dropName(e.name), pos: e.pos }));
+      const remembered = (senses.recentDrops?.(DROP_MEMORY_MS) ?? []).filter((d) => targetItems.includes(dropName(d.name)))
+        .map((d) => ({ id: d.id, name: dropName(d.name), pos: d.pos, ageMs: d.ageMs }));
+      return [...new Map([...seen, ...remembered].map((d) => [d.id, d])).values()].slice(0, 3); // 回执最多列三处
+    };
+    const dropText = (drops: KnownDrop[]) => drops.length ? `；记得掉落物：${describeDrops(drops, adapter.state().pos)}` : '';
     const receipt = (dug: number, lost = 0) => {
       const final = held();
       return { block: args.block, items: targetItems, initial, target, final, gained: final - initial, dug, targetMet: final >= target,
-        ...(lost ? { lost } : {}) };
+        ...(lost ? { lost } : {}), ...(lastLostDrops.length ? { lostDrops: lastLostDrops.map((d) => ({ name: d.name, pos: d.pos, ...(d.ageMs !== undefined ? { ageMs: d.ageMs } : {}) })) } : {}) };
     };
     const itemsLabel = (items: string[]) => items.length <= 3 ? items.join('/') : `${items.slice(0, 3).join('/')} 等 ${items.length} 种`;
     const briefly = (r: ReturnType<typeof receipt>) =>
@@ -255,7 +267,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       if (!s.connected) return fail('NOT_CONNECTED', `连接断开；${briefly(receipt(dug, lost))}`, { collection: receipt(dug, lost) });
       if (![...drops].some((item) => canAcceptItem(s.inventory, s.emptySlots, item))) {
         const r = receipt(dug, lost);
-        return held() > initial ? ok(`背包已满，${briefly(r)}`, { dug: dug - lost, collection: r }) : fail('INVENTORY_FULL', `背包已满；${briefly(r)}`, { collection: r });
+        return held() > initial ? ok(`背包已满，${briefly(r)}${lost ? dropText(lastLostDrops) : ''}`, { dug: dug - lost, collection: r }) : fail('INVENTORY_FULL', `背包已满；${briefly(r)}`, { collection: r });
       }
       senses.refresh();
       const feetY = Math.floor(s.pos.y);
@@ -298,7 +310,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         if (skippedUnreachable.size && !candidates.length) {
           const r = receipt(dug, lost);
           return held() > initial
-            ? ok(`${briefly(r)}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug: dug - lost, skippedUnreachable: skippedUnreachable.size, collection: r })
+            ? ok(`${briefly(r)}${lost ? dropText(lastLostDrops) : ''}；其余 ${skippedUnreachable.size} 处刚确认无法到达或够不着，先换个站位再采`, { dug: dug - lost, skippedUnreachable: skippedUnreachable.size, collection: r })
             : fail('PATH_NOT_FOUND', `${briefly(r)}；${skippedUnreachable.size} 处 ${args.block} 刚确认无法到达或够不着，同一站位暂不重复尝试；先换个方向走至少 3 格，或稍后再试`, { skippedUnreachable: skippedUnreachable.size, collection: r });
         }
         // 看不见目标：不替它决定往下挖（直上直下挖是最危险的挖法），只说脚下踩着的是什么，挖不挖、往哪挖由它定
@@ -336,7 +348,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
             : '';
         const r = receipt(dug, lost);
         return held() > initial
-          ? ok(`看不到更多 ${args.block}${looked}，${briefly(r)}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, dug: dug - lost, ...(skipped ? { skippedUnsafe: { ...risky } } : {}), collection: r }, manMadeCaveat)
+          ? ok(`看不到更多 ${args.block}${looked}，${briefly(r)}${lost ? dropText(lastLostDrops) : ''}${ownNote}${manMadeNote}${staleNote}${riskNote()}${remembered}${underNote}`, { searched, dug: dug - lost, ...(skipped ? { skippedUnsafe: { ...risky } } : {}), collection: r }, manMadeCaveat)
           : fail('NOT_FOUND', `未达成：${briefly(r)}；${skipped
             ? `能看见的 ${args.block} 都不安全，没有去挖${riskNote()}${looked}${staleNote}`
             : ownSkipped.size ? `附近能看到的 ${args.block} 都是自己房子上的（${ownSkipped.size} 块），拆了还得补，没去挖；要去别处找${staleNote}`
@@ -388,7 +400,7 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
         if (++failsInRow >= 4) {
           const r = receipt(dug, lost);
           return held() > initial
-            ? ok(`多次失败后停止，${briefly(r)}`, { dug: dug - lost, collection: r })
+            ? ok(`多次失败后停止，${briefly(r)}${lost ? dropText(lastLostDrops) : ''}`, { dug: dug - lost, collection: r })
             : fail(codeFromError(e) === 'ERROR' ? 'PATH_NOT_FOUND' : codeFromError(e), `无法到达或挖掘 ${args.block}：${(e as Error).message}${args.dig ? '' : '；路上是土石坡坎挡着就加 "dig":true（挖穿、垫方块过去）'}；${briefly(r)}`, { collection: r });
         }
         continue;
@@ -408,19 +420,32 @@ async function gatherRun(ctx: SkillCtx, args: { block: string; count: number; fo
       }
       if (held() <= before) {
         lost++;
+        for (const drop of missingDrops()) lostDrops.set(`${drop.name}@${Math.round(drop.pos.x)},${Math.round(drop.pos.y)},${Math.round(drop.pos.z)}`, drop);
+        lastLostDrops = [...lostDrops.values()].slice(0, 3);
         progressNow(`${args.block} 的目标掉落物没捡到`);
         if (lost >= 3) {
           const r = receipt(dug, lost);
           return held() > initial
-            ? ok(`${briefly(r)}；另有 ${lost} 块挖掉后目标物品没进背包（可能掉进水里或够不着）`, { dug: dug - lost, lost, collection: r })
-            : fail('ERROR', `挖掉了 ${lost} 块 ${args.block} 但目标物品都没进背包（可能掉进水里或够不着），换个干燥、好走的地方再挖；${briefly(r)}`, { dug: dug - lost, lost, collection: r });
+            ? ok(`${briefly(r)}；另有 ${lost} 块挖掉后目标物品没进背包${dropText(lastLostDrops)}`, { dug: dug - lost, lost, collection: r })
+            : fail('ERROR', `挖掉了 ${lost} 块 ${args.block} 但目标物品都没进背包${dropText(lastLostDrops)}；${briefly(r)}`, { dug: dug - lost, lost, collection: r });
         }
         continue;
       }
+      // 这次捡到了目标掉落：扣掉这块方块自己应掉的 1 个目标物，剩下的才算把旧掉落捡回来了。
+      const ownDrop = targetItems.some((item) => dropItemsOf(pick.name).includes(item)) ? 1 : 0;
+      const recovered = Math.min(lost, Math.max(0, held() - before - ownDrop));
+      lost -= recovered;
+      const here = adapter.state().pos;
+      const nearby = [...lostDrops.entries()]
+        .filter(([, drop]) => dist3(drop.pos, here) <= 8.5)
+        .sort((a, b) => dist3(a[1].pos, here) - dist3(b[1].pos, here));
+      for (const [dropKey] of nearby.slice(0, recovered)) lostDrops.delete(dropKey);
+      if (!lost) lostDrops.clear();
+      lastLostDrops = [...lostDrops.values()].slice(0, 3);
     }
     const after = args.for ? materialPlan(args.for.item, args.for.count, adapter.state().inventory) : null;
     const r = receipt(dug, lost);
-    return ok(`${briefly(r)}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug: dug - lost, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}), collection: r });
+    return ok(`${briefly(r)}${lost ? dropText(lastLostDrops) : ''}${after ? `；${describePlan(after)}` : ''}${riskNote()}`, { dug: dug - lost, ...(lost ? { lost } : {}), ...(after ? { plan: after } : {}), collection: r });
   }
 }
 
