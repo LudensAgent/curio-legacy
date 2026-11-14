@@ -2036,20 +2036,46 @@ export class Mind {
       && c.worldId === state.worldId && c.sessionId === state.sessionId && c.dim === state.dim
       && Math.hypot(c.pos.x - state.pos.x, c.pos.y - state.pos.y, c.pos.z - state.pos.z) <= 8).slice(-6);
     // 手上正在做/接着要做的那一步（activity.index 指向下一待执行步，前一步是正在跑的），以及已经想好的下一段
-    const plannedDig = [
+    const plannedSteps = [
       ...(this.activity ? this.activity.steps.slice(Math.max(0, this.activity.index - 1), this.activity.index + 1) : []),
       ...(this.queuedNext?.draft.steps ?? []),
-    ].some((st) => DIGGING_SKILLS.has(st.skill));
+    ];
+    const plannedDig = plannedSteps.some((st) => DIGGING_SKILLS.has(st.skill));
     // 寻路/自写技能也会挖：最近 5 秒真有挖掘事件时也算“在挖”，别让铁镐在无名路径上悄悄掉耐久
-    const recentDig = this.safe(() => (this.d.adapter.recentDug?.(Date.now() - 5_000)?.length ?? 0) > 0, false);
+    const recentDug = this.safe(() => this.d.adapter.recentDug?.(Date.now() - 5_000) ?? [], []);
+    // 本轮计划里的 excavate_run：给工具账附上步数、明确工具和下一格材料。
+    // 只读计划参数与当前方块；unknown 不猜成普通石料，也不替 Agent 换工具。
+    const excavation = plannedSteps.find((st) => st.skill === 'excavate_run');
+    const excavationJob = (() => {
+      if (!excavation?.args || typeof excavation.args !== 'object' || Array.isArray(excavation.args)) return undefined;
+      const args = excavation.args as Record<string, unknown>;
+      const blocks = typeof args.steps === 'number' && Number.isFinite(args.steps) ? Math.max(1, Math.round(args.steps)) : 4;
+      const delta = args.direction === 'north' ? { x: 0, z: -1 }
+        : args.direction === 'south' ? { x: 0, z: 1 }
+          : args.direction === 'east' ? { x: 1, z: 0 }
+            : args.direction === 'west' ? { x: -1, z: 0 } : undefined;
+      const yDelta = args.mode === 'stairs_up' ? 1 : args.mode === 'tunnel' ? 0 : -1;
+      const next = delta === undefined ? null : this.safe(() => this.d.adapter.blockAt({
+        x: Math.floor(state.pos.x) + delta.x,
+        y: Math.floor(state.pos.y) + yDelta,
+        z: Math.floor(state.pos.z) + delta.z,
+      }), null);
+      const recent = recentDug.at(-1)?.name;
+      const material = next !== null && !/^(air|cave_air|void_air)$/.test(next) ? next : recent ?? next ?? undefined;
+      const tool = typeof args.tool === 'string' ? args.tool : state.held?.endsWith('_pickaxe') ? state.held : undefined;
+      return { blocks, ...(tool === undefined ? {} : { tool }), ...(material === undefined ? {} : { material }) };
+    })();
     const tierFact = this.safe(() => toolTierFact({
-      inventory: state.inventory, stock: percept.storage?.stock, held: state.held, digging: plannedDig || recentDig,
+      inventory: state.inventory, stock: percept.storage?.stock, held: state.held,
+      digging: plannedDig || recentDug.length > 0, ...(excavationJob === undefined ? {} : { job: excavationJob }),
     }), null);
     // 同一状态签名不每念重复；状态变了、换了世界/会话/维度，或过了 10 分钟才再说；两次投放至少隔 30 秒
     const factNow = Date.now();
     const scoped = tierFact ? `${state.worldId}:${state.sessionId}:${state.dim}:${tierFact.key}` : null;
     const changed = scoped !== this.toolFactKey || factNow - this.toolFactAt > Mind.TOOL_FACT_REPEAT_MS;
-    const toolFact = scoped && changed && factNow - this.toolFactAt >= Mind.TOOL_FACT_MIN_GAP_MS ? tierFact : null;
+    // 新开挖计划的本轮预算不该被 30 秒节流吞掉；同一计划仍按 key 去重。
+    const planChanged = excavationJob !== undefined && scoped !== this.toolFactKey;
+    const toolFact = scoped && changed && (planChanged || factNow - this.toolFactAt >= Mind.TOOL_FACT_MIN_GAP_MS) ? tierFact : null;
     if (toolFact) {
       this.toolFactKey = scoped; this.toolFactAt = factNow;
       // 只在真正投放时打一次点；buildMindMessages 可能因升层/重试被调用多次，不能放在提示词构建里重复发

@@ -309,6 +309,32 @@ test('mind：同一 key 的工具事实不每念重复，key 变化后再说', (
   memory.close();
 });
 
+test('mind：excavate_run 的计划步数进入本轮工具预算', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  adapter.blocks.push({ name: 'stone', pos: { x: 1, y: 63, z: 0 } });
+  adapter.inv.set('iron_pickaxe', 1);
+  adapter.inv.set('stone_pickaxe', 4);
+  adapter.inv.set('iron_ingot', 1);
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const captured: MindContext[] = [];
+  const thinker = { think(ctx: MindContext) { captured.push(ctx); return new Promise(() => {}); } };
+  const arbiter = { info: () => null, start: () => ({ id: 'noop' }) };
+  const mind = new Mind({ adapter, arbiter: arbiter as unknown as Arbiter, perception, memory, bus,
+    self: new SelfModel(null), persona: 'P', thinker: thinker as unknown as Thinker });
+  const activity = createActivity({
+    what: '朝东开 16 格下行台阶', why: '测试', kind: 'gather', repeat: 1,
+    steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 16, tool: 'iron_pickaxe' } }],
+  }, '', 'llm', adapter.state());
+  (mind as any).activity = activity;
+  (mind as any).think('测试', 'glance');
+  const fact = captured[0]?.toolFact ?? '';
+  assert.match(fact, /本次约 16 格：铁镐预计耗 16 耐久/);
+  assert.match(fact, /改用石镐预计耗 16/);
+  assert.match(fact, /这次计划用铁镐挖普通石材（stone）/);
+  memory.close();
+});
+
 test('提示词不再宣传旧 passage/附近路径', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));

@@ -284,10 +284,21 @@ type PickTier = typeof PICK_TIERS[number];
 /** 原版镐的挖掘速度系数（对应材质的方块，无附魔）。 */
 const PICK_SPEED: Record<PickTier, number> = { wooden: 2, stone: 4, iron: 6, diamond: 8 };
 const PICK_ZH: Record<PickTier, string> = { wooden: '木镐', stone: '石镐', iron: '铁镐', diamond: '钻石镐' };
+/** 便宜镐够用的普通石料；矿石不在这里，不能用便宜镐替代。 */
+const ORDINARY_STONE = /^(stone|granite|diorite|andesite|deepslate|cobblestone|cobbled_deepslate|tuff|calcite|dripstone_block|netherrack|basalt|blackstone|smooth_basalt|end_stone|sandstone|red_sandstone|terracotta|mossy_cobblestone)$/;
+
+/** 当前已写进计划的一次开挖；只用来把本轮消耗量说清，不替 Agent 选工具。 */
+export type ToolJob = {
+  blocks: number;
+  tool?: string;
+  /** 下一格方块名；未知时省略，不猜“普通石料”。 */
+  material?: string;
+};
 
 /**
  * 工具分级事实：最高档是铁/钻石镐、对应材料稀缺（≤6）时，把「高阶镐还剩多少、
  * 便宜镐有没有/还能不能做/还能挖多少、哪些方块其实不用高阶镐」摆成事实。
+ * 有本轮开挖计划时，再给出预计消耗、剩余耐久和换便宜镐的时间代价。
  * 换不换、做不做由 Agent 定；只在挖掘时投放。key 供上层状态签名去重。
  */
 export function toolTierFact(input: {
@@ -295,6 +306,7 @@ export function toolTierFact(input: {
   stock?: readonly StockRow[];
   held?: string | null;
   digging: boolean;
+  job?: ToolJob;
 }): { text: string; key: string } | null {
   if (!input.digging) return null;
   const { inventory: inv, stock, held } = input;
@@ -377,6 +389,26 @@ export function toolTierFact(input: {
   // 速度是换高阶镐唯一的好处，把它也量化摆出来（原版 1.20.1：石头硬度 1.5，镐速 木2/石4/铁6/钻8，无附魔、站在地上）
   const stoneSecs = (tier: PickTier) => Math.round(1.5 * 1.5 / PICK_SPEED[tier] * 20) / 20;
   parts.push(`挖普通石头每格约：${cheapZh} ${stoneSecs(choice.tier)} 秒、${highZh} ${stoneSecs(high)} 秒（无附魔；深板岩约翻倍）`);
+  // 本轮计划的工具预算：只在计划确实用高阶镐挖普通石料、且有更便宜的镐可用时出现。
+  // 这是按计划步数估算的“至少消耗”，不把未知的拐角/补支撑格算进去，也不替 Agent 换工具。
+  const job = input.job;
+  const jobTier = job?.tool?.match(/^(wooden|stone|iron|diamond)_pickaxe$/)?.[1] as PickTier | undefined;
+  const jobLevels = job?.tool === undefined ? [] : inv.filter((i) => i.name === job.tool).flatMap(levelsOf);
+  const jobBest = jobLevels.length ? Math.max(...jobLevels) : null;
+  const jobMaterial = job?.material?.replace(/^minecraft:/, '');
+  const jobIsHigh = jobTier !== undefined && jobTier === high;
+  const jobCanUseCheaper = jobTier !== undefined && PICK_TIERS.indexOf(choice.tier) < PICK_TIERS.indexOf(jobTier);
+  if (job !== undefined && jobTier !== undefined && jobIsHigh && jobCanUseCheaper
+    && jobMaterial !== undefined && ORDINARY_STONE.test(jobMaterial)) {
+    const blocks = Math.max(1, Math.round(job.blocks));
+    const after = jobBest === null ? null : Math.max(0, jobBest - blocks);
+    const slow = Math.round((stoneSecs(choice.tier) - stoneSecs(jobTier)) * blocks * 10) / 10;
+    const hand = job.tool === held ? `当前主手是${PICK_ZH[jobTier]}` : `这次计划用${PICK_ZH[jobTier]}`;
+    parts.unshift(
+      `${hand}挖普通石材（${jobMaterial}）：这次会继续消耗${scarce < 3 ? '不可补的' : ''}${PICK_ZH[jobTier]}`,
+      `本次约 ${blocks} 格：${PICK_ZH[jobTier]}预计耗 ${blocks} 耐久${jobBest === null ? '' : `，当前最好剩 ${jobBest}${after === null ? '' : `，之后约剩 ${after}`}`}；改用${cheapZh}预计耗 ${blocks}${slow > 0 ? `，慢约 ${slow} 秒（按普通石头估算）` : ''}；${matZh} ${scarce}，${scarce < 3 ? `${PICK_ZH[jobTier]}坏了补不了` : `坏了还能补 ${Math.floor(scarce / 3)} 把`}`,
+    );
+  }
   // 便宜镐能不能补、补一把要什么，是和高阶镐“坏了没得补”对照的关键事实；即使现有便宜镐还可用也报，
   // 否则很容易被理解成“石镐是稀缺备份，留着别用”。
   // 背包和箱子分开算：箱子里有材料不等于现在能做；否则会提示“材料已经够了”，
@@ -407,6 +439,8 @@ export function toolTierFact(input: {
     `high:${highItem.count}:${bucket(highItem)}`,
     `mat:${scarce}`,
     `craft:${gap}`,
+    // 新计划/新步数/新材料要重新算本轮预算；同一计划不每念重复。
+    `job:${job?.tool ?? 'auto'}:${job?.blocks ?? 0}:${jobMaterial ?? 'unknown'}`,
   ].join('|');
   return { text: parts.join('；'), key };
 }

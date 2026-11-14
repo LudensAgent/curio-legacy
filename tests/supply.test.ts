@@ -158,6 +158,40 @@ test('toolTierFact：铁镐 + 有可用石镐也要报事实（不再因为它�
   );
 });
 
+test('toolTierFact：计划开挖普通石料时给出本轮耐久预算和换镐时间差', () => {
+  const inv = [
+    item('iron_pickaxe', 1, { durability: { left: 250, max: 250 } }),
+    item('stone_pickaxe', 1, { durability: { left: 100, max: 131 } }),
+    item('iron_ingot', 1),
+  ];
+  const f = toolTierFact({
+    inventory: inv, held: 'iron_pickaxe', digging: true,
+    job: { blocks: 16, tool: 'iron_pickaxe', material: 'granite' },
+  })!;
+  assert.ok(f);
+  assert.match(f.text, /本次约 16 格：铁镐预计耗 16 耐久，当前最好剩 250，之后约剩 234/);
+  assert.match(f.text, /改用石镐预计耗 16，慢约 2\.4 秒/);
+  assert.match(f.text, /铁锭 1，铁镐坏了补不了/);
+  assert.match(f.text, /当前主手是铁镐挖普通石材（granite）：这次会继续消耗不可补的铁镐/);
+  assert.match(f.key, /job:iron_pickaxe:16:granite/);
+
+  // 同一计划改变步数会重新给出预算，不会被旧签名吞掉
+  const shorter = toolTierFact({
+    inventory: inv, held: 'iron_pickaxe', digging: true,
+    job: { blocks: 8, tool: 'iron_pickaxe', material: 'granite' },
+  })!;
+  assert.notEqual(shorter.key, f.key);
+  assert.match(shorter.text, /本次约 8 格/);
+
+  // 矿石不能拿石镐替代，不把“换便宜镐”的预算按普通石料给出来
+  const ore = toolTierFact({
+    inventory: inv, held: 'iron_pickaxe', digging: true,
+    job: { blocks: 16, tool: 'iron_pickaxe', material: 'diamond_ore' },
+  })!;
+  assert.equal(ore.text.includes('普通石材'), false);
+  assert.equal(ore.text.includes('本次约 16 格'), false);
+});
+
 test('toolTierFact：便宜镐快坏了，报做一把的真实缺口（木棍/原木这类嵌套也报）', () => {
   const inventory = [
     item('iron_pickaxe', 1),
