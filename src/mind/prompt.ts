@@ -1,6 +1,6 @@
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
-import { budgetFacts, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
+import { budgetFacts, consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
@@ -430,11 +430,14 @@ function intentText(ctx: MindContext): string {
 }
 
 /**
- * 不占 5 条提醒配额的决策事实：下矿的账、木料/矿石的账、顺手采集。
+ * 不占 5 条提醒配额的决策事实：下矿的账、木料/矿石的账、出门的账、掉落物找回、顺手采集。
  * 地下挖掘时静态说明常已占满 situationalReminders 的 5 个位置，这些事实按 push 顺序排在后面会被 slice 截掉
  * （2026-11-06 线上：388 个地下 prompt 里“下矿的账/顺手采集”0 次送达，ore_opportunity 却打了 231 次日志）。
  * 这里只把已有事实换个送达位置；采不采、收不收工、备多少仍由 Agent 决定。
  */
+const TRIP_ACCOUNT_MIN_MS = 3 * 60_000;
+const HOME_FAR_BLOCKS = 24;
+
 export function decisionReminders(ctx: MindContext): string[] {
   const out: string[] = [];
   const p = ctx.percept, s = ctx.state;
@@ -494,6 +497,25 @@ export function decisionReminders(ctx: MindContext): string[] {
     out.push(`上一段采集有 ${lost.lost} 块 ${lost.items.join('/')} 掉落物没进背包（目标 ${lost.target}，现有 ${lost.final}${lost.targetMet ? '，已达成' : '，未达成'}）；如果还要，用 pickup_items {"radius":8,"item":"${item}","remembered":true} 走回最近见过的掉落点；找不到就换地方或继续，别把挖掉当成拿到`);
   } else if (/掉落物没捡到|掉落物没进背包/.test(ctx.lastRecord?.summary ?? '')) {
     out.push('上一段回执提到掉落物没捡到；如果还要，用 pickup_items {"radius":8,"remembered":true} 走回最近见过的掉落点；找不到就换地方或继续，别把挖掉当成拿到');
+  }
+  // 出门的机会成本：采集/探索时把“已经付过的寻找成本、最近消耗、清单后面的需求”并排；
+  // 这次带回多少、够不够后面几步，由 Agent 定（不写“应该多采”）。
+  const pending = ctx.plan?.steps.filter((st) => !st.done).map((st) => st.text) ?? [];
+  const kind = ctx.activity?.kind;
+  if (ctx.tier === 'deliberate' && pending.length && (kind === 'gather' || kind === 'explore')) {
+    const leg = (ctx.excursions ?? []).find((l) => !l.end && l.worldId === s.worldId && l.dim === p.self.dim);
+    const home = homeOf(ctx.memory, { worldId: s.worldId, dim: p.self.dim, pos: here });
+    const away = (leg && leg.onlineMs >= TRIP_ACCOUNT_MIN_MS) || (home && home.dist > HOME_FAR_BLOCKS);
+    if (away) {
+      const consumption = consumptionSummary(ctx.self.history(20).map((r) => r.lost));
+      const tripLine = leg && leg.onlineMs >= 60_000 ? `这趟已在线 ${Math.round(leg.onlineMs / 60_000)} 分钟，离入口最远 ${leg.farthest.dist} 格` : null;
+      const seenHere = p.nearby.resources.filter((r) => r.seen === 'now').slice(0, 4).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
+      const rememberedHere = p.nearby.resources.filter((r) => r.seen === 'memory').slice(0, 3).map((r) => `${r.block}×${r.count}（最近 ${Math.round(r.nearest)} 格）`);
+      const site = seenHere.length ? `眼前看得见 ${seenHere.join('、')}` : rememberedHere.length ? `记得附近有 ${rememberedHere.join('、')}` : null;
+      const line = `这次出门的账：寻找这块地方的成本已经付过；${tripLine ? `${tripLine}；` : ''}${home ? `家「${home.label}」在${home.dir}边 ${home.dist} 格；` : ''}背包空 ${p.emptySlots} 格${consumption ? `；${consumption}` : ''}${site ? `；${site}` : ''}；清单还没做的「${pending.slice(0, 3).join('」「')}」。这次准备带回多少、够不够后面几步，由你定；空槽/安全/时间由你权衡`;
+      out.push(line);
+      ctx.log?.(line, { kind: 'trip_account' });
+    }
   }
   // 站在这一趟的起点附近（通常刚到门边）时，把以前推到过的最远处贴在末尾：要不要从那里接着推由它定。
   const reach = ctx.reach;
