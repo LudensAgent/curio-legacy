@@ -3858,7 +3858,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const soil = b.blockAt(this.vec(pos));
     if (soil?.name !== 'farmland') return { ok: false, reason: 'NOT_FARMLAND' };
     const above = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
-    if (above && above.name !== 'air') return { ok: true }; // 已经种了
+    // 上方不是空气时要区分“已经种了作物”和“被火把/草/雪等占着”：后者不能算播种成功。
+    if (above && above.name !== 'air') return CROP_BLOCKS.test(above.name) ? { ok: true } : { ok: false, reason: `ABOVE_OCCUPIED:${above.name}` };
     const it = this.invItem(seed);
     if (!it) return { ok: false, reason: `NO_SEED:${seed}` };
     await this.afterAction(() => this.moveTo({ kind: 'reach_block', pos }, { signal, timeoutMs: 15000 }), check);
@@ -5707,6 +5708,8 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
 
 /** 只能种在耕地上的作物物品；对其它方块右键服务器不会生效（堆肥桶除外）。 */
 const FARM_CROPS = new Set(['wheat_seeds', 'beetroot_seeds', 'melon_seeds', 'pumpkin_seeds', 'carrot', 'potato', 'torchflower_seeds', 'pitcher_pod']);
+/** 耕地上方这些方块算“已经种了”；其它非空气方块是占用，不是播种成功。 */
+const CROP_BLOCKS = /^(wheat|carrots|potatoes|beetroots|torchflower_crop|pitcher_crop|melon_stem|pumpkin_stem|attached_melon_stem|attached_pumpkin_stem)$/;
 /** 锄头能直接变成耕地的方块（粗泥/缠根泥土只会先变成泥土）。 */
 const TILLABLE = new Set(['dirt', 'grass_block', 'dirt_path']);
 const AIR_BLOCK = /^(air|cave_air|void_air)$/;

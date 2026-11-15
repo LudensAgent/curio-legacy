@@ -448,6 +448,13 @@ export const findItem: Skill<{ item: string; count?: number }> = {
 
 // ===================================================================== 农业
 const SEEDS: Record<string, string> = { wheat: 'wheat_seeds', carrot: 'carrot', potato: 'potato', beetroot: 'beetroot_seeds' };
+const AIR_BLOCK = /^(air|cave_air|void_air)$/;
+/** 耕地湿润判定：水在耕地同层或高一层、水平切比雪夫距离 ≤4。 */
+const HYDRATION_RADIUS = 4;
+type CellFailure = { pos: Vec3Like; reason: string };
+/** 首次建田失败时也能用同一套措辞（f 还不存在前就要报缺口）。 */
+const failureText = (list: CellFailure[], label: string) => list.length
+  ? `；${label} ${list.length} 格没成：${list.slice(0, 3).map((x) => `(${x.pos.x},${x.pos.y},${x.pos.z}) ${x.reason}`).join('；')}${list.length > 3 ? ' 等' : ''}` : '';
 
 export const collectSeeds: Skill<{ count: number }> = {
   name: 'collect_seeds',
@@ -485,8 +492,8 @@ export const collectSeeds: Skill<{ count: number }> = {
 
 export const farm: Skill<{ crop: string; size: number }> = {
   name: 'farm',
-  description: '经营农田：收割成熟作物并补种；附近有自己见过、上面没有作物的耕地时优先接管（最多 size 格），否则按 crop/size 在附近开垦；消耗对应种子并使用锄头。缺锄头默认返回缺口，make:true 才允许消耗木板/圆石和木棍制作锄头',
-  argsDoc: '{"crop"?: "wheat|carrot|potato|beetroot", "size"?: 4-25}',
+  description: '经营农田：收割成熟作物并补种；没有同作物农田时，接管附近自己见过、上面没有作物的耕地；已有田不足 size 时在田边继续开垦，直到 size 或周围没有可开垦的泥土/草方块。回执给农田格数、作物/空位/成熟、湿润/干燥与 4 格内水源距离；开垦/播种/收割失败逐格给原因。缺锄头默认返回缺口，make:true 才允许消耗木板/圆石和木棍制作锄头',
+  argsDoc: '{"crop"?: "wheat|carrot|potato|beetroot", "size"?: 4-25（目标格数；已有同作物田不足会扩建）}',
   timeoutMs: 240000,
   movement: true,
   validate(raw) {
@@ -499,11 +506,32 @@ export const farm: Skill<{ crop: string; size: number }> = {
     const { adapter, memory, signal } = ctx;
     const seed = SEEDS[args.crop];
     const s = adapter.state();
-    let f = memory.farms().filter((x) => x.dim === s.dim).sort((a, b) => Math.hypot(a.cells[0].x - s.pos.x, a.cells[0].z - s.pos.z) - Math.hypot(b.cells[0].x - s.pos.x, b.cells[0].z - s.pos.z))[0];
+    let f = memory.farms().filter((x) => x.dim === s.dim && x.crop === args.crop)
+      .sort((a, b) => Math.hypot(a.cells[0].x - s.pos.x, a.cells[0].z - s.pos.z) - Math.hypot(b.cells[0].x - s.pos.x, b.cells[0].z - s.pos.z))[0];
     let harvested = 0, planted = 0, tilled = 0;
+    const wantSize = Math.min(args.size, 25);
+    const tillFailures: CellFailure[] = [];
+    const plantFailures: CellFailure[] = [];
+    const harvestFailures: CellFailure[] = [];
+    let noHoe = false;
+    let deadlineHit = false;
+    const hasSeed = () => adapter.state().inventory.some((it) => it.name === seed);
+    const tillCell = async (c: Vec3Like) => {
+      if (noHoe || Date.now() > ctx.deadline - 5000) return false;
+      try {
+        const r = await adapter.till(c, signal);
+        if (r.ok && adapter.blockAt(c) === 'farmland') { tilled++; return true; }
+        tillFailures.push({ pos: c, reason: r.reason ?? 'TILL_FAILED' });
+        if (r.reason === 'NO_HOE') noHoe = true;
+      } catch (e) {
+        if (isAbort(e)) throw e;
+        tillFailures.push({ pos: c, reason: String((e as Error).message ?? e) });
+      }
+      return false;
+    };
 
-    // 没有登记过的田时，先采用脚边已经开垦好的空耕地（手工锄的地块不在 memory.farms 里），
-    // 而不是另开一块新地。只接管上面没有作物的耕地：不把别人的作物当成自己的收成。
+    // 没有同作物的田时，先采用脚边已经开垦好的空耕地（手工锄的地块不在 memory.farms 里）。
+    // 只接管上面没有作物的耕地：不把别人的作物当成自己的收成。
     if (!f && Date.now() < ctx.deadline - 5000) {
       const base = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y), z: Math.floor(s.pos.z) };
       const offsets = Array.from({ length: 9 }, (_, i) => i - 4);
@@ -511,10 +539,10 @@ export const farm: Skill<{ crop: string; size: number }> = {
         const p = { x: base.x + dx, y: base.y + dy, z: base.z + dz };
         // 只接管亲眼见过（或刚操作过）的耕地，不靠方块读取发现墙后/地下的田。
         const seen = ctx.senses.recognizedAt?.(p) === 'farmland';
-        const empty = /^(air|cave_air|void_air)$/.test(adapter.blockAt({ ...p, y: p.y + 1 }) ?? '');
+        const empty = AIR_BLOCK.test(adapter.blockAt({ ...p, y: p.y + 1 }) ?? '');
         return seen && adapter.blockAt(p) === 'farmland' && empty ? [p] : [];
       }))).sort((a, b) => Math.hypot(a.x - base.x, a.z - base.z) - Math.hypot(b.x - base.x, b.z - base.z))
-        .slice(0, Math.min(args.size, 25));
+        .slice(0, wantSize);
       if (existing.length >= 2) {
         f = { id: shortId('farm_'), dim: s.dim, crop: args.crop, cells: existing, plantedAt: Date.now(), harvests: 0 };
         memory.addFarm(f);
@@ -529,60 +557,141 @@ export const farm: Skill<{ crop: string; size: number }> = {
         const r = await adapter.craft(hoe, 1, signal);
         if (!r.ok) return fail('MISSING_MATERIALS', `没有锄头也做不了（${hoe}：2 ${hoe === 'stone_hoe' ? '圆石' : '木板'} + 2 木棍）`);
       }
-      // 在脚边找一块 n×n 的草地/泥土（这些方块就在眼前，属于可见的地面）
+      // 在脚边找一块 n×n 的草地/泥土（这些方块就在眼前，属于可见的地面）。
+      // 已有耕地只经接管/扩建进入，不在首次开垦里混入带作物的格子。
       const n = Math.max(2, Math.round(Math.sqrt(args.size)));
       const x0 = Math.floor(s.pos.x) + 2, z0 = Math.floor(s.pos.z) - Math.floor(n / 2), y = Math.floor(s.pos.y) - 1;
       const cells: Vec3Like[] = [];
       for (let dx = 0; dx < n; dx++) for (let dz = 0; dz < n; dz++) {
         const p = { x: x0 + dx, y, z: z0 + dz };
-        if (['grass_block', 'dirt', 'farmland'].includes(adapter.blockAt(p) ?? '')) cells.push(p);
+        if (['grass_block', 'dirt'].includes(adapter.blockAt(p) ?? '')) cells.push(p);
       }
-      if (cells.length < 2) return fail('ERROR', '脚边没有适合开垦的平地（草方块/泥土）');
+      if (cells.length < 2) return fail('ERROR', `脚边没有适合开垦的平地（草方块/泥土）；请求 ${wantSize} 格，实际 0 格`);
       for (const c of cells) {
-        if (Date.now() > ctx.deadline - 5000) break;
-        try {
-          const r = await adapter.till(c, signal);
-          if (r.ok) tilled++;
-          if (r.reason === 'NO_HOE') break;
-        } catch (e) {
-          if (isAbort(e)) throw e;
-        }
+        if (noHoe) break;
+        if (Date.now() > ctx.deadline - 5000) { deadlineHit = true; break; }
+        await tillCell(c);
         ctx.progress(tilled / cells.length / 2, `开垦 ${tilled}/${cells.length}`);
       }
-      if (!tilled) return fail('ERROR', '没能锄出耕地');
-      f = { id: shortId('farm_'), dim: s.dim, crop: args.crop, cells: cells.filter((c) => adapter.blockAt(c) === 'farmland'), plantedAt: Date.now(), harvests: 0 };
+      const grown = cells.filter((c) => adapter.blockAt(c) === 'farmland');
+      if (!grown.length) {
+        return fail('ERROR', `没能锄出耕地；请求 ${wantSize} 格，实际 0 格${failureText(tillFailures, '开垦')}`);
+      }
+      f = { id: shortId('farm_'), dim: s.dim, crop: args.crop, cells: grown, plantedAt: Date.now(), harvests: 0 };
       memory.addFarm(f);
       memory.addLandmark('discovery', '我的农田', s.dim, f.cells[0], 4);
       ctx.bus.publish('farm', 'P2', `开垦了一块 ${f.cells.length} 格的农田`);
     }
 
+    // 已有田小于请求的 size 时在田边继续开垦：size 不是只在第一次开田时生效。
+    // 没有种子时扩建只会白耗锄头耐久，留给收割/补种；扩建缺口在回执里说明。
+    let expansionStop: 'no_candidate' | 'deadline' | 'no_hoe' | 'no_seed' | 'guard' | null = null;
+    if (f.cells.length < wantSize) {
+      if (!hasSeed()) expansionStop = 'no_seed';
+      const tried = new Set(f.cells.map(posKey));
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+      const tillableAbove = /^(air|cave_air|void_air|short_grass|tall_grass|grass|fern)$/;
+      let guard = 0;
+      while (!expansionStop) {
+        if (f.cells.length >= wantSize) break;
+        if (noHoe) { expansionStop = 'no_hoe'; break; }
+        if (Date.now() > ctx.deadline - 5000) { expansionStop = 'deadline'; break; }
+        if (guard++ >= wantSize * 3) { expansionStop = 'guard'; break; }
+        const next = f.cells.flatMap((base) => dirs.map(([dx, dz]) => ({ x: base.x + dx, y: base.y, z: base.z + dz })))
+          .find((p) => {
+            if (tried.has(posKey(p))) return false;
+            const name = adapter.blockAt(p), above = adapter.blockAt({ ...p, y: p.y + 1 }) ?? '';
+            // 已锄好的空耕地也吸收进来，不必重新锄；带作物的耕地不碰。
+            return name === 'farmland' ? AIR_BLOCK.test(above) : !!name && ['grass_block', 'dirt'].includes(name) && tillableAbove.test(above);
+          });
+        if (!next) { expansionStop = 'no_candidate'; break; }
+        tried.add(posKey(next));
+        if (adapter.blockAt(next) === 'farmland') f.cells.push(next);
+        else if (await tillCell(next)) f.cells.push(next);
+      }
+      memory.updateFarm(f.id, { cells: f.cells });
+    }
+
     // 收割成熟的、补种空着的
     for (const [i, c] of f.cells.entries()) {
-      if (Date.now() > ctx.deadline - 3000) break;
+      if (Date.now() > ctx.deadline - 3000) { deadlineHit = true; break; }
       const top = { x: c.x, y: c.y + 1, z: c.z };
       const age = adapter.cropAge(top);
-      try {
-        if (age && age.age >= age.max) {
+      if (age && age.age >= age.max) {
+        try {
           if (Math.hypot(top.x - adapter.state().pos.x, top.z - adapter.state().pos.z) > 4) {
             await adapter.moveTo({ kind: 'near', pos: top, range: 2 }, { signal, timeoutMs: 15000 });
           }
-          if ((await adapter.dig(top, signal)).ok) harvested++;
+          const r = await adapter.dig(top, signal);
+          if (r.ok) harvested++;
+          else harvestFailures.push({ pos: top, reason: r.reason ?? 'DIG_FAILED' });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          harvestFailures.push({ pos: top, reason: String((e as Error).message ?? e) });
         }
-        if (!adapter.cropAge(top) && adapter.state().inventory.some((it) => it.name === seed)) {
-          if ((await adapter.plant(c, seed, signal)).ok) planted++;
+      }
+      if (!adapter.cropAge(top) && hasSeed()) {
+        try {
+          const r = await adapter.plant(c, seed, signal);
+          // “ok”必须真的种出了作物；上方是火把/草等非作物时不能算播种成功。
+          if (r.ok && adapter.cropAge(top)) planted++;
+          else plantFailures.push({ pos: c, reason: r.reason ?? `NO_CROP:${adapter.blockAt(top) ?? 'unknown'}` });
+        } catch (e) {
+          if (isAbort(e)) throw e;
+          plantFailures.push({ pos: c, reason: String((e as Error).message ?? e) });
         }
-      } catch (e) {
-        if (isAbort(e)) throw e;
       }
       ctx.progress(0.5 + (i + 1) / f.cells.length / 2, `收割 ${harvested}，播种 ${planted}`);
     }
     await adapter.collectNearbyDrops(signal, 6, 3000).catch((e) => { if (isAbort(e)) throw e; return 0; });
     memory.updateFarm(f.id, { plantedAt: planted ? Date.now() : f.plantedAt, harvests: f.harvests + (harvested ? 1 : 0) });
+
+    // 回执给现场事实：规模、作物/空位/成熟、湿度与水源距离；不把“没执行任何动作”说成“还没成熟”。
+    const cells = f.cells;
+    const stats = cells.reduce((acc, c) => {
+      const top = { x: c.x, y: c.y + 1, z: c.z };
+      const above = adapter.blockAt(top) ?? 'unknown';
+      const age = adapter.cropAge(top);
+      const moisture = Number(adapter.blockStateAt?.(c)?.properties?.moisture);
+      if (AIR_BLOCK.test(above)) acc.empty++;
+      else if (age) { acc.crops++; if (age.age >= age.max) acc.mature++; }
+      else acc.other++;
+      if (!Number.isFinite(moisture)) acc.unknown++;
+      else if (moisture > 0) acc.wet++;
+      else { acc.dry++; acc.dryCells.push(c); }
+      return acc;
+    }, { crops: 0, empty: 0, other: 0, mature: 0, wet: 0, dry: 0, unknown: 0, dryCells: [] as Vec3Like[] });
+    const range = (lo: number, hi: number) => Array.from({ length: Math.max(0, hi - lo + 1) }, (_, i) => lo + i);
+    const xs = cells.map((c) => c.x), zs = cells.map((c) => c.z), ys = cells.map((c) => c.y);
+    // 只有出现干格才做水源扫描；没有干格时不必按 9×9 范围读方块。
+    const waters = stats.dry ? range(Math.min(...xs) - HYDRATION_RADIUS, Math.max(...xs) + HYDRATION_RADIUS)
+      .flatMap((x) => range(Math.min(...zs) - HYDRATION_RADIUS, Math.max(...zs) + HYDRATION_RADIUS).flatMap((z) =>
+        range(Math.min(...ys), Math.max(...ys) + 1).flatMap((y) => adapter.blockAt({ x, y, z }) === 'water' ? [{ x, y, z }] : []))) : [];
+    const waterDistances = stats.dryCells.map((c) => Math.min(...waters.filter((w) => w.y === c.y || w.y === c.y + 1)
+      .map((w) => Math.max(Math.abs(w.x - c.x), Math.abs(w.z - c.z)))));
+    const hydrated = waterDistances.filter((d) => d <= HYDRATION_RADIUS).length;
+    const finite = waterDistances.filter(Number.isFinite);
+    const nearest = finite.length ? Math.min(...finite) : null;
+    const facts = `农田 ${cells.length} 格：作物 ${stats.crops}${stats.other ? `、其他方块 ${stats.other}` : ''}、空 ${stats.empty}、成熟 ${stats.mature}、湿润 ${stats.wet}、干 ${stats.dry}${stats.unknown ? `、湿度未知 ${stats.unknown}` : ''}`
+      + (stats.dry ? `；4 格内有水 ${hydrated}/${stats.dry} 格${nearest !== null ? `，最近水 ${nearest} 格` : '，没看见水源'}` : '');
+    const expansionReason = expansionStop === 'no_candidate' ? '周围没有更多可开垦的泥土/草方块'
+      : expansionStop === 'no_seed' ? '没有种子，未扩建'
+        : expansionStop === 'no_hoe' ? '没有锄头，未扩建'
+          : expansionStop === 'deadline' ? '到期中止' : expansionStop === 'guard' ? '达到扩建尝试上限' : '';
+    const sizeText = cells.length < wantSize
+      ? `；请求 ${wantSize} 格，实际 ${cells.length} 格${expansionReason ? `（${expansionReason}）` : ''}` : '';
+    const abortText = deadlineHit ? '；到期中止，未完成逐格处理' : '';
+    const { dryCells, ...counts } = stats;
+    const data = { harvested, planted, tilled, cells: cells.length, farm: { id: f.id, cells, ...counts, hydrated, nearestWater: nearest }, tillFailures: tillFailures.slice(0, 8), plantFailures: plantFailures.slice(0, 8), harvestFailures: harvestFailures.slice(0, 8) };
     if (!harvested && !planted && !tilled) {
-      const hasSeed = adapter.state().inventory.some((it) => it.name === seed);
-      return hasSeed ? ok('农田里的作物还没成熟') : fail('MISSING_MATERIALS', `没有 ${seed} 可以播种`);
+      if (stats.empty > 0) {
+        if (!hasSeed()) return fail('MISSING_MATERIALS', `${facts}；${stats.empty} 格空着但没有 ${seed}${failureText(tillFailures, '开垦')}${sizeText}${abortText}`, data);
+        return fail('EFFECT_NOT_CONFIRMED', `${facts}；${stats.empty} 格空着，没有播上${failureText(tillFailures, '开垦')}${failureText(plantFailures, '播种')}${sizeText}${abortText}`, data);
+      }
+      if (stats.mature > 0) return fail('EFFECT_NOT_CONFIRMED', `${facts}；有 ${stats.mature} 格成熟但没有收下来${failureText(harvestFailures, '收割')}${sizeText}${abortText}`, data);
+      return ok(`${facts}${failureText(tillFailures, '开垦')}${sizeText}${abortText}`, data);
     }
-    return ok(`农田：开垦 ${tilled}、收割 ${harvested}、播种 ${planted}（共 ${f.cells.length} 格）`, { harvested, planted });
+    return ok(`${facts}；开垦 ${tilled}、收割 ${harvested}、播种 ${planted}${failureText(tillFailures, '开垦')}${failureText(plantFailures, '播种')}${failureText(harvestFailures, '收割')}${sizeText}${abortText}`, data);
   },
 };
 
