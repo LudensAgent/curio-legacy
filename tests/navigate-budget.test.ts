@@ -10,8 +10,8 @@ test('近目标的默认搜索节点/边预算更小，长途保持库默认上�
   const far = defaultBudgetFor(at, { x: 100, y: 64, z: 0 });
   assert.ok(near.maxNodes < 2048 && near.maxEdges < 16384, JSON.stringify(near));
   assert.ok(edge.maxNodes <= 1024 && edge.maxEdges <= 4096, JSON.stringify(edge));
-  assert.equal(far.maxNodes, 2048);
-  assert.equal(far.maxEdges, 16384);
+  assert.equal(far.maxNodes, 4096);
+  assert.equal(far.maxEdges, 32768);
 });
 
 test('搜索预算耗尽且本地有未知边界时先观察，再按 UNKNOWN_BOUNDARY 交回', async (t) => {

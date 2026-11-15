@@ -78,6 +78,9 @@ export const MAX_GAP_JUMP_HORIZONTAL = 2;
 /** 跳跃落空时会落进缺口：往下看这么多格，先碰到危险格就不规划这次跳跃。 */
 const GAP_FALL_LOOKDOWN = 8;
 
+/** 边缘站姿（脚底中心是空/未知，但身体足印压住邻列已记录支撑）的额外代价。 */
+export const EDGE_STANCE_COST = 6;
+
 const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: boolean): LandSearchEdgePolicy => ({
   version,
   evaluate(edge: LandSearchPolicyEdge, read: LandSearchPolicyRead): LandSearchPolicyDecision {
@@ -141,15 +144,27 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
     if (edge.kind !== 'ladder' && !(feet !== null && isWaterBlock(feet))) {
       // 脚高接近整数：支撑是下面那格；分数脚高（半砖、雪层）：支撑就在脚所在那格。
       const supportY = Math.abs(edge.to.y - Math.round(edge.to.y)) <= 0.05 ? Math.round(edge.to.y) - 1 : Math.floor(edge.to.y);
+      const supportsFoot = (sx: number, sz: number) => {
+        const cell = read.cell(sx, supportY, sz);
+        if (cell.kind !== 'recorded') return false;
+        // 楼梯等多面形状可能同时有低面和整块顶面；这里只确认该列有可站立支撑，
+        // 具体脚高由 land-search 的 supportFaces 与执行层确认，不再用单一面高卡死。
+        return supportTop(cell.state.name.replace(/^minecraft:/, ''), cell.state.properties) !== null;
+      };
       const cell = read.cell(x, supportY, z);
-      if (cell.kind === 'unknown') {
-        // 未记录 ≠ 没有支撑：只靠邻列擦边时，这一格可能只是还没看过。把它作为
-        // 观察边界交回，让协调器看清脚底中心后再决定；不是永久策略拒绝。
-        return { allow: false, observe: true, reason: `stance is supported only by a neighbouring column's edge; support under the feet centre at (${x},${supportY},${z}) is not recorded yet`,
-          supportColumn: { minY: supportY, maxY: supportY } };
-      }
-      if (cell.kind === 'unavailable' || supportTop(cell.state.name.replace(/^minecraft:/, ''), cell.state.properties) === null) {
-        return { allow: false, reason: `host policy rejects a stance supported only by a neighbouring column's edge: no observed support under the feet centre at (${x},${supportY},${z})` };
+      if (!supportsFoot(x, z)) {
+        // 身体足印覆盖到的邻列有已记录支撑：站得住，但连续行走可能滑出边缘，给额外代价。
+        // 旧矿道/台阶大量是这种站姿；默认允许比“脚底中心必须自己有支撑”更接近原版。
+        const edgeSupport = supportColumnsUnder(edge.to, supportY)
+          .some((under) => (under.x !== x || under.z !== z) && supportsFoot(under.x, under.z));
+        if (edgeSupport) return { allow: true, extraCost: EDGE_STANCE_COST };
+        if (cell.kind === 'unknown') {
+          // 未记录 ≠ 没有支撑：这一格可能只是还没看过。把它作为观察边界交回，
+          // 让协调器看清脚底中心后再决定；不是永久策略拒绝。
+          return { allow: false, observe: true, reason: `support under the feet centre at (${x},${supportY},${z}) is not recorded yet`,
+            supportColumn: { minY: supportY, maxY: supportY } };
+        }
+        return { allow: false, reason: `host policy rejects a stance with no observed support under the feet centre or body footprint at (${x},${supportY},${z})` };
       }
     }
     // 旁边的岩浆会流动、也可能被碰到：脚部、头部与脚下一层的岩浆邻格都加价，规划更愿意离远一点。
@@ -179,7 +194,7 @@ export function isFirePolicyRejection(reason: string): boolean {
  * 而不是液体、涉水未授权或危险格这类不能靠“垫一块”改变的安全/模式限制。
  */
 export function isConstructionFixablePolicyRejection(reason: string): boolean {
-  return reason.includes('stance supported only by a neighbouring column')
+  return reason.includes('no observed support under the feet centre or body footprint')
     || (reason.includes('cannot clear a') && reason.includes('horizontal gap jump'));
 }
 
@@ -219,5 +234,5 @@ export function policyRemedy(reason: string, opts: { fireClearable: boolean }): 
   return '';
 }
 
-export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-only.dry.lava-neighbor-3.v6', new Set(['fall']), false);
-export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.centre-support-observe-unknown.gap-jump-2.fall-wade.lava-neighbor-3.v6', new Set(['fall', 'water_contact']), true);
+export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.gap-jump-2.fall-only.dry.lava-neighbor-3.v7', new Set(['fall']), false);
+export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.gap-jump-2.fall-wade.lava-neighbor-3.v7', new Set(['fall', 'water_contact']), true);

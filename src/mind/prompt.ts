@@ -287,7 +287,7 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resol
 - 普通朝一个方向走一段，不需要精确目的地 → advance {"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}；宿主处理台阶、分数顶面、合理小落差和已确认的跳跃/梯子，局部被挡会在有限范围内绕行，不挖不放
 - 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
 - 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
-- 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工，不负责绕路去某处）
+- 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工；stairs/stairs_up 只用于上下层，同层找矿/开平巷用 mode:"tunnel"，不写 mode 默认 stairs；停在具体格时先同方向补支撑/填方块，别每段换方向；不负责绕路去某处）
 - 只有需要精确到相邻某一格（建筑、挖放、贴边、指定材料）才用 move_step；普通走路优先 advance。改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
 - 站到看见过/记得的附近目标旁 → approach_visible；容器/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）
 - 要到一个确切的格或精确连续脚位 → navigate_to
@@ -1174,7 +1174,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在。熔炉的「空（已确认没有可取的东西）」或「空（只剩燃料 …）」是最近一次打开/取物时的状态；之后没有新的烧炼或取物记录时，它仍是最近一次观察；旧教训只说明当时要检查，不证明现在还有原料/产物；只有写了原料/产物才表示可能还有' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实。旧台阶的边缘站姿按身体足印判支撑，不再因为脚底中心是空就整条不通；断口/大落差仍需现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在。熔炉的「空（已确认没有可取的东西）」或「空（只剩燃料 …）」是最近一次打开/取物时的状态；之后没有新的烧炼或取物记录时，它仍是最近一次观察；旧教训只说明当时要检查，不证明现在还有原料/产物；只有写了原料/产物才表示可能还有' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),

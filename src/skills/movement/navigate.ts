@@ -114,8 +114,8 @@ export function defaultBudgetFor(from: Vec3Like | undefined, to: Vec3Like) {
     maxObservedCells: Math.min(4096, 512 + Math.ceil(direct) * 16),
     // 近目标（≤24 格）别按长途的节点/边预算扫完整片连通区：先在本地返回边界或
     // 证据缺口，由协调器观察/重搜；更远的路线仍用库的默认上限。
-    maxNodes: direct <= 24 ? Math.min(1024, Math.max(256, 256 + Math.ceil(direct) * 24)) : 2048,
-    maxEdges: direct <= 24 ? Math.min(4096, Math.max(1024, 1024 + Math.ceil(direct) * 96)) : 16384,
+    maxNodes: direct <= 24 ? Math.min(1024, Math.max(256, 256 + Math.ceil(direct) * 24)) : 4096,
+    maxEdges: direct <= 24 ? Math.min(4096, Math.max(1024, 1024 + Math.ceil(direct) * 96)) : 32768,
   };
 }
 

@@ -6,7 +6,7 @@ import type {
   LandSearchPolicyEdge,
   LandSearchPolicyRead,
 } from 'curio-minecraft-3d-memory/navigation';
-import { hostLandEdgePolicy, isConstructionFixablePolicyRejection, isDangerousBlock, isFirePolicyRejection, LAVA_EDGE_COST, policyRemedy } from '../src/spatial/land-edge-policy.ts';
+import { EDGE_STANCE_COST, hostLandEdgePolicy, isConstructionFixablePolicyRejection, isDangerousBlock, isFirePolicyRejection, LAVA_EDGE_COST, policyRemedy } from '../src/spatial/land-edge-policy.ts';
 
 type Hazard = LandSearchPolicyEdge['hazards'][number];
 type CellEntry = readonly [x: number, y: number, z: number, cell: LandSearchPolicyCell];
@@ -227,18 +227,16 @@ test('permitted edge stays within the per-edge read bound (swept body, support a
   assert.ok(expected.every((cell) => read.has(cell)), '落点脚/头/支撑与岩浆邻格都被读取');
 });
 
-test('桥头擦边：脚底中心未记录时交回观察边界；已有中心支撑才允许，不可用/非支撑仍拒绝', () => {
+test('桥头擦边：邻列有已记录支撑时允许并加价；无支撑才交回观察/拒绝', () => {
   // 复现：桥面圆石到 x=94 为止，路线保留起点偏移走到 x=95.29，身体只压住 x=94 那列 0.01 格。
   const to = at(95.29, 70, -39.55);
   const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
   const edgeOnly = fakeReader([[94, 69, -40, recorded('cobblestone')]], 64, []);
-  const deferred = hostLandEdgePolicy.evaluate(edge, edgeOnly.read);
-  assert.equal(deferred.allow, false);
-  assert.equal(deferred.observe, true);
-  assert.deepEqual(deferred.supportColumn, { minY: 69, maxY: 69 });
-  assert.match(deferred.reason, /feet centre at \(95,69,-40\)/);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, edgeOnly.read)), EDGE_STANCE_COST, '压住邻列边缘有已记录支撑：允许，但加价');
   const centred = fakeReader([[95, 69, -40, recorded('cobblestone')]], 64, []);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centred.read)), 0);
+  const centreAir = fakeReader([[94, 69, -40, recorded('cobblestone')], [95, 69, -40, recorded('air')]], 64, []);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centreAir.read)), EDGE_STANCE_COST, '中心是空气但邻列有支撑：按边缘站姿允许');
   const unknownBelow = fakeReader([], 64, []);
   const stillDeferred = hostLandEdgePolicy.evaluate(edge, unknownBelow.read);
   assert.equal(stillDeferred.allow, false);
