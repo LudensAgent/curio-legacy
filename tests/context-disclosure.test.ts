@@ -8,6 +8,7 @@ import { SelfModel } from '../src/mind/self.ts';
 import { Perception } from '../src/perception/perception.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { travelStore } from '../src/travel/store.ts';
+import type { ActivityRecord } from '../src/mind/types.ts';
 import { FakeAdapter } from './fake-adapter.ts';
 
 function fixture(t: { after: (fn: () => void) => void }, tier: 'glance' | 'deliberate' = 'deliberate') {
@@ -138,6 +139,53 @@ test('技能索引之外只补执行状态，候选收起与可试用不能混�
   assert.equal(skills[0], 'shield-hold［自动，代码 v1］ 成2/败1；候选可试用（试用成3/败1）（详情查 skill）');
   assert.match(skills[1]!, /已收起/);
   assert.doesNotMatch(skills[1]!, /候选可试用/, '未识别的候选状态不能被改写成可用');
+});
+
+test('历史回执只留结构化摘要；最近一条仍是完整回执', (t) => {
+  const { self, section } = fixture(t);
+  const at = Date.now() - 60_000;
+  const record: ActivityRecord = {
+    id: 'r-long', what: '在很远的矿道里刨一条很长的测试平巷，边挖边找铁', kind: 'gather', outcome: 'stuck',
+    summary: '原因'.repeat(200), durationSec: 30, gained: { cobblestone: 3 }, lost: { torch: 1 }, at, signature: 'gather', failures: 1,
+    expect: '预期'.repeat(100),
+    collection: { block: 'oak_log', items: ['oak_log'], initial: 0, target: 8, final: 2, gained: 2, dug: 3, targetMet: false, lost: 0, skill: 'gather', args: {}, at },
+  };
+  self.data.history.push(record);
+  const recent = section('最近').recent_activities[0] as { summary: string; collection?: string; i_expected?: string; ago?: string };
+  assert.ok(recent.summary.length <= 181, '历史摘要要截短');
+  assert.match(recent.collection ?? '', /目标 8，未达成/, '目标/实得的反例数字仍保留');
+  assert.doesNotMatch(recent.collection ?? '', /gather|@/, '不展开完整采集快照和动作参数');
+  assert.ok((recent.i_expected?.length ?? 0) <= 81, '预期截短但保留，便于归因');
+  assert.ok(recent.ago, '历史回执带新鲜度');
+  const last = section('最近', { lastRecord: record }).last_activity as { summary: string; collection?: unknown; i_expected?: unknown };
+  assert.ok(last.summary.length > 200, '最近一条保留完整摘要');
+  assert.ok(last.collection, '最近一条保留采集快照');
+  assert.ok(last.i_expected);
+});
+
+test('最近经历优先保留未处理失败和最近两条，不固定塞满五条', (t) => {
+  const { self, section } = fixture(t);
+  const base = Date.now() - 20 * 60_000;
+  const rec = (id: string, outcome: ActivityRecord['outcome'], at: number, kind: ActivityRecord['kind'] = 'build'): ActivityRecord => ({
+    id, what: `活 ${id}`, kind, outcome, summary: 's', durationSec: 1, gained: {}, lost: {}, at, signature: id, failures: outcome === 'stuck' ? 1 : 0,
+  });
+  self.data.history.push(
+    rec('old-done-1', 'done', base), rec('old-done-2', 'done', base + 1000), rec('old-done-3', 'done', base + 2000),
+    { ...rec('old-done-with-failures', 'done', base + 2500, 'build'), failures: 2 },
+    rec('old-stuck', 'stuck', base + 3000, 'gather'), rec('recent-1', 'done', base + 4000, 'rest'), rec('recent-2', 'done', base + 5000, 'rest'),
+  );
+  const recent = section('最近');
+  const shown = recent.recent_activities as { what: string }[];
+  assert.deepEqual(shown.map((r) => r.what), ['活 old-done-with-failures', '活 old-stuck', '活 recent-1', '活 recent-2'],
+    '有失败的旧经历与卡住/没做成同等优先，最近两条始终保留');
+  assert.match(recent.recent_activities_omitted, /3 段较早经历未列出/);
+});
+
+test('自动想起的经历只给短摘要', (t) => {
+  const { section } = fixture(t);
+  const memories = section('想起来的', { recalled: [{ kind: 'experience', text: '经'.repeat(400), score: 3, match: 'historical' }] }).memories as string[];
+  assert.ok(memories[0]!.length < 220, memories[0]);
+  assert.match(memories[0]!, /…/);
 });
 
 test('methods/macros 保留调用写法和执行状态', (t) => {

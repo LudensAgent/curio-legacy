@@ -32,11 +32,11 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
     rec('原地往下挖竖井', 'stuck', now - 4 * 60_000),
     rec('往下挖竖井', 'unmet', now - 3 * 60_000),
   );
-  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
+  const [system, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
     self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
     audience: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /主目标「挖够粗铁做装备」的清单已观察到 15 在线分钟没勾掉一项/);
-  assert.ok(user.content.includes(GOAL_SWITCH_RULE), '引用统一的换目标规则');
+  assert.ok(system.content.includes(GOAL_SWITCH_RULE), '完整换目标规则在 System【专注】里');
   assert.match(user.content, /清单是成果，做法可以随时换/);
   assert.match(user.content, /删掉没做完的成果/);
   assert.match(user.content, /写 switch_reason/);
@@ -44,6 +44,9 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
   assert.match(user.content, /只观察停滞不构成删项理由/);
   assert.doesNotMatch(user.content, /不再强制写 switch_reason/);
   assert.match(user.content, /「下到 y16 找铁」）保留，别写成新步骤/);
+  const hint = user.content.split('\n').find((line) => line.includes('的清单已观察到'))!;
+  assert.match(hint, /按【专注】/, '提醒引用完整规则，不整段复述');
+  assert.doesNotMatch(hint, /清单是成果，做法可以随时换/, '完整规则只在【专注】里出现一次');
 });
 
 test('没有停滞、或瞥一眼，不提示改清单', (t) => {

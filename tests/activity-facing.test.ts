@@ -36,8 +36,9 @@ test('同一位置连续路径失败时，用户提醒保留失败事实，不�
   for (const failure of failures) {
     assert.ok(recovery.includes(failure.skill));
     assert.ok(recovery.includes(failure.failure_code));
-    assert.ok(recovery.includes(failure.summary));
+    assert.ok(!recovery.includes(failure.summary), '完整失败回执只在【此刻】，提醒不重复原文');
   }
+  assert.match(recovery, /完整回执见【此刻】/);
   assert.doesNotMatch(recovery, /不施工时没找到|没授权挖\/放|excavate_run|place_support|pillar_one|allowDig|allowPlace/);
 });
 

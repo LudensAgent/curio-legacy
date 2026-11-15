@@ -12,7 +12,7 @@ import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { myBed } from '../skills/stations.ts';
 import { gearAlreadyHeldInText } from '../skills/work.ts';
 import { portalAgeText, travelStore } from '../travel/store.ts';
-import { argsLabel, describeActivity } from './activity.ts';
+import { argsLabel, clipFeedback, describeActivity } from './activity.ts';
 import { describeBuild, dirOf, homeOf, myBuilds } from './home.ts';
 import { FACILITY_LABELS, myFacilities, type Facility } from './facilities.ts';
 import { activeDrafts } from '../building/drafts.ts';
@@ -464,7 +464,8 @@ function planRevisionHint(ctx: MindContext): string | null {
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
   const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
-  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。${GOAL_SWITCH_RULE} ${PLAN_EDIT_RULE} 如果只是换做法，写 {"focus":"${plan.agendaId}","methods":[…] } 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+  // 完整换目标/改清单规则已经在【专注】里；这里只提这次触发的事实和最短入口，避免整段复述。
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。换目标按【专注】（阶段回顾 + switch_reason，或操作者明确指令；被拒别重复）。删改未完成项也按【专注】：平时写 switch_reason、距上次删改满 ${PLAN_REVISION_MIN} 分钟（阶段回顾或这一念明确回应操作者指令时可直接改），只观察停滞不构成删项理由，删项那一念不收工；只是换做法写 {"focus":"${plan.agendaId}","methods":[…]} 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
 }
 
 /** 这一念的意图文本：当前活动、议程、最近三个念头。提醒里的“想下矿/想回地面”判断共用同一口径。 */
@@ -598,16 +599,26 @@ export function situationalReminders(ctx: MindContext): string[] {
   if (focusItem && !ctx.plan && ctx.tier === 'deliberate') out.push(`主目标「${focusItem.text}」还没有清单：写 "plan":{"focus":"${focusItem.id}","steps":[…3–6 项]}，之后一项项推进`);
   const revision = planRevisionHint(ctx);
   if (revision) out.push(revision);
-  // 同一位置连续移动/规划失败：保留各次原因，不把程序/证据问题归因成地形无路。
+  // 同一位置连续移动/规划失败：只报次数、动作、代码和最近时间；完整原因与范围留在【此刻】。
+  // 不把程序/证据问题归因成地形无路，也不把当时的回执当成现在的环境。
+  const failureAge = (iso: string) => {
+    const ms = Date.now() - Date.parse(iso);
+    if (!Number.isFinite(ms)) return '';
+    const minutes = Math.max(0, Math.round(ms / 60_000));
+    return minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : `${Math.round(minutes / 60)} 小时前`;
+  };
   const pathFails = (ctx.recentActionFailures ?? []).filter((f) => PATH_REPEAT.has(f.skill));
   if (pathFails.length >= 3) {
-    const recent = pathFails.slice(0, 3).map((f) => `${f.skill} ${f.failure_code ?? '失败'}：${f.summary.slice(0, 120)}`).join('；');
-    out.push(`【局部恢复】附近记录了 ${pathFails.length} 次移动/规划失败，最近：${recent}。预算耗尽、参数错误、证据变化与已观测阻挡含义不同；结合各次回执和当前目标判断是否续接、调整或停止。`);
+    const recent = pathFails.slice(-3).map((f) => {
+      const age = failureAge(f.observed_at);
+      return `${f.skill} ${f.failure_code ?? '失败'}${age ? `（${age}）` : ''}`;
+    }).join('、');
+    out.push(`【局部恢复】附近记录了 ${pathFails.length} 次移动/规划失败，最近：${recent}。预算耗尽、参数错误、证据变化与已观测阻挡含义不同；各次完整回执见【此刻】，结合当前目标判断是否续接、调整或停止。`);
   } else {
     const repeatFails = (ctx.recentActionFailures ?? []).filter((f) => (f.repeats ?? 0) >= 2);
     if (repeatFails.length) {
-      const f = repeatFails[0];
-      out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次）：${f.summary.slice(0, 120)}。这只是该动作的结果；整段活的状态未变`);
+      const f = repeatFails[0], age = failureAge(f.observed_at);
+      out.push(`动作 ${f.skill} 在这一带反复 ${f.failure_code ?? '失败'}（${f.repeats} 次${age ? `，最近 ${age}` : ''}）；完整回执见【此刻】。这只是该动作的结果；整段活的状态未变，不必把整段活推倒重来；位置和环境可能随后改变`);
     }
   }
   const where = p.self.where?.kind;
@@ -724,7 +735,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
         ...(Object.keys(m.stopReasons).length ? { stopped: m.stopReasons } : {}),
         ...(m.lastEvidence ? { last_evidence: attemptEvidenceText(m.lastEvidence) } : {}),
       })) } : {}),
-      ...(full && plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
+      ...(full && plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${clipFeedback(a.whatHappened, 120)}${a.whyStopped ? `（停因 ${clipFeedback(a.whyStopped, 50)}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
       checklist_note: full
         ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；勾选前按当前事实核验（装备看 wearing、食物看背包、据点资源取出后才算）。远行/补给的成果按这趟需要拆开写（如装备/武器/盾实际可用、随身食物数量、火把与施工材料、备用工具、背包空间与战利品余量、传送门/返程与紧急撤退方案；装备可用 equipment 的 head/torso/legs/feet/off-hand 槽位），各用系统支持的条件或写明观察验收；一个 inventory_min 只证明它自己。勾错或后来发现没做到：重抄整份清单，改掉那条成果的文字重新核验（文字不变会保留完成；改文字会重新变成未完成、丢掉原 done_when，并换新 po_ id；methods 的 outcome 要改指新 id），别把错误完成留在清单上；其他真实完成的项原样抄回。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
@@ -1181,14 +1192,26 @@ function collectionSnapshot(c: NonNullable<ActivityRecord['collection']>) {
   return `采集 ${c.items.join('/')} ${c.initial}→${c.final}（目标 ${c.target}${c.targetMet ? '，已达成' : '，未达成'}；实得 +${c.gained}，挖了 ${c.dug} 块${c.lost ? `，${c.lost} 块掉落物没捡到` : ''}）；动作 ${c.skill} ${argsLabel({ skill: c.skill, args: c.args ?? {} })} @ ${new Date(c.at).toISOString()}；历史采集回执，不代表当前背包`;
 }
 
-function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string) {
+function recordLine(r: ActivityRecord, memory: WorldMemory, dimension: string, compact = false) {
   const g = Object.entries(r.gained).slice(0, 6).map(([k, v]) => `${k}+${v}`).join(' ');
   const l = Object.entries(r.lost).slice(0, 4).map(([k, v]) => `${k}-${v}`).join(' ');
-  return { what: recallText(r.what, memory, dimension, r.at), outcome: r.completion === 'condition' ? 'condition_met' : r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}), summary: recallText(r.summary, memory, dimension, r.at),
-    ...(r.stop ? { stop: `${r.stop.reason}${r.stop.detail ? `：${r.stop.detail.slice(0, 120)}` : ''}` } : {}),
+  const summary = recallText(r.summary, memory, dimension, r.at);
+  const hypothesis = r.hypothesis ? recallText(r.hypothesis, memory, dimension, 0) : null;
+  const minutes = Math.max(0, Math.round((Date.now() - r.at) / 60_000));
+  const ago = minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : `${Math.round(minutes / 60)} 小时前`;
+  const expected = r.expect ? recallText(r.expect, memory, dimension, r.at) : null;
+  return { what: recallText(r.what, memory, dimension, r.at), outcome: r.completion === 'condition' ? 'condition_met' : r.outcome, took_real_s: r.durationSec, ...(g ? { gained: g } : {}), ...(l ? { used: l } : {}),
+    // 历史回执只留结构化摘要和首尾；完整回执只在 last_activity 保留，避免每念重复。
+    ...(compact ? { ago } : {}),
+    summary: compact ? clipFeedback(summary, 180) : summary,
+    ...(r.stop ? { stop: `${r.stop.reason}${r.stop.detail ? `：${clipFeedback(r.stop.detail, compact ? 60 : 120)}` : ''}` } : {}),
     ...(r.facing ? { facing: r.facing } : {}),
-    ...(r.collection ? { collection: collectionSnapshot(r.collection) } : {}),
-    ...(r.expect ? { i_expected: recallText(r.expect, memory, dimension, r.at) } : {}), ...(r.hypothesis ? { hypothesis: recallText(r.hypothesis, memory, dimension, 0) } : {}) };
+    // 历史回执保留目标/实得这组反例数字，但不展开完整采集快照和动作参数。
+    ...(r.collection ? { collection: compact
+      ? `采集 ${r.collection.items.join('/')} ${r.collection.initial}→${r.collection.final}（目标 ${r.collection.target}${r.collection.targetMet ? '，已达成' : '，未达成'}）`
+      : collectionSnapshot(r.collection) } : {}),
+    ...(expected ? { i_expected: compact ? clipFeedback(expected, 80) : expected } : {}),
+    ...(hypothesis ? { hypothesis: compact ? clipFeedback(hypothesis, 100) : hypothesis } : {}) };
 }
 
 export function buildMindMessages(ctx: MindContext): ChatMessage[] {
@@ -1197,6 +1220,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...p.nearby.resources.slice(0, 6).map((r) => r.block), ...s.inventory.slice(0, 10).map((i) => i.name)].filter(Boolean).join(' ');
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
+  const activitySkills = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))];
   const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
   const brief = decisionBrief(ctx);
   const spatial = spatialBrief(ctx);
@@ -1261,13 +1285,33 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       branches: ctx.progress.branches.map((b) => ({ group: b.group, reached: `${b.done}/${b.total}`, ...(b.next.length ? { untouched: b.next } : {}) })),
     }] as [string, Record<string, unknown>]] : []),
     ...(ctx.recalled?.length || ctx.hindsightMemories?.length || ctx.openedSkill ? [['想起来的', {
-      ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}${r.match === 'current_goal' ? '·当前目标' : r.match === 'execution_gap' ? '·执行缺口' : '·历史'}] ${r.text}`) } : {}),
+      ...(ctx.recalled?.length ? { memories: ctx.recalled.map((r) => `[${RECALL_LABEL[r.kind]}${r.match === 'current_goal' ? '·当前目标' : r.match === 'execution_gap' ? '·执行缺口' : '·历史'}] ${clipFeedback(r.text, 180)}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term: ctx.hindsightMemories.map((m) => `[${m.kind === 'experience' ? '经历' : '推断'}·长期记忆] ${m.text}`) } : {}),
       ...(ctx.hindsightMemories?.length ? { long_term_note: '长期记忆是合并后的历史经历或推断，不等于当前现场事实；现场以【身边】【身体】为准。' } : {}),
       ...(ctx.openedSkill ? { skill_opened: { name: ctx.openedSkill.name, text: ctx.openedSkill.body } } : {}),
     }] as [string, Record<string, unknown>]] : []),
     ['最近', {
-      ...(!glance ? { recent_activities: self.history(5).filter((r) => r !== ctx.lastRecord).map((r) => recordLine(r, ctx.memory, s.dim)) } : {}),
+      // 不再固定取最近 5 条：最近两条保留连续性，另有最多三条按结构化事实评分较高的旧经历
+      // （未解决/失败、服务当前清单成果、与当前活动同类或步骤相同）。只筛字段，不解析文字；
+      // 没列出的较早经历用计数标出来，仍可按 recall 查。
+      ...(!glance ? (() => {
+        const pool = self.history(20).filter((r) => r !== ctx.lastRecord);
+        const latest = pool.slice(-2);
+        const nextOutcome = ctx.plan?.steps.find((st) => !st.done);
+        const weight = (r: ActivityRecord) =>
+          (r.outcome === 'stuck' || r.outcome === 'unmet' || r.failures > 0 || r.resource?.goalIncomplete === true || r.completion === 'attempt' ? 4
+            : r.outcome === 'interrupted' || r.outcome === 'abandoned' || r.outcome === 'replaced' ? 2 : 0)
+          + (nextOutcome?.id && r.outcomeId === nextOutcome.id ? 3 : 0)
+          + (r.kind === ctx.activity?.kind ? 2 : 0)
+          + (activitySkills.some((sk) => r.signature.includes(sk)) ? 1 : 0);
+        const relevant = pool.filter((r) => !latest.includes(r) && weight(r) > 0)
+          .sort((a, b) => weight(b) - weight(a) || b.at - a.at).slice(0, 3);
+        const shown = [...new Map([...relevant, ...latest].map((r) => [r.id, r])).values()].sort((a, b) => a.at - b.at);
+        return {
+          recent_activities: shown.map((r) => recordLine(r, ctx.memory, s.dim, true)),
+          ...(pool.length > shown.length ? { recent_activities_omitted: `${pool.length - shown.length} 段较早经历未列出，可按 recall 查` } : {}),
+        };
+      })() : {}),
       ...(ctx.lastRecord ? { last_activity: recordLine(ctx.lastRecord, ctx.memory, s.dim) } : {}),
       stream: self.recentThoughts(glance ? 4 : 8).map((t) => `${t.kind === 'monologue' ? '[此前想法，未经核实]' : `[${t.kind}]`} ${recallText(t.text, ctx.memory, undefined, t.kind === 'outcome' || t.kind === 'notice' ? t.at : 0)}`),
     }],
@@ -1314,7 +1358,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     if (line) reminders.push(line);
   }
   // 目录只给核心动作完整参数；其他动作正在被使用时，把参数贴在 user 消息里，免得每次都得先查 moves。
-  const active = [...new Set((ctx.activity?.steps ?? []).map((st) => st.skill))].filter((n) => !COMMON_MOVES.includes(n));
+  const active = activitySkills.filter((n) => !COMMON_MOVES.includes(n));
   if (active.length) reminders.push(`正在用的动作参数：\n${moveDetails(active)}`);
   // 操作者的指令放在最前面，最后的提醒里再说一遍（开头和结尾模型最不容易忽略）
   const order = ctx.operatorOrder;
