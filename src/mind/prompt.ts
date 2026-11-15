@@ -238,7 +238,7 @@ const OUTPUT = `只输出一个 JSON 对象：
 {"monologue":"第一人称内心独白，接着刚才的念头往下想（20–80 字）",
  "decision":"continue|adjust|new|detour|switch|experiment|rest",
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）","outcome_id":"po_…（可选：推进哪项计划成果）","method_id":"pm_…（可选：采用哪条计划做法）"},
- "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
+ "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{与 done_when 相同的条件对象，如 {"type":"any_of","conditions":[…]}；不能用 exploration}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
 取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。熔炉里的成品/剩料用 collect_furnace，不要排 take_items 或只开 use_gui 看一眼。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。

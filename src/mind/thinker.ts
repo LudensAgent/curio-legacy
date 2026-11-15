@@ -8,7 +8,7 @@ import { queryMechanics } from '../methods/mechanics.ts';
 import { boundedJson } from '../planner/prompt.ts';
 import { extractJson, normalizeStep, ruleProposal } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
-import { evaluateCondition, minDistanceOnly, validateCondition } from '../projects/conditions.ts';
+import { CONDITION_KINDS, evaluateCondition, minDistanceOnly, validateCondition } from '../projects/conditions.ts';
 import type { Condition } from '../projects/types.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
 import { validatePlanSkill } from '../skills/types.ts';
@@ -62,13 +62,31 @@ function normalizeDoneWhen(raw: unknown, depth = 0): unknown {
   const selfFields = ['held', 'riding', 'inWater', 'inLava', 'onGround', 'inPortal', 'dim', 'sky_visible', 'underground'];
   const fieldName = (field: unknown) => typeof field === 'string' ? aliases[field] ?? field : undefined;
   if (o.type === undefined) {
-    if (Array.isArray(o.conditions)) o.type = o.any === true || o.mode === 'any' ? 'any_of' : 'all_of';
-    else if (o.slot !== undefined && o.item !== undefined) o.type = 'equipment';
-    else if (o.item !== undefined && o.count !== undefined) o.type = 'inventory_min';
-    else if (o.pos !== undefined && o.radius !== undefined) o.type = 'location_near';
-    else if (o.pos !== undefined && (o.name !== undefined || o.properties !== undefined)) o.type = 'block_state';
-    else if (fieldName(o.field ?? o.state ?? o.property ?? o.key ?? o.name)
-      || Object.keys(o).some((key) => selfFields.includes(fieldName(key) ?? ''))) o.type = 'self_state';
+    // 模型常把组合条件写成 {"any_of":[...]} 而不是 {"type":"any_of","conditions":[...]}；
+    // 单条件也会写成 {"inventory_min":{...}}。这两种形状无歧义，先规范再交给事实校验。
+    const wrappers = ([['any_of', 'any_of'], ['all_of', 'all_of']] as const).filter(([key]) => Array.isArray(o[key]));
+    if (wrappers.length === 1) {
+      const [key, type] = wrappers[0];
+      o.type = type;
+      o.conditions = o[key];
+      delete o[key];
+    } else if (wrappers.length === 0) {
+      const wrapped = Object.keys(o).filter((key) => CONDITION_KINDS.has(key) && o[key] && typeof o[key] === 'object' && !Array.isArray(o[key]));
+      if (wrapped.length === 1) {
+        const type = wrapped[0];
+        const body = o[type];
+        delete o[type];
+        Object.assign(o, body);
+        o.type = type;
+      } else if (Array.isArray(o.conditions)) o.type = o.any === true || o.mode === 'any' ? 'any_of' : 'all_of';
+      else if (o.slot !== undefined && o.item !== undefined) o.type = 'equipment';
+      else if (o.item !== undefined && o.count !== undefined) o.type = 'inventory_min';
+      else if (o.pos !== undefined && o.radius !== undefined) o.type = 'location_near';
+      else if (o.pos !== undefined && (o.name !== undefined || o.properties !== undefined)) o.type = 'block_state';
+      else if (fieldName(o.field ?? o.state ?? o.property ?? o.key ?? o.name)
+        || Object.keys(o).some((key) => selfFields.includes(fieldName(key) ?? ''))) o.type = 'self_state';
+    }
+    // wrappers.length > 1：同时写 any_of 和 all_of 有歧义，不猜；交给 validateCondition 报错。
   }
   const direct = fieldName(o.type);
   if (direct && selfFields.includes(direct) && !['sky_visible', 'underground'].includes(direct)) {

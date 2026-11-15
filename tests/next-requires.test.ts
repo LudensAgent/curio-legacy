@@ -82,6 +82,57 @@ test('next.requires 在解析边界校验一次；null 是无效值，不能当�
   } finally { memory.close(); }
 });
 
+test('next.requires 接受 any_of/all_of 键和单键简写，规范成标准条件', () => {
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null);
+  try {
+    const any = parseDecision({ decision: 'continue', next: nextOf({
+      any_of: [{ inventory_min: { item: 'torch', count: 1 } }, { inventory_min: { item: 'coal', count: 1 } }],
+    }) }, adapter, memory, false);
+    assert.ok(!('error' in any), 'any_of 简写不应被拒绝');
+    assert.deepEqual(any.next?.requires, {
+      type: 'any_of', conditions: [
+        { type: 'inventory_min', item: 'torch', count: 1 },
+        { type: 'inventory_min', item: 'coal', count: 1 },
+      ],
+    });
+
+    const all = parseDecision({ decision: 'continue', next: nextOf({
+      all_of: [{ type: 'inventory_space_min', free_slots: 3 }, { inventory_min: { item: 'torch', count: 1 } }],
+    }) }, adapter, memory, false);
+    assert.ok(!('error' in all), 'all_of 简写不应被拒绝');
+    assert.deepEqual(all.next?.requires, {
+      type: 'all_of', conditions: [
+        { type: 'inventory_space_min', free_slots: 3 },
+        { type: 'inventory_min', item: 'torch', count: 1 },
+      ],
+    });
+
+    const single = parseDecision({ decision: 'continue', next: nextOf({
+      inventory_min: { item: 'torch', count: 1 },
+    }) }, adapter, memory, false);
+    assert.ok(!('error' in single), '单键简写不应被拒绝');
+    assert.deepEqual(single.next?.requires, { type: 'inventory_min', item: 'torch', count: 1 });
+
+    const canonical = parseDecision({ decision: 'continue', next: nextOf({
+      type: 'any_of', conditions: [{ type: 'inventory_min', item: 'torch', count: 1 }],
+    }) }, adapter, memory, false);
+    assert.ok(!('error' in canonical));
+    assert.deepEqual(canonical.next?.requires, { type: 'any_of', conditions: [{ type: 'inventory_min', item: 'torch', count: 1 }] });
+
+    const malformed = parseDecision({ decision: 'continue', next: nextOf({
+      any_of: [{ inventory_min: { item: 'raw_iron', count: 0 } }],
+    }) }, adapter, memory, false);
+    assert.ok('error' in malformed, '规范化后仍无效的条件要保留错误提示');
+    assert.match(malformed.error, /next\.requires 无效/);
+
+    const ambiguous = parseDecision({ decision: 'continue', next: nextOf({
+      any_of: [{ type: 'inventory_min', item: 'torch', count: 1 }],
+      all_of: [{ type: 'inventory_min', item: 'coal', count: 1 }],
+    }) }, adapter, memory, false);
+    assert.ok('error' in ambiguous, '同时写 any_of/all_of 有歧义，不能静默选一个');
+  } finally { memory.close(); }
+});
+
 test('activity.requires 被明确拒绝，指示改用 next.requires', () => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null);
   try {

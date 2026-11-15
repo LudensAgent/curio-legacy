@@ -7,6 +7,9 @@ import { buildingArchiveFor } from '../skills/build.ts';
 import { activeDrafts } from '../building/drafts.ts';
 import type { Condition, ConditionResult } from './types.ts';
 
+/** validateCondition 接受的 kind；normalizeDoneWhen 也用它识别单键简写。新增条件类型时在这里同步。 */
+export const CONDITION_KINDS = new Set(['inventory_min', 'inventory_full', 'inventory_space_min', 'location_near', 'self_state', 'equipment', 'block_state', 'sky_visible', 'underground', 'position_y', 'exploration']);
+
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 const finite = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const validPos = (p: unknown): p is Vec3Like => object(p) && finite(p.x, -29_999_984, 29_999_984) && finite(p.z, -29_999_984, 29_999_984) && finite(p.y, -2048, 2048);
