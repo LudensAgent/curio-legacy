@@ -169,18 +169,22 @@ export class KnowledgeBase {
     });
     const candidates = [...groups].flatMap(([document, entries]) => {
       const exact = [document.id, document.title, ...document.aliases].some((name) => normalize(name) === normalized);
+      // 别名只负责“找到这篇文档”，不参与挑章节：英文机制词通常只在别名里，
+      // 用它选章节会让所有章节同分、按 id 排出一个不相干的章节。
+      const coverage = (count: number) => count / Math.max(1, terms.length);
+      const aliasText = normalize(document.aliases.join(' '));
+      const aliasHit = coverage(terms.filter((term) => aliasText.includes(term)).length) >= 0.3;
       const chapters = entries.map((entry) => {
         const matches = terms.filter((term) => entry.heading.includes(term) || entry.body.includes(term));
-        const coverage = matches.length / Math.max(1, terms.length);
-        const score = matches.reduce((total, term) => total + (entry.heading.includes(term) ? 8 : 0) + (entry.body.includes(term) ? 2 : 0), 0) * coverage;
-        return { ...entry, score: coverage >= 0.3 ? score : 0 };
+        const score = matches.reduce((total, term) => total + (entry.heading.includes(term) ? 8 : 0) + (entry.body.includes(term) ? 2 : 0), 0) * coverage(matches.length);
+        return { ...entry, score: coverage(matches.length) >= 0.3 ? score : 0 };
       }).filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score || a.section.id.localeCompare(b.section.id));
-      if (!chapters.length && !exact) return [];
-      // 文档别名只定位文章；有章节命中时取最高分章节（同分按章节 id 稳定取舍），
-      // 避免“并列就退回标题串”把唯一可引用的摘录丢掉。没有任何章节命中时才只给文档摘要。
+      if (!chapters.length && !exact && !aliasHit) return [];
+      // 有章节命中时取最高分章节（同分按章节 id 稳定取舍）；只有别名命中时给文档摘要，
+      // 由阅读目录再选章节，不把“文档命中”冒充成“这一章最相关”。
       const chapter = normalized.length > 1 && chapters[0] ? chapters[0].section : undefined;
       const excerpt = chapter ? chapter.text.split(/\n\s*\n/)[0].slice(0, 120) : document.sections.map((section) => section.title).slice(0, 3).join('；').slice(0, 120);
-      return [{ score: (chapters[0]?.score ?? 0) + (exact ? 16 : 0) + (normalize(document.title).includes(normalized) ? 6 : 0), id: document.id, title: document.title, kind: document.kind,
+      return [{ score: (chapters[0]?.score ?? 0) + (exact ? 16 : 0) + (aliasHit && !chapters.length ? 4 : 0) + (normalize(document.title).includes(normalized) ? 6 : 0), id: document.id, title: document.title, kind: document.kind,
         ...(chapter ? { section: chapter.id, sectionTitle: chapter.title } : {}), excerpt } satisfies KnowledgeMatch & { score: number }];
     }).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
     const relevant = candidates.filter((candidate) => candidate.score >= (candidates[0]?.score ?? 0) * 0.5);

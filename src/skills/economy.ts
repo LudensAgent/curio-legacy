@@ -485,7 +485,7 @@ export const collectSeeds: Skill<{ count: number }> = {
 
 export const farm: Skill<{ crop: string; size: number }> = {
   name: 'farm',
-  description: '经营农田：收割成熟作物并补种，或按 crop/size 在附近开垦；消耗对应种子并使用锄头。缺锄头默认返回缺口，make:true 才允许消耗木板/圆石和木棍制作锄头',
+  description: '经营农田：收割成熟作物并补种；附近有自己见过、上面没有作物的耕地时优先接管（最多 size 格），否则按 crop/size 在附近开垦；消耗对应种子并使用锄头。缺锄头默认返回缺口，make:true 才允许消耗木板/圆石和木棍制作锄头',
   argsDoc: '{"crop"?: "wheat|carrot|potato|beetroot", "size"?: 4-25}',
   timeoutMs: 240000,
   movement: true,
@@ -501,6 +501,26 @@ export const farm: Skill<{ crop: string; size: number }> = {
     const s = adapter.state();
     let f = memory.farms().filter((x) => x.dim === s.dim).sort((a, b) => Math.hypot(a.cells[0].x - s.pos.x, a.cells[0].z - s.pos.z) - Math.hypot(b.cells[0].x - s.pos.x, b.cells[0].z - s.pos.z))[0];
     let harvested = 0, planted = 0, tilled = 0;
+
+    // 没有登记过的田时，先采用脚边已经开垦好的空耕地（手工锄的地块不在 memory.farms 里），
+    // 而不是另开一块新地。只接管上面没有作物的耕地：不把别人的作物当成自己的收成。
+    if (!f && Date.now() < ctx.deadline - 5000) {
+      const base = { x: Math.floor(s.pos.x), y: Math.floor(s.pos.y), z: Math.floor(s.pos.z) };
+      const offsets = Array.from({ length: 9 }, (_, i) => i - 4);
+      const existing = offsets.flatMap((dx) => offsets.flatMap((dz) => [-2, -1, 0, 1].flatMap((dy) => {
+        const p = { x: base.x + dx, y: base.y + dy, z: base.z + dz };
+        // 只接管亲眼见过（或刚操作过）的耕地，不靠方块读取发现墙后/地下的田。
+        const seen = ctx.senses.recognizedAt?.(p) === 'farmland';
+        const empty = /^(air|cave_air|void_air)$/.test(adapter.blockAt({ ...p, y: p.y + 1 }) ?? '');
+        return seen && adapter.blockAt(p) === 'farmland' && empty ? [p] : [];
+      }))).sort((a, b) => Math.hypot(a.x - base.x, a.z - base.z) - Math.hypot(b.x - base.x, b.z - base.z))
+        .slice(0, Math.min(args.size, 25));
+      if (existing.length >= 2) {
+        f = { id: shortId('farm_'), dim: s.dim, crop: args.crop, cells: existing, plantedAt: Date.now(), harvests: 0 };
+        memory.addFarm(f);
+        ctx.bus.publish('farm', 'P2', `接管附近已开垦的 ${existing.length} 格空耕地`);
+      }
+    }
 
     if (!f) {
       if (!s.inventory.some((i) => i.name.endsWith('_hoe'))) {

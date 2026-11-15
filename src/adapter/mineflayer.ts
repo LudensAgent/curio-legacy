@@ -3837,7 +3837,7 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     const block = b.blockAt(this.vec(pos));
     if (!block) return { ok: false, reason: 'NO_BLOCK' };
     if (block.name === 'farmland') return { ok: true };
-    if (!['dirt', 'grass_block', 'dirt_path', 'coarse_dirt'].includes(block.name)) return { ok: false, reason: `NOT_TILLABLE:${block.name}` };
+    if (!TILLABLE.has(block.name)) return { ok: false, reason: `NOT_TILLABLE:${block.name}` };
     const above = b.blockAt(this.vec({ x: pos.x, y: pos.y + 1, z: pos.z }));
     if (above && above.boundingBox === 'block') return { ok: false, reason: 'BLOCKED' };
     if (above && ['short_grass', 'tall_grass', 'grass', 'fern'].includes(above.name)) await this.afterAction(() => raceAbort(b.dig(above, true), signal, 3000, () => {}), check);
@@ -5146,6 +5146,11 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       if (isTreeSaplingItem(item) && !saplingSoilFor(item).has(block.name)) {
         return { ok: false, reason: `BAD_SUPPORT:${item} 不能种在 ${block.name} 上，只能种在${saplingSoilText(item)}上`, effectEvidence: { verified: true, changed: false, reasons: [`目标方块 ${block.name} 不是 ${item} 的可种土壤，未发送放置动作`] } };
       }
+      const above = b.blockAt(block.position.offset(0, 1, 0))?.name ?? null;
+      const targetProblem = itemBlockTargetProblem(item, block.name, above);
+      if (targetProblem) {
+        return { ok: false, reason: `BAD_SUPPORT:${targetProblem}`, effectEvidence: { verified: true, changed: false, reasons: [`目标 ${block.name}、上方 ${above ?? '未加载'}；未发送使用动作`] } };
+      }
       if (this.mcData.blocksByName?.[item]) return await this.placeItemAgainst(item, block, check);
       if (/_boat$|_raft$/.test(item)) {
         // 放船/筏：船/筏是实体不是方块，服务器只认“右键用物品”（use_item）才落船，发 block_place（放方块）对它无效，
@@ -5698,4 +5703,30 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
     if (!this.ready || !text) return;
     try { this.bot.chat(safeChat(text)); } catch { /* ignore */ }
   }
+}
+
+/** 只能种在耕地上的作物物品；对其它方块右键服务器不会生效（堆肥桶除外）。 */
+const FARM_CROPS = new Set(['wheat_seeds', 'beetroot_seeds', 'melon_seeds', 'pumpkin_seeds', 'carrot', 'potato', 'torchflower_seeds', 'pitcher_pod']);
+/** 锄头能直接变成耕地的方块（粗泥/缠根泥土只会先变成泥土）。 */
+const TILLABLE = new Set(['dirt', 'grass_block', 'dirt_path']);
+const AIR_BLOCK = /^(air|cave_air|void_air)$/;
+
+/**
+ * 物品与右键目标在原版里确定不兼容时返回原因；兼容返回 null。
+ * 只描述目标前提，不替调用方选格子：种子/锄头对错目标发送也只会是 NO_EFFECT。
+ * above 未知（null）时不判定，交给服务器结果确认。
+ */
+export function itemBlockTargetProblem(item: string, target: string, above: string | null): string | null {
+  if (/_hoe$/.test(item)) {
+    if (target === 'farmland') return '目标已经是耕地';
+    if (!TILLABLE.has(target)) return `锄头只能把 ${[...TILLABLE].join('/')} 变成耕地，目标是 ${target}`;
+    if (above !== null && !AIR_BLOCK.test(above)) return `目标上方是 ${above}，不满足锄地要求的上方为空气（farm/till 会先清掉草，这一动作不会）`;
+    return null;
+  }
+  if (FARM_CROPS.has(item) && target !== 'composter') {
+    if (target !== 'farmland') return `种子只能种在耕地上，目标是 ${target}`;
+    if (above !== null && !AIR_BLOCK.test(above)) return `耕地上面已经有 ${above}，种不进去`;
+    return null;
+  }
+  return null;
 }

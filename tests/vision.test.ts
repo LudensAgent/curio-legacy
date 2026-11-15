@@ -104,6 +104,37 @@ test('记忆：转身后保留所见地点，重新看见方块消失才遗忘',
   assert.equal(vision.knownBlocks(['coal_ore'], 96).length, 0, '重新看见该格为空才遗忘');
 });
 
+test('最近看清过的普通方块也能按名字找到：耕地不属于资源/地表白名单', () => {
+  const { adapter, vision } = setup();
+  adapter.pitch = -0.7;
+  adapter.blocks.push({ name: 'farmland', pos: { x: 2, y: 64, z: 0 } });
+  vision.scan();
+  const found = vision.knownBlocks(['farmland'], 6);
+  assert.equal(found.length, 1, '刚看清的耕地应能按名字查回来');
+  assert.deepEqual(found[0]!.pos, { x: 2, y: 64, z: 0 });
+});
+
+test('刚操作过的格子（锄成耕地）不用再扫描也能按名字查到', () => {
+  const { adapter, vision } = setup();
+  adapter.blocks.push({ name: 'farmland', pos: { x: 0, y: 64, z: 0 } });
+  vision.expose({ x: 0, y: 64, z: 0 });
+  const found = vision.knownBlocks(['farmland'], 6);
+  assert.equal(found.length, 1, '操作后用当前世界状态记一条近期观察');
+});
+
+test('再次看清后方块改名：旧名不再返回，新名能查到（不把格子直接丢掉）', () => {
+  const { adapter, vision } = setup();
+  adapter.pitch = -0.7;
+  adapter.blocks.push({ name: 'oak_log', pos: { x: 2, y: 64, z: 0 } });
+  vision.scan();
+  assert.equal(vision.knownBlocks(['oak_log'], 6).length, 1);
+  adapter.blocks = adapter.blocks.map((b) => b.pos.x === 2 && b.pos.y === 64 && b.pos.z === 0 ? { ...b, name: 'farmland' } : b);
+  assert.equal(vision.knownBlocks(['oak_log'], 6).length, 0, '看见它已经不是橡木原木');
+  const renamed = vision.knownBlocks(['farmland'], 6);
+  assert.equal(renamed.length, 1, '改名后应能在新名字下找到');
+  assert.deepEqual(renamed[0]!.pos, { x: 2, y: 64, z: 0 });
+});
+
 test('实体：墙后的僵尸看不见；近处的能“听见”，远处的感知不到', () => {
   const { adapter, vision } = setup();
   for (let y = 64; y <= 68; y++) for (let z = -6; z <= 6; z++) adapter.blocks.push({ name: 'stone', pos: { x: 3, y, z } });

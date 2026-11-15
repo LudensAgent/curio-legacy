@@ -80,6 +80,8 @@ export interface Senses {
   rememberedWaypoint?(target: Vec3Like, maxDistance: number, excluded: Vec3Like[]): Vec3Like | null;
   /** 这一格认得出是什么：刚看见或之前亲眼见过的；没见过就 null（不透视） */
   recognizedAt?(pos: Vec3Like): string | null;
+  /** 刚操作/接触过的格子按当前世界状态记一条近期观察；不透视，也不替调用方选目标 */
+  expose?(pos: Vec3Like): string | null;
   /** 最近亲眼看见的某类生物的最后位置 */
   lastSighting?(match: (name: string) => boolean, maxAgeMs?: number): { id: number; name: string; pos: Vec3Like; ageMs: number } | null;
   /** 最近亲眼看见过、现在不在视野里的掉落物 */

@@ -240,6 +240,9 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
         return fail(code, `对着 ${target.name} 使用 ${args.item} 失败：${r.reason}${hint}`, { target: target.name, pos: target.pos, effectEvidence: r.effectEvidence });
       }
       const after = adapter.state().inventory.find((i) => i.name === args.item)?.count ?? 0;
+      // 右键确认过的目标按操作后的实际状态记一条近期观察：耕地/作物这类不在资源记忆白名单里，
+      // 不记的话下一次按名字查找还是找不到（尤其是站在上面、扫描射线照不到的脚格）。
+      ctx.senses.expose?.(target.pos);
       // 自己放下的工作台/熔炉记住位置，下次复用
       if (isStation(args.item) && r.placed) rememberStation(ctx, args.item, r.placed);
       const location = r.placed ? `，确认放置在 ${r.placed.x},${r.placed.y},${r.placed.z}（本次只放置这一块）` : '';
@@ -574,8 +577,8 @@ export const ride: Skill<{ direction?: string; to?: { x: number; z: number }; di
 /** 转头：朝一个方向（八方位，或 up/down）或者一格（xyz）看过去。扔东西、射箭、用东西都朝正看着的方向 */
 export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number } }> = {
   name: 'look',
-  description: '转头看向一个方向（N…NW、up 抬头、down 低头）或一格坐标；只转头不走。之后用 use_item（扔雪球、末影珍珠、鸡蛋）或 toss_item 就朝这边',
-  catalog: '{"dir"?:"N|NE|E|SE|S|SW|W|NW|up|down","xyz"?:[x,y,z]}：转头看向一个方向或一格；只转头不走（之后 use_item/toss_item 朝这边）',
+  description: '转头看向一个方向（N…NW、up 抬头、down 低头）或一格坐标；只转头不走。看坐标会回报那一格当前是什么；没看见就说没看见，旧记忆只作标注。之后用 use_item（扔雪球、末影珍珠、鸡蛋）或 toss_item 就朝这边',
+  catalog: '{"dir"?:"N|NE|E|SE|S|SW|W|NW|up|down","xyz"?:[x,y,z]}：转头看向一个方向或一格；只转头不走（之后 use_item/toss_item 朝这边）；看坐标会回报那一格现在是什么',
   argsDoc: '{"dir"?: "N|NE|E|SE|S|SW|W|NW|up|down", "xyz"?: [x,y,z] 或 {"x":0,"y":64,"z":0}}',
   timeoutMs: 3000,
   movement: false,
@@ -601,7 +604,15 @@ export const look: Skill<{ dir?: string; xyz?: { x: number; y: number; z: number
     } else if (args.dir === 'up' || args.dir === 'down') pitch = args.dir === 'up' ? Math.PI / 2 - 0.05 : -(Math.PI / 2 - 0.05);
     else { const [dx, dz] = DIRS[args.dir!]; yaw = yawOfDir(dx, dz); }
     await ctx.adapter.look(yaw, pitch, ctx.signal);
-    return ok(args.xyz ? `看向 (${args.xyz.x},${args.xyz.y},${args.xyz.z})` : `看向 ${args.dir}`);
+    if (!args.xyz) return ok(`看向 ${args.dir}`);
+    // 转头之后要能回答“那一格现在是什么”：坐标本身不是观察，旧记忆也不能替代当前观察。
+    const seen = ctx.senses.observeBlocks?.([args.xyz])[0];
+    const remembered = seen ? null : ctx.senses.recognizedAt?.(args.xyz) ?? null;
+    const atText = `(${args.xyz.x},${args.xyz.y},${args.xyz.z})`;
+    return ok(seen
+      ? `看向 ${atText}；看见 ${seen.name}`
+      : `看向 ${atText}；这一格没有当前可见的方块${remembered ? `（最近记得是 ${remembered}，旧记忆不能替代观察）` : ''}`,
+    { lookAt: args.xyz, ...(seen ? { seen: { name: seen.name, pos: seen.pos, properties: seen.properties } } : {}), ...(!seen && remembered ? { remembered } : {}) });
   },
 };
 

@@ -117,3 +117,19 @@ test('装水只选源方块：附近只有流动水时报没有源', async () =>
   assert.equal(r.failureCode, 'NOT_FOUND');
   assert.match(r.summary, /都是流动的/);
 });
+
+test('右键成功后在目标格记一条近期观察，下一次按名字查找不用再扫描', async () => {
+  const w = new FeedbackWorld();
+  w.inv.set('stone_hoe', 1);
+  w.setBlock({ x: 2, y: 63, z: 0 }, 'grass_block');
+  const exposed: Vec3Like[] = [];
+  const ctx = makeCtx(w, {
+    senses: {
+      knownBlocks: () => [{ name: 'grass_block', pos: { x: 2, y: 63, z: 0 }, dist: 2 }],
+      expose: (pos) => { exposed.push(pos); return 'farmland'; },
+    },
+  });
+  const r = await useItem.run(ctx, { item: 'stone_hoe', on: 'grass_block' });
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.deepEqual(exposed, [{ x: 2, y: 63, z: 0 }]);
+});

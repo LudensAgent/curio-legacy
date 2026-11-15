@@ -158,7 +158,7 @@ test('当前已看见 until 时直接按视野收工；读已完成会话不伪�
   assert.deepEqual(adapter.actions, []);
 });
 
-test('前方真实射线看到普通方块时也可作为 until，不要求它已进资源记忆', async (t) => {
+test('前方真实射线看到普通方块时也可作为 until（近期观察，不是资源记忆）', async (t) => {
   const { adapter, ctx } = voxelNavigationFixture(20);
   t.after(() => ctx.memory.close());
   const pos = { x: 4, y: 65, z: 0 };
@@ -166,7 +166,8 @@ test('前方真实射线看到普通方块时也可作为 until，不要求它�
   const senses = new Vision(adapter);
   senses.scan();
   assert.equal(senses.seenAt(pos), 'red_wool');
-  assert.deepEqual(senses.knownBlocks(['red_wool'], 96), []);
+  // 普通方块也会进 5 分钟的近期地表记录；它仍不是资源记忆（15 分钟、按名字限量）。
+  assert.deepEqual(senses.knownBlocks(['red_wool'], 96).map((b) => b.pos), [pos]);
   const result = await exploreToward.run({ ...ctx, senses }, argsOf({ direction: 'E', distance: 16, until: 'red_wool' }, adapter));
   assert.equal(result.data?.stopReason, 'UNTIL_SEEN');
   assert.deepEqual(result.data?.foundRef, { kind: 'block', pos });

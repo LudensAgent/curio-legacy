@@ -21,6 +21,16 @@ test('inventory stack knowledge is searchable and distinguishes slots from item 
   assert.ok(result.document.sources.some((source) => source.url === 'https://minecraft.wiki/w/Item'));
 });
 
+test('英文机制词只写在别名里也能定位文档；只有别名命中时给目录摘要，不硬选章节', () => {
+  const library = new KnowledgeBase('1.20.1');
+  const result = library.query({ query: 'hoe farmland grass block' });
+  assert.ok('matches' in result);
+  const hit = result.matches.find((match) => match.id === 'crop-farming');
+  assert.ok(hit, JSON.stringify(result.matches));
+  assert.equal(hit.section, undefined, '别名只定位文章，不把某个章节冒充成最相关');
+  assert.match(hit.excerpt, /耕地种植/);
+});
+
 function fixture(t: TestContext, documents: { id: string; title: string; aliases: string[]; version?: string; sources?: { url: string; title: string }[]; body: string }[]) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-knowledge-'));
   documents.forEach(({ body, version, sources, ...metadata }) => fs.writeFileSync(path.join(directory, `${metadata.id}.md`), `---\n${Object.entries({ ...metadata,

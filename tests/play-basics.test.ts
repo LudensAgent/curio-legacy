@@ -70,6 +70,12 @@ test('look 朝方向或坐标转头', async (t) => {
   assert.ok(fromArray.ok && fromObject.ok);
   assert.deepEqual(fromObject, fromArray);
   assert.deepEqual(SKILLS.look.validate((fromObject as { args: unknown }).args, w), fromObject);
+  // 看坐标要回报那一格现在是什么，而不是只说“看向坐标”。
+  w.blocks.push({ name: 'farmland', pos: { x: 3, y: 64, z: 0 } });
+  const looked = await SKILLS.look.run(ctx, { xyz: { x: 3, y: 64, z: 0 } });
+  assert.equal(looked.status, 'succeeded');
+  assert.match(looked.summary, /farmland/);
+  assert.deepEqual((looked.data as { seen?: { pos?: unknown } }).seen?.pos, { x: 3, y: 64, z: 0 });
   assert.ok(!SKILLS.look.validate({ xyz: { x: 3, y: 'up', z: 0 } }, w).ok);
   const { dive: diveSkill } = await import('../src/skills/actions.ts');
   const dive = diveSkill.validate({ xyz: [3, 60, 0] }, w);

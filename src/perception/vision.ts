@@ -241,6 +241,12 @@ function* sightSamples(pos: Vec3Like, boxes: readonly (readonly number[])[] | un
   }
 }
 export const RESOURCE_MEMORY_TTL_MS = 15 * 60_000;
+/** 最近看清过的地表（不分方块种类）保留时长与总量：够覆盖一段连续作业，又不会无限增长。 */
+export const RECENT_SURFACE_TTL_MS = 5 * 60_000;
+const RECENT_SURFACE_MAX = 4096;
+/** 一次按名字查询最多复核多少格（多名字共享这个上限，控制取证成本）。 */
+const KNOWN_QUERY_MAX = 600;
+const AIR_BLOCK = /^(air|cave_air|void_air)$/;
 /**
  * 每帧最多把这么多格视线证据写进共享空间记忆（近的先写）。已驻留的 Section 直接写入；只有已存盘
  * 未驻留的格才进共享会话的待载队列（上限 MAX_PENDING_OBSERVATIONS=256，所有写入方共用，超出记为缺口，
@@ -327,6 +333,11 @@ export class Vision {
   /** 本次扫描看到的值得注意的方块 */
   visibleNow = new Map<string, { name: string; pos: Vec3Like; dist: number }>();
   private visibleSurfaces = new Map<string, { name: string; pos: Vec3Like; at: number }>();
+  /**
+   * 最近看清过的地表格，不按资源/地表白名单筛：耕地、作物、门、台阶这类“不是资源但会被
+   * 使用或改变”的格子也要能按名字找回来。总量有上限，过期按 syncScope 的每秒清理。
+   */
+  private recentSurfaces = new Map<string, { name: string; pos: Vec3Like; at: number }>();
   composition: Record<string, number> = {};
   openness = { left: 0, center: 0, right: 0 };
   lastSweepAt = 0;
@@ -364,6 +375,7 @@ export class Vision {
       this.dropSightings.clear();
       this.visibleNow.clear();
       this.visibleSurfaces.clear();
+      this.recentSurfaces.clear();
       this.composition = {};
       this.openness = { left: 0, center: 0, right: 0 };
       this.lastScanAt = 0;
@@ -387,6 +399,11 @@ export class Vision {
           if (now - block.lastSeen <= RESOURCE_MEMORY_TTL_MS) break;
           this.forget(key);
         }
+      }
+      // 最近地表按最后看见排序（每次看见都重新 set 挪到队尾），队首过期就清。
+      for (const [key, surface] of this.recentSurfaces) {
+        if (now - surface.at <= RECENT_SURFACE_TTL_MS) break;
+        this.recentSurfaces.delete(key);
       }
     }
     return state;
@@ -521,6 +538,7 @@ export class Vision {
       const k = keyOf(x, y, z);
       const pos = { x, y, z };
       this.visibleSurfaces.set(k, { name, pos, at: now });
+      this.noteRecent(name, pos, now);
       if (!NOTABLE.has(name) && !GROUND.has(name)) return;
       visibleNow.set(k, { name, pos, dist });
       this.remember(k, name, pos, now);
@@ -733,6 +751,14 @@ export class Vision {
     return ok;
   }
 
+  /** 所有看清过的格都留一条短期记录：不是资源也能按名字找回来、改名时也能更新。 */
+  private noteRecent(name: string, pos: Vec3Like, now: number) {
+    const k = keyOf(pos.x, pos.y, pos.z);
+    this.recentSurfaces.delete(k);
+    this.recentSurfaces.set(k, { name, pos: { x: pos.x, y: pos.y, z: pos.z }, at: now });
+    if (this.recentSurfaces.size > RECENT_SURFACE_MAX) this.recentSurfaces.delete(this.recentSurfaces.keys().next().value!);
+  }
+
   private remember(k: string, name: string, pos: Vec3Like, now: number) {
     let lru = this.byName.get(name);
     if (lru === undefined) { lru = new Map(); this.byName.set(name, lru); }
@@ -874,6 +900,7 @@ export class Vision {
       if (!name) continue;
       out.push({ name, properties: { ...block?.properties }, stateComplete: block != null, pos: { ...pos }, worldId: state.worldId, sessionId: state.sessionId,
         dimension: state.dim, observationId: state.observationId, observedAt: now, source: 'vision' });
+      if (!AIR_BLOCK.test(name)) this.noteRecent(name, pos, now);
     }
     // 合法视锥结果是共享地图的唯一写入源；空批次不产生任何写入/生命周期报告。
     // 同步调用：eager 直接写入；manual 对 resident/首观测同步写入，未驻留的已保存
@@ -884,25 +911,43 @@ export class Vision {
   }
 
   /**
-   * 已知的方块位置：当前看得见或曾经看见过（15 分钟内）。
-   * 只有重新亲眼看见该格已改变才遗忘；视野外或遮挡后的变化不能更新记忆。
+   * 已知的方块位置：当前看得见或曾经看见过（资源记忆 15 分钟 / 近期地表 5 分钟）。
+   * 只有重新亲眼看见该格已改变才遗忘或改名；视野外或遮挡后的变化不能更新记忆。
    */
   knownBlocks(names: string[], maxDist: number): BlockHit[] {
     const s = this.syncScope();
     if (!s.observationReady) return [];
     const set = new Set(names);
-    const candidates = [...this.known.entries()].filter(([, value]) => set.has(value.name))
-      .map(([key, value]) => ({ key, value, dist: Math.hypot(value.pos.x - s.pos.x, value.pos.y - s.pos.y, value.pos.z - s.pos.z) }))
-      .filter((candidate) => candidate.dist <= maxDist);
+    const byKey = new Map<string, { key: string; name: string; pos: Vec3Like; dist: number }>();
+    const consider = (key: string, value: { name: string; pos: Vec3Like }) => {
+      if (!set.has(value.name)) return;
+      const dist = Math.hypot(value.pos.x - s.pos.x, value.pos.y - s.pos.y, value.pos.z - s.pos.z);
+      if (dist > maxDist || byKey.has(key)) return;
+      byKey.set(key, { key, name: value.name, pos: value.pos, dist });
+    };
+    // 最近看清过的地表不分资源/地表白名单：耕地、作物这类也会被名字查找用到。
+    // 先收近期记录，同一格两个名字并存时以最近看清的为准。
+    for (const [key, value] of this.recentSurfaces) consider(key, value);
+    for (const [key, value] of this.known) consider(key, value);
+    const candidates = [...byKey.values()].sort((a, b) => a.dist - b.dist).slice(0, KNOWN_QUERY_MAX);
     const probe = newSightProbeCache();
     const observed = new Map(Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
-      this.observeBlocks(candidates.slice(index * 32, (index + 1) * 32).map((candidate) => candidate.value.pos), probe))
+      this.observeBlocks(candidates.slice(index * 32, (index + 1) * 32).map((candidate) => candidate.pos), probe))
       .flat().map((block) => [keyOf(block.pos.x, block.pos.y, block.pos.z), block.name]));
-    return candidates.filter(({ key, value }) => {
+    const now = Date.now();
+    return candidates.filter(({ key, name, pos }) => {
       const current = observed.get(key);
-      if (current && current !== value.name) { this.forget(key); return false; }
-      return true;
-    }).map(({ value, dist }) => ({ name: value.name, pos: value.pos, dist })).sort((a, b) => a.dist - b.dist);
+      if (!current || current === name) return true;
+      // 亲眼看见它变了：按新名字留下，而不是让新旧名字都查不到。
+      if (AIR_BLOCK.test(current)) {
+        this.forget(key);
+        this.recentSurfaces.delete(key);
+      } else {
+        this.noteRecent(current, pos, now);
+        if (this.known.has(key)) this.remember(key, current, pos, now);
+      }
+      return false;
+    }).map(({ name, pos, dist }) => ({ name, pos, dist })).sort((a, b) => a.dist - b.dist);
   }
 
   /** 记忆整体标过期（死亡、中断、暂停恢复、换会话）后，“已写过”的记录失效：身边的格下一帧立即重写。 */
@@ -1027,7 +1072,9 @@ export class Vision {
     const seen = this.seenAt(pos);
     if (seen) return seen;
     const k = this.known.get(keyOf(pos.x, pos.y, pos.z));
-    return k && Date.now() - k.lastSeen <= RESOURCE_MEMORY_TTL_MS ? k.name : null;
+    if (k && Date.now() - k.lastSeen <= RESOURCE_MEMORY_TTL_MS) return k.name;
+    const recent = this.recentSurfaces.get(keyOf(pos.x, pos.y, pos.z));
+    return recent && Date.now() - recent.at <= RECENT_SURFACE_TTL_MS ? recent.name : null;
   }
 
   /** 刚挖开一格后，这一格暴露出的邻面是贴脸可见的（不用转头、不用视线确认）：把值得注意的方块直接记进视野记忆。返回记下的方块名。 */
@@ -1036,9 +1083,10 @@ export class Vision {
     if (!state.observationReady) return null;
     const name = this.adapter.blockStateAt?.(pos)?.name ?? this.adapter.blockOptics(pos.x, pos.y, pos.z)?.name;
     if (!name || name === 'air' || name === 'cave_air' || name === 'void_air') return null;
-    if (!NOTABLE.has(name) && !GROUND.has(name)) return null;
     const now = Date.now();
     const k = keyOf(pos.x, pos.y, pos.z);
+    this.noteRecent(name, pos, now);
+    if (!NOTABLE.has(name) && !GROUND.has(name)) return null;
     this.visibleSurfaces.set(k, { name, pos: { ...pos }, at: now });
     const dist = Math.round(Math.hypot(pos.x + 0.5 - state.pos.x, pos.y + 0.5 - state.pos.y, pos.z + 0.5 - state.pos.z));
     if (!this.visibleNow.has(k)) this.visibleNow.set(k, { name, pos: { ...pos }, dist });

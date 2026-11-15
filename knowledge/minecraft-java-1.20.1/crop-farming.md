@@ -4,15 +4,15 @@ title: "耕地、作物生长与收获"
 kind: "mechanic"
 edition: "java"
 versions: ["1.20.1"]
-aliases: ["种植", "农田", "耕地", "灌溉", "成熟", "小麦种子", "胡萝卜", "马铃薯", "甜菜", "骨粉", "farmland", "wheat_seeds", "carrot", "potato", "beetroot_seeds", "bone_meal"]
+aliases: ["种植", "农田", "耕地", "麦田", "灌溉", "成熟", "小麦种子", "胡萝卜", "马铃薯", "甜菜", "骨粉", "锄头", "踩踏", "干燥", "变回", "泥土", "farmland", "wheat_seeds", "carrot", "potato", "beetroot_seeds", "bone_meal", "hoe", "till", "grass_block", "trample"]
 sources: [{"url":"https://minecraft.wiki/w/Farmland","title":"Minecraft Wiki: Farmland"},{"url":"https://minecraft.wiki/w/Block_light","title":"Minecraft Wiki: Light"},{"url":"https://minecraft.wiki/w/Tutorial%3ACrop_farming","title":"Minecraft Wiki: Tutorial:Crop farming"},{"url":"https://minecraft.wiki/w/Bonemeal","title":"Minecraft Wiki: Bone Meal"},{"url":"https://minecraft.wiki/w/Potatoes","title":"Minecraft Wiki: Potato"}]
 versionNote: "只说明 Java 1.20.1 已有的小麦、胡萝卜、马铃薯与甜菜；当前来源含后续植物，本篇未纳入。作物数量与等待时长不作为保证。未取得来源修订号。"
-reviewedAt: "2026-10-28"
+reviewedAt: "2026-11-15"
 ---
 
 ## planting | 耕地种植、作物材料与水源位置
 
-这些作物需要耕地，小麦用小麦种子种植，甜菜用甜菜种子；胡萝卜与马铃薯直接以自身种植。收获的小麦不能当种子种回去，烤马铃薯与毒马铃薯也不能代替普通马铃薯种植。锄头能把合适的泥土类地面变成耕地。对一块耕地，水位于其同层或高一层、水平各方向四格内即可湿润它，淋到雨也能湿润；干燥且没有种作物的耕地可能变回泥土。湿润影响生长条件，不等于作物已经成熟。[耕地](https://minecraft.wiki/w/Farmland)、[作物材料](https://minecraft.wiki/w/Tutorial%3ACrop_farming)。
+这些作物需要耕地，小麦用小麦种子种植，甜菜用甜菜种子；胡萝卜与马铃薯直接以自身种植。收获的小麦不能当种子种回去，烤马铃薯与毒马铃薯也不能代替普通马铃薯种植。锄头对泥土、草方块、土径右键可把它们直接变成耕地；目标格上方必须是空气，上方有草、蕨、雪等时不生效。粗泥和缠根泥土被锄头右键后先变成泥土，再一次右键才成为耕地。种子只能点在耕地上，且种下的位置（耕地上方一格）必须是空气；对泥土、草方块或已有作物的耕地点种子不生效。对一块耕地，水位于其同层或高一层、水平各方向四格内即可湿润它，淋到雨也能湿润；干燥且没有种作物的耕地可能变回泥土。湿润影响生长条件，不等于作物已经成熟。[耕地](https://minecraft.wiki/w/Farmland)、[作物材料](https://minecraft.wiki/w/Tutorial%3ACrop_farming)。
 
 ## growth | 光照、随机生长与骨粉
 
@@ -20,4 +20,4 @@ reviewedAt: "2026-10-28"
 
 ## harvest | 成熟状态、掉落与再次种植
 
-作物可以提前打掉，但未成熟时通常只能回收种植材料，无法得到成熟收获。成熟的小麦产出小麦与种子，胡萝卜和马铃薯得到可再次种植的作物，甜菜得到甜菜与种子；产量受具体掉落规则影响。踩踏或改变承托地块也可能破坏耕地和作物。收下成品不会自动补种；不同作物还可用于[动物繁殖](knowledge:animal-husbandry#food-and-following)、烹饪或交易。[种植与收获](https://minecraft.wiki/w/Tutorial%3ACrop_farming)、[马铃薯](https://minecraft.wiki/w/Potatoes)。
+作物可以提前打掉，但未成熟时通常只能回收种植材料，无法得到成熟收获。成熟的小麦产出小麦与种子，胡萝卜和马铃薯得到可再次种植的作物，甜菜得到甜菜与种子；产量受具体掉落规则影响。耕地会在这些情况下变回泥土并破坏上方作物：没有水且没有种作物时随机刻回退；上方被放置完整方块；玩家或生物从上方落到耕地上（下落超过半格即踩踏）。收下成品不会自动补种；不同作物还可用于[动物繁殖](knowledge:animal-husbandry#food-and-following)、烹饪或交易。[耕地](https://minecraft.wiki/w/Farmland)、[种植与收获](https://minecraft.wiki/w/Tutorial%3ACrop_farming)、[马铃薯](https://minecraft.wiki/w/Potatoes)。
