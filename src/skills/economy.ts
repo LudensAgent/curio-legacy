@@ -149,6 +149,11 @@ const parseStoreSpecs = (v: unknown): StoreSpec[] | null => {
 const nameMatch = (pattern: string, name: string) => pattern.includes('*') ? new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`).test(name) : pattern === name;
 
 const CONTAINERS = ['chest', 'trapped_chest', 'barrel', 'shulker_box', ...['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black'].map((color) => `${color}_shulker_box`)];
+/** 熔炉类工作站：有独立取物入口，不是箱子。 */
+const FURNACE_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker']);
+const bare = (name: string) => name.replace(/^minecraft:/, '');
+const furnaceTargetHint = (name: string, pos: Vec3Like) =>
+  `选定位置当前是 ${bare(name)}，它是有独立取物入口的熔炉类工作站，不是箱子；take_items/store_items 只处理箱子/木桶/潜影盒，未改选，也没有把这次当成“容器消失”，熔炉记录仍保留。熔炉产物/剩料用 collect_furnace {"at":${JSON.stringify(pos)}}；要看/操作界面用 use_gui {"target":${JSON.stringify(pos)}}。`;
 type ContainerTarget = string | Vec3Like;
 const posKey = (pos: Vec3Like) => `${pos.x},${pos.y},${pos.z}`;
 
@@ -238,7 +243,11 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
     if (matches.length !== 1) return { ok: false as const, result: fail('BAD_ARGS', 'target 需要明确的容器地标 ID 或坐标；同名多个容器不能自动代选', { candidates: containerCandidates(ctx) }) };
     ctx.senses.refresh();
     const current = ctx.senses.observeBlocks?.([matches[0].pos])[0];
-    if (current && !CONTAINERS.includes(current.name)) {
+    if (current && !CONTAINERS.includes(bare(current.name))) {
+      if (FURNACE_BLOCKS.has(bare(current.name))) {
+        forgetObservedContainer(ctx, matches[0].pos);
+        return { ok: false as const, result: fail('BAD_ARGS', furnaceTargetHint(current.name, matches[0].pos), { candidates: containerCandidates(ctx) }) };
+      }
       forgetObservedContainer(ctx, matches[0].pos);
       return { ok: false as const, result: fail('TARGET_GONE', `选定地点亲眼看见已是 ${current.name}，忘掉已失效的容器记忆；未改选其他容器${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx) }) };
     }
@@ -254,7 +263,11 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
       : `离你约 ${dist} 格，转头看仍看不见（可能被遮挡或未加载）`;
     return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 navigate_to 过去、或改选看得见的容器再存${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
   }
-  if (!CONTAINERS.includes(observed.name)) {
+  if (!CONTAINERS.includes(bare(observed.name))) {
+    if (FURNACE_BLOCKS.has(bare(observed.name))) {
+      forgetObservedContainer(ctx, pos);
+      return { ok: false as const, result: fail('BAD_ARGS', furnaceTargetHint(observed.name, pos), { candidates: containerCandidates(ctx) }) };
+    }
     forgetObservedContainer(ctx, pos);
     return { ok: false as const, result: fail('TARGET_GONE', `选定位置当前是 ${observed.name}，忘掉已失效的容器记忆；未改选其他容器${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx) }) };
   }
@@ -340,8 +353,8 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
 
 export const takeItems: Skill<{ item: string; count: number; target?: ContainerTarget }> = {
   name: 'take_items',
-  description: '会自己走到已看见的容器旁（不必先 go_near，远处/没看见的先 navigate_to）。从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
-  argsDoc: '{"item":"<物品名>","count"?:1-64,"target"?:{x,y,z}|"容器地标ID"}；未指定target时只列线索，不执行存取',
+  description: '会自己走到已看见的箱子/木桶/潜影盒旁（不必先 go_near，远处/没看见的先 navigate_to）。从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。熔炉不是箱子，产物/剩料用 collect_furnace。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
+  argsDoc: '{"item":"<物品名>","count"?:1-64,"target"?:{x,y,z}|"容器地标ID"}；未指定target时只列线索，不执行存取；target 只能是箱子/木桶/潜影盒，熔炉用 collect_furnace',
   timeoutMs: 90000,
   movement: true,
   outcomeBoundary: true,

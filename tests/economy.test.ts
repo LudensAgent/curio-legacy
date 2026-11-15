@@ -146,6 +146,21 @@ test('仓储：存进箱子（工具留身上），再取出来', async () => {
   assert.equal(a.inv.get('raw_copper'), 4);
 });
 
+test('take_items 指到熔炉：不当作消失的箱子，明确指向 collect_furnace', async (t) => {
+  const a = new FakeAdapter(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  memory.setWorld(a.state().worldId);
+  const target = { x: 2, y: 64, z: 0 };
+  a.blocks.push({ name: 'furnace', pos: target });
+  const { o } = await runSkill(a, 'take_items', { item: 'iron_ingot', count: 1, target }, memory);
+  assert.equal(o.result.status, 'failed');
+  assert.equal(o.result.failureCode, 'BAD_ARGS');
+  assert.match(o.result.summary, /collect_furnace/);
+  assert.match(o.result.summary, /不是箱子/);
+  assert.doesNotMatch(o.result.summary, /忘掉已失效的容器记忆/);
+  assert.equal(a.actions.length, 0, '没有把熔炉当箱子打开或移动到别处');
+});
+
 test('农业：开垦并播种；成熟后收割补种', async () => {
   const a = new FakeAdapter();
   a.inv.set('wooden_hoe', 1);

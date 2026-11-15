@@ -68,6 +68,16 @@ test('公开目录区分直线施工与共享体素导航，不再宣传旧寻�
   assert.match(explore, /只接受声明的参数/);
 });
 
+test('熔炉产物走 collect_furnace，take_items 明确只处理箱子类容器', () => {
+  const catalog = movesCatalog(28);
+  assert.match(catalog, /^- collect_furnace /m);
+  assert.match(deliberateSystem(''), /熔炉产物\/剩料 → collect_furnace/);
+  assert.match(deliberateSystem(''), /熔炉里的成品\/剩料用 collect_furnace/);
+  const take = moveDetails(['take_items']);
+  assert.match(take, /熔炉不是箱子.*collect_furnace/);
+  assert.match(take, /target 只能是箱子\/木桶\/潜影盒/);
+});
+
 test('the directory carries concrete usage for non-core actions and the query does not silently drop names', () => {
   const directory = moveDirectory();
   assert.match(directory, /常用动作.*travel_to/);

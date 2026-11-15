@@ -119,17 +119,25 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
       const r = await adapter.useGui(target, args.ops, signal, { onContainer: rememberContainer });
       if (!recorded && r.container) rememberContainer(r.container);
       // 熔炉类：关掉后里面的东西留着，记下来；取空了也留下“已确认空”的记录，避免下次又以为里面还有。
-      if (typeof pos === 'object' && 'x' in pos && r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
-        const at = (i: number) => { const x = r.view!.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };
-        ctx.memory.setFurnace({ dim: adapter.state().dim, pos, block: r.view.type, input: at(0), output: at(2), fuel: at(1), burning: false });
+      const furnacePos = typeof pos === 'object' && 'x' in pos && 'y' in pos && 'z' in pos ? pos : undefined;
+      const furnaceView = furnacePos && r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)
+        ? r.view : undefined;
+      if (furnaceView && furnacePos) {
+        const slotAt = (i: number) => { const x = furnaceView.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };
+        ctx.memory.setFurnace({ dim: adapter.state().dim, pos: furnacePos, block: furnaceView.type, input: slotAt(0), output: slotAt(2), fuel: slotAt(1), burning: false });
       }
       const view = showView(r.view);
+      const output = furnaceView?.slots.find((slot) => slot.role === 'output' && slot.name && slot.count > 0)
+        ?? furnaceView?.slots.find((slot) => slot.slot === 2 && slot.name && slot.count > 0);
+      const takeHint = output && furnacePos
+        ? `产物格 ${output.slot} 还有 ${output.name}×${output.count}，没有取出；要取回用 collect_furnace {"at":{"x":${furnacePos.x},"y":${furnacePos.y},"z":${furnacePos.z}}} 或 use_gui {"target":{"x":${furnacePos.x},"y":${furnacePos.y},"z":${furnacePos.z}},"ops":[{"take":{"slot":${output.slot}}}]}`
+        : '';
       const did = r.done.length ? `做了：${r.done.join('，')}。` : '';
       if (!r.ok) {
         const code = r.reason?.startsWith('NO_ITEM') ? 'MISSING_MATERIALS' : r.reason?.startsWith('NOT_OPENABLE') ? 'BAD_ARGS' : 'ERROR';
-        return fail(code, `界面操作没做完：${r.reason}。${did}${view}`, { pos, done: r.done, view: r.view });
+        return fail(code, `界面操作没做完：${r.reason}。${did}${view}${takeHint ? `；${takeHint}` : ''}`, { pos, done: r.done, view: r.view });
       }
-      return ok(`${did}${view}${args.ops.length ? '' : '（只看了一眼，没有动）'}；窗口已关闭，工作站输入是否保留取决于该界面的游戏规则`, { target, done: r.done, view: r.view });
+      return ok(`${did}${view}${takeHint ? `；${takeHint}` : ''}${args.ops.length ? '' : '（只看了一眼，没有动）'}；窗口已关闭，工作站输入是否保留取决于该界面的游戏规则`, { target, done: r.done, view: r.view });
     } catch (e) {
       if (isAbort(e)) throw e;
       return fail(codeFromError(e), `界面操作出错：${(e as Error).message}`);

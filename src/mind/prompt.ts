@@ -140,7 +140,7 @@ export interface MindContext {
  * 例外：spatial_extrema 是一次只读到访/最深点查询，参数少且直接支撑提示词里的到访覆盖事实，
  * 放进核心目录是为了让 Agent 知道“可以查更大范围”，不是因为它高频。
  */
-export const COMMON_MOVES = ['advance', 'travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'spatial_extrema', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
+export const COMMON_MOVES = ['advance', 'travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'spatial_extrema', 'craft', 'smelt', 'collect_furnace', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
 
 /**
  * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
@@ -240,7 +240,7 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）","outcome_id":"po_…（可选：推进哪项计划成果）","method_id":"pm_…（可选：采用哪条计划做法）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
-取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
+取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。熔炉里的成品/剩料用 collect_furnace，不要排 take_items 或只开 use_gui 看一眼。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
 operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304），是需求不是已取得物资；activity/next/methods 里写的物资同样只是需求，不自动采集/制作/取物，换 method 不清空未完成 needs（除非明确重估了目标或需求）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
@@ -289,7 +289,7 @@ const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resol
 - 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
 - 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工；stairs/stairs_up 只用于上下层，同层找矿/开平巷用 mode:"tunnel"，不写 mode 默认 stairs；停在具体格时先同方向补支撑/填方块，别每段换方向；不负责绕路去某处）
 - 只有需要精确到相邻某一格（建筑、挖放、贴边、指定材料）才用 move_step；普通走路优先 advance。改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
-- 站到看见过/记得的附近目标旁 → approach_visible；容器/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）
+- 站到看见过/记得的附近目标旁 → approach_visible；箱子/木桶/潜影盒/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；熔炉产物/剩料 → collect_furnace {"at":{x,y,z}}，take_items 只处理箱子/木桶/潜影盒
 - 要到一个确切的格或精确连续脚位 → navigate_to
 - 普通小台阶/小落差由 advance 连续处理；descend_to 只给 advance 无法安全处理的明确下落（更大落差、水里、或需要先看落点）
 移动回执带 sessionId；普通短移动通常一次完成，只有回执明确说预算/超时停下、要接着走完原方向或原目标时才原样传回。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖，到过的区块也不等于搜过——隧道里只看得见沿途；段后按实测位置重新判断。
@@ -306,7 +306,7 @@ const DELIBERATE_MODE = `【每次这样想】
 const CHOOSE = `【选动作】
 - 普通朝一个方向走一段 → advance；去某处/找没见过的东西 → 按【走到哪】选；look_around 只看当前视野，explore_toward 才改变位置（until 在本轮视野看见就停）；拿看得见的方块 → gather；精确到身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
-- 从箱子取/存东西 → 先 find_item {"item":"…","count":要几个} 查它在哪些箱子、哪只够用，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
+- 从箱子取/存东西 → 先 find_item {"item":"…","count":要几个} 查它在哪些箱子、哪只够用，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）；熔炉里的成品/剩料用 collect_furnace {"at":{"x":…,"y":…,"z":…}}，不要用 take_items（它只处理箱子/木桶/潜影盒）
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与地形改动写进 steps。
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}再 build；简单功能设施用基础动作或 spec.design
@@ -1174,7 +1174,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实。旧台阶的边缘站姿按身体足印判支撑，不再因为脚底中心是空就整条不通；断口/大落差仍需现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在。熔炉的「空（已确认没有可取的东西）」或「空（只剩燃料 …）」是最近一次打开/取物时的状态；之后没有新的烧炼或取物记录时，它仍是最近一次观察；旧教训只说明当时要检查，不证明现在还有原料/产物；只有写了原料/产物才表示可能还有' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实。旧台阶的边缘站姿按身体足印判支撑，不再因为脚底中心是空就整条不通；断口/大落差仍需现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在。熔炉的「空（已确认没有可取的东西）」或「空（只剩燃料 …）」是最近一次打开/取物时的状态；之后没有新的烧炼或取物记录时，它仍是最近一次观察；旧教训只说明当时要检查，不证明现在还有原料/产物；只有写了原料/产物才表示可能还有；熔炉产物/剩料用 collect_furnace，不要用 take_items' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),
