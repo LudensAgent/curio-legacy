@@ -63,7 +63,7 @@ test('公开目录区分直线施工与共享体素导航，不再宣传旧寻�
   assert.match(travel, /只接受 to\/range\/timeoutMs\/sessionId/);
   assert.doesNotMatch(travel, /allowDig|allowPlace|allowTower|allowSwim|allowHazard|sprint|\btool\b|\bvia\b/);
   const explore = moveDetails(['explore_toward']);
-  assert.match(explore, /沿你指定的 N\/E\/S\/W 方向按共享 VoxelMap 三维路线推进/);
+  assert.match(explore, /沿你指定的八方向（N\/NE\/E\/SE\/S\/SW\/W\/NW）按共享 VoxelMap 三维路线推进/);
   assert.match(explore, /原方向、距离与横向范围冻结/);
   assert.match(explore, /只接受声明的参数/);
 });

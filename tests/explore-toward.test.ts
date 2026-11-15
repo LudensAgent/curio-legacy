@@ -14,13 +14,18 @@ const argsOf = (raw: unknown, adapter: FakeAdapter) => {
   return result.args;
 };
 
-test('方向探索保留距离，明确拒绝不支持的对角/施工能力与未知参数', () => {
+test('方向探索保留距离并接受八方向，明确拒绝施工开关与未知参数', () => {
   const adapter = new FakeAdapter();
   const args = argsOf({ direction: 'E', distance: 512 }, adapter);
   assert.equal(args.distance, 512);
   assert.deepEqual(exploreToward.validate(args, adapter), { ok: true, args });
+  for (const direction of ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'] as const) {
+    const diagonal = argsOf({ direction, distance: 40 }, adapter);
+    assert.equal(diagonal.direction, direction);
+    assert.deepEqual(exploreToward.validate(diagonal, adapter), { ok: true, args: diagonal });
+  }
   for (const request of [
-    { direction: 'NE', distance: 40 }, { direction: 'E', distance: 600 },
+    { direction: 'E', distance: 600 }, { direction: 'UP', distance: 40 },
     { direction: 'E', distance: 40, allowDig: true }, { direction: 'E', distance: 40, allowDig: false },
     { direction: 'E', distance: 40, allowSwim: false }, { direction: 'E', distance: 40, tool: 'stone_pickaxe' },
     { direction: 'E', distance: 40, via: 'auto' }, { direction: 'E', distance: 40, avoid: [] },
@@ -28,6 +33,17 @@ test('方向探索保留距离，明确拒绝不支持的对角/施工能力与�
   ]) assert.equal(exploreToward.validate(request, adapter).ok, false, JSON.stringify(request));
   assert.equal(exploreToward.validate({ direction: 'E', distance: 40, make: false }, adapter).ok, true, '通用 make 不应被当作未知参数');
 });
+
+/** 把窄走廊扩成开阔地面，用于对角方向探索的端到端测试。 */
+function widenWalkable(fixture: ReturnType<typeof voxelNavigationFixture>, maxZ = 24) {
+  const { adapter, map } = fixture;
+  const state = adapter.state();
+  let sequence = 1_000_000;
+  for (let x = -1; x <= 40; x++) for (let z = -maxZ; z <= maxZ; z++) for (let y = 63; y <= 65; y++) {
+    map.observe({ worldId: state.worldId, dim: state.dim, sessionId: state.sessionId, observedAt: Date.now(), sequence: ++sequence,
+      source: 'vision', evidence: 'seen', stateComplete: true, state: { name: y === 63 ? 'minecraft:stone' : 'minecraft:air', properties: {} }, pos: { x, y, z } });
+  }
+}
 
 /** 一条先下降 10 格再走平的隧道：地表搜索如果不限制下降，就会沿它进洞。 */
 function descendingTunnelFixture() {
@@ -102,6 +118,17 @@ test('方向探索跨四个规划窗口沿冻结方向推进 64 格，途中不�
   assert.equal((result.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 64);
   assert.equal(scan.mock.callCount(), 0);
   assert.ok(adapter.actions.every((action) => !/^moveTo:(xz|near|advance)/.test(action)));
+});
+
+test('对角方向探索沿冻结 bearing 推进，不要求模型改写成正交方向', async (t) => {
+  const fixture = voxelNavigationFixture(40);
+  widenWalkable(fixture);
+  t.after(() => fixture.ctx.memory.close());
+  const result = await exploreToward.run(fixture.ctx, argsOf({ direction: 'NE', distance: 16, segment: 16 }, fixture.adapter));
+  assert.equal(result.status, 'succeeded', result.summary);
+  const progress = result.data?.progress as { along: number; lateral: number };
+  assert.ok(progress.along >= 15.9, `沿 NE 实测 ${progress.along}`);
+  assert.ok(fixture.adapter.pos.x > 8 && fixture.adapter.pos.z < -8, JSON.stringify(fixture.adapter.pos));
 });
 
 test('until 在行走中首次亲眼看到时停步；前视帧中的旧候选须重新可见', async (t) => {
