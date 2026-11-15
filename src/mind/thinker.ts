@@ -39,7 +39,7 @@ const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
  * Mind 用它决定前景思考的档位，Thinker 用它拒绝在思考中途升级为更慢的一轮。
  */
 export const LOW_AIR_OXYGEN = 10;
-import { ACTIVITY_KINDS, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision, type NextDraft } from './types.ts';
+import { ACTIVITY_KINDS, AGENDA_NOTE_MAX, DECISION_KINDS, type ActivityDraft, type ActivityKind, type ActivityStep, type Consolidation, type DecisionKind, type Habits, type MindDecision, type NextDraft } from './types.ts';
 
 /** 无效决定重试时把已查到的资料压成一小段，提醒模型不要重复查询。 */
 const knowledgeDigest = (result: string) => {
@@ -352,9 +352,13 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
   if (o.agenda && typeof o.agenda === 'object') {
     const a = o.agenda as Record<string, any>;
     agenda = {
-      add: (Array.isArray(a.add) ? a.add : []).slice(0, 4).map((x: any) => ({ text: str(typeof x === 'string' ? x : x?.text, 100),
-        kind: (['goal', 'idea', 'question'].includes(x?.kind) ? x.kind : 'goal') as 'goal' | 'idea' | 'question',
-        horizon: (x?.horizon === 'someday' ? 'someday' : 'today') as 'today' | 'someday' }))
+      add: (Array.isArray(a.add) ? a.add : []).slice(0, 4).map((x: any) => {
+        const note = str(x?.note, AGENDA_NOTE_MAX);
+        return { text: str(typeof x === 'string' ? x : x?.text, 100),
+          kind: (['goal', 'idea', 'question'].includes(x?.kind) ? x.kind : 'goal') as 'goal' | 'idea' | 'question',
+          horizon: (x?.horizon === 'someday' ? 'someday' : 'today') as 'today' | 'someday',
+          ...(note ? { note } : {}) };
+      })
         .filter((x: { text: string }) => x.text),
       done: (Array.isArray(a.done) ? a.done : []).filter((x: unknown) => typeof x === 'string').slice(0, 6),
       drop: (Array.isArray(a.drop) ? a.drop : []).filter((x: unknown) => typeof x === 'string').slice(0, 6),
@@ -367,7 +371,14 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ? (str(learnedRaw.revise, 80) && typeof learnedRaw.text === 'string' && cleanLesson(learnedRaw.text)
       ? { revise: str(learnedRaw.revise, 80), text: cleanLesson(learnedRaw.text) } : undefined)
     : typeof learnedRaw === 'string' ? cleanLesson(learnedRaw) || undefined : undefined;
-  const verdict = ['supported', 'refuted', 'unclear'].includes(o.experiment_result) ? o.experiment_result as 'supported' | 'refuted' | 'unclear' : undefined;
+  const rawResult = o.experiment_result;
+  const resultStatus = (v: unknown) => ['supported', 'refuted', 'unclear'].includes(String(v)) ? v as 'supported' | 'refuted' | 'unclear' : undefined;
+  const verdict = resultStatus(rawResult);
+  const settlementId = rawResult && typeof rawResult === 'object' ? str((rawResult as Record<string, unknown>).id, 20) : '';
+  const settlementStatus = rawResult && typeof rawResult === 'object' ? resultStatus((rawResult as Record<string, unknown>).status) : undefined;
+  const settlementEvidence = rawResult && typeof rawResult === 'object' ? str((rawResult as Record<string, unknown>).evidence, 160) : '';
+  const experimentSettlement = settlementId && /^x_/.test(settlementId) && settlementStatus
+    ? { id: settlementId, status: settlementStatus, ...(settlementEvidence ? { evidence: settlementEvidence } : {}) } : undefined;
   if (kind === 'experiment' && !hypothesis) notes.push('experiment 没写 hypothesis，这次只当普通尝试');
   return {
     kind, monologue, notes,
@@ -375,7 +386,7 @@ export function parseDecision(raw: unknown, adapter: GameAdapter, memory: WorldM
     ...(activity ? { activity } : {}), ...(next ? { next } : {}), ...(agenda ? { agenda } : {}),
     ...(learned ? { learned } : {}),
     ...(hypothesis ? { hypothesis } : {}),
-    ...(verdict ? { verdict } : {}),
+    ...(verdict ? { verdict } : {}), ...(experimentSettlement ? { experimentSettlement } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}),
     ...(str(o.liked, 60) ? { liked: str(o.liked, 60) } : {}),
     ...(parseHabits(o.habits) ? { habits: parseHabits(o.habits)! } : {}),
@@ -892,7 +903,8 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
   const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && (typeof sk.body === 'string' && sk.body.trim().length >= 20 || executable)
     ? { name: sk.name.slice(0, 41), description: sk.description.slice(0, 200), body: typeof sk.body === 'string' ? sk.body.slice(0, 6000) : '', ...(executable ? { raw: sk } : {}) } : undefined;
   const agendaAdd = (Array.isArray(o.agenda_add) ? o.agenda_add : []).map((a: any) => typeof a === 'string' ? { text: a } : a)
-    .map((a: any) => ({ text: str(a?.text, 60), kind: a?.kind === 'goal' ? 'goal' as const : 'idea' as const, horizon: a?.horizon === 'someday' ? 'someday' as const : 'today' as const }))
+    .map((a: any) => ({ text: str(a?.text, 60), kind: a?.kind === 'goal' ? 'goal' as const : 'idea' as const, horizon: a?.horizon === 'someday' ? 'someday' as const : 'today' as const,
+      ...(str(a?.note, 80) ? { note: str(a?.note, 80) } : {}) }))
     .filter((a: { text: string }) => a.text.length >= 4).slice(0, 3);
   return { rewrite, merge, drop, add, agendaDrop: ids(o.agenda_drop, agendaIds), ...(agendaAdd.length ? { agendaAdd } : {}), ...(skill ? { skill } : {}),
     ...(str(o.diary, 160) ? { diary: str(o.diary, 160) } : {}), ...(str(o.monologue, 160) ? { monologue: str(o.monologue, 160) } : {}) };

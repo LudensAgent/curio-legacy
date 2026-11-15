@@ -272,6 +272,9 @@ export interface ActivityRecord {
   stop?: { reason: string; detail?: string; boundaries?: unknown[]; failure?: string; searchFailure?: string | null };
 }
 
+/** 议程/实验来源摘要的存储上限：只存可复核的短句，不存推理过程。 */
+export const AGENDA_NOTE_MAX = 80;
+
 export interface AgendaItem {
   id: string;
   text: string;
@@ -329,6 +332,8 @@ export interface Experiment {
   activityId: string;
   status: 'running' | 'supported' | 'refuted' | 'unclear';
   evidence?: string;
+  /** 开始验证时正在做的那段活（活动标题的快照）；是验证场景，不是问题最初来源，也不保存推理过程 */
+  source?: string;
   at: number;
 }
 
@@ -357,7 +362,7 @@ export interface Consolidation {
   add: string[];
   agendaDrop: string[];
   /** 策略回顾想出的新玩法：放进议程的点子或目标 */
-  agendaAdd?: { text: string; kind: 'goal' | 'idea'; horizon: 'today' | 'someday' }[];
+  agendaAdd?: { text: string; kind: 'goal' | 'idea'; horizon: 'today' | 'someday'; note?: string }[];
   /** 琢磨出的一整套做法，写成自己的技能（raw 是原始对象：带 when/steps 时交给行为引擎，写下就生效） */
   skill?: { name: string; description: string; body: string; raw?: Record<string, unknown> };
   diary?: string;
@@ -384,11 +389,13 @@ export interface MindDecision {
   activity?: ActivityDraft;
   /** 预排的下一段；requires 是它开始前的前置条件，不是当前活动的收工条件。 */
   next?: NextDraft;
-  agenda?: { add: { text: string; kind: AgendaItem['kind']; horizon: AgendaItem['horizon'] }[]; done: string[]; drop: string[]; focus?: string };
+  agenda?: { add: { text: string; kind: AgendaItem['kind']; horizon: AgendaItem['horizon']; note?: string }[]; done: string[]; drop: string[]; focus?: string };
   learned?: string | { revise: string; text: string };
   hypothesis?: string;
   /** 上一段实验的结论（模型看完实际结果后的判断） */
   verdict?: 'supported' | 'refuted' | 'unclear';
+  /** 按 id 结束一条仍在进行中的旧实验（生命周期清理，不新增实验状态） */
+  experimentSettlement?: { id: string; status: 'supported' | 'refuted' | 'unclear'; evidence?: string };
   /** 想写进日记的一句话（今天发生了什么值得记住的事） */
   diary?: string;
   /** 刚发现自己喜欢的东西 */

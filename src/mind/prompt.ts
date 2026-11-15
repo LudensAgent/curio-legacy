@@ -265,7 +265,8 @@ const PLAN_EDIT_RULE = `清单是成果，做法可以随时换（只写 methods
 export const RESOURCE_PRINCIPLE = '资源用来支持后面的行动：已经到达资源点、寻找成本付过时，清单后面还要什么、这次顺带补多少写在 gather.count 与 plan.needs 里；背包、安全和时间是并排的事实。';
 
 /** 专注：主目标 = 成果 + 当前做法，插曲用 detour */
-const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。${GOAL_SWITCH_RULE}`;
+const AGENDA_RULE = '只有以后要专门花一段或多段活处理的问题才写 agenda；一次性缺口留在手上的活，机制疑问用 experiment；同一问题别重复写进 agenda、plan 和零碎想法；解决后写 done/drop。agenda.add 可加 "note":"可复核的来源（短）"；旧的进行中实验用 experiment_result 按 id 结束：{"id":"x_…","status":"supported|refuted|unclear","evidence":"短事实"}。';
+const FOCUS = `【专注】主目标是这一阶段要拿到的成果，不是做法，也不是过夜、脱困这类眼前事（detour）。checklist 是成果（3–6 项可验证的子任务，可写 {"text":"…","done_when":{…}} 自动勾）；methods 是当前采用的路线/做法（可写 {"text":"…","outcome":序号} 指向它服务哪项成果），做法可以换、可以停。${PLAN_EDIT_RULE} 给 activity/next 写 outcome_id（po_…）或 method_id（pm_…）可把这段活的结果记到对应账上。${GOAL_SWITCH_RULE} ${AGENDA_RULE}`;
 
 /** 技能的生成、试用与正式使用分开，完整写法按需查。 */
 const SKILLS_DOC = () => `【技能】把做法写进 skill 会保存候选：{"name":"英文-连字符","description":"…","when":{条件},"steps":[…]或"code":"JS","verify":"观察原目标是否达成"}。显式试用用 use_skill {"name":"…","trial":true,"args":{…}}；候选不自动接手、不替换稳定版，取得足够实际验收证据才启用。启用后 when 含 after_failure＝动作失败时先试；只有状态条件＝成立自动做；不写＝手动调用。只写 body、没有可执行定义的纯文字技能只是未验证笔记，不会被自动接手；要按它做，先用 skill 读。可执行技能写进来自带 verify；保存时没有 verify 会被拒绝。方块只读当前视觉，unknown不能当作空气或已知矿物；只听到的实体没有精确坐标和可交互ID（写 hostile 条件时加 seen:true 只看看得见的怪）。写不出就用 worth_learning；写法先查 {"kind":"skill","name":"writing-skills"}。岩浆或水下呼吸问题属于玩法风险，宿主不自动救援；按当前目标和学会的技能处理。纯文字技能可用 skill {"name":"…","restore":true} 恢复到阅读目录；恢复不代表验证成功。技能目录和查询保留成功过的应急版本；可用 skill {"name":"…","from_version":1} 将指定完整历史契约另存新候选再试，保留稳定版和旧证据，新候选从零验收；历史成功不保证现在有效。`;
@@ -798,7 +799,7 @@ export function decisionBrief(ctx: MindContext): string[] {
   if (constraints.length) out.push(constraints.join('；'));
   if (opportunity) out.push(opportunity);
   const question = ctx.self.agenda().find((a) => a.kind === 'question' && a.id !== plan?.agendaId);
-  const running = ctx.self.experiments().find((e) => e.status === 'running');
+  const running = ctx.self.runningExperiment(ctx.activity?.id);
   if (question) out.push(`待弄清：${question.text.slice(0, 90)}`);
   else if (running) out.push(`待验证：${running.hypothesis.slice(0, 90)}`);
   if (next?.id) out.push(`可查：{"kind":"progress","target":"${next.id}"}（这一项的已记录进展）`);
@@ -1132,7 +1133,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ['我', {
       traits: self.data.traits, feeling: moodWords(self.mood), ...(self.tastes().length ? { likes: self.tastes() } : {}),
       ...(!glance && (image.goodAt.length || image.struggleWith.length) ? { self_image: image } : {}),
-      agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}) })),
+      agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, horizon: a.horizon, ...(a.status === 'active' ? { focus: true } : {}), ...(a.attempts ? { tried: a.attempts } : {}), ...(a.note ? { source: a.note } : {}) })),
       ...(self.agenda().length || ctx.plan ? { agenda_and_plan_source: '议程与【专注】里的目标、清单是你自己保存的计划；其中的方法或“操作者指令”等标注不等于操作者原话。当前指令以单独的【操作者的指令】为准。' } : {}),
       know_how: knowHow.map((k) => ({ id: k.id, text: recallText(cleanLesson(k.text), ctx.memory, undefined, k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses, unverified: k.unverified === true, source: k.source,
         ...(k.prior ? { before_rewrite: `改写前的说法累计 ${k.prior.wins} 胜 ${k.prior.losses} 负（改写过 ${k.prior.revisions} 次）` } : {}),
@@ -1143,7 +1144,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine),
         knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用按当前世界与目标核对。' } : {}),
-      ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
+      ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.source ? { from_activity: e.source } : {}), ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
       ...(!glance && (learnedSkills.length || ctx.mySkills.length) ? { my_skills: [...learnedSkills.slice(0, 12),
@@ -1262,10 +1263,10 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 再退一步看看日子是怎么过的（strategy：夜里在哪过、怎么死的、哪些目标耗了很多段活、装备升到哪了、游戏进度到哪了）：
   找出最大的、一再出现的麻烦，问自己“有没有一种根本不同的玩法能让它不再发生”——不是把同一件事做得更用力，而是换个思路（出门时带上什么、把什么搬到哪、换个地方住、先去弄某样东西、干脆放下某件事）。
   换玩法多半是做法上的改变（出门带什么、什么时候收工、在哪冶炼、一次挖多少）：写成一条窍门 add，不进议程。
-  只有它要专门花几段活去做成一件事（比如去下界要塞拿烈焰棒、合成末影之眼找要塞）时，才放进议程 agenda_add（{"text":"要做成的事","kind":"idea|goal"}，最多 3 条，写成“做成什么”，不要写成“以后要怎样”）；没想到就不写，不要硬凑。
+  只有它要专门花几段活去做成一件事（比如去下界要塞拿烈焰棒、合成末影之眼找要塞）时，才放进议程 agenda_add（{"text":"要做成的事","kind":"idea|goal","note":"可复核的来源（短，可选）"}，最多 3 条，写成“做成什么”，不要写成“以后要怎样”）；没想到就不写，不要硬凑。
 - 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
 只输出一个 JSON 对象：
-{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
+{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea","note":"来源（短，可选）"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const knowledgeFacts = self.knowledgeFacts(6);
   const payload = {
     know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses,
@@ -1301,8 +1302,8 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
       ...(r.collection ? { collection: collectionSnapshot(r.collection) } : {}),
       summary: historical(r.summary, r.at),
     })),
-    experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
-    agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts })),
+    experiments: self.experiments(6).map((e) => `${historical(e.hypothesis)} → ${e.status}${e.source ? `（验证时的处境：${e.source}）` : ''}${e.evidence ? `（${historical(e.evidence.slice(0, 80), e.at)}）` : ''}`),
+    agenda: self.agenda().map((a) => ({ id: a.id, text: a.text, kind: a.kind, tried: a.attempts, ...(a.note ? { source: a.note } : {}) })),
     diary: self.diary(5).map((d) => historical(d.text)),
     feeling: moodWords(self.mood),
     ...(mySkills.length ? { my_skills: mySkills } : {}),

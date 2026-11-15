@@ -1023,7 +1023,7 @@ export class Mind {
       a.planCoverageGap = coverageGap;
       this.d.bus.publish('plan_coverage_gap', 'P2', `「${a.what}」${coverageGap}`, { planId: a.id });
     }
-    if (hypothesis) { a.hypothesis = hypothesis; this.d.self.startExperiment(hypothesis, a.id); }
+    if (hypothesis) { a.hypothesis = hypothesis; this.d.self.startExperiment(hypothesis, a.id, a.why ?? a.what); }
     const agenda = draft.agendaId ? this.d.self.data.agenda.find((x) => x.id === draft.agendaId) : this.d.self.activeAgenda();
     if (agenda) a.agendaId = agenda.id;
     this.activity = a;
@@ -2373,6 +2373,13 @@ export class Mind {
         this.d.bus.publish('experiment', 'P2', `实验「${exp.hypothesis}」→ ${decision.verdict}`, { hypothesis: exp.hypothesis, verdict: decision.verdict });
       }
     }
+    if (decision.experimentSettlement) {
+      const settle = decision.experimentSettlement, exp = this.d.self.experiment(settle.id);
+      if (exp) {
+        this.d.self.concludeExperiment(exp.id, settle.status, settle.evidence ?? '按 id 结束了旧实验');
+        this.d.bus.publish('experiment', 'P2', `结束旧实验「${exp.hypothesis}」→ ${settle.status}`, { hypothesis: exp.hypothesis, verdict: settle.status, experimentId: exp.id });
+      } else this.d.bus.publish('decision_normalized', 'P3', `experiment_result 里的 ${settle.id} 不是现有实验，已忽略`);
+    }
     const learn = (text: string, revise?: string) => {
       // 人不会每做一件事就立一条规矩：出乎意料（卡住、实验）或修订旧经验才马上记下，其余先存着，休息时再回想
       const notable = !!revise || !!last?.hypothesis || last?.outcome === 'stuck' && Date.now() - this.lastLessonAt > 90_000;
@@ -2394,8 +2401,8 @@ export class Mind {
     if (learnedText) learn(learnedText, typeof decision.learned === 'object' ? decision.learned.revise : undefined);
     if (decision.agenda) {
       for (const a of decision.agenda.add) {
-        const item = this.d.self.addAgenda(a.text, a.kind, a.horizon, learn);
-        if (item) this.d.bus.publish('agenda', 'P3', `${a.kind === 'idea' ? '冒出个点子' : a.kind === 'question' ? '想弄明白' : '想做'}：${a.text}`, { id: item.id });
+        const item = this.d.self.addAgenda(a.text, a.kind, a.horizon, { onRule: learn, ...(a.note ? { note: a.note } : {}) });
+        if (item) this.d.bus.publish('agenda', 'P3', `${a.kind === 'idea' ? '冒出个点子' : a.kind === 'question' ? '想弄明白' : '想做'}：${a.text}${a.note ? `（来源：${a.note}）` : ''}`, { id: item.id, ...(a.note ? { note: a.note } : {}) });
       }
     }
     // 先看“局部失败 → 换维度/来源”是否有新证据，再看无进展闸门。

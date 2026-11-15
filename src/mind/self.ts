@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { shortId } from '../util.ts';
 import { applyProgress, emptyProgressLedger, progressSummary, type ProgressEntry, type ProgressInput, type ProgressLedger } from './progress-ledger.ts';
-import type { ActivityKind, ActivityRecord, AgendaItem, DiaryEntry, Experiment, Habits, KnowHow, Mood, Thought } from './types.ts';
+import { AGENDA_NOTE_MAX, type ActivityKind, type ActivityRecord, type AgendaItem, type DiaryEntry, type Experiment, type Habits, type KnowHow, type Mood, type Thought } from './types.ts';
 
 /** 查过的资料只留最近几条，供之后几次思考对照，不堆成资料库。 */
 const KNOWLEDGE_FACTS_MAX = 6;
@@ -482,18 +482,25 @@ export class SelfModel {
 
   // ---------------------------------------------------------------- 议程
   agenda(): AgendaItem[] { return this.data.agenda.filter((a) => a.status === 'open' || a.status === 'active'); }
-  addAgenda(text: string, kind: AgendaItem['kind'], horizon: AgendaItem['horizon'], onRule?: (text: string) => void): AgendaItem | null {
+  addAgenda(text: string, kind: AgendaItem['kind'], horizon: AgendaItem['horizon'], opts: { onRule?: (text: string) => void; note?: string } = {}): AgendaItem | null {
     const t = text.trim().slice(0, 100);
     if (!t) return null;
     if (isAgendaRule(t)) {
-      if (onRule) onRule(cleanLesson(t));
+      if (opts.onRule) opts.onRule(cleanLesson(t));
       else this.learn(t, { source: 'reflection' });
       return null;
     }
+    const note = opts.note?.trim().slice(0, AGENDA_NOTE_MAX) || undefined;
     const k = keywords(t);
     const dup = this.agenda().find((a) => a.text === t || (overlap(keywords(a.text), k) >= Math.max(3, Math.min(k.size, keywords(a.text).size) * 0.8)));
-    if (dup) { dup.updatedAt = Date.now(); this.touch(); return dup; }
-    const item: AgendaItem = { id: shortId('a_'), text: t, kind, horizon, status: 'open', createdAt: Date.now(), updatedAt: Date.now(), attempts: 0 };
+    if (dup) {
+      dup.updatedAt = Date.now();
+      // 同一问题再次出现时保留最初的来源，不被后来的措辞覆盖。
+      if (note && !dup.note) dup.note = note;
+      this.touch();
+      return dup;
+    }
+    const item: AgendaItem = { id: shortId('a_'), text: t, kind, horizon, status: 'open', createdAt: Date.now(), updatedAt: Date.now(), attempts: 0, ...(note ? { note } : {}) };
     this.data.agenda.push(item);
     // 议程太长时，最旧的“以后再说”的点子先被忘掉（人也记不住太多待办）
     const open = this.agenda();
@@ -860,20 +867,26 @@ export class SelfModel {
   }
 
   // ---------------------------------------------------------------- 实验
-  startExperiment(hypothesis: string, activityId: string): Experiment {
-    const e: Experiment = { id: shortId('x_'), hypothesis: hypothesis.slice(0, 160), activityId, status: 'running', at: Date.now() };
+  startExperiment(hypothesis: string, activityId: string, source?: string): Experiment {
+    const e: Experiment = { id: shortId('x_'), hypothesis: hypothesis.slice(0, 160), activityId, status: 'running', at: Date.now(), ...(source?.trim() ? { source: source.trim().slice(0, AGENDA_NOTE_MAX) } : {}) };
     this.data.experiments.push(e);
     if (this.data.experiments.length > 30) this.data.experiments = this.data.experiments.slice(-30);
     this.touch();
     return e;
   }
   experimentFor(activityId: string) { return this.data.experiments.find((e) => e.activityId === activityId); }
+  experiment(id: string) { return this.data.experiments.find((e) => e.id === id); }
   concludeExperiment(id: string, status: Experiment['status'], evidence: string) {
     const e = this.data.experiments.find((x) => x.id === id);
     if (!e) return;
     e.status = status; e.evidence = evidence.slice(0, 200); this.touch();
   }
   experiments(n = 4) { return this.data.experiments.slice(-n); }
+  /** 仍在进行、尚未得出结论的实验：优先当前活动关联的那条，否则最近一条。 */
+  runningExperiment(activityId?: string) {
+    const running = this.data.experiments.filter((e) => e.status === 'running');
+    return (activityId ? running.find((e) => e.activityId === activityId) : undefined) ?? running.at(-1);
+  }
 
   // ---------------------------------------------------------------- 日记
   writeDiary(text: string, dim: string, pos: [number, number, number]) {
@@ -1016,7 +1029,7 @@ export class SelfModel {
       if (item && item.kind === 'goal' && (item.status === 'active' || this.data.plan?.agendaId === id)) { keptGoals.push({ id, text: item.text }); continue; }
       this.setAgendaStatus(id, 'dropped');
     }
-    for (const a of c.agendaAdd ?? []) this.addAgenda(a.text, a.kind, a.horizon);
+    for (const a of c.agendaAdd ?? []) this.addAgenda(a.text, a.kind, a.horizon, { note: a.note });
     this.data.insights = [];
     this.data.reflectedAt = Date.now();
     this.data.knowHowAtReflect = this.data.knowHow.length;
