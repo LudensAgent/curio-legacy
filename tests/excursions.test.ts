@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { AgentState } from '../src/adapter/types.ts';
-import { describeCoverage, describeCurrentTrip, describeLeg, ExcursionLog, exploreAttemptFromReceipt, type Leg } from '../src/mind/excursions.ts';
+import { describeCoverage, describeCurrentTrip, describeLeg, describeLegBrief, ExcursionLog, exploreAttemptFromReceipt, type Leg } from '../src/mind/excursions.ts';
 
 const body = (over: Partial<AgentState> = {}): AgentState => ({
   connected: true, alive: true, observationReady: true, worldId: 'w1', sessionId: 's1', observationId: 1, username: 'u',
@@ -58,6 +58,7 @@ test('unobserved gaps are not counted as online time and a dimension change duri
   log.sample(body({ dim: 'overworld' }), now += 60_000);
   assert.equal(log.legs()[0].end?.kind, 'unobserved');
   assert.match(describeLeg(log.legs()[0], { now }), /其间情况未知/);
+  assert.match(describeLegBrief(log.legs()[0], { now }), /另有 \d+ 分钟未观测，其间情况未知/, '短摘要也要标出未观测时段');
 });
 
 test('prompt lists trips in this dimension and trips beyond a nearby portal, only when deliberating', async () => {
@@ -100,9 +101,11 @@ test('prompt lists trips in this dimension and trips beyond a nearby portal, onl
   };
   const deliberate = known('deliberate');
   assert.equal(deliberate.my_trips_beyond_nearby_portal.length, 1);
+  assert.ok(deliberate.current_trip, '当前这一趟走 current_trip');
   assert.match(deliberate.my_trips_beyond_nearby_portal[0], /^下界/);
   assert.match(deliberate.my_trips_beyond_nearby_portal[0], new RegExp(`落在门 ${far.id} 旁`));
-  assert.match(deliberate.my_trips_beyond_nearby_portal[0], /离入口最远处 \(0,70,-160\)，离入口 160 格；/);
+  assert.match(deliberate.my_trips_beyond_nearby_portal[0], /最远离入口 160 格 \(0,70,-160\)/);
+  assert.doesNotMatch(deliberate.my_trips_beyond_nearby_portal[0], /背包食物|镐 \d+→\d+ 把/, '过去出行只给一行摘要');
   assert.ok(deliberate.trips_note);
   const glance = known('glance');
   assert.equal(glance.my_trips_beyond_nearby_portal, undefined, 'glance 不展开历史出行');

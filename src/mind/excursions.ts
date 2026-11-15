@@ -291,6 +291,21 @@ const ago = (t: number, now: number) => {
   return m < 1 ? '刚才' : m < 90 ? `${m} 分钟前` : m < 48 * 60 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;
 };
 
+const legEntryText = (leg: Leg, portal: string | null) => `${leg.entry.kind === 'dimension' ? `从${DIM_ZH[leg.entry.from ?? ''] ?? leg.entry.from ?? '别的维度'}过来`
+  : leg.entry.kind === 'respawn' ? '死亡后复活' : '恢复观测时'}${portal ? `，落在门 ${portal} 旁` : ''}`;
+const legEndingText = (leg: Leg, now: number, brief: boolean) => {
+  const end = leg.end;
+  if (!end) return brief ? '还在这一段' : `还在这一段，现在 ${at3(leg.last)}`;
+  if (end.kind === 'death') return `${ago(end.at, now)}死亡结束（${end.cause}）${brief ? '' : `，死时最后站稳处 ${at3(end.pos)}`}`;
+  if (end.kind === 'dimension') return `${ago(end.at, now)}从 ${at3(end.pos)} 去了${DIM_ZH[end.to] ?? end.to}`;
+  return `最后观测在 ${at3(end.pos)}，之后未观测${end.to ? `，再观测到时已在${DIM_ZH[end.to] ?? end.to}` : ''}（其间情况未知）`;
+};
+const eatenText = (leg: Leg, lead: string) => {
+  const entries = Object.entries(leg.eaten);
+  return entries.length ? `${lead}吃掉 ${entries.map(([k, v]) => `${k}×${v}`).join('、')}（+${entries.reduce((n, [k, v]) => n + v * (FOOD_VALUE[k]?.points ?? 0), 0)}）` : '';
+};
+const observedText = (leg: Leg) => `在线观测 ${minutes(leg.onlineMs)}${leg.unobservedMs > GAP_MS ? `（另有 ${minutes(leg.unobservedMs)}未观测，其间情况未知）` : ''}`;
+
 /**
  * 一段出行的事实句。here 给出（同维度）时附上最远点相对现在的方位；portalNear 把入口对上已登记的门。
  * 措辞只陈述测到的量，不评价够不够、该不该。
@@ -298,33 +313,36 @@ const ago = (t: number, now: number) => {
 export function describeLeg(leg: Leg, opts: { now?: number; here?: Vec3Like; portalNear?: (pos: Vec3Like) => string | null } = {}): string {
   const now = opts.now ?? Date.now();
   const portal = opts.portalNear?.(leg.entry.pos) ?? null;
-  const entry = `${leg.entry.kind === 'dimension' ? `从${DIM_ZH[leg.entry.from ?? ''] ?? leg.entry.from ?? '别的维度'}过来`
-    : leg.entry.kind === 'respawn' ? '死亡后复活' : '恢复观测时'}${portal ? `，落在门 ${portal} 旁` : ''}`;
   const far = leg.farthest;
   const fromHere = opts.here ? (() => {
     const dx = far.x + 0.5 - opts.here!.x, dz = far.z + 0.5 - opts.here!.z, d = Math.round(Math.hypot(dx, dz));
     return d ? `，在你 ${dirName(dx, dz)} ${d} 格` : '，就在你这里';
   })() : '';
   const end = leg.end;
-  const ending = !end ? `还在这一段，现在 ${at3(leg.last)}`
-    : end.kind === 'death' ? `${ago(end.at, now)}死亡结束（${end.cause}），死时最后站稳处 ${at3(end.pos)}`
-      : end.kind === 'dimension' ? `${ago(end.at, now)}从 ${at3(end.pos)} 去了${DIM_ZH[end.to] ?? end.to}`
-        : `最后观测在 ${at3(end.pos)}，之后未观测${end.to ? `，再观测到时已在${DIM_ZH[end.to] ?? end.to}` : ''}（其间情况未知）`;
   const a = leg.start, b = leg.latest;
   // 旧存档没有空槽：按未知显示，不补 0 假装观测过。
   const slots = `、空槽 ${a.emptySlots ?? '未知'}→${b.emptySlots ?? '未知'}`;
-  const eaten = Object.entries(leg.eaten);
-  const eatenText = eaten.length
-    ? `，吃掉 ${eaten.map(([k, v]) => `${k}×${v}`).join('、')}（+${eaten.reduce((n, [k, v]) => n + v * (FOOD_VALUE[k]?.points ?? 0), 0)}）` : '，没观测到吃东西';
+  const eaten = eatenText(leg, '，') || '，没观测到吃东西';
   const span = end ? '' : '至今';
   return [
-    `${DIM_ZH[leg.dim] ?? leg.dim}，${ago(leg.startedAt, now)}开始，${span}在线观测 ${minutes(leg.onlineMs)}${leg.unobservedMs > GAP_MS ? `（另有 ${minutes(leg.unobservedMs)}未观测，其间情况未知）` : ''}`,
-    `入口 ${at3(leg.entry.pos)}（${entry}）`,
+    `${DIM_ZH[leg.dim] ?? leg.dim}，${ago(leg.startedAt, now)}开始，${span}${observedText(leg)}`,
+    `入口 ${at3(leg.entry.pos)}（${legEntryText(leg, portal)}）`,
     `身体站过的离入口最远处 ${at3(far)}，离入口 ${far.dist} 格${fromHere}`,
-    ending,
-    `饥饿值累计降 ${leg.hungerDrop} 点${eatenText}`,
+    legEndingText(leg, now, false),
+    `饥饿值累计降 ${leg.hungerDrop} 点${eaten}`,
     `${end ? '出发→结束' : '出发→现在'}：背包食物 ${a.foodPoints}→${b.foodPoints} 饥饿点${slots}、镐 ${a.pickaxes}→${b.pickaxes} 把（耐久合计 ${a.pickaxeDurability}→${b.pickaxeDurability}）、身上护甲耐久 ${a.armor}→${b.armor}、土石类填充方块 ${a.blocks}→${b.blocks}、火把 ${a.torches}→${b.torches}`,
   ].join('；');
+}
+
+/**
+ * 过去几段出行的短摘要：什么时候、从哪进入、最远走到哪、怎么结束、吃了多少。
+ * 完整的分段与消耗差值仍用 describeLeg（反思/深想时用），这里只给每次决策默认携带的一行。
+ */
+export function describeLegBrief(leg: Leg, opts: { now?: number; portalNear?: (pos: Vec3Like) => string | null } = {}): string {
+  const now = opts.now ?? Date.now();
+  const portal = opts.portalNear?.(leg.entry.pos) ?? null;
+  const eaten = eatenText(leg, '；');
+  return `${DIM_ZH[leg.dim] ?? leg.dim}，${ago(leg.startedAt, now)}开始，${observedText(leg)}；入口 ${at3(leg.entry.pos)}（${legEntryText(leg, portal)}）；最远离入口 ${leg.farthest.dist} 格 ${at3(leg.farthest)}；${legEndingText(leg, now, true)}${eaten}`;
 }
 
 /**

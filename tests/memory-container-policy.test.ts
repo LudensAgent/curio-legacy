@@ -110,7 +110,7 @@ test('unopened historical containers are candidates and facilities without autom
   const facilities = myFacilities(memory, world.state(), ['chest']);
   assert.equal(facilities.length, 1);
   assert.equal(facilities[0].precise, true);
-  assert.match(facilities[0].text, /内容未知/);
+  assert.match(facilities[0].contents ?? '', /内容未知/);
   const recalledLandmark = memory.findLandmark(landmark.id, world.dim)!;
   assert.equal(recalledLandmark.precise, true);
   assert.equal(recalledLandmark.radius, 0);

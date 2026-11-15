@@ -23,7 +23,7 @@ import type { FocusPlan } from './self.ts';
 import type { KnowledgeMatch } from '../knowledge/library.ts';
 
 import { RECALL_LABEL, type Recalled } from './recall.ts';
-import { describeCurrentTrip, describeLeg, LEG_NOTE, type Leg } from './excursions.ts';
+import { describeCurrentTrip, describeLegBrief, LEG_NOTE, type Leg } from './excursions.ts';
 import { foodNote } from '../skills/food.ts';
 import { isResourceBlock, oreSpotsByKind, oreSpotsNear } from '../memory/ore-spots.ts';
 import { oreLayerFacts } from '../knowledge/ore-layers.ts';
@@ -1006,10 +1006,10 @@ function worldKnowledge(ctx: MindContext) {
   // 自己的设施（箱子、工作站、床）在 my_facilities 里单独说，这里只列别的地点
   // 矿点按矿种单独列（ore_spots），不和死亡点、基地挤这 8 个位置
   const marks = m.landmarks().filter((l) => l.dim === p.self.dim && l.worldId === s.worldId);
-  const places = marks.filter((l) => !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd')
-    .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
-    .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 8)
-    .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
+  const portalSnapshot = travelStore(m).snapshot(s.worldId);
+  const endpointById = new Map(portalSnapshot.endpoints.map((e) => [e.id, e]));
+  const portalRows = portalSnapshot.endpoints.filter((e) => e.dim === p.self.dim)
+    .map((e) => ({ e, d: Math.hypot(e.pos.x - here.x, e.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 4);
   // 农田状态单独走 my_farms，设施列表里不再重复列“我的农田”地标。
   // Percept.farms 与 memory.farms() 同序（farmInfo 按 memory 顺序生成），用索引取 harvests/坐标，避免同形农田串账。
   const farmRecords = m.farms().filter((f) => f.dim === p.self.dim && f.cells.length);
@@ -1041,7 +1041,18 @@ function worldKnowledge(ctx: MindContext) {
   const listedFacilities = ctx.tier === 'deliberate'
     ? [...reserved, ...ownFacilities.filter((f) => !reserved.includes(f))].slice(0, 8).sort((a, b) => a.dist - b.dist)
     : [];
-  const facilities = listedFacilities.map((f) => `${f.text}（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`);
+  const facilities = listedFacilities.map((f) => `${f.text}（${facilityUse(f.kind)}${facilityAge(f.observedAt)}${f.contents ? `；${f.contents}` : ''}）`);
+  // 地标只列别的地点：设施、门和开挖入口各有自己的主来源，同坐标不在 places 重复；
+  // 同一坐标的多份历史地标（如门与门厅）只留按距离排序的第一条，旧记录仍在记忆里。
+  const posKey = (pos: Vec3Like) => `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`;
+  const ownPos = new Set([...listedFacilities.map((f) => posKey(f.pos)), ...portalRows.map(({ e }) => posKey(e.pos))]);
+  const places = marks.filter((l) => !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd'
+    && !ownPos.has(posKey(l.pos)))
+    .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
+    .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d)
+    .filter((entry, i, all) => all.findIndex((other) => posKey(other.l.pos) === posKey(entry.l.pos)) === i)
+    .slice(0, 8)
+    .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
   const nearbyFacilities = ctx.tier === 'glance'
     ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`)
     : [];
@@ -1060,32 +1071,31 @@ function worldKnowledge(ctx: MindContext) {
     const ago = death.seconds_ago < 90 ? `${death.seconds_ago} 秒前` : death.seconds_ago < 3600 ? `${Math.round(death.seconds_ago / 60)} 分钟前` : `${Math.round(death.seconds_ago / 3600)} 小时前`;
     return `${death.dim} (${death.pos[0]},${death.pos[1]},${death.pos[2]})，${death.cause}，${ago}`;
   });
-  const portalSnapshot = travelStore(m).snapshot(s.worldId);
-  const endpointById = new Map(portalSnapshot.endpoints.map((e) => [e.id, e]));
   // 只列当前维度、离自己最近的几处门：别的维度的门走不过去，只在 leads_to 里说明落点；
   // 方块核对用的是当前维度的区块数据，跨维度的坐标查出来的不是那扇门。
-  const portals = portalSnapshot.endpoints.filter((e) => e.dim === p.self.dim)
-    .map((e) => ({ e, d: Math.hypot(e.pos.x - here.x, e.pos.z - here.z) })).sort((a, b) => a.d - b.d).slice(0, 4)
-    .map(({ e }) => {
-      // 同一目的地的路线可能被重复登记：只按「目的地 + 回程是否验证过」列一次
-      const leadsTo = [...new Map(portalSnapshot.routes.filter((r) => r.fromId === e.id)
-        .map((r) => {
-          const to = endpointById.get(r.toId);
-          return [`${r.toId}:${r.returnVerified}`, { to: r.toId, ...(to ? { dim: to.dim, pos: to.pos } : {}), return_verified: r.returnVerified }];
-        })).values()];
-      const nowBlock = ctx.blockAt?.(e.pos) ?? null;
-      // 证据是客户端已加载的区块数据，只核对记录坐标这一格，不是这次视野亲眼看见
-      const now = nowBlock === null ? '区块未加载(未知)'
-        : nowBlock === e.kind ? `记录格仍是 ${e.kind}（区块数据）`
-        : `记录格现为 ${nowBlock}（区块数据，非视野所见）`;
-      return {
-        id: e.id, kind: e.kind, pos: e.pos, from_here: bearing(e.pos),
-        use: 'observe_portal/travel_portal',
-        portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
-        recorded_ago: portalAgeText(e.observedAt),
-        ...(leadsTo.length ? { leads_to: leadsTo } : {}), now,
-      };
-    });
+  // 同一目的地的路线可能被重复登记：按目的地合并，任一条记过返程就标为已验证；每条只留一行。
+  // 短行仍保留目的地 id 和「回程未验证」，避免把“没验证”误读成“没有这条路”。
+  const portals = portalRows.map(({ e }) => {
+    const leadsTo = portalSnapshot.routes.filter((route) => route.fromId === e.id).reduce((map, r) => {
+      const to = endpointById.get(r.toId);
+      const prev = map.get(r.toId);
+      map.set(r.toId, { dim: to?.dim ?? prev?.dim, pos: to?.pos ?? prev?.pos, verified: r.returnVerified || prev?.verified === true });
+      return map;
+    }, new Map<string, { dim?: string; pos?: Vec3Like; verified: boolean }>());
+    const nowBlock = ctx.blockAt?.(e.pos) ?? null;
+    // 证据是客户端已加载的区块数据，只核对记录坐标这一格，不是这次视野亲眼看见
+    const now = nowBlock === null ? '区块未加载(未知)'
+      : nowBlock === e.kind ? `记录格仍是 ${e.kind}（区块数据）`
+      : `记录格现为 ${nowBlock}（区块数据，非视野所见）`;
+    return {
+      id: e.id, kind: e.kind, pos: e.pos, from_here: bearing(e.pos),
+      use: 'observe_portal/travel_portal',
+      portal_observed: e.portalObserved ? '亲见门' : '仅到达位置',
+      recorded_ago: portalAgeText(e.observedAt),
+      ...(leadsTo.size ? { leads_to: [...leadsTo.entries()].map(([to, r]) => `${r.dim ?? '未知维度'} ${to}${r.pos ? ` (${Math.round(r.pos.x)},${Math.round(r.pos.y)},${Math.round(r.pos.z)})` : ''} ${r.verified ? '回程已验证' : '回程未验证'}`) } : {}),
+      now,
+    };
+  });
   // 本维度去过多远：explored_around 只抽样身边 32–128 格，看不到更远处走过的路；这里只给历史事实，不选方向。
   const extent = ctx.tier === 'deliberate' ? m.visitedExtent(p.self.dim) : null;
   const visitedExtent = extent === null || extent.bounds === null ? null : [
@@ -1101,14 +1111,15 @@ function worldKnowledge(ctx: MindContext) {
   const portalNear = (dim: string) => (pos: Vec3Like) => portalSnapshot.endpoints
     .filter((e) => e.dim === dim && Math.hypot(e.pos.x - pos.x, e.pos.y - pos.y, e.pos.z - pos.z) <= 6)
     .sort((a, b) => Math.hypot(a.pos.x - pos.x, a.pos.z - pos.z) - Math.hypot(b.pos.x - pos.x, b.pos.z - pos.z))[0]?.id ?? null;
-  const tripsHere = ctx.tier === 'deliberate' ? legs.filter((l) => l.dim === p.self.dim).slice(-3)
-    .map((l) => describeLeg(l, { here, portalNear: portalNear(l.dim) })) : [];
+  // 当前这一趟已经在 current_trip 里给了完整覆盖；这里只给过去两段的一行摘要，避免同一段经历展开两遍。
+  const tripsHere = ctx.tier === 'deliberate' ? legs.filter((l) => l.dim === p.self.dim && l !== currentLeg).slice(-2)
+    .map((l) => describeLegBrief(l, { portalNear: portalNear(l.dim) })) : [];
   const beyond = [...new Set(portalSnapshot.endpoints
     .filter((e) => e.dim === p.self.dim && Math.hypot(e.pos.x - here.x, e.pos.y - here.y, e.pos.z - here.z) <= 16)
     .flatMap((e) => portalSnapshot.routes.filter((r) => r.fromId === e.id).map((r) => endpointById.get(r.toId)?.dim))
     .filter((d): d is string => !!d && d !== p.self.dim))];
   const tripsBeyond = ctx.tier === 'deliberate'
-    ? beyond.flatMap((dim) => legs.filter((l) => l.dim === dim).slice(-3).map((l) => describeLeg(l, { portalNear: portalNear(dim) }))) : [];
+    ? beyond.flatMap((dim) => legs.filter((l) => l.dim === dim && l !== currentLeg).slice(-2).map((l) => describeLegBrief(l, { portalNear: portalNear(dim) }))) : [];
   const builds = myBuilds(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   const home = homeOf(m, { worldId: s.worldId, dim: p.self.dim, pos: here });
   // 移动动作里的 "base" 只指一处（首选基地）；记得好几个基地时把它指哪、有多远摆出来，免得把别的基地当成 "base"
@@ -1210,11 +1221,37 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine),
         knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用按当前世界与目标核对。' } : {}),
-      ...(!glance && self.experiments().length ? { experiments: self.experiments().map((e) => ({ hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.source ? { from_activity: e.source } : {}), ...(e.evidence ? { evidence: recallText(e.evidence, ctx.memory, undefined, e.at) } : {}) })) } : {}),
+      // 只给正在验证和尚未得出结论的试验；已结论的留给反思与自我模型，不在每次决策里展开。
+      // 运行中的试验保留完整证据；未结论的只留短摘要。
+      ...(!glance && self.experiments().length ? (() => {
+        const all = self.experiments(30);
+        const shown = [...all.filter((e) => e.status === 'running'), ...all.filter((e) => e.status === 'unclear').slice(-1)];
+        return shown.length ? { experiments: shown.map((e) => {
+          const raw = e.evidence ? recallText(e.evidence, ctx.memory, undefined, e.at) : null;
+          const evidence = raw && e.status !== 'running' ? `${raw.slice(0, 100)}${raw.length > 100 ? '…' : ''}` : raw;
+          return {
+            hypothesis: recallText(e.hypothesis, ctx.memory, undefined, 0), status: e.status, ...(e.source ? { from_activity: e.source } : {}),
+            ...(evidence ? { evidence } : {}),
+          };
+        }) } : {};
+      })() : {}),
       ...(!glance && self.diary().length ? { diary: self.diary(5).map((d) => recallText(d.text, ctx.memory, undefined, 0)) } : {}),
       // 学会的东西只列一张表：从经历里验证过的做法（直接写成一步）；恢复类技能不在这里重复。
-      ...(!glance && (learnedSkills.length || ctx.mySkills.length) ? { my_skills: [...learnedSkills.slice(0, 12),
-        ...ctx.mySkills.slice(0, 6).map((m) => `${m.name}［${m.status === 'verified' ? '验证过的做法' : m.status === 'macro' ? '组合' : '试验中的做法'}，直接写成一步 {"skill":"${m.name}"}］：${m.description.slice(0, 50)}`)] } : {}),
+      // System【技能书】已给名字、状态和一句用途；行为技能这里只补执行状态，试用/版本细节按 skill 查。
+      // methods/macros 不在 System 索引里，保留调用写法与一句用途。
+      ...(!glance && (learnedSkills.length || ctx.mySkills.length) ? { my_skills: [
+        ...learnedSkills.slice(0, 12).map((line) => {
+          const [base, candidate] = line.split('；候选');
+          if (!candidate) return base!;
+          // 收起/停用的技能上游已过滤；这里只压缩仍在试用的候选，不把未知状态改写成可用。
+          if (!candidate.includes('尚未启用')) return line;
+          const trial = candidate.match(/试用成(\d+)\/败(\d+)/);
+          return `${base}；候选可试用${trial ? `（试用成${trial[1]}/败${trial[2]}）` : ''}（详情查 skill）`;
+        }),
+        ...ctx.mySkills.slice(0, 6).map((m) => {
+          const state = m.status === 'macro' ? (m.success ? `，成功率 ${m.success}` : '') : m.trials ? `，试用成${m.trials.verified}/败${m.trials.failed}` : '';
+          return `${m.name}［${m.status === 'verified' ? '验证过的做法' : m.status === 'macro' ? '组合' : '试验中的做法'}${state}，直接写成一步 {"skill":"${m.name}"}］：${m.description.slice(0, 50)}`;
+        })] } : {}),
       ...(!glance && ctx.instincts ? { body_instincts: ctx.instincts } : {}),
       ...(!glance && ctx.researchContext ? { research: ctx.researchContext } : {}),
     }],

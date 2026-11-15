@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
 import type { Landmark, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
-import { chestLocation, describeChest, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, chestName, describeChestSummary, isContainerLandmark } from '../memory/chest-memory.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -13,7 +13,8 @@ export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的
  * 挖过的通道不在设施表里：已观测的通道体素由共享 VoxelMap 保留，移动按该证据搜索。
  */
 export type FacilityKind = 'chest' | 'station' | 'bed';
-export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; radius?: number; precise?: boolean; observedAt?: number }
+/** contents 只给一句摘要：完整容器记录按需用 find_item / take_items 查，不每念展开。 */
+export interface Facility { kind: FacilityKind; label: string; pos: Vec3Like; dist: number; text: string; contents?: string; radius?: number; precise?: boolean; observedAt?: number }
 
 type State = { worldId: string; dim: string; pos: Vec3Like; worldDay?: number };
 const flat = (a: Vec3Like, b: Vec3Like) => Math.round(Math.hypot(a.x - b.x, a.z - b.z));
@@ -42,14 +43,15 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
       if ((c.worldId ?? 'default') !== s.worldId) continue;
       const location = chestLocation(c, clock);
       out.push({ kind: 'chest', label: '用过的容器', pos: location.pos, dist: flat(location.pos, s.pos), radius: location.radius,
-        precise: location.precise, observedAt: location.observedAt, text: `${describeChest(c, clock)}${location.precise ? `，${flat(location.pos, s.pos)}格` : ''}` });
+        precise: location.precise, observedAt: c.contents?.observedAt ?? location.observedAt,
+        text: `${chestName(c)}${location.precise ? `，${flat(location.pos, s.pos)}格` : ''}`, contents: describeChestSummary(c) });
     }
     for (const l of memory.landmarks()) {
       if (l.kind !== 'discovery' || !mine(l, s) || !isContainerLandmark(l.label)) continue;
       if (memory.chests(s.dim).some((c) => d3(c.pos, l.pos) <= 0.1)) continue;
       const location = chestLocation(l, clock);
       out.push({ kind: 'chest', label: l.label, pos: location.pos, dist: flat(location.pos, s.pos), radius: location.radius,
-        precise: location.precise, observedAt: location.observedAt, text: `${l.label} ${location.text}，只记得地点，内容未知` });
+        precise: location.precise, observedAt: location.observedAt, text: `${l.label} ${location.text}`, contents: '只记得地点，内容未知' });
     }
   }
   for (const l of stations) {

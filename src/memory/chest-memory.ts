@@ -132,15 +132,26 @@ export function recall(chests: ChestRecord[], accept: (name: string) => boolean,
   return out.sort((a, b) => (a.dist ?? 0) - (b.dist ?? 0));
 }
 
+/** 箱子内容的公共事实：最多几样、空位、增量记录；两个描述函数共用，避免各写一套排序/空位口径。 */
+function chestFacts(c: ChestRecord, max: number) {
+  const items = (c.contents?.items ?? []).filter((i) => i.count > 0).sort((a, b) => b.count - a.count);
+  return { items: items.slice(0, max), total: items.length, freeSlots: c.contents?.freeSlots, stale: c.contents?.possiblyStale === true };
+}
+
 /** 一个箱子现在精确的样子："放矿的箱子 (293,68,-369)：raw_iron×9（还剩 3 格空）" */
 export function describeChest(c: ChestRecord, _clock?: Clock, max = 6): string {
-  const items = (c.contents?.items ?? []).slice().sort((a, b) => b.count - a.count).slice(0, max);
+  const { items, freeSlots, stale } = chestFacts(c, max);
   const body = items.map((i) => `${i.name}×${i.count}`).join('、');
-  const stale = c.contents?.possiblyStale ? '（最近一次是增量操作，未确认全量）' : '';
-  const known = c.contents?.freeSlots != null;
-  const free = known ? `（还剩 ${c.contents!.freeSlots} 格空）` : '';
-  const label = body || (known ? '空的' : '内容未知（重新打开才确认）');
-  return `${chestName(c)}：${label}${free}${stale}`;
+  const label = body || (freeSlots != null ? '空的' : '内容未知（重新打开才确认）');
+  return `${chestName(c)}：${label}${freeSlots != null ? `（还剩 ${freeSlots} 格空）` : ''}${stale ? '（最近一次是增量操作，未确认全量）' : ''}`;
+}
+
+/** 设施列表用的一句摘要：只给类数、最多的几样和空位；完整数量仍用 find_item 查。 */
+export function describeChestSummary(c: ChestRecord, max = 2): string {
+  const { items, total, freeSlots, stale } = chestFacts(c, max);
+  return total
+    ? `${total} 类，${items.map((i) => `${i.name}×${i.count}`).join('、')}${total > max ? ' 等' : ''}${freeSlots != null ? `，剩 ${freeSlots} 格空` : ''}${stale ? '，增量记录未确认全量' : ''}；完整数量用 find_item 查`
+    : freeSlots != null ? `空，剩 ${freeSlots} 格；重新打开才更新` : '内容未知（重新打开才确认）';
 }
 
 /** 一条精确回忆说成人话 */
