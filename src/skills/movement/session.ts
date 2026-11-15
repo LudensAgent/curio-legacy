@@ -13,22 +13,26 @@ import type { MakeWayOptions } from './make-way.ts';
 
 export type MoveMode = 'walk' | 'step' | 'drop' | 'jump' | 'ladder';
 /**
- * Default modes for advance. `navigate_to` has its own KINDS list so jump and
- * ladder body control remain explicitly opt-in; advance keeps its documented
- * walk/step/drop default.
+ * Default modes for ordinary directional movement (advance): walk/step/drop plus
+ * jump/ladder, which the coordinator only uses when the current geometry is
+ * confirmed. `navigate_to` keeps its own KINDS list so precise goals still choose
+ * their modes explicitly.
  */
-export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop'];
+export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 
-/** Phase 1 只开放四方向；对角线必须先验证 corner clearance（设计 D19）。 */
+/** explore_toward 的常规方向；advance 另支持四个对角方向。 */
 export type CardinalDirection = 'N' | 'E' | 'S' | 'W';
 export const CARDINAL_DIRECTIONS: readonly CardinalDirection[] = ['N', 'E', 'S', 'W'];
+/** 普通方向移动的八方向；对角由宿主按正交步执行并检查两侧角落净空，不做斜穿。 */
+export type CompassDirection = CardinalDirection | 'NE' | 'NW' | 'SE' | 'SW';
+export const COMPASS_DIRECTIONS: readonly CompassDirection[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
 export type MovementIntent =
   /** targetKind 在请求边界冻结：格目标的完成条件与精确连续脚位不同，续接不能改语义。 */
   | { kind: 'navigate'; to: Vec3Like; targetKind: NavigationTargetKind; arrival?: NavigationArrival; allowed: MoveMode[]; historical: boolean }
   | {
       kind: 'advance';
-      direction: CardinalDirection;
+      direction: CompassDirection;
       distance: number;
       maxLateralDrift: number;
       allowed: MoveMode[];
@@ -190,6 +194,7 @@ const sessions = new Map<string, MovementSession>();
 
 const inScope = (session: MovementSession, scope: MoveScope) =>
   session.scope.worldId === scope.worldId && session.scope.dim === scope.dim && session.scope.sessionId === scope.sessionId;
+
 
 /** 已完成/已取消/已停止的 session 不再参与“同一 scope 只能有一个活动意图”的取代。 */
 const isTerminal = (session: MovementSession) =>

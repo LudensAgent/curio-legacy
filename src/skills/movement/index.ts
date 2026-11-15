@@ -10,7 +10,7 @@ export { exploreToward } from './explore-toward.ts';
 export {
   clearMovementSessions, createMovementSession, findMovementSession, activeMovementSession, suspendScopeSessions, remainingMakeWayEdits,
   intentKeyOf, MOVEMENT_SESSION_CAPACITY, MOVEMENT_SESSION_TTL_MS,
-  type CardinalDirection, type MoveMode, type MovementIntent, type MovementSession, type StopReason,
+  type CardinalDirection, type CompassDirection, type MoveMode, type MovementIntent, type MovementSession, type StopReason,
 } from './session.ts';
 export { runMovementCoordinator } from './coordinator.ts';
 export { runNavigationSegment } from './segment.ts';

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { Vec3Like } from '../src/adapter/types.ts';
-import { footSurfaceY, supportCellsUnderBody, supportSurfaces, supportTop } from '../src/perception/geometry.ts';
+import { footSurfaceY, supportCellsUnderBody, supportSurfaces, supportTop, verticalStepKind } from '../src/perception/geometry.ts';
 import { facingOfYaw, feetCell, toWorld } from '../src/perception/local.ts';
 import { toRel } from '../src/skills/movement/coordinates.ts';
 import { moveStep, mineCell, placeCell, placeSupport, pillarOne } from '../src/skills/movement/index.ts';
@@ -317,6 +317,15 @@ test('move_step 绝对 xyz 的 y 是脚高：分数脚高按脚所在格解析�
   assert.equal(Math.floor(w.pos.x), 1);
   assert.deepEqual(r.data?.targetCell, { x: 1, y: 64, z: 0 }, '回执的目标格是身体所在格（半砖上面那格），不是半砖本身');
   assert.match(r.summary, /63\.50/);
+});
+
+test('一级台阶允许分数顶面造成的 1.06–1.125 格落差', () => {
+  // 土径顶面 0.9375、灵魂沙 0.875：从整块顶面下一级时实测脚高差可到 1.0625/1.125，
+  // 仍是正常的一格台阶，不能按 1.01 卡成 >1 落差。
+  assert.equal(verticalStepKind(-1.0625), -1);
+  assert.equal(verticalStepKind(-1.125), -1);
+  assert.equal(verticalStepKind(-1.2), null);
+  assert.equal(verticalStepKind(1.125), 1);
 });
 
 test('move_step 绝对 xyz 的 ±1 高度差按实测脚高判断，不拿脚下格底当脚高', () => {

@@ -16,13 +16,13 @@ import { makeCtx } from './survival-helpers.ts';
 const WORLD = 'fake-world', DIM = 'overworld', SESSION = 'fake-session';
 let sequence = 0;
 
-function fill(map: VoxelMap, name: string, cells: Vec3Like[]) {
+function fill(map: VoxelMap, name: string, cells: Vec3Like[], properties: Record<string, string> = {}) {
   for (const pos of cells) {
     sequence += 1;
     map.observe({
       worldId: WORLD, dim: DIM, sessionId: SESSION, observedAt: Date.now(), sequence,
       source: 'vision', evidence: 'seen', stateComplete: true,
-      state: { name, properties: {} }, pos,
+      state: { name, properties }, pos,
     });
   }
 }
@@ -34,6 +34,19 @@ function corridor(maxX: number, minX = -1, zRange: [number, number] = [-1, 1], s
   for (let x = minX; x <= maxX; x++) for (let z = zRange[0]; z <= zRange[1]; z++) {
     for (let y = 64; y <= 66; y++) if (!skip(x, y, z)) air.push({ x, y, z });
     if (!skip(x, 63, z)) ground.push({ x, y: 63, z });
+  }
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:grass_block', ground);
+  return map;
+}
+
+/** 一片开阔的 2D 地面，用于八方向与对角测试。 */
+function openArea(radius = 24) {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [], ground: Vec3Like[] = [];
+  for (let x = -radius; x <= radius; x++) for (let z = -radius; z <= radius; z++) {
+    for (let y = 64; y <= 66; y++) air.push({ x, y, z });
+    ground.push({ x, y: 63, z });
   }
   fill(map, 'minecraft:air', air);
   fill(map, 'minecraft:grass_block', ground);
@@ -108,12 +121,80 @@ test('A1 开阔地 20 格：单次 advance 完成，实测 along 达标，frozen
   assert.ok(Math.abs(progress.horizontalNet - progress.along) < 0.01);
   assert.deepEqual(r.data?.frozenOrigin, origin, '冻结起点不可变');
   assert.deepEqual((r.data?.intent as { direction: string; distance: number }), {
-    kind: 'advance', direction: 'E', distance: 20, maxLateralDrift: 4, allowed: ['walk', 'step', 'drop'], historical: true,
+    kind: 'advance', direction: 'E', distance: 20, maxLateralDrift: 4, allowed: ['walk', 'step', 'drop', 'jump', 'ladder'], historical: true,
   });
+  assert.equal((r.data?.budget as { maxNoProgressSegments: number }).maxNoProgressSegments, 4, '普通移动给多段恢复空间');
   assert.equal((r.data?.counters as { confirmedTransitions: number }).confirmedTransitions, 20);
   assert.equal(Math.floor(adapter.pos.x), 20);
   assert.equal((r.data?.continuation as { canContinue: boolean }).canContinue, false);
   assert.ok(adapter.actions.every((action) => action === 'moveTo:feet'), '只迈步，不挖/不放');
+});
+
+test('A1d 短距离 1 格与对角 NE 都只用方向+距离完成', async (t) => {
+  const one = openArea(6), oneSetup = setup(one);
+  t.after(() => oneSetup.ctx.memory.close());
+  const short = await advance.run(oneSetup.ctx, args({ direction: 'E', distance: 1 }));
+  assert.equal(short.status, 'succeeded', short.summary);
+  assert.ok(oneSetup.adapter.pos.x >= 1.4, `短距离应实际推进，实际 x=${oneSetup.adapter.pos.x}`);
+
+  const diag = openArea(12), diagSetup = setup(diag);
+  t.after(() => diagSetup.ctx.memory.close());
+  const result = await advance.run(diagSetup.ctx, args({ direction: 'NE', distance: 8 }));
+  assert.equal(result.status, 'succeeded', result.summary);
+  const progress = result.data?.progress as { along: number; lateral: number; horizontalNet: number };
+  assert.ok(progress.along >= 7.9, `沿 NE 实测 ${progress.along}`);
+  assert.ok(progress.horizontalNet >= 7.9, `水平净位移 ${progress.horizontalNet}`);
+  assert.ok(diagSetup.adapter.pos.x > 4 && diagSetup.adapter.pos.z < -4, `身体应向东北实际移动：${JSON.stringify(diagSetup.adapter.pos)}`);
+  assert.ok(Math.abs(progress.lateral) <= 16);
+});
+
+test('A1g 低血也能连续通过 2 格无摔伤落差，不要求单独 descend_to', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [], ground: Vec3Like[] = [];
+  for (let x = -1; x <= 8; x++) for (let z = -1; z <= 1; z++) {
+    const floor = x < 3 ? 63 : 61;
+    for (let y = floor + 1; y <= 66; y++) air.push({ x, y, z });
+    ground.push({ x, y: floor, z });
+  }
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:grass_block', ground);
+  const { adapter, ctx } = setup(map);
+  adapter.hp = 4.3;
+  t.after(() => ctx.memory.close());
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 6 }));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(adapter.pos.y <= 62.01 && adapter.pos.x >= 5, `2 格落差后继续：${JSON.stringify(adapter.pos)}`);
+});
+
+test('A1f 普通移动跨过半砖等分数顶面，不需要模型算脚高', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [], ground: Vec3Like[] = [], slab: Vec3Like[] = [];
+  for (let x = -1; x <= 8; x++) for (let z = -1; z <= 1; z++) {
+    for (let y = 64; y <= 66; y++) air.push({ x, y, z });
+    (x === 3 ? slab : ground).push({ x, y: 63, z });
+  }
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:grass_block', ground);
+  fill(map, 'minecraft:stone_slab', slab, { type: 'bottom' });
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 5 }));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(adapter.pos.x >= 4, `跨过半砖顶面：${JSON.stringify(adapter.pos)}`);
+});
+
+test('A1e 普通移动默认允许已确认的一格缺口跳跃', async (t) => {
+  const map = new VoxelMap(WORLD, { validityWindowMs: 60_000 });
+  const air: Vec3Like[] = [];
+  for (let x = -1; x <= 1; x++) for (let y = 64; y <= 68; y++) for (let z = -1; z <= 1; z++) air.push({ x, y, z });
+  fill(map, 'minecraft:air', air);
+  fill(map, 'minecraft:stone', [{ x: -1, y: 63, z: 0 }, { x: 1, y: 63, z: 0 }]);
+  const { adapter, ctx } = setup(map);
+  adapter.pos = { x: -0.5, y: 64, z: 0.5 };
+  t.after(() => ctx.memory.close());
+  const r = await advance.run(ctx, args({ direction: 'E', distance: 2 }));
+  assert.equal(r.status, 'succeeded', r.summary);
+  assert.ok(adapter.pos.x >= 1.4, `跨过 x=0 的一格缺口：x=${adapter.pos.x}`);
 });
 
 test('A1b 非格心起点 + maxLateralDrift 0：沿实测偏移连续推进，不被格心化偏移', async (t) => {
@@ -636,11 +717,15 @@ test('A18 同一 session 的并发执行租约：第二个 invocation 被拒绝'
   assert.equal(resumed.status, 'succeeded', resumed.summary);
 });
 
-test('advance 参数校验：拒绝对角线、区域/until 与越界距离', () => {
+test('advance 参数校验：接受八方向与短距离，拒绝未知方向/区域/until/非法模式', () => {
   const adapter = new FakeAdapter();
+  for (const direction of ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']) {
+    assert.equal(advance.validate({ direction, distance: 2 }, adapter).ok, true, direction);
+  }
   for (const raw of [
-    { direction: 'NE', distance: 20 },
-    { direction: 'E', distance: 2 },
+    { direction: 'NN', distance: 20 },
+    { direction: 'E', distance: 0 },
+    { direction: 'E', distance: 161 },
     { direction: 'E', distance: 20, region: { center: { x: 0, y: 64, z: 0 }, radius: 8 } },
     { direction: 'E', distance: 20, until: 'oak_log' },
     { direction: 'E', distance: 20, allowed: ['walk', 'dig'] },
@@ -648,6 +733,11 @@ test('advance 参数校验：拒绝对角线、区域/until 与越界距离', ()
     assert.equal(advance.validate(raw, adapter).ok, false, JSON.stringify(raw));
   }
   assert.equal(advance.validate({ direction: 'E', distance: 20 }, adapter).ok, true);
+  const long = advance.validate({ direction: 'NW', distance: 160 }, adapter);
+  assert.ok(long.ok, long.ok ? '' : long.error);
+  assert.equal(long.args.maxLateralDrift, 16, '长距离给更宽的宿主绕行容差');
+  assert.equal(long.args.maxNoProgressSegments, 4, '普通移动不因一段无进展立即停');
+  assert.deepEqual(long.args.allowed, ['walk', 'step', 'drop', 'jump', 'ladder'], '普通移动默认允许已确认的跳跃/梯子');
 });
 
 test('前方有墙：像 pathfinder 一样先走到离目标最近的已达格，不在原地停下', async (t) => {

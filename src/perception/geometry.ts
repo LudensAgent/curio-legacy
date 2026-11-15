@@ -157,15 +157,21 @@ export const RELATIVE_FOOT_TOLERANCE = 0.95;
 export const PLAYER_STEP_HEIGHT = 0.6;
 /** 相邻上下级的最小实际高差；更小按同层处理，避免把采样噪声当成台阶。 */
 export const MIN_STEP_DELTA = 0.01;
+/**
+ * 一格台阶允许的分数顶面差：灵魂沙 0.875、土径 0.9375 等，离开整块顶面一格时
+ * 实测脚高差最多约 1.125。不能按整块高度卡 1.01，否则站在土径/灵魂沙旁的一级台阶
+ * 会被误判成“>1 落差”，把 Agent 逼回去挖台阶或绕路。
+ */
+export const SHAPE_STEP_TOLERANCE = 0.15;
 
 /**
- * 单步竖直关系：同层 0，上一级 1，下一级 -1，超出 ±1 为 null。
+ * 单步竖直关系：同层 0，上一级 1，下一级 -1，超出约 ±1（含分数顶面）为 null。
  * move_step 预检与局部图的 executable 落点共用这一份判据。
  */
 export function verticalStepKind(delta: number): -1 | 0 | 1 | null {
   if (Math.abs(delta) <= MIN_STEP_DELTA) return 0;
-  if (delta > 0 && delta <= 1 + MIN_STEP_DELTA) return 1;
-  if (delta < 0 && delta >= -1 - MIN_STEP_DELTA) return -1;
+  if (delta > 0 && delta <= 1 + SHAPE_STEP_TOLERANCE) return 1;
+  if (delta < 0 && delta >= -1 - SHAPE_STEP_TOLERANCE) return -1;
   return null;
 }
 

@@ -1,5 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import { blockCollidesBody, bodyBoxAt, bodyCells, supportTop } from '../perception/geometry.ts';
+import { blockCollidesBody, bodyBoxAt, bodyCells, estimatedFallDamage, supportTop } from '../perception/geometry.ts';
 import { AbortedError, dist3, sleep, throwIfAborted } from '../util.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 
@@ -86,8 +86,9 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
     if (!Number.isFinite(drop) || drop <= 0.25 || Math.abs(option.drop - drop) > 0.15 || drop > 24) return refused('没有确认此落点的有效下降高度，或超出单次下行范围');
     if (option.surface === 'water' && option.waterDepth !== 2) return refused('尚未亲眼确认目标水面及下方至少两格水，不能据此保证入水');
     if (option.surface === 'water' && option.support.name !== 'water') return refused('该水柱存在气泡等额外作用，当前没有确认其下行风险');
-    // Deliberately overestimate ground impact; do not assume armor, enchantments or a perfect walk-off.
-    const estimatedDamageUpperBound = option.surface === 'water' ? 0 : Math.ceil(drop) + 2;
+    // 原版摔伤从 >3 格才开始；护甲/附魔只会减少伤害，不会增加。用同一套 estimatedFallDamage
+    // 做上限，别把 1–3 格的安全落差估成 ceil(drop)+2 点而挡住低血时的正常下行。
+    const estimatedDamageUpperBound = option.surface === 'water' ? 0 : estimatedFallDamage(drop);
     if (!Number.isFinite(initial.hp) || initial.hp - estimatedDamageUpperBound < 4) return refused(`当前生命 ${initial.hp} 不足以保守承受这次约 ${drop.toFixed(1)} 格落差并保留余量`, 'LOW_HP');
     const latest = check();
     if (dist3(latest.pos, receipt.from) > 0.35) return refused('观察后站位已经改变，需重新评估落点');

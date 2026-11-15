@@ -1,20 +1,24 @@
 import type { Vec3Like } from '../../adapter/types.ts';
 import { arrivalDistanceOf, goalFromIntent, goalReached } from './goal.ts';
-import type { CardinalDirection, MovementIntent, MovementProgress, MovementSession, StopReason } from './session.ts';
+import type { CompassDirection, MovementIntent, MovementProgress, MovementSession, StopReason } from './session.ts';
 
-/** 与世界方向一致：N=-Z、E=+X、S=+Z、W=-X。 */
-const BEARINGS: Record<CardinalDirection, { x: number; z: number }> = {
+/** 与世界方向一致：N=-Z、E=+X、S=+Z、W=-X；对角为归一化向量。 */
+const BEARINGS: Record<CompassDirection, { x: number; z: number }> = {
   N: { x: 0, z: -1 },
+  NE: { x: Math.SQRT1_2, z: -Math.SQRT1_2 },
   E: { x: 1, z: 0 },
+  SE: { x: Math.SQRT1_2, z: Math.SQRT1_2 },
   S: { x: 0, z: 1 },
+  SW: { x: -Math.SQRT1_2, z: Math.SQRT1_2 },
   W: { x: -1, z: 0 },
+  NW: { x: -Math.SQRT1_2, z: -Math.SQRT1_2 },
 };
 
-export const bearingOf = (direction: CardinalDirection) => ({ ...BEARINGS[direction] });
+export const bearingOf = (direction: CompassDirection) => ({ ...BEARINGS[direction] });
 
 /**
  * 冻结方向上的有符号投影与横向偏移。distance 按水平世界距离（方块格）解释；
- * 斜向也先归一化，不按 X/Z 两轴各走多少重复计数（本版只开放四方向）。
+ * 斜向也先归一化，不按 X/Z 两轴各走多少重复计数。
  */
 export function project(origin: Vec3Like, bearing: { x: number; z: number }, current: Vec3Like) {
   const dx = current.x - origin.x, dz = current.z - origin.z;

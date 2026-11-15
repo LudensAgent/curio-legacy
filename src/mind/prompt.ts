@@ -140,7 +140,7 @@ export interface MindContext {
  * 例外：spatial_extrema 是一次只读到访/最深点查询，参数少且直接支撑提示词里的到访覆盖事实，
  * 放进核心目录是为了让 Agent 知道“可以查更大范围”，不是因为它高频。
  */
-export const COMMON_MOVES = ['travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'spatial_extrema', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
+export const COMMON_MOVES = ['advance', 'travel_to', 'explore_toward', 'approach_visible', 'go_near', 'move_step', 'navigate_to', 'mine_cell', 'place_cell', 'place_support', 'pillar_one', 'gather', 'look', 'swim_path', 'boat_path', 'descend_to', 'excavate_run', 'assess_landings', 'spatial_extrema', 'craft', 'smelt', 'eat', 'pickup_items', 'store_items', 'take_items', 'find_item', 'sleep', 'press_keys', 'build', 'use_item'];
 
 /**
  * 真·远行/末地动作：平时不占静态目录。建造档案、基地、预留、远程防守这些是日常通用能力，
@@ -284,13 +284,15 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
 【走到哪】按意图选一个移动动作（失败看回执里的具体原因再决定换法）：
+- 普通朝一个方向走一段，不需要精确目的地 → advance {"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}；宿主处理台阶、分数顶面、合理小落差和已确认的跳跃/梯子，局部被挡会在有限范围内绕行，不挖不放
 - 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
 - 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
 - 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工，不负责绕路去某处）
-- 身边相邻一格（含上下一级台阶）→ move_step；改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
+- 只有需要精确到相邻某一格（建筑、挖放、贴边、指定材料）才用 move_step；普通走路优先 advance。改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
 - 站到看见过/记得的附近目标旁 → approach_visible；容器/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）
 - 要到一个确切的格或精确连续脚位 → navigate_to
-移动回执带 sessionId，仍要完成同一目标时原样传回。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖，到过的区块也不等于搜过——隧道里只看得见沿途；段后按实测位置重新判断。
+- 普通小台阶/小落差由 advance 连续处理；descend_to 只给 advance 无法安全处理的明确下落（更大落差、水里、或需要先看落点）
+移动回执带 sessionId；普通短移动通常一次完成，只有回执明确说预算/超时停下、要接着走完原方向或原目标时才原样传回。重复 look_around 不代表移动进展，进入新区块也不等于观测覆盖，到过的区块也不等于搜过——隧道里只看得见沿途；段后按实测位置重新判断。
 【相对坐标】activity/next 含 move_step、mine_cell、place_cell、place_support 的水平相对操作时，必须声明活动的 facing:"N|E|S|W"，表示坐标的前方，不等于推进方向。子步骤省略 facing 就继承，显式冲突会退回；绝对 xyz 和纯竖直操作不要求这个字段。活动里没有相对坐标步骤就省略 facing，不要拿镜头或行进方向去填；要写只能是 N/E/S/W，没有 NE/NW 等八方向。活动参考系独立于镜头朝向；转头、观察、插火把不会改变它，local 方块图仍按 local.facing 解读。输出前核对文字目标方向与坐标换算后的实际方向；例如 facing:"N" 的 [-1,0,0] 是向南。需要改变参考系时可明确声明新的 facing（包括 "S"）；后退/换向写进步骤或 facing。
 【原地上下】move_step [0,1,0] 原地上移要求梯子；相邻上下台阶可用 move_step [1,1,0]/[1,-1,0]（层高限制见动作目录）。assess_landings 返回当前可见的落点候选及未确认项，descend_to 核实所选落点后下降。施工动作会改变地形：pillar_one {"item":"any"}（或指定材料）消耗一块材料垫高，起跳需要头顶上方两格都空；mine_cell [0,-1,0] 挖空脚下支撑后身体会下落，无需再 move_step。上下行也可由【走到哪】中的导航按已观测路线执行；施工与否写进步骤。
 【消息怎么读】越往后越要紧：【我】性格心情、议程、窍门 →【记得的地方】→【进度】主线到哪了、下一个目标 →【想起来的】自动想起的旧事和技能 →【最近】→【手上的活】→【身边】方块图 local、生物、资源 →【身体】where、生命饥饿、天色、背包 →【专注】主目标和清单 →【此刻】为什么现在想、注意到什么 →【此刻要留意】。未看见的方块状态未知，未挖到不代表那里是空气。`;
@@ -302,7 +304,7 @@ const DELIBERATE_MODE = `【每次这样想】
 这是综合判断：先看当前目标和阶段是否仍成立、这段活推进了什么；再想接下来一段需要什么（资源、装备、空间），环境里有没有可用、需组织或需维护的对象，当前最有价值的下一步是什么（继续主线、补给、建设还是维护）。只查与当前决策有关的层面，已有足够事实就停，不重述全部历史/背包/设施。可以换做法、资源来源、布局和下一段活动；改主目标仍按【专注】的换目标规则，一次失败不默认目标失效，一个新发现不自动换主线。不把长期发展变成无限囤积、无限建设或每念重开计划。${GOAL_REFUSAL_RULE}`;
 
 const CHOOSE = `【选动作】
-- 去某处/找没见过的东西 → 按【走到哪】选；look_around 只看当前视野，explore_toward 才改变位置（until 在本轮视野看见就停）；拿看得见的方块 → gather；身边某一格 → mine_cell / move_step / place_cell / place_support
+- 普通朝一个方向走一段 → advance；去某处/找没见过的东西 → 按【走到哪】选；look_around 只看当前视野，explore_toward 才改变位置（until 在本轮视野看见就停）；拿看得见的方块 → gather；精确到身边某一格 → mine_cell / move_step / place_cell / place_support
 - 坐船过水：船是实体，用 use_item {"item":"…_boat","on":"water"} 放到水面（别用 place_cell），再 interact {"entity":"boat"} 上船；boat_path {"direction":"SW"} 划（必须给 direction 或 to）。水面上岸/游到指定点用 swim_path；吃 → eat（背包有吃的）/ hunt / forage / fish；做东西 → craft、smelt（会自己放下背包里的工作台/熔炉；拿不准查 recipes）
 - 从箱子取/存东西 → 先 find_item {"item":"…","count":要几个} 查它在哪些箱子、哪只够用，再 take_items / store_items 指定那只箱子（target 写坐标或容器地标 ID）
 - 地表和地下都可按【走到哪】选导航或相邻格动作，能否通行取决于实际地形与观测证据；mine_cell / place_cell / place_support / pillar_one 改变指定格，excavate_run 按显式方向、模式、步数施工。路线与地形改动写进 steps。
@@ -326,7 +328,7 @@ const PRINCIPLES = `【原则】
 
 const PRECISE = `【精确操作】local 以脚部占据格为原点：[前,上,右]，前=local.facing。spots.stand/place 是当前可见的候选站位/放置格，仍需动作确认。
 - [0,0,0] 是脚部格，[0,1,0] 是头部格，[0,-1,0] 是支撑格；挖空 [0,-1,0] 会下落，无需 move_step。
-- move_step 相对写法只锁定相邻列，±1 内实际脚高由宿主解析（回执 resolvedAt）；绝对 xyz 失败若给出同一列的实际脚高，这是该列的落脚证据；落点有岩浆/火等危险时默认拒绝，allowHazard:true 显式接受危险落点；更大落差可用 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报超出层高限制、或 assess_landings 没有相邻落点，只说明该动作范围内的结果，不证明远处没有路线，也不要求改用施工。
+- move_step 相对写法只锁定相邻列，约 ±1 内实际脚高由宿主解析（分数顶面如土径/灵魂沙可到约 1.15 格；回执 resolvedAt）；绝对 xyz 失败若给出同一列的实际脚高，这是该列的落脚证据；落点有岩浆/火等危险时默认拒绝，allowHazard:true 显式接受危险落点；更大落差可用 assess_landings，再把 options[].target 原样交给 descend_to（没有 mode/nearest）。move_step 报超出层高限制、或 assess_landings 没有相邻落点，只说明该动作范围内的结果，不证明远处没有路线，也不要求改用施工。
 - place_cell 指方块占据格；place_support 的参数是补上的支撑格：[1,-1,0] 补 [1,0,0] 脚部目标格下方，上下范围 -2..3，可补下一级 [1,-2,0]。梯子、火把可放进身体格（需有附着面）。
 - 机械性失败只做已授权的执行辅助；照明、垫方块、挖墙都要你显式安排（make / place / dig / fill），不会自动消耗材料。`;
 

@@ -1,6 +1,6 @@
 import type { PlacementFaceAttempt, Vec3Like } from '../../adapter/types.ts';
 import { facingOfYaw, feetCell, supportCell, toWorld, type Facing } from '../../perception/local.ts';
-import { bodyCells, estimatedFallDamage, isReplaceable, MIN_STEP_DELTA, PLAYER_STEP_HEIGHT, supportCellsUnderBody, supportTop, verticalStepKind, type StateAt } from '../../perception/geometry.ts';
+import { bodyCells, estimatedFallDamage, isReplaceable, MIN_STEP_DELTA, PLAYER_STEP_HEIGHT, SHAPE_STEP_TOLERANCE, supportCellsUnderBody, supportTop, verticalStepKind, type StateAt } from '../../perception/geometry.ts';
 import { LIQUID_BLOCKS } from '../../perception/surroundings.ts';
 import { sleep, throwIfAborted } from '../../util.ts';
 import { breakCell, why } from '../body.ts';
@@ -92,9 +92,9 @@ function shapeOf(name: string, properties: Record<string, string | number | bool
  */
 const moveStepSkill: Skill<MoveArgs> = {
   name: 'move_step',
-  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。相对写法只锁定相邻那一列：同列在当前脚高 ±1 格内若有唯一可站立脚高（含半砖、雪层、地毯、土径等分数脚高），宿主按实际碰撞顶面执行，“上”分量写错也不拒绝，回执用 requestedAt/resolvedAt 写明实际是同层/上一级（高 0.01–1 格，如 [1,1,0]）/下一级（支撑顶面低 0.01–1 格）；绝对 xyz 的 y 是你写明的脚高，须与实际一致。上升超过 0.6 格要起跳，头顶需净空；脚下是梯子时 [0,1,0] 沿梯子爬一格。同列 ±1 内没有可站立面（下方是空腔、落差或高差超过 1 格）时如实返回支撑格和落差，不换列、不自动改落点；补支撑用 place_support，更大落差用 descend_to。落点身体格/支撑格是岩浆、火、岩浆块、仙人掌、细雪等，或旁边/头顶有可流入的岩浆时默认不迈并列出危险格，allowHazard:true 显式接受后照迈。在岩浆/水里或乘骑时不做普通迈步。',
+  description: '站到身边相邻的一格（[前,上,右] 或 xyz）。相对写法只锁定相邻那一列：同列在当前脚高约 ±1 格内若有唯一可站立脚高（含半砖、雪层、地毯、土径、灵魂沙等分数脚高；分数顶面使一级台阶最多约 1.15 格），宿主按实际碰撞顶面执行，“上”分量写错也不拒绝，回执用 requestedAt/resolvedAt 写明实际是同层/上一级（高 0.01–1.15 格，如 [1,1,0]）/下一级（支撑顶面低 0.01–1.15 格）；绝对 xyz 的 y 是你写明的脚高，须与实际一致。上升超过 0.6 格要起跳，头顶需净空；脚下是梯子时 [0,1,0] 沿梯子爬一格。同列约 ±1 内没有可站立面（下方是空腔、落差或高差超过约 1.15 格）时如实返回支撑格和落差，不换列、不自动改落点；补支撑用 place_support，更大落差用 descend_to。落点身体格/支撑格是岩浆、火、岩浆块、仙人掌、细雪等，或旁边/头顶有可流入的岩浆时默认不迈并列出危险格，allowHazard:true 显式接受后照迈。在岩浆/水里或乘骑时不做普通迈步。',
   catalog: '{"to":[前,上,右],"facing"?:"N|E|S|W"} 或 {"xyz":[x,y,z]}，"allowHazard"?:true：迈到相邻一格（同层或上下一级，高差 ≤1 格）；落点危险默认不迈',
-  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "allowHazard"?true} 或 {"xyz":[x,y,z], "allowHazard"?true}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；相对写法 [1,0,0]/[1,1,0]/[1,-1,0] 都锁定同一相邻列，宿主在 ±1 内（上一级高 0.01–1 格，超过 0.6 格要起跳；下一级支撑顶面低 0.01–1 格）按实际脚高执行；同列 [0,1,0] 只在梯子上可爬；allowHazard 默认 false）',
+  argsDoc: '{"to":[前,上,右], "facing"?:"N|E|S|W", "allowHazard"?true} 或 {"xyz":[x,y,z], "allowHazard"?true}（xyz 的 x/z 是整数方块列，只有 y 是目标脚高、可为分数，例如半砖 {"xyz":[1,63.5,0]}；前后/左右 ±1，上下 -1..1；相对写法 [1,0,0]/[1,1,0]/[1,-1,0] 都锁定同一相邻列，宿主在约 ±1 内（上一级高 0.01–1.15 格，超过 0.6 格要起跳；下一级支撑顶面低 0.01–1.15 格）按实际脚高执行；同列 [0,1,0] 只在梯子上可爬；allowHazard 默认 false）',
   timeoutMs: 8000,
   movement: true,
   // 计划录入只检查写法；相邻性、落差、支撑和净空由每一步执行前的 validate + run 用最新位置确认。
@@ -140,7 +140,7 @@ const moveStepSkill: Skill<MoveArgs> = {
         return { ok: false, error: '原地向上不是 move_step：脚下没有梯子；原地垫高用 pillar_one' };
       }
       if (horizontal === 0 && dy <= 0) return { ok: false, error: '原地上下不是 move_step：要下挖用 mine_cell，要垫高用 pillar_one' };
-      if (dy < -1.01 || dy > 1.01) return { ok: false, error: `(${p.x},${p.y},${p.z}) 的脚高与当前相差 ${dy.toFixed(2)} 格，move_step 只处理 ±1 格` };
+      if (dy < -(1 + SHAPE_STEP_TOLERANCE) || dy > 1 + SHAPE_STEP_TOLERANCE) return { ok: false, error: `(${p.x},${p.y},${p.z}) 的脚高与当前相差 ${dy.toFixed(2)} 格，move_step 只处理约 ±1 格（分数顶面可到 1.15 格）` };
       return { ok: true, args: { at: [dx, p.y - feet.y, dz] as Rel, facing: facing as Facing, xyz: p, origin, ...hazard } };
     }
     const to = parseRel(relValue(a), { f: 1, u: [-1, 1], r: 1 });
@@ -315,7 +315,7 @@ const moveStepSkill: Skill<MoveArgs> = {
           : stair ? { stairs: stair } : null;
       const correction = (correctedU === null
         ? below
-          ? `同列下方 ${below.drop.toFixed(2)} 格才有可站立脚面 y=${below.foot.toFixed(2)}，与当前脚高相差 ${Math.abs(below.foot - baseFoot).toFixed(2)} 格，不符合 move_step 的同层/±1 规则；要下去先用 assess_landings 确认落点，再 descend_to（move_step 不处理 >1 落差），或补支撑后按同层走`
+          ? `同列下方 ${below.drop.toFixed(2)} 格才有可站立脚面 y=${below.foot.toFixed(2)}，与当前脚高相差 ${Math.abs(below.foot - baseFoot).toFixed(2)} 格，不符合 move_step 的同层/约 ±1 规则；要下去先用 assess_landings 确认落点，再 descend_to（move_step 不处理 >约 1.15 落差），或补支撑后按同层走`
           : belowScan.unknown ? '同列下方有未加载格，无法确认落点；先靠近或看清这一列再决定'
             : '同列下方没有找到可站立面；要补支撑用 place_support 目标脚下方那一格'
         : `同一列可站立脚高是 y=${below!.foot.toFixed(2)}；把 y 写成 ${below!.foot.toFixed(2)}`) + (stair ? `；${stairHint(stair)}` : '');

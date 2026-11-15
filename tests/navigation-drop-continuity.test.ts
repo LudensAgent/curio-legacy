@@ -107,7 +107,7 @@ test('连续 drop 拒绝 Promise 成功但仍在空中的身体，也保留取�
 test('连续多格 drop 保留既有生命余量门槛', async (t) => {
   const { adapter, ctx, request } = setup();
   t.after(() => ctx.memory.close());
-  adapter.hp = 7;
+  adapter.hp = 3; // 2 格落差本身不造成伤害，但 3 血低于下行保留余量
   let moves = 0;
   t.mock.method(adapter, 'moveTo', async (target) => {
     if (target.kind !== 'feet') return;

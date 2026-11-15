@@ -11,6 +11,7 @@ import {
   type RouteResidency, type RouteResidencyFailure,
 } from '../../spatial/skill-residency.ts';
 import { DEFAULT_LAND_SEARCH_MAX_EDGES, DEFAULT_LAND_SEARCH_MAX_NODES, type LandSearchPolicySummary } from 'curio-minecraft-3d-memory/navigation';
+import { estimatedFallDamage } from '../../perception/geometry.ts';
 import { feetCell } from '../../perception/local.ts';
 import { codeFromError, isAbort, runSkill, validateSkill, type FailureCode, type SkillCtx, type SkillResult } from '../types.ts';
 import { movementFailureOfSearch, movementFailureOfSegment, type MovementFailure } from './contract.ts';
@@ -1192,8 +1193,9 @@ async function runNavigationSegmentInner(
     } else {
       const drop = current.pos.y - transition.to.y;
       if (transition.kind === 'drop' && transition.drop > 1) {
-        // 保留原多格下落的保守生命余量条件；路线几何已用当前实测起点复验。
-        const estimatedDamageUpperBound = Math.ceil(drop) + 2;
+        // 路线几何已用当前实测起点复验；摔伤上限按原版 >3 格才计伤害，别把 1–3 格的安全落差
+        // 估成 ceil(drop)+2 点，导致低血时连下一格箱子都被拒绝。
+        const estimatedDamageUpperBound = estimatedFallDamage(drop);
         if (!Number.isFinite(current.hp) || current.hp - estimatedDamageUpperBound < 4) {
           return receipt('physical_failure', {
             stopCode: 'step_failed', failureCode: 'LOW_HP', stepIndex: index, transition,

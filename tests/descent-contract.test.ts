@@ -14,7 +14,8 @@ test('descend requires fresh local geometry, sufficient health or observed water
       receipt: { worldId: state.worldId, sessionId: state.sessionId, dimension: state.dim, observationId: 6, at: Date.now(), from: { ...state.pos } } };
     const calls: { target: MoveTarget; opts: MoveOpts }[] = [];
     const ctx = { adapter: { state: () => structuredClone(state),
-      blockAt: (p: { x: number; y: number; z: number }) => surface === 'water' ? 'air' : (p.x === 1 && p.y === 63 && p.z === 0 ? 'stone' : 'air'),
+      blockAt: (p: { x: number; y: number; z: number }) => surface === 'water' ? 'air'
+        : (p.x === option.support.pos.x && p.y === option.support.pos.y && p.z === option.support.pos.z ? 'stone' : 'air'),
       async moveTo(target: MoveTarget, opts: MoveOpts) {
         calls.push({ target, opts }); state.pos = { ...option.target }; state.inWater = surface === 'water'; state.onGround = !state.inWater;
       } }, senses: { refresh() {}, landingOptions: () => [option] }, signal: new AbortController().signal, deadline: Date.now() + 3000 } as unknown as SkillCtx;
@@ -40,8 +41,15 @@ test('descend requires fresh local geometry, sufficient health or observed water
   assert.match(missing.summary, /2 格内可见落点|选择的落点当前不可见/);
   assert.ok(Array.isArray(missing.data?.available) && (missing.data.available as unknown[]).length > 0, '失败时列出当前可复制的落点');
   assert.equal(wrong.calls.length, 0);
-  const unsafe = fixture(); unsafe.state.hp = 8;
+  const unsafe = fixture(); unsafe.state.hp = 4; // 6 格落差约 3 点伤，4 血不够保留余量
   assert.equal((await descend.run(unsafe.ctx, { target: unsafe.option.target })).failureCode, 'LOW_HP'); assert.equal(unsafe.calls.length, 0);
+  // 1–3 格原版不摔伤：低血也不应把 2 格落差估成 ceil(2)+2 点而拒绝。
+  const safeLow = fixture(); safeLow.state.hp = 4.3;
+  safeLow.option.target = { x: 1.5, y: 68, z: 0.5 }; safeLow.option.surfaceY = 68; safeLow.option.drop = 2;
+  safeLow.option.support = { pos: { x: 1, y: 67, z: 0 }, name: 'stone' };
+  const safe = await descend.run(safeLow.ctx, { target: safeLow.option.target });
+  assert.equal(safe.status, 'succeeded', safe.summary);
+  assert.equal(safeLow.calls.length, 1);
   const occluded = fixture(); occluded.option.corridor = 'unknown';
   const unknown = await descend.run(occluded.ctx, { target: occluded.option.target });
   assert.equal(unknown.status, 'failed'); assert.match(unknown.summary, /落体通道未看清/);
