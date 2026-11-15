@@ -44,7 +44,7 @@ test('descend requires fresh local geometry, sufficient health or observed water
   const unsafe = fixture(); unsafe.state.hp = 4; // 6 格落差约 3 点伤，4 血不够保留余量
   assert.equal((await descend.run(unsafe.ctx, { target: unsafe.option.target })).failureCode, 'LOW_HP'); assert.equal(unsafe.calls.length, 0);
   // 1–3 格原版不摔伤：低血也不应把 2 格落差估成 ceil(2)+2 点而拒绝。
-  const safeLow = fixture(); safeLow.state.hp = 4.3;
+  const safeLow = fixture(); safeLow.state.hp = 1.59;
   safeLow.option.target = { x: 1.5, y: 68, z: 0.5 }; safeLow.option.surfaceY = 68; safeLow.option.drop = 2;
   safeLow.option.support = { pos: { x: 1, y: 67, z: 0 }, name: 'stone' };
   const safe = await descend.run(safeLow.ctx, { target: safeLow.option.target });

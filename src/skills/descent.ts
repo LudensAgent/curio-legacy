@@ -90,7 +90,8 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
     // 做上限，别把 1–3 格的安全落差估成 ceil(drop)+2 点而挡住低血时的正常下行。
     // 只有真的会掉血的落差才要求额外余量；无伤落差在 1 点血时也可以下。
     const estimatedDamageUpperBound = option.surface === 'water' ? 0 : estimatedFallDamage(drop);
-    if (!Number.isFinite(initial.hp) || (estimatedDamageUpperBound > 0 && initial.hp - estimatedDamageUpperBound < 2)) {
+    const insufficientHp = (hp: number) => !Number.isFinite(hp) || (estimatedDamageUpperBound > 0 && hp - estimatedDamageUpperBound < 2);
+    if (insufficientHp(initial.hp)) {
       return refused(estimatedDamageUpperBound > 0
         ? `当前生命 ${initial.hp} 不足以承受这次约 ${drop.toFixed(1)} 格落差（预计 ${estimatedDamageUpperBound} 点摔伤并保留 2 点余量）`
         : `当前生命 ${initial.hp} 无法确认安全下行`, 'LOW_HP');
@@ -98,7 +99,7 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
     const latest = check();
     if (dist3(latest.pos, receipt.from) > 0.35) return refused('观察后站位已经改变，需重新评估落点');
     if (!latest.connected || !latest.alive || !latest.observationReady || !latest.onGround || latest.inWater || latest.inLava
-      || latest.hp - estimatedDamageUpperBound < 4) return refused('观察期间站稳状态或生命余量已改变，需重新评估');
+      || insufficientHp(latest.hp)) return refused('观察期间站稳状态或生命余量已改变，需重新评估');
     const end = Math.min(ctx.deadline, Date.now() + 12_000);
     if (end <= Date.now()) return refused('本次下行时间预算已用尽');
     try {
