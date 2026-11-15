@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { footprintBounds, surveyBuildSite } from '../src/building/site.ts';
+import { checkSiteAt, footprintBounds, surveyBuildSite, terrainSketch } from '../src/building/site.ts';
+import { siteFor } from '../src/building/architect.ts';
 import { compileBuilding, materialCost, normalizeSpec, rotatePosition } from '../src/building/spec.ts';
 import { planScaffolding } from '../src/building/scaffold.ts';
 import { WorldMemory } from '../src/memory/store.ts';
@@ -34,6 +35,100 @@ test('选址：避开水塘，挑一块干燥平整的空地', () => {
   } finally { memory.close(); }
 });
 
+test('地形草图：人造方块和悬空地表会被标出，建筑师不选它', () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const clean = terrainSketch(w, 2, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(clean.artificial[2]![2], false);
+  assert.equal(clean.unsupported[2]![2], false);
+  assert.ok(siteFor({ x: 0, z: 0 }, clean, [0], [0], { width: 1, depth: 1 }), '自然平地可选');
+
+  w.setBlock({ x: 0, y: 63, z: 0 }, 'obsidian');
+  const artificial = terrainSketch(w, 2, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(artificial.artificial[2]![2], true);
+  assert.match(artificial.rows[2]!.split(' ')[2]!, /A/);
+  assert.match(artificial.summary, /人造方块/);
+  assert.equal(siteFor({ x: 0, z: 0 }, artificial, [0], [0], { width: 1, depth: 1 }), null, '人造方块不当地基');
+
+  w.setBlock({ x: 0, y: 63, z: 0 }, 'grass_block');
+  for (const y of [62, 61, 60, 59]) w.setBlock({ x: 0, y, z: 0 }, 'air');
+  const floating = terrainSketch(w, 2, { x: 0.5, y: 64, z: 0.5 });
+  assert.equal(floating.unsupported[2]![2], true);
+  assert.match(floating.rows[2]!.split(' ')[2]!, /!/);
+  assert.match(floating.summary, /悬空|没有支撑/);
+  assert.equal(siteFor({ x: 0, z: 0 }, floating, [0], [0], { width: 1, depth: 1 }), null, '悬空地表不当地基');
+});
+
+test('选址：自然地表下面是深洞/悬空时不算可整平地', () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  for (let x = -5; x <= 5; x++) for (let z = -5; z <= 5; z++) for (const y of [62, 61, 60, 59]) w.setBlock({ x, y, z }, 'air');
+  const s = surveyBuildSite(w, null, spec, { radius: 0, center: { x: 0, y: 64, z: 0 } });
+  assert.equal(s.best, null);
+  assert.ok(s.rejected.unsupported > 0, JSON.stringify(s.rejected));
+});
+
+test('选址：地基下面有岩浆/危险格不算可整平地', () => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.setBlock({ x: 0, y: 62, z: 0 }, 'magma_block');
+  const s = surveyBuildSite(w, null, spec, { radius: 0, center: { x: 0, y: 64, z: 0 } });
+  assert.equal(s.best, null);
+  assert.ok(s.rejected.unsupported > 0, JSON.stringify(s.rejected));
+});
+
+test('自绘建筑：origin 有人造方块时就近改址，不直接在坏地基开工', async () => {
+  const custom = normalizeSpec({ name: '自绘小屋', layout: 'custom', components: [
+    { pos: { x: 0, y: 0, z: 0 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+    { pos: { x: 1, y: 0, z: 0 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+    { pos: { x: 0, y: 0, z: 1 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+  ] });
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const ctx = makeCtx(w);
+  try {
+    w.setBlock({ x: 0, y: 63, z: 0 }, 'obsidian');
+    const v = build.validate({ blueprint: 'custom', spec: custom, origin: { x: 0, y: 64, z: 0 } }, w);
+    assert.ok(v.ok, v.ok ? '' : v.error);
+    if (!v.ok) return;
+    const r = await build.run(ctx, v.args);
+    const origin = r.data?.origin as { x: number; y: number; z: number } | undefined;
+    assert.ok(origin && (origin.x !== 0 || origin.z !== 0), '应在坏 origin 附近另选一块地');
+  } finally { ctx.memory.close(); }
+});
+
+test('自绘建筑：足印按组件算，给了 origin 也要先做选址校验', async () => {
+  const custom = normalizeSpec({ name: '自绘小屋', layout: 'custom', components: [
+    { pos: { x: 0, y: 0, z: 0 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+    { pos: { x: 1, y: 0, z: 0 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+    { pos: { x: 0, y: 0, z: 1 }, name: 'cobblestone', phase: 'foundation', tags: ['floor', 'support'] },
+  ] });
+  assert.deepEqual(footprintBounds(custom), { minX: -1, maxX: 2, minZ: -1, maxZ: 2 });
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  const memory = new WorldMemory(null);
+  const ctx = makeCtx(w);
+  try {
+    // 足印里的人造方块（黑曜石/传送门这类）不是可整的平地
+    w.setBlock({ x: 1, y: 63, z: 0 }, 'obsidian');
+    const bad = checkSiteAt(w, memory, custom, { x: 0, y: 64, z: 0 }, 0);
+    assert.equal(bad.ok, false);
+    assert.match(bad.why, /自然地形|坡|地基/);
+    // build 给了 origin 也不能绕过校验：周围全是人造方块时必须在开工前停下
+    for (let x = -20; x <= 20; x++) for (let z = -20; z <= 20; z++) w.setBlock({ x, y: 63, z }, 'obsidian');
+    const v = build.validate({ blueprint: 'custom', spec: custom, origin: { x: 0, y: 64, z: 0 } }, w);
+    assert.ok(v.ok, v.ok ? '' : v.error);
+    if (!v.ok) return;
+    const r = await build.run(ctx, v.args);
+    assert.equal(r.failureCode, 'NOT_FOUND');
+    assert.match(r.summary, /不合适|不是自然地形|坡太陡/);
+    assert.ok(!w.actions.some((a) => a.startsWith('place:')), '没有在坏地基上开工');
+  } finally {
+    ctx.memory.close();
+    memory.close();
+  }
+});
+
 test('build 不给 origin：附近都是水时 NOT_FOUND 并说明原因和方向', async () => {
   const w = new InstantBuildWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -59,6 +154,16 @@ test('build 不自动接着盖地基有问题的工地，换块地另起', async
     const bad = archive.design({ worldId: w.worldId, dimension: 'overworld', origin: { x: 2, y: 64, z: 2 }, rotation: 0, spec, materials: materialCost(compileBuilding(spec).cells) });
     archive.inspect(bad.id, { at: Date.now(), complete: false, checked: 1, defects: [{ cellId: '0,-2,0', pos: { x: 2, y: 62, z: 2 }, kind: 'terrain', expected: '地基', actual: 'water' }], functions: {} });
     assert.match(terrainProblem(archive.get(bad.id)!) ?? '', /water/);
+    // 显式 repair 也不能在坏地基上继续：同一 projectId 不能换位置，要求 abandon 后另起
+    const repair = build.validate({ projectId: bad.id, mode: 'repair' }, w);
+    assert.ok(repair.ok, repair.ok ? '' : repair.error);
+    if (repair.ok) {
+      const r = await build.run(ctx, repair.args);
+      assert.equal(r.failureCode, 'NOT_FOUND');
+      assert.match(r.summary, /同一 projectId 不能换位置/);
+      assert.match(r.summary, /abandon/);
+      assert.ok(!w.actions.some((a) => a.startsWith('place:')), '不在坏地基上补方块');
+    }
     const v = build.validate({ blueprint: 'hut', prefab: true }, w);
     if (!v.ok) throw new Error(v.error);
     const r = await build.run(ctx, v.args);

@@ -327,7 +327,7 @@ export const build: Skill<BuildArgs> = {
         notes.push(`作品 ${old.id.slice(0, 8)} 的位置固定在 (${old.origin.x},${old.origin.y},${old.origin.z})，忽略了给的 origin (${args.origin.x},${args.origin.y},${args.origin.z})；想换地方就不写 projectId 另起一座`);
       }
       // 只勘察站在附近看得见的地形：给的 origin 离得远就先走过去再看（不隔着老远读地形）
-      if (origin && !old && args.mode === 'build' && spec.layout === 'house') {
+      if (origin && !old && args.mode === 'build') {
         const here = ctx.adapter.state().pos;
         const far = Math.hypot(origin.x - here.x, origin.z - here.z);
         if (far > 24) {
@@ -340,7 +340,7 @@ export const build: Skill<BuildArgs> = {
       const rotations = args.rotation !== undefined ? [args.rotation] : [rotation, ...([0, 90, 180, 270] as Rotation[]).filter((r) => r !== rotation)];
       let surveyFrom: { center?: Vec3Like; radius: number; why?: string } | null = origin ? null : { radius: 24 };
       // 模型给了 origin（新工地）：先按同样的标准看一眼那块地，不合适就在它附近 16 格内另找
-      if (origin && !old && args.mode === 'build' && spec.layout === 'house') {
+      if (origin && !old && args.mode === 'build') {
         const check = checkSiteAt(ctx.adapter, ctx.memory, spec, origin, rotation, own, ownFootprints(archive, state.worldId, state.dim));
         if (check.ok) {
           if (check.origin.y !== origin.y) notes.push(`origin 的 y 按地面校正为 ${check.origin.y}`);
@@ -367,6 +367,13 @@ export const build: Skill<BuildArgs> = {
         }
       }
       if (!origin) return fail('ERROR', '没有确定施工位置');
+      // 已有作品的 origin 固定，不能靠 repair 换地：地基坏时明确要求放弃后另起，避免同一工地反复修。
+      if (old && (args.mode === 'build' || args.mode === 'repair')) {
+        const terrain = terrainProblem(old);
+        if (terrain) {
+          return fail('NOT_FOUND', `${spec.name} 的工地 (${old.origin.x},${old.origin.y},${old.origin.z}) ${terrain}；同一 projectId 不能换位置。先用 place_support/place_cell 补好地基再 mode:"inspect" 复验，或 build {"projectId":"${old.id}","mode":"abandon"} 后用新 origin 另起`, { projectId: old.id, origin: { ...old.origin }, terrain });
+        }
+      }
       const blueprint = compileBuilding(spec);
       const project = archive.design({ id: old?.id, worldId: state.worldId, dimension: state.dim, origin, rotation: rot, spec, materials: materialCost(blueprint.cells), reason: args.reason });
       const draftId = args.reason?.match(/图纸 (dr_[a-z0-9]+)/)?.[1];

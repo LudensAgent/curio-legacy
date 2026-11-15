@@ -103,6 +103,33 @@ test('knowledge mistakenly placed in activity steps is read during thinking and 
   assert.deepEqual(w.adapter.actions, []);
 });
 
+test('terrain 查询只读返回高差/人造方块/悬空与足印候选，不产生身体动作', async (t) => {
+  const w = fixture(t, [{ kind: 'terrain', width: 5, depth: 5 }, decision]);
+  const result = await w.think();
+  assert.equal(result.activity?.steps[0].skill, 'look_around');
+  assert.equal(w.calls.length, 2);
+  const out = w.calls[1].at(-1)!.content;
+  assert.match(out, /"legend"/);
+  assert.match(out, /人造方块/);
+  assert.match(out, /悬空/);
+  assert.match(out, /"footprint"/);
+  assert.match(out, /"best"/);
+  assert.match(out, /"cut"/);
+  assert.match(out, /"rotation"/);
+  assert.match(out, /"bearing"/);
+  assert.match(out, /"rejected_legend"/);
+  assert.equal(w.bus.recent().filter((e) => e.type === 'terrain_query').length, 1);
+  assert.deepEqual(w.adapter.actions, []);
+});
+
+test('terrain 查询校验范围：越界参数明确拒绝，不静默截断', async (t) => {
+  const w = fixture(t, [{ kind: 'terrain', radius: 99 }, decision]);
+  await w.think();
+  assert.equal(w.calls.length, 2);
+  assert.match(w.calls[1].at(-1)!.content, /terrain\.radius 需要 4–16/);
+  assert.deepEqual(w.adapter.actions, []);
+});
+
 test('knowledge and existing queries share the three-query budget', async (t) => {
   const w = fixture(t, [{ kind: 'knowledge', query: '床' }, { kind: 'moves', names: ['use_item'] },
     { kind: 'knowledge', id: 'fixture-topic', section: 'effects' }, { kind: 'knowledge', query: '再查一次' }, decision]);

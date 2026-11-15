@@ -100,7 +100,7 @@ site 是房子中心相对 terrain 草图正中间那格的位置（x 往东为�
     my_likes: req.likes,
     my_past_works: req.pastWorks,
     ...(req.terrain ? { terrain: {
-      how_to_read: `以想盖房子的地方为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是中心那一列；数字是这一列地表比中心高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉）`,
+      how_to_read: `以想盖房子的地方为中心 ${req.terrain.radius * 2 + 1}×${req.terrain.radius * 2 + 1} 格，行从北到南、列从西到东，正中间是中心那一列；数字是这一列地表比中心高/低几格，~ 是水，? 看不清，带 T 的长着树（盖房要砍掉），带 A 的是人造方块（门/黑曜石/建筑，不是自然平地），带 ! 的是地表下面悬空或支撑未知（不能直接做地基）`,
       summary: req.terrain.summary, rows: req.terrain.rows } } : {}),
     budget: kind !== 'dwelling' ? `实用的小建筑：省料，木料折合原木不超过 ${UTILITY_LOGS} 根，能用圆石就用圆石，灯用 torch`
       : req.pastWorks.length ? '按手上和附近的材料量力而行' : `这是第一座房子，要当天盖完：木料折合原木不超过 ${FIRST_HOUSE_LOGS} 根（1 原木=4 木板，4 级台阶要 6 木板，半砖半块木板），圆石 40 块以内，灯用 torch`,
@@ -181,6 +181,14 @@ export function siteFor(raw: unknown, terrain: TerrainSketch | undefined, fx: nu
   if (!Number.isFinite(dx) || !Number.isFinite(dz) || Math.abs(dx) > terrain.radius || Math.abs(dz) > terrain.radius) return null;
   const h = terrain.heights[dz + terrain.radius]?.[dx + terrain.radius];
   if (h === undefined || h === null || h === 'water') return null;
+  // 按房子中心占地看一圈：水、人造方块（传送门/黑曜石/建筑）、悬空/支撑未知都不能当自然平地。
+  const halfW = Math.floor(size.width / 2), halfD = Math.floor(size.depth / 2);
+  for (let ox = -halfW; ox <= halfW; ox++) for (let oz = -halfD; oz <= halfD; oz++) {
+    const i = dz + oz + terrain.radius, j = dx + ox + terrain.radius;
+    const hh = terrain.heights[i]?.[j];
+    if (hh === undefined || hh === null || hh === 'water') return null;
+    if (terrain.artificial[i]?.[j] || terrain.unsupported[i]?.[j]) return null;
+  }
   const cx = terrain.center.x + dx, cz = terrain.center.z + dz;
   return {
     origin: { x: cx - Math.min(...fx) - Math.floor(size.width / 2), y: terrain.center.y + h + 1, z: cz - Math.min(...fz) - Math.floor(size.depth / 2) },

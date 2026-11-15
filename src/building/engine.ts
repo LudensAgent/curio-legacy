@@ -47,6 +47,13 @@ const VEGETATION = /(_leaves|_log|_wood|_stem|_sapling|mangrove_propagule|_flowe
 const LEVELABLE = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'netherrack', 'end_stone', 'sand', 'red_sand', 'gravel', 'clay', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block']);
 export const siteClearable = (name: string) => !name.endsWith('grass_block') && VEGETATION.test(name) || LEVELABLE.has(name) || clearanceFixture(name);
 const solidGround = (name: string) => !replaceable(name) && !HAZARDS.has(name) && !/door|torch|flower|sapling|leaves|fence|pane|carpet|bed|rail/.test(name);
+/** 地基扫描对一格的判定：可承重 / 可填掉 / 阻挡（危险格也算阻挡）。选址预检与施工共用同一口径。 */
+export function foundationSupport(name: string): 'solid' | 'fillable' | 'blocked' {
+  if (HAZARDS.has(name)) return 'blocked';
+  if (solidGround(name)) return 'solid';
+  if (replaceable(name) || VEGETATION.test(name) || clearanceFixture(name)) return 'fillable';
+  return 'blocked';
+}
 
 function actualState(adapter: StateBuildingAdapter, pos: Vec3Like) {
   if (adapter.blockStateAt) return adapter.blockStateAt(pos);

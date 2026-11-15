@@ -2,6 +2,7 @@ import type { GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { DIRS } from '../perception/perception.ts';
 import { rotatePosition, type BuildingSpec, type Rotation } from './spec.ts';
+import { foundationSupport } from './engine.ts';
 
 /**
  * 选址：像玩家盖房前那样看看身边的地形——每一列地表有多高、是不是水、有没有别人的东西——
@@ -11,7 +12,9 @@ const AIR = new Set(['air', 'cave_air', 'void_air']);
 const LIQUID = new Set(['water', 'lava', 'bubble_column', 'kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'powder_snow']);
 /** 地表上可以清掉、不算地面的东西：草、花、树、雪层…… */
 const COVER = /(^air$|^cave_air$|_leaves$|_log$|_wood$|_stem$|_sapling$|^mangrove_propagule$|_flower$|_tulip$|_mushroom$|^short_grass$|^grass$|^tall_grass$|fern$|bush$|vine|^dandelion$|^poppy$|orchid$|allium$|bluet$|daisy$|cornflower$|lily_of_the_valley$|peony$|lilac$|^rose_bush$|^sunflower$|^snow$|^sugar_cane$|^torch$|^wall_torch$)/;
-const NATURAL = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'gravel', 'sand', 'red_sand', 'clay', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block', 'netherrack', 'end_stone']);
+const NATURAL = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'mycelium', 'rooted_dirt', 'stone', 'deepslate', 'andesite', 'granite', 'diorite', 'tuff', 'calcite', 'gravel', 'sand', 'red_sand', 'clay', 'sandstone', 'red_sandstone', 'terracotta', 'snow_block', 'mud', 'moss_block', 'netherrack', 'end_stone',
+  // 下界的自然地表也算自然地形；黑曜石/传送门/建筑仍算人造，不能当平地。
+  'basalt', 'smooth_basalt', 'blackstone', 'soul_sand', 'soul_soil', 'crimson_nylium', 'warped_nylium', 'nether_wart_block', 'warped_wart_block']);
 const TREE = /_log$|_wood$|_stem$/;
 
 export interface Column { y: number; ground: string; wet: boolean; tree: boolean; artificial: string | null }
@@ -23,29 +26,52 @@ export interface SiteCandidate {
 }
 /** 整地上限：铲最多高出 3 格、填最多低 2 格；5×5（含余量）总量不超过约 40 块，按面积放大 */
 const MAX_CUT = 3, MAX_FILL = 2;
-export const levelBudget = (spec: Pick<BuildingSpec, 'width' | 'depth'>) => Math.round(40 * (spec.width * spec.depth) / 25);
+export const levelBudget = (spec: Pick<BuildingSpec, 'width' | 'depth' | 'layout'> & { components?: BuildingSpec['components'] }) => {
+  // 整地预算按实际占地：house 取生成主体，再加所有附加零件的范围；自绘只看零件。
+  let minX = spec.layout === 'house' ? 0 : Infinity, maxX = spec.layout === 'house' ? spec.width - 1 : -Infinity;
+  let minZ = spec.layout === 'house' ? 0 : Infinity, maxZ = spec.layout === 'house' ? spec.depth - 1 : -Infinity;
+  for (const c of spec.components ?? []) {
+    minX = Math.min(minX, c.pos.x); maxX = Math.max(maxX, c.pos.x);
+    minZ = Math.min(minZ, c.pos.z); maxZ = Math.max(maxZ, c.pos.z);
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minZ)) { minX = 0; maxX = spec.width - 1; minZ = 0; maxZ = spec.depth - 1; }
+  const area = (maxX - minX + 1) * (maxZ - minZ + 1);
+  return Math.round(40 * area / 25);
+};
 
 /** 世界坐标里的一块矩形占地（含边） */
 export interface SiteRect { minX: number; maxX: number; minZ: number; maxZ: number }
 
 /** 一座作品的占地矩形（按它的朝向转到世界坐标） */
-export function projectRect(origin: Vec3Like, rotation: Rotation, spec: Pick<BuildingSpec, 'width' | 'depth'>): SiteRect {
-  const a = rotatePosition({ x: 0, y: 0, z: 0 }, origin, rotation), b = rotatePosition({ x: spec.width - 1, y: 0, z: spec.depth - 1 }, origin, rotation);
-  return { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minZ: Math.min(a.z, b.z), maxZ: Math.max(a.z, b.z) };
+export function projectRect(origin: Vec3Like, rotation: Rotation, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { components?: BuildingSpec['components'] }): SiteRect {
+  // 与 footprintBounds 同一足印（含 house 的附加零件）；footprintBounds 自带 1 格余量，
+  // 这里减掉，由 ownFootprints 统一向外留 1 格，避免避让范围变成 2 格。
+  const b = footprintBounds(spec);
+  const p1 = rotatePosition({ x: b.minX + 1, y: 0, z: b.minZ + 1 }, origin, rotation), p2 = rotatePosition({ x: b.maxX - 1, y: 0, z: b.maxZ - 1 }, origin, rotation);
+  return { minX: Math.min(p1.x, p2.x), maxX: Math.max(p1.x, p2.x), minZ: Math.min(p1.z, p2.z), maxZ: Math.max(p1.z, p2.z) };
 }
 
 export interface SiteSurvey {
   best: SiteCandidate | null;
   checked: number;
-  rejected: { wet: number; uneven: number; hazard: number; artificial: number; unknown: number; occupied?: number };
+  rejected: { wet: number; uneven: number; hazard: number; artificial: number; unsupported: number; unknown: number; occupied?: number };
   /** 地势更平、更干的方向（失败时给建议） */
   hint: string | null;
 }
 
 /** 房子 + 门口 + 脚手架占的局部坐标范围（未旋转），外加 1 格余量 */
-export function footprintBounds(spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'>) {
+export function footprintBounds(spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { components?: BuildingSpec['components'] }) {
   const scaffold = spec.layout === 'house';
-  return { minX: (scaffold ? -2 : 0) - 1, maxX: spec.width, minZ: (scaffold ? -spec.height - 2 : -1) - 1, maxZ: spec.depth };
+  const house = { minX: (scaffold ? -2 : 0) - 1, maxX: spec.width, minZ: scaffold ? -spec.height - 3 : -1, maxZ: spec.depth };
+  if (!spec.components?.length) return house;
+  const xs = spec.components.map((c) => c.pos.x), zs = spec.components.map((c) => c.pos.z);
+  const parts = { minX: Math.min(...xs) - 1, maxX: Math.max(...xs) + 1, minZ: Math.min(...zs) - 1, maxZ: Math.max(...zs) + 1 };
+  // 自绘建筑按实际零件包围盒；house 的附加零件要和生成的主体合并，避免只验主体。
+  if (!scaffold) return parts;
+  return {
+    minX: Math.min(house.minX, parts.minX), maxX: Math.max(house.maxX, parts.maxX),
+    minZ: Math.min(house.minZ, parts.minZ), maxZ: Math.max(house.maxZ, parts.maxZ),
+  };
 }
 
 /** 一列地表：从上往下穿过空气和植被，第一块是液体 → wet；第一块地面 → 地表高度 */
@@ -68,7 +94,19 @@ export function surfaceColumn(adapter: GameAdapter, x: number, z: number, top: n
   return null;
 }
 
-export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[]; center?: Vec3Like; avoid?: SiteRect[] } = {}): SiteSurvey {
+/** 地表下面 maxFoundationDepth 内有没有可承重方块；引擎会填浅坑，超过深度的空洞算不能做地基。 */
+function supportedBelow(adapter: GameAdapter, x: number, z: number, topY: number, depth: number): boolean {
+  for (let d = 1; d <= depth; d++) {
+    const name = adapter.blockAt({ x, y: topY - d, z });
+    if (name === null) return false;
+    const support = foundationSupport(name);
+    if (support === 'solid') return true;
+    if (support === 'blocked') return false;
+  }
+  return false;
+}
+
+export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number; components?: BuildingSpec['components'] }, opts: { radius?: number; rotations?: Rotation[]; ownStations?: Vec3Like[]; center?: Vec3Like; avoid?: SiteRect[] } = {}): SiteSurvey {
   const s = adapter.state();
   const radius = opts.radius ?? 24;
   const rotations = opts.rotations ?? [0, 90, 180, 270];
@@ -85,7 +123,19 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
     if (!cols.has(k)) cols.set(k, Math.hypot(x - bx, z - bz) > reach ? null : surfaceColumn(adapter, x, z, by + 10, by - 12, own));
     return cols.get(k)!;
   };
-  const rejected = { wet: 0, uneven: 0, hazard: 0, artificial: 0, unknown: 0, occupied: 0 };
+  // 只有真需要地基的图纸才检查支撑深度；墙/装饰类自绘没有地板格，别拿深洞整地标准误拒。
+  const needsFoundation = spec.layout === 'house' || (spec.components ?? []).some((c) => c.phase === 'foundation');
+  const supportDepth = Math.max(1, Math.min(8, spec.maxFoundationDepth ?? 4));
+  const supportCache = new Map<string, boolean>();
+  const supported = (x: number, z: number, topY: number) => {
+    const k = `${x},${z}`;
+    const known = supportCache.get(k);
+    if (known !== undefined) return known;
+    const ok = supportedBelow(adapter, x, z, topY, supportDepth);
+    supportCache.set(k, ok);
+    return ok;
+  };
+  const rejected = { wet: 0, uneven: 0, hazard: 0, artificial: 0, unsupported: 0, unknown: 0, occupied: 0 };
   const avoid = opts.avoid ?? [];
   const dirScore = new Map<string, { ok: number; n: number; wet: number }>();
   let best: SiteCandidate | null = null, checked = 0;
@@ -111,6 +161,7 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
         // 自己别的工地（盖了一半的、放弃的）占着的地方：不在上面另起一座，免得两座互相把对方当成占位
         if (avoid.some((r) => p.x >= r.minX && p.x <= r.maxX && p.z >= r.minZ && p.z <= r.maxZ)) { reason = 'occupied'; break; }
         if (c.artificial) { reason = 'artificial'; break; }
+        if (needsFoundation && !supported(p.x, p.z, c.y)) { reason = 'unsupported'; break; }
         heights.push(c.y);
         if (c.tree) trees++;
       }
@@ -152,16 +203,16 @@ export function surveyBuildSite(adapter: GameAdapter, memory: WorldMemory | null
 /** 失败时的人话说明 */
 export function describeSiteFailure(survey: SiteSurvey, spec: Pick<BuildingSpec, 'width' | 'depth'>, radius = 24): string {
   const r = survey.rejected;
-  const why = [r.occupied ? '和自己别的工地重叠' : '', r.wet ? '挨水/岩浆' : '', r.uneven ? '坡太陡、要铲/填的方块太多' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
+  const why = [r.occupied ? '和自己别的工地重叠' : '', r.wet ? '挨水/岩浆' : '', r.uneven ? '坡太陡、要铲/填的方块太多' : '', r.unsupported ? '地基下面悬空/支撑太深' : '', r.artificial ? '有不是自然地形的方块' : '', r.hazard ? '在出过事的危险区域' : '', r.unknown ? '有区块没加载、或地表被山体/洞顶盖住' : ''].filter(Boolean).join('、');
   return `附近 ${radius} 格内没有够平（或整得平）又不挨水的 ${spec.width}×${spec.depth} 空地${why ? `（试过的位置主要问题：${why}）` : ''}，换个地方${survey.hint ? `（比如往 ${survey.hint} 走 30 格以上）` : ''}再试，或直接给 origin`;
 }
 
 /** 某个指定 origin 能不能盖：能盖返回校正过高度的 origin；不能盖返回原因 */
-export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = [], avoid: SiteRect[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
+export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number; components?: BuildingSpec['components'] }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = [], avoid: SiteRect[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
   const r = surveyBuildSite(adapter, memory, spec, { radius: 0, rotations: [rotation], ownStations, center: origin, avoid });
   if (r.best && Math.abs(r.best.origin.y - origin.y) <= 2) return { ok: true, origin: r.best.origin };
   const x = r.rejected;
-  const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.occupied ? '和自己别的工地重叠' : '', x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
+  const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.occupied ? '和自己别的工地重叠' : '', x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.unsupported ? '地基下面悬空/支撑太深' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
   return { ok: false, why };
 }
 
@@ -173,6 +224,10 @@ export interface TerrainSketch {
   /** 每格相对高度；null = 看不清/在山体里，'water' = 水面 */
   heights: (number | 'water' | null)[][];
   trees: boolean[][];
+  /** 地表是人造方块（门/黑曜石/建筑等），不能当自然平地；未知/水为 false */
+  artificial: boolean[][];
+  /** 地表下面直接是空气或未知：悬空/薄壳或支撑未知，不能直接做地基 */
+  unsupported: boolean[][];
   rows: string[];
   summary: string;
 }
@@ -183,24 +238,29 @@ export function terrainSketch(adapter: GameAdapter, radius = 8, at?: Vec3Like): 
   const bx = Math.floor(c.x), bz = Math.floor(c.z), py = Math.floor(c.y);
   const here = surfaceColumn(adapter, bx, bz, py + 2, py - 6, new Set());
   const base = here && !here.wet ? here.y : py - 1;
-  const heights: (number | 'water' | null)[][] = [], trees: boolean[][] = [], rows: string[] = [];
-  const stats = { n: [0, 0], s: [0, 0], w: [0, 0], e: [0, 0], water: { n: 0, s: 0, w: 0, e: 0 }, trees: 0, flat: 0, known: 0 };
+  const heights: (number | 'water' | null)[][] = [], trees: boolean[][] = [], artificial: boolean[][] = [], unsupported: boolean[][] = [], rows: string[] = [];
+  const stats = { n: [0, 0], s: [0, 0], w: [0, 0], e: [0, 0], water: { n: 0, s: 0, w: 0, e: 0 }, trees: 0, artificial: 0, unsupported: 0, flat: 0, known: 0 };
   for (let dz = -radius; dz <= radius; dz++) {
-    const hr: (number | 'water' | null)[] = [], tr: boolean[] = [], toks: string[] = [];
+    const hr: (number | 'water' | null)[] = [], tr: boolean[] = [], ar: boolean[] = [], ur: boolean[] = [], toks: string[] = [];
     for (let dx = -radius; dx <= radius; dx++) {
       const c = surfaceColumn(adapter, bx + dx, bz + dz, base + 12, base - 10, new Set());
       const h: number | 'water' | null = !c ? null : c.wet ? 'water' : c.y - base;
-      hr.push(h); tr.push(!!c?.tree);
+      const art = !!c?.artificial;
+      // 地表下面 4 格内没有可承重方块：悬空平台/深洞，不能直接当地基（引擎最多填到 maxFoundationDepth）。
+      const unsupportedHere = !!c && !c.wet && !supportedBelow(adapter, bx + dx, bz + dz, c.y, 4);
+      hr.push(h); tr.push(!!c?.tree); ar.push(art); ur.push(unsupportedHere);
       const tok = h === null ? '?' : h === 'water' ? '~' : h > 0 ? `+${h}` : String(h);
-      toks.push(`${tok}${c?.tree ? 'T' : ''}`);
+      toks.push(`${tok}${c?.tree ? 'T' : ''}${art ? 'A' : ''}${unsupportedHere ? '!' : ''}`);
       if (h === null) continue;
       stats.known++;
       if (c!.tree) stats.trees++;
+      if (art) stats.artificial++;
+      if (unsupportedHere) stats.unsupported++;
       const side = (k: 'n' | 's' | 'w' | 'e') => { if (h === 'water') stats.water[k]++; else { stats[k][0] += h; stats[k][1]++; } };
       if (dz < 0) side('n'); if (dz > 0) side('s'); if (dx < 0) side('w'); if (dx > 0) side('e');
       if (h !== 'water' && Math.abs(h) <= 1) stats.flat++;
     }
-    heights.push(hr); trees.push(tr); rows.push(toks.join(' '));
+    heights.push(hr); trees.push(tr); artificial.push(ar); unsupported.push(ur); rows.push(toks.join(' '));
   }
   const avg = (k: 'n' | 's' | 'w' | 'e') => stats[k][1] ? stats[k][0] / stats[k][1] : 0;
   const notes: string[] = [];
@@ -211,6 +271,8 @@ export function terrainSketch(adapter: GameAdapter, radius = 8, at?: Vec3Like): 
   const wet = (Object.entries(stats.water) as [string, number][]).filter(([, n]) => n >= 3).map(([k]) => ({ n: '北', s: '南', w: '西', e: '东' } as Record<string, string>)[k]);
   if (wet.length) notes.push(`${wet.join('、')}边有水`);
   if (stats.trees) notes.push(`有 ${stats.trees} 列长着树`);
+  if (stats.artificial) notes.push(`有 ${stats.artificial} 列地表是人造方块（门/黑曜石/建筑），不是可整的自然平地`);
+  if (stats.unsupported) notes.push(`有 ${stats.unsupported} 列地表下面悬空或支撑未知，不能直接做地基`);
   notes.push(`和脚下差不多高（±1）的格子占 ${stats.known ? Math.round(stats.flat / stats.known * 100) : 0}%`);
-  return { center: { x: bx, y: base, z: bz }, radius, heights, trees, rows, summary: notes.join('；') };
+  return { center: { x: bx, y: base, z: bz }, radius, heights, trees, artificial, unsupported, rows, summary: notes.join('；') };
 }

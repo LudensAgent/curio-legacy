@@ -17,7 +17,7 @@ import { NO_ARBITRARY_TRAVEL_STEPS, NON_OBSERVING_STEPS, NON_PRODUCING_STEPS } f
 import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
-import { terrainSketch } from '../building/site.ts';
+import { surveyBuildSite, terrainSketch } from '../building/site.ts';
 import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
@@ -28,7 +28,7 @@ import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
-const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'progress'];
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'progress', 'terrain'];
 /** 需要完整上下文（技能、图纸、Wiki 资料、矿道记录）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
 const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
 /**
@@ -664,6 +664,57 @@ export class Thinker {
       if (kind === 'moves') {
         const names = (Array.isArray(raw.names) ? raw.names : [raw.name ?? raw.names]).map((n: unknown) => String(n ?? '').trim()).filter(Boolean);
         return names.length ? moveDetails(names) : moveDirectory();
+      }
+      if (kind === 'terrain') {
+        // 只读地形：先看周围高差/水/树/人造方块/悬空；给了宽深再按这个足印找附近可整的平地。
+        const radius = raw.radius === undefined ? 8 : Number(raw.radius);
+        if (!Number.isInteger(radius) || radius < 4 || radius > 16) return 'terrain.radius 需要 4–16 的整数';
+        const width = raw.width === undefined ? undefined : Number(raw.width);
+        const depth = raw.depth === undefined ? undefined : Number(raw.depth);
+        if ((width === undefined) !== (depth === undefined)) return 'terrain 的 width/depth 要一起写';
+        if (width !== undefined && depth !== undefined && (!Number.isInteger(width) || width < 1 || width > 16 || !Number.isInteger(depth) || depth < 1 || depth > 16)) {
+          return 'terrain 的 width/depth 需要 1–16 的整数（只读估算，不施工）';
+        }
+        const sketch = terrainSketch(this.adapter, radius);
+        this.bus.publish('terrain_query', 'P3', `查地形：半径 ${radius}${width === undefined ? '' : `，足印 ${width}×${depth}`}`);
+        const base = {
+          center: sketch.center, radius, summary: sketch.summary, rows: sketch.rows,
+          legend: '数字=地表相对中心高/低；~ 水；? 看不清；T 树；A 人造方块（门/黑曜石/建筑）；! 地表下悬空或支撑未知',
+        };
+        if (width === undefined || depth === undefined) {
+          return JSON.stringify({
+            ...base,
+            note: 'rows 是当前视野内看到的；要按某个建筑的足印找可整地块，再加 width/depth（1–16）。',
+          }).slice(0, 4000);
+        }
+        const spec = {
+          width, depth, height: 4, layout: 'custom' as const, maxFoundationDepth: 4,
+          components: [
+            { pos: { x: 0, y: 0, z: 0 }, name: 'stone', properties: {}, phase: 'foundation' as const, tags: ['floor', 'support'], dependsOn: [] },
+            { pos: { x: width - 1, y: 0, z: depth - 1 }, name: 'stone', properties: {}, phase: 'foundation' as const, tags: ['floor', 'support'], dependsOn: [] },
+          ],
+        };
+        const survey = surveyBuildSite(this.adapter, this.memory, spec, { radius: 8 });
+        const here = this.adapter.state().pos;
+        const best = survey.best && (() => {
+          const dx = survey.best!.origin.x - here.x, dz = survey.best!.origin.z - here.z;
+          return {
+            origin: survey.best!.origin, rotation: survey.best!.rotation,
+            cut: survey.best!.cut, fill: survey.best!.fill, dist: survey.best!.dist,
+            bearing: { dir: Math.abs(dx) >= Math.abs(dz) ? (dx >= 0 ? 'E' : 'W') : (dz >= 0 ? 'S' : 'N'), dist: Math.round(Math.hypot(dx, dz)) },
+          };
+        })();
+        const hint = ({ N: '北', S: '南', E: '东', W: '西' } as Record<string, string>)[survey.hint ?? ''] ?? survey.hint;
+        return JSON.stringify({
+          ...base,
+          footprint: {
+            width, depth, best,
+            rejected: survey.rejected,
+            rejected_legend: 'wet=挨水/岩浆，uneven=坡太陡或整地量大，hazard=出过事的危险区，artificial=有人造方块，unsupported=地基下面悬空/支撑太深，unknown=看不清/未加载，occupied=和自己别的工地重叠',
+            hint: hint ?? null,
+          },
+          note: 'best 是附近 8 格内按这个足印挑的可整地块（cut/fill 是估算的铲/填量；rotation 是估算时用的朝向；只读）。选址/施工仍由你决定。',
+        }).slice(0, 4000);
       }
       if (kind === 'skill') {
         const name = String(raw.name ?? '').trim();

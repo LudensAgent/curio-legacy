@@ -177,13 +177,22 @@ test('野外临时放的工作台用完收回背包；家附近的留着', async
 });
 
 test('建筑师按地形挑的位置换算成施工 origin：房子中心落在选的格子上，地面高度取草图', () => {
-  const radius = 2;
-  const heights: (number | 'water' | null)[][] = [[0, 0, 0, 0, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 1], ['water', 0, 0, 1, 1], [null, 0, 0, 0, 0]];
-  const terrain = { center: { x: 100, y: 64, z: 200 }, radius, heights, trees: heights.map((r) => r.map(() => false)), rows: [], summary: '' };
+  const radius = 3;
+  const inner: (number | 'water' | null)[][] = [[0, 0, 0, 0, 0], [0, 0, 0, 1, 1], [0, 0, 0, 1, 1], ['water', 0, 0, 1, 1], [null, 0, 0, 0, 0]];
+  const heights: (number | 'water' | null)[][] = Array.from({ length: 7 }, (_, r) =>
+    Array.from({ length: 7 }, (_, c) => {
+      const y = r - 1, x = c - 1;
+      return y >= 0 && y < 5 && x >= 0 && x < 5 ? inner[y]![x]! : 0;
+    }));
+  const falseGrid = heights.map((r) => r.map(() => false));
+  const terrain = { center: { x: 100, y: 64, z: 200 }, radius, heights, trees: falseGrid, artificial: falseGrid, unsupported: falseGrid, rows: [], summary: '' };
   const site = siteFor({ x: 1, z: 0, why: '高一点' }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 });
   assert.deepEqual(site?.origin, { x: 99, y: 66, z: 198 });
   assert.equal(siteFor({ x: -2, z: 1 }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 }), null, '水面上不行');
   assert.equal(siteFor({ x: 9, z: 0 }, terrain, [0, 4], [0, 4], { width: 5, depth: 5 }), null, '草图外不行');
+  const withObsidian = { ...terrain, artificial: terrain.artificial.map((row) => [...row]) };
+  withObsidian.artificial[1]![2] = true; // 选点足迹的角落，不在中心那一格
+  assert.equal(siteFor({ x: 1, z: 0 }, withObsidian, [0, 4], [0, 4], { width: 5, depth: 5 }), null, '足迹里有黑曜石不行');
 });
 
 test('地形草图：东边高起一块、南边有水，行北到南、列西到东', async () => {
