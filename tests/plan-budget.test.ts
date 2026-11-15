@@ -86,18 +86,26 @@ test('needs 跨重启保留', () => {
   b.close();
 });
 
-test('【专注】展示 material_budget：需要/现有/还差，并标明数量由 Agent 定', (t) => {
+test('【专注】/【身体】展示补给事实：material_budget、饥饿值口径、勾选核验', (t) => {
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   t.after(() => memory.close());
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const self = new SelfModel(null);
   const plan = self.setPlan('备木头再进下界', ['备好木头'], [], { needs: [{ item: 'oak_log', count: 16, why: '工具/火把' }] })!;
   adapter.inv.set('oak_log', 2);
-  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
+  adapter.inv.set('iron_helmet', 1);
+  const context = { tier: 'deliberate' as const, reason: '测试', percept: perception.update(), state: adapter.state(),
     self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P' });
+    audience: null, notes: [], mySkills: [], persona: 'P' };
+  const [, user] = buildMindMessages(context);
   assert.match(user.content, /material_budget/);
   assert.match(user.content, /oak_log×16/);
   assert.match(user.content, /还差/);
   assert.match(user.content, /数量写在 count 里/);
+  assert.match(user.content, /箱子部分是最后打开时的记录，只是线索，不代表已随身或仍可取得/);
+  assert.match(user.content, /饥饿值；随身食物看背包/);
+  assert.match(user.content, /不是已穿戴/);
+  assert.match(user.content, /勾选前按当前事实核验/);
+  const [, glance] = buildMindMessages({ ...context, tier: 'glance' });
+  assert.match(glance.content, /勾掉前按当前事实核验/);
 });

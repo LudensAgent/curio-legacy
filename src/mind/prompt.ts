@@ -240,10 +240,10 @@ const OUTPUT = `只输出一个 JSON 对象：
  "activity":{"what":"具体要干什么","why":"为什么现在做","kind":"gather|craft|build|explore|survive|rest|experiment|tidy|social|other","facing":"N|E|S|W（含水平相对操作时必填）","steps":[{"skill":"动作名","args":{}}],"repeat":1,"done_when":{…},"expect":"预计会怎样","if_stuck":"卡住打算怎么办","applying":"k_…（可选：这段活按哪条窍门做，结果只作为它的应用证据，不自动证明结论正确）","outcome_id":"po_…（可选：推进哪项计划成果）","method_id":"pm_…（可选：采用哪条计划做法）"},
  "next":{同 activity，可提前写下一段；手上的活成功结束后接上——“要是卡住就…”这种备选写进 if_stuck，不要写成 next。可选 "requires":{当前状态条件（如 inventory_min、location_near、self_state、equipment、inventory_full、block_state 等，可用 all_of/any_of 组合；不能用 exploration）}：轮到这段 next 时先按当时状态验收的前置条件，未满足或无法确认就不启动并交回你重新决定；它不结束当前活动，也不替你去等待或准备材料}}
 activity.done_when 只结束当前活动；next.requires 只决定下一段能否开始，两者不能互相替代。
-取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
+取物：find_item 只查线索、不产出、不代表已取得（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
-operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304），是需求不是已取得物资；activity/next/methods 里写的物资同样只是需求，不自动采集/制作/取物，换 method 不清空未完成 needs（除非明确重估了目标或需求）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
@@ -371,7 +371,7 @@ const ENVIRONMENT_MANAGEMENT = `【环境改造】平整/填坑/削坡/台阶、
 
 const SUSTAINED_OPERATION = `【持续运营】Task（这一批）≠ Project（建成设施）≠ Ongoing Operation（维持生产）；建成不等于经营完成。农业：需求/选址/地形/耕地/水源/光照/通道/播种/看成熟/收割/按种子库存需求补种/整理/按消耗扩建、缩减或暂停；不按现实时间推断成熟，没看见成熟不声称可收。畜牧：发现动物/判断建群/选址围栏/门与食物/引导/确认动物在内部且边界闭合/保留繁殖种群/按条件繁殖/按需取产物/查数量空间食物。维护在回基地/经过设施/等待或完成/储备下降/看到损坏堵塞成熟逃逸/准备远行时进入注意；普通维护可延后，紧急损坏或即将失去关键资产才打断主线。farm 动作只管开垦/收割/补种，不管围栏/水源/光照。产能/库存/维护成本与收益不划算时可缩减、暂停或放弃。`;
 
-const TRIP_PREPARATION = `【出发准备】远行/下界/末地前，整趟行动的食物、工具与备用工具、装备、火把/燃料、施工材料、背包空间、返程与紧急余量都摆出来一起看。一次失败不证明准备标准需要降低；换方法、换来源或调整标准都可选，调整时说明依据和风险。准备足够就出发，不为更稳妥无限追加。`;
+const TRIP_PREPARATION = `【出发准备】远行/下界/末地前，把整趟行动的食物、工具与备用工具、装备、火把/燃料、施工材料、背包空间、返程与紧急余量一起看。核验时区分：随身库存（背包现有）、已装备（头/胸/腿/脚/副手槽里放着的）、已核实据点库存（已确认位置、内容和可访问性；取出前不算随身）、历史库存（旧记录，只是线索，不算随身准备）、未取得资源（没找到/没到达/没取出/数量未核实）；工具连耐久一起看。一次失败不证明准备标准需要降低；换方法、换来源或调整标准都可选，调整时说明依据和风险。准备足够就出发，不为更稳妥无限追加。`;
 
 const GLANCE_MODE = `这次只是抬头看一眼，不必把每个细节重新铺开：
 - 先看【此刻】，再核对【手上的活】的 continue_effect：只有决定原样执行剩余计划才 continue（独白可以很短）；要改变当下动作就用 adjust，插一件事用 detour——独白、what、expect、noticed 不会改变执行。
@@ -726,10 +726,10 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       ...(full && plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
       checklist_note: full
-        ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
-        : '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法。',
+        ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；勾选前按当前事实核验（装备看 wearing、食物看背包、据点资源取出后才算）。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
+        : '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法；勾掉前按当前事实核验。',
       ...(full && plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
-        material_budget_note: 'material_budget 是写在 plan.needs 里的预算；数量写在 count 里，宿主只按配方与背包+记得的箱子算差额，不自动改 gather.count' } : {}),
+        material_budget_note: 'material_budget 是写在 plan.needs 里的预算；数量写在 count 里，宿主按配方与背包+记得的箱子合计算差额（箱子部分是最后打开时的记录，只是线索，不代表已随身或仍可取得），不自动改 gather.count' } : {}),
       ...(full && plan.methods?.some((m) => m.status === 'active') ? { method_review_note: 'last_evidence/recent_attempts：dug/filled 才是新通道，openSteps 是本来就能直接走的覆盖，found/located/acquired 是目标证据；这几条路线/阻碍是不是同一个，对照最近几次判断；继续或换做法写在 methods/activity 里' } : {}),
       // 独立进展账本：只投影当前目标摘要；详情用 {"kind":"progress"} 查，不每念展开。
       ...(full ? (() => {
@@ -802,7 +802,7 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
     ...(p.self.where ? { where: p.self.where.text } : p.self.overhead ? { overhead: p.self.overhead.block ? `头顶 ${p.self.overhead.up} 格是 ${p.self.overhead.block}` : '头顶一直空着' } : {}),
     pos: pos3(p.self.pos), dim: `${DIM_ZH[p.self.dim] ?? p.self.dim}（${p.self.dim}）`, biome: p.self.biome, sky_visible: p.self.sky_visible ?? null,
     // 血量保留一位小数：半颗心四舍五入成 0 会让模型以为自己已经死了
-    hp: Math.round(p.self.hp * 10) / 10, food: p.self.food,
+    hp: Math.round(p.self.hp * 10) / 10, food: `${p.self.food}（饥饿值；随身食物看背包）`,
     ...(p.self.inWater ? { inWater: true, oxygen: s.oxygen } : {}), ...(p.self.inLava ? { inLava: true } : {}), ...(p.self.riding ? { riding: p.self.riding } : {}),
     // 触觉事实：身体 AABB 正压着的门方块（不受视野限制）；不在此格时省略，避免每念都占字数
     ...(p.self.body_in_portal ? { body_in_portal: p.self.body_in_portal } : {}),
@@ -828,10 +828,10 @@ function bodyState(p: Percept, s: AgentState, activity: Activity | null, habits:
         ? `；${it.stacks.map((stack) => `槽${stack.slot} ${stack.count}/${stackSize}，该叠可再放 ${stackSize - stack.count} 个数据相同的物品`).join('；')}` : '';
       return `${name}×${count}${isTreeSaplingItem(name) ? '（可种）' : ''}${it?.stackSize ? `（每叠上限 ${it.stackSize}${multi}${stacks}）` : ''}${durabilityText(it)}${it?.enchanted ? '（附魔）' : ''}`;
     }), empty_slots: `${s.emptySlots} 个空槽（每槽放一叠，不是一件）`,
-    ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾（穿到对应槽才生效）：${wearables.join('；')}` } : {}),
+    ...(wearables.length ? { wearables_in_backpack: `背包里的护甲/盾不是已穿戴（穿到/放到对应槽才生效）：${wearables.join('；')}` } : {}),
     ...(mergeable.length ? { mergeable_gear: `${mergeable.join('；')}。同名同材质装备可在工作台/砂轮合成修理：结果耐久 = min(满耐久, 两件耐久之和 + 满耐久5%)；铁砧是 +满耐久12%（耗经验、保留普通附魔）。两件耐久之和超过满耐久时，多出的耐久会被丢掉、合计耐久反而下降，只换来一个空槽；合不合看材料、耐久和空槽事实。穿在身上的那件不在背包里，不能直接放进合成格。` } : {}),
     // 精确账本的总表（箱子+背包合计）：供"物资充足/稀缺"量化；箱子部分是最后打开时记的，之后世界可能变化
-    ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，按最后一次打开各箱子时记录（之后世界可能变化，重新打开才更新）` } : {}),
+    ...(p.storage?.stock?.length ? { stored_stock: `${p.storage.stored}；以上是「箱子+背包」合计，箱子部分只是最后一次打开时的记录，不算随身准备，之后世界可能变化，重新打开或取出才更新；随身只算背包里的` } : {}),
     ...(s.connected && s.emptySlots <= 5 ? { inventory_space: s.emptySlots > 0
       ? `空槽是能新放一整叠的位置，${s.emptySlots} 个空槽由所有物品共用（例如 64 个铁矿石只占 1 个空槽）${roomText ? `；未满的同类堆还能继续装：${roomText}` : '；现有物品堆都已满'}`
       : `没有空槽${roomText ? `，但未满的同类堆还能继续装：${roomText}——这些同类掉落物捡得起来` : '，现有物品堆都满了——新物品捡不进来，先腾空槽或把同类未满堆并起来'}` } : {}),
