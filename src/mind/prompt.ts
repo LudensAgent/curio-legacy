@@ -726,7 +726,7 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
       ...(full && plan.attempts?.length ? { recent_attempts: plan.attempts.slice(-3).map((a) => `${new Date(a.at).toISOString().slice(11, 16)}${a.where ? `@(${Math.floor(a.where.x)},${Math.floor(a.where.y)},${Math.floor(a.where.z)})` : ''} ${a.whatHappened}${a.whyStopped ? `（停因 ${a.whyStopped}）` : ''}${a.evidence ? `｜${attemptEvidenceText(a.evidence)}` : ''}`) } : {}),
       // 清单是成果；它可以是可验证的施工结果，不能按“开巷/挖 N 格”这类关键词把成果判成做法。
       checklist_note: full
-        ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；勾选前按当前事实核验（装备看 wearing、食物看背包、据点资源取出后才算）。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
+        ? `清单是成果，要可验证：可以是找到/到达/取得，也可以是“挖通到某坐标的巷/新开 N 格通道”这类可验收施工结果；勾选前按当前事实核验（装备看 wearing、食物看背包、据点资源取出后才算）。远行/补给的成果按这趟需要拆开写（如装备/武器/盾实际可用、随身食物数量、火把与施工材料、备用工具、背包空间与战利品余量、传送门/返程与紧急撤退方案；装备可用 equipment 的 head/torso/legs/feet/off-hand 槽位），各用系统支持的条件或写明观察验收；一个 inventory_min 只证明它自己。勾错或后来发现没做到：重抄整份清单，改掉那条成果的文字重新核验（文字不变会保留完成；改文字会重新变成未完成、丢掉原 done_when，并换新 po_ id；methods 的 outcome 要改指新 id），别把错误完成留在清单上；其他真实完成的项原样抄回。${PLAN_EDIT_RULE} 给 activity 写 outcome_id/method_id 可把结果记到对应账上。`
         : '清单是成果；瞥一眼不改成果清单（增、删、改、重排都留到认真想），可以勾掉做完的项、可以换做法；勾掉前按当前事实核验。',
       ...(full && plan.needs?.length ? { material_budget: budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock),
         material_budget_note: 'material_budget 是写在 plan.needs 里的预算；数量写在 count 里，宿主按配方与背包+记得的箱子合计算差额（箱子部分是最后打开时的记录，只是线索，不代表已随身或仍可取得），不自动改 gather.count' } : {}),

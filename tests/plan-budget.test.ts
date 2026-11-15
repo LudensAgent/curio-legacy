@@ -106,6 +106,28 @@ test('【专注】/【身体】展示补给事实：material_budget、饥饿值�
   assert.match(user.content, /饥饿值；随身食物看背包/);
   assert.match(user.content, /不是已穿戴/);
   assert.match(user.content, /勾选前按当前事实核验/);
+  assert.match(user.content, /远行\/补给的成果按这趟需要拆开写/);
+  assert.match(user.content, /装备\/武器\/盾实际可用/);
+  assert.match(user.content, /备用工具/);
+  assert.match(user.content, /背包空间与战利品余量/);
+  assert.match(user.content, /紧急撤退方案/);
+  assert.match(user.content, /head\/torso\/legs\/feet\/off-hand/);
+  assert.match(user.content, /一个 inventory_min 只证明它自己/);
+  assert.match(user.content, /改掉那条成果的文字重新核验/);
+  assert.match(user.content, /其他真实完成的项原样抄回/);
   const [, glance] = buildMindMessages({ ...context, tier: 'glance' });
   assert.match(glance.content, /勾掉前按当前事实核验/);
+});
+
+test('清单勾错可纠正：改文字重开该项，原样抄回的已完成项保留', () => {
+  const self = new SelfModel(null);
+  const cond = { type: 'self_state', field: 'dim', equals: 'the_nether' } as const;
+  const plan = self.setPlan('赴下界找烈焰人', ['核实护甲与补给', '走到下界门'], [cond, null])!;
+  self.checkPlan([0, 1], () => true);
+  assert.equal(self.plan()!.steps[0]!.done, true);
+  assert.equal(self.plan()!.steps[1]!.done, true);
+  const repaired = self.setPlan(plan.agendaId, ['核实护甲（重核：未穿戴）', '走到下界门'])!;
+  assert.equal(repaired.steps[0]!.done, false, '改文字后重新变成未完成');
+  assert.equal(repaired.steps[0]!.doneWhen, undefined, '改文字会丢掉原 done_when');
+  assert.equal(repaired.steps[1]!.done, true, '原样抄回的已完成项保留');
 });
