@@ -10,6 +10,7 @@ import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
 import { PERSISTENT_VERIFY_GUIDANCE } from './verify-guidance.ts';
+import { WHEN_SYNTAX } from './when-syntax.ts';
 
 /**
  * 造技能：从经历里总结出新技能（或者重写管这件事却没做好的旧技能），后台单独请模型写，写下就生效。
@@ -606,10 +607,11 @@ ${API_DOC}`;
 
   messages(incident: Incident): ChatMessage[] {
     const review = incident.kind === 'review';
-    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${this.taskFor(incident)}
-${this.rules()}
+    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${WHEN_SYNTAX}${this.rules()}
 
-只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}。`;
+只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}。
+
+${this.taskFor(incident)}`;
     const { what_happened, its_own_note, ...rest } = this.incidentFacts(incident) as Record<string, unknown>;
     const user = { what_happened, ...(its_own_note ? { its_own_note } : {}), ...rest, now: incident.context, ...this.skillTables([incident]) };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
@@ -617,11 +619,12 @@ ${this.rules()}
 
   /** 几件事攒成一批：一次请求看完，最多写 2 份技能 */
   batchMessages(incidents: Incident[]): ChatMessage[] {
-    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。下面是这几分钟里攒下的 ${incidents.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
-逐件判断：值得写技能就写，不值得就说为什么；几件说的是同一回事可以合写一份。整批最多写 2 份技能。
-${this.rules()}
+    const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${WHEN_SYNTAX}${this.rules()}
 
-只输出一个 JSON 对象：{"results":[{"event":1,"skill":{…}},{"event":2,"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}]}，每件事都要有一条。`;
+只输出一个 JSON 对象：{"results":[{"event":1,"skill":{…}},{"event":2,"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}]}，每件事都要有一条。
+
+下面是这几分钟里攒下的 ${incidents.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
+逐件判断：值得写技能就写，不值得就说为什么；几件说的是同一回事可以合写一份。整批最多写 2 份技能。`;
     const user = {
       events: incidents.map((i, k) => ({ event: k + 1, how_to_look: this.taskFor(i), ...this.incidentFacts(i, 40) })),
       now: incidents.at(-1)!.context,

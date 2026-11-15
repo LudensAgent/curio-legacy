@@ -3,6 +3,7 @@ import type { EventBus } from '../events.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import type { SharedSpatialSession } from '../spatial/shared-session.ts';
 import { createBodyNavigation } from './movement/body-navigation.ts';
+import type { TaskSource } from '../arbiter/arbiter.ts';
 import type { RecoveryContext } from './recovery.ts';
 
 export type FailureCode =
@@ -101,6 +102,13 @@ export interface SkillCtx {
   signal: AbortSignal;
   deadline: number;
   taskId: string;
+  /** 本任务由谁发起；只用于内部来源判断，不是游戏事实。 */
+  source?: TaskSource;
+  /** 任务派发时刻（epoch ms）与派发时距上次挨打的毫秒数；反射执行前复核 hurt_within 用。 */
+  startedAt?: number;
+  hurtAgoMs?: number;
+  /** 代码技能嵌套深度；只有顶层反射调用才在执行前复核触发条件。 */
+  skillDepth?: number;
   /** Original delegation inherited by recovery and nested learned skills. */
   recovery?: RecoveryContext;
   /** 当前逻辑动作的共享额度账本（如 climb_up 的原高度、逻辑起点与已确认爬升），由同一执行实例的所有调用共享。 */

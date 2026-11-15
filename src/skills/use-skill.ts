@@ -1,6 +1,6 @@
 import { makeBridge, visibleActionSenses } from '../codeskills/bridge.ts';
 import { runSandboxed, VERIFY_METHODS, type SandboxHandler } from '../codeskills/sandbox.ts';
-import { evalPredicate, senseNow, type Predicate } from '../mind/predicate.ts';
+import { evalPredicate, senseNow, situationOf, type Predicate } from '../mind/predicate.ts';
 import { throwIfAborted } from '../util.ts';
 import { dirName } from '../perception/perception.ts';
 import { SKILLS } from './index.ts';
@@ -10,7 +10,7 @@ import { fail, isAbort, obj, ok, runSkill, validateSkill, type Skill, type Skill
 
 /** use_skill 只需要按名字取出步骤；注册表由 main 设置（行为引擎） */
 export interface BehaviorLookup {
-  get(name: string, trial?: boolean): { name: string; description: string; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number; verify?: string; needs?: Record<string, string> } | undefined;
+  get(name: string, trial?: boolean): { name: string; description: string; when?: Predicate; steps: { skill: string; args?: unknown; if?: Predicate; optional?: boolean }[]; code?: string; version?: number; verify?: string; needs?: Record<string, string> } | undefined;
   list(): { name: string }[];
   executionError?(name: string, trial?: boolean): string | null;
   recordInvocation?(name: string, result: SkillResult): void;
@@ -67,6 +67,25 @@ export const useSkill: Skill<{ name: string; trial?: boolean; args?: Record<stri
     if (unavailable) return fail('BAD_ARGS', unavailable);
     const b = registry?.get(args.name, args.trial);
     if (!b) return fail('BAD_ARGS', `技能 ${args.name} 不存在或已停用`);
+    // 反射在触发快照上判断 when；从触发到真正执行之间身体可能已经离开危险。
+    // 只复核“处境”部分：doing/after_failure 是触发当时的上下文，不能拿当前感官重验。
+    const situation = b.when ? situationOf(b.when) : null;
+    if (ctx.source === 'reflex' && (ctx.skillDepth ?? 0) === 0 && situation) {
+      const trigger = args.args?.trigger as { hurtAgoMs?: unknown; at?: unknown } | undefined;
+      const sinceDispatch = ctx.startedAt === undefined ? 0 : Math.max(0, Date.now() - ctx.startedAt);
+      const hurtAgoMs = ctx.hurtAgoMs !== undefined
+        ? ctx.hurtAgoMs + sinceDispatch
+        : typeof trigger?.hurtAgoMs === 'number'
+          ? trigger.hurtAgoMs + (typeof trigger.at === 'number' ? Math.max(0, Date.now() - trigger.at) : 0)
+          : Infinity;
+      const fresh = senseNow(ctx.adapter, ctx.senses, null, undefined, hurtAgoMs);
+      if (!evalPredicate(situation, fresh)) {
+        return ok(`技能「${b.name}」的触发条件已解除，没有执行`, {
+          skipped: 'trigger_cleared', staleTrigger: true, noop: true, trigger,
+          current: { head: fresh.head, cover: fresh.cover },
+        });
+      }
+    }
     const recovery = ctx.recovery ?? (args.failure ? { ...args.failure, allowPlace: args.args?.allowPlace === true, allowDig: args.args?.allowDig === true } : undefined);
     ctx = { ...ctx, ...(recovery ? { recovery } : {}), ...(recovery?.args.make === false ? { make: false } : {}) };
     // 整个技能执行实例累计的爬升级数，跨取消/失败保留，避免“缺少回执”被当成“没有进展”。

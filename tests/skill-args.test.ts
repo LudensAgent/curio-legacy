@@ -22,7 +22,10 @@ function rig(t: any, dir = tmp()) {
   const engine = new BehaviorEngine(book, adapter, arbiter, bus, vision);
   setBehaviorRegistry(engine);
   t.after(() => { setBehaviorRegistry(null); engine.dispose(); memory.close(); });
-  const run = (args: unknown) => new Promise<TaskOutcome>((res) => { arbiter.once('done', res); arbiter.start({ skill: 'use_skill', args: { name: 'echo-y', args } }, 'llm'); });
+  const run = (args: unknown, name = 'echo-y', source: 'llm' | 'reflex' = 'llm', meta: { hurtAgoMs?: number } = {}) => new Promise<TaskOutcome>((res) => {
+    arbiter.once('done', res);
+    arbiter.start({ skill: 'use_skill', args: { name, args } }, source, meta);
+  });
   return { adapter, book, engine, run };
 }
 
@@ -34,6 +37,40 @@ test('声明了参数的技能：传了不认识的参数名当场说清楚它�
   assert.match(bad.error, /不认识参数 args\.targetY；它要的是：args\.y（要挖到的高度）/);
   assert.equal((useSkill.validate({ name: 'echo-y', args: { y: 30 } }, adapter as any) as any).ok, true);
   assert.equal((useSkill.validate({ name: 'echo-y', args: { y: 30, trigger: {} } }, adapter as any) as any).ok, true, 'trigger 是身体自己带的');
+});
+
+test('反射触发后条件已解除时不执行技能；head 仍实心才执行', async (t) => {
+  const { engine, adapter, run } = rig(t);
+  assert.ok(engine.write({ name: 'wall-reflex', description: '头格被实心方块压住时挖开自己', when: { in_wall: true }, code: 'return { touched: true };', verify: 'const s = await api.state(); return true;' }).ok);
+  const stale = await run({ trigger: { hp: 20, cover: 'open', doing: 'sleep' } }, 'wall-reflex', 'reflex');
+  assert.equal(stale.result.status, 'succeeded', stale.result.summary);
+  assert.match(stale.result.summary, /触发条件已解除/);
+  assert.equal(stale.result.data?.skipped, 'trigger_cleared');
+  assert.equal(stale.result.data?.noop, true, '空触发仍要标记为空执行');
+  assert.equal(((engine as unknown as { stats: Record<string, { idleInterrupts?: number }> }).stats['wall-reflex']?.idleInterrupts) ?? 0, 0, '触发后条件解除不是技能空转，不累计 idle');
+  adapter.blocks.push({ name: 'dirt', pos: { x: 0, y: 65, z: 0 } });
+  const active = await run({ trigger: { hp: 20, cover: 'open', doing: 'sleep' } }, 'wall-reflex', 'reflex');
+  assert.equal(active.result.status, 'succeeded', active.result.summary);
+  assert.match(active.result.summary, /"touched":true/);
+});
+
+test('反射新鲜度复验不压下恢复条件；hurt_within 按触发后经过的时间判断', async (t) => {
+  const { engine, run } = rig(t);
+  assert.ok(engine.write({ name: 'recover-reflex', description: 'sleep 失败后先处理', when: { after_failure: { skill: 'sleep' } }, code: 'return { recovered: true };', verify: 'const s = await api.state(); return true;' }).ok);
+  const recovered = await run({ trigger: { hp: 20, cover: 'open', doing: 'sleep' } }, 'recover-reflex', 'reflex');
+  assert.equal(recovered.result.status, 'succeeded', recovered.result.summary);
+  assert.match(recovered.result.summary, /"recovered":true/);
+
+  assert.ok(engine.write({ name: 'hurt-reflex', description: '刚挨打时后撤', when: { hurt_within: 30 }, code: 'return { hurt: true };', verify: 'const s = await api.state(); return true;' }).ok);
+  const fresh = await run({ trigger: { at: Date.now(), hurtAgoMs: 1000 } }, 'hurt-reflex', 'reflex');
+  assert.equal(fresh.result.status, 'succeeded', fresh.result.summary);
+  assert.match(fresh.result.summary, /"hurt":true/);
+  const expired = await run({ trigger: { at: Date.now() - 31_000, hurtAgoMs: 1000 } }, 'hurt-reflex', 'reflex');
+  assert.equal(expired.result.status, 'succeeded', expired.result.summary);
+  assert.match(expired.result.summary, /触发条件已解除/);
+  const production = await run({ trigger: { at: Date.now() - 1000, hurtAgoMs: 1000 } }, 'hurt-reflex', 'reflex', { hurtAgoMs: 35_000 });
+  assert.equal(production.result.status, 'succeeded', production.result.summary);
+  assert.match(production.result.summary, /触发条件已解除/, '生产路径的 ctx.hurtAgoMs 也要按执行时间复核');
 });
 
 test('代码里照判定的写法读 args.args.y 也读得到调用参数', async (t) => {

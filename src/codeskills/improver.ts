@@ -7,6 +7,7 @@ import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
 import { PERSISTENT_VERIFY_GUIDANCE } from './verify-guidance.ts';
+import { WHEN_SYNTAX } from './when-syntax.ts';
 
 /**
  * 代码技能的后台改进：一份代码技能在游戏里反复失败（或心智主动要求）时，单独发一次 LLM 请求，
@@ -100,6 +101,7 @@ export class CodeImprover {
 根据它在游戏里实际运行的记录改进代码：修掉出错的地方，处理记录里暴露出来的情况（比如路被挡、方块读不到、动作失败），让它更可靠；
 如果它能用但费劲（harvest_effect 显示用它时拿东西更慢），就让它更省：少走冤枉路、少做无用的动作、先看再动、一次做完。保持用途不变，代码保持简短清楚。
 先分清问题在触发条件 when、参数声明 args、执行步骤/代码还是验收 verify；不要只改代码来绕过触发和参数错误。保持调用方的目标、允许手段和资源范围；缺准备条件就返回事实，不代替它另选玩法。
+${WHEN_SYNTAX}
 body 说明输入的含义和坐标基准、原目标、允许的副作用、停止条件与可观察的后置条件。优先组合已可靠的技能，固定几步可改成 steps；需要计算和循环时继续使用 code，每个循环有次数/时间边界。保存的新版本仍是待验证候选，不把编译通过叫作已经学会。
 ${API_DOC}
 它还带一段判定（verify）：做完以后看一眼世界确认真的做成了（只能用 api.state/blockAt/region/entities/drops/nearestLand；args.before 是开工前的 api.state()，args.result 是代码的返回值，args.args 是调用参数；return true 算成，return "原因" 算没成）。改代码就必须同时复核 verify，不能沿用旧判定；判定至少要调用一次 api.* 观察世界，不能写成恒真（return true）。

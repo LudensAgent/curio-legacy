@@ -293,6 +293,8 @@ export class Arbiter extends EventEmitter {
     /** 同一逻辑步骤的自动重试/续跑共享的绝对期限（epoch ms）；只提前，不延后。 */
     deadlineMs?: number;
     climb?: { height: number; spent: number; startY: number };
+    /** 派发时距上次挨打的毫秒数；反射技能执行前复核 hurt_within 用。 */
+    hurtAgoMs?: number;
   } = {}): TaskInfo | { error: string } {
     if (this.pausedFlag) return { error: 'Agent 已暂停' };
     // 关闭中的共享服务不再接受新任务；不自动重试或退回独立地图。
@@ -364,6 +366,9 @@ export class Arbiter extends EventEmitter {
       signal: controller.signal,
       deadline: task.deadline,
       taskId: task.id,
+      source: task.source,
+      startedAt: task.startedAt,
+      ...(meta.hurtAgoMs === undefined ? {} : { hurtAgoMs: meta.hurtAgoMs }),
       progress: (p: number, note?: string) => {
         if (this.current?.id !== task.id) return;
         task.progress = Math.max(0, Math.min(1, p));

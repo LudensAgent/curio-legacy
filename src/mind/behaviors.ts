@@ -479,12 +479,13 @@ export class BehaviorEngine {
     for (const b of matches) {
       if (!s) break;
       // 触发时的情况交给技能（代码技能里是 args.trigger），也留着给事后评判和改进用
-      const trigger = { hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover,
+      const trigger = { at: now, hp: Math.round(s.state.hp * 10) / 10, food: s.state.food, doing: s.doing, hurtAgoMs: Number.isFinite(s.hurtAgoMs) ? s.hurtAgoMs : null, cover: s.cover, head: s.head,
         hostiles: s.hostiles.slice(0, 4).map((h) => ({ name: h.name, dist: Math.round(h.dist * 10) / 10, ...(h.fusing ? { fusing: true } : {}) })),
         offHand: s.state.equipment?.find((e) => e.slot === 'off-hand')?.name ?? null };
-      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, ...(b.candidate ? { trial: true } : {}), args: { trigger } } }, 'reflex');
+      const r = this.arbiter.start({ skill: 'use_skill', args: { name: b.name, ...(b.candidate ? { trial: true } : {}), args: { trigger } } }, 'reflex',
+        Number.isFinite(s.hurtAgoMs) ? { hurtAgoMs: s.hurtAgoMs } : {});
       if ('error' in r) { this.lastFired.set(b.name, now); continue; }
-      this.aftermath.set(b.name, { taskId: r.id, behavior: b, hp: s.state.hp, at: now, pos: { ...s.state.pos }, inv: inventoryKey(s.state.inventory), nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
+      this.aftermath.set(b.name, { taskId: r.id, behavior: b, hp: s.state.hp, at: now, pos: { ...s.state.pos }, inv: inventoryKey(s.state.inventory), nearest: Math.min(Infinity, ...s.hostiles.map((h) => h.dist)), ...(s.doing && cur && cur.source !== 'filler' ? { interrupted: s.doing } : {}), context: `触发时血 ${trigger.hp}${trigger.hostiles.length ? `，${trigger.hostiles.map((h) => `${h.name} ${h.dist}格`).join('、')}` : ''}，${trigger.cover === 'open' ? '在空地' : trigger.cover === 'pit' ? '在坑里' : '在封好的坑里'}，头格 ${trigger.head ?? '未知'}${s.doing ? `，当时在做 ${s.doing}` : ''}${trigger.offHand ? `，副手拿着 ${trigger.offHand}` : ''}` });
       this.lastFired.set(b.name, now);
       this.touch(b.name, (st) => { st.fired++; st.lastAt = now; });
       this.bus.publish('instinct', 'P2', `技能「${b.name}」的条件成立，身体照着做：${b.description}`, { name: b.name, source: b.source });
@@ -1092,6 +1093,7 @@ export class BehaviorEngine {
     const pending = aftermath?.taskId === o.task.id ? aftermath : undefined;
     const args = o.task.args as { trial?: boolean; failure?: unknown };
     const recovery = this.recoveries.get(name);
+    const staleTrigger = o.result.data?.staleTrigger === true;
     // 回执带版本按版本归属；反射捕获按捕获版本；执行期间没被改写才按当前 trial 归属；
     // STUCK/TIMEOUT 常缺回执版本，执行期间又被改成新候选时只能保留未知，不按完成时的 trial:true 猜当前候选。
     const b = this.executedRun(name, o, pending);
@@ -1117,7 +1119,7 @@ export class BehaviorEngine {
     }
     if (b.candidate) {
       // 试用中的反射接手后什么都没做：和稳定版一样记 idle 并歇一会儿，否则冷却一过又会打断手上的事。
-      if (this.recordInvocation(name, o.result, b, o.task.id) && o.task.source === 'reflex') {
+      if (this.recordInvocation(name, o.result, b, o.task.id) && o.task.source === 'reflex' && !staleTrigger) {
         this.noteIdle(name, b, pending?.nearest, pending?.interrupted);
         if (pending) this.aftermath.delete(name);
       }
@@ -1131,7 +1133,7 @@ export class BehaviorEngine {
     }
     if (skipped) {
       // no-op（身体什么都没做）：不记 ok/fail；反射触发的记 idle 信号（收窄 when、歇一会儿别反复空转），非反射的只是这次没成
-      if (o.task.source === 'reflex') this.noteIdle(name, b, pending?.nearest, pending?.interrupted);
+      if (o.task.source === 'reflex' && !staleTrigger) this.noteIdle(name, b, pending?.nearest, pending?.interrupted);
       if (pending) this.aftermath.delete(name);
       if (recovery) recovery.ignored = true;
       return;
