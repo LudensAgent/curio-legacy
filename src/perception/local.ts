@@ -106,7 +106,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
   };
   const word = (f: number, u: number, r: number) => `${f > 0 ? '前' : f < 0 ? '后' : ''}${r < 0 ? '左' : r > 0 ? '右' : ''}${u > 0 ? `上${u}` : u < 0 ? `下${-u}` : ''}` || '原地';
   const stand: string[] = [], place: string[] = [];
-  // 与 move_step 单步预检同一组判据：曼哈顿 1；同层脚高一致，上一级/下一级 0.01–1 格。
+  // 与 move_step 单步预检同一组判据：曼哈顿 1；同层脚高一致，上一级/下一级 0.01–1.15 格。
   // stand 是候选（含对角和分数脚高），不保证一步到达；executable 才是可直接交给 move_step 的落点。
   const executable: { at: [number, number, number]; xyz: [number, number, number]; foot: number; facing: Facing; primitive: 'move_step' }[] = [];
   /** 每个正交相邻列只保留离当前脚高最近的那一步；u 是扫描层，不是 move_step 的竖直偏移。 */
@@ -129,7 +129,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
     const diagonal = f !== 0 && r !== 0;
     stand.push(`[${f},${u},${r}] ${word(f, u, r)}${offset}${diagonal ? '（对角，需多步）' : ''}`);
     const horizontal = Math.abs(f) + Math.abs(r);
-    // 用实测连续脚高，而不是整数脚格：站在雪层/半砖上时，0.01–1 格的台阶同样可走。
+    // 用实测连续脚高，而不是整数脚格：站在雪层/半砖上时，0.01–1.15 格的台阶同样可走。
     const vertical = verticalStepKind(foot - pos.y);
     if (horizontal !== 1 || vertical === null) continue;
     const columnKey = `${f},${r}`;
@@ -152,7 +152,7 @@ export function localMap(_adapter: Pick<GameAdapter, 'blockAt'>, pos: Vec3Like, 
   return { facing, source: 'current_vision', frame: `[前,上,右]；每层的行从前(f=+${R})到后(f=-${R})，列从左(r=-${R})到右(r=+${R})，中间是自己；只显示本次看见的格子，? 是未知`, legend, layers, body: bodyCells,
     spots: {
       stand: stand.slice(0, 8), executable: executable.slice(0, 8), place: place.slice(0, 8),
-      note: 'stand 是候选脚部目标格：括号里的脚高按实际碰撞顶面（半砖/雪层等可为分数），对角项需要多步，不能直接当 move_step 的一步；executable 是按 move_step 单步规则（曼哈顿 1、同层脚高一致、上下级 0.01–1 格、身体净空；超过 0.6 格要起跳）预检过的落点，xyz 是世界脚位，执行前仍会按最新位置重新预检。place 是已看清的空位且旁边有已观察的可贴面方块。地图来自本次视觉，body 的脚/头所在格来自触觉事实；两者证据范围不同，未知格不计入。实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格',
+      note: 'stand 是候选脚部目标格：括号里的脚高按实际碰撞顶面（半砖/雪层等可为分数），对角项需要多步，不能直接当 move_step 的一步；executable 是按 move_step 单步规则（曼哈顿 1、同层脚高一致、上下级 0.01–1.15 格、身体净空；超过 0.6 格要起跳）预检过的落点，xyz 是世界脚位，执行前仍会按最新位置重新预检。place 是已看清的空位且旁边有已观察的可贴面方块。地图来自本次视觉，body 的脚/头所在格来自触觉事实；两者证据范围不同，未知格不计入。实际移动和放置仍需动作确认。[0,0,0] 是当前脚部占据格，[0,-1,0] 是其下方支撑格',
     } };
 }
 

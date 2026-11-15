@@ -25,7 +25,7 @@ type AdvanceArgs = {
  */
 export const advance: Skill<AdvanceArgs> = {
   name: 'advance',
-  description: '朝 N/NE/E/SE/S/SW/W/NW 之一水平推进指定距离。方向与距离冻结，宿主按冻结方向派生 waypoint 并分段执行已验证的 walk/step/drop（当前已加载方块可即时确认缺失证据），每步用实测位置确认；普通台阶、分数顶面和合理小落差由宿主处理，不挖、不放、不搭桥，也不因绕路改方向。对角方向按正交步执行，不斜穿或切角。回执报告 along（沿方向实测进度）、lateral（横向偏移）、horizontalNet（水平净位移）和实际路线；遇到未观察边界或已知阻挡会有限绕行/观察，确实无法继续才停下并保留 sessionId 供续接。内部预算按距离和实际进展自适应，普通调用不需要填写。',
+  description: '朝 N/NE/E/SE/S/SW/W/NW 之一水平推进指定距离。方向与距离冻结，宿主按冻结方向派生 waypoint 并分段执行已验证的 walk/step/drop（当前已加载方块可即时确认缺失证据），每步用实测位置确认；普通台阶、分数顶面和合理小落差由宿主处理，不挖、不放、不搭桥，也不因绕路改方向。对角由宿主按已确认的 diagonal walk 边执行，证据不足时走正交绕行，不斜穿阻挡或未确认格。回执报告 along（沿方向实测进度）、lateral（横向偏移）、horizontalNet（水平净位移）和实际路线；遇到未观察边界或已知阻挡会有限绕行/观察，确实无法继续才停下并保留 sessionId 供续接。内部预算按距离和实际进展自适应，普通调用不需要填写。',
   catalog: '{"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}：朝一个方向走一段；宿主处理台阶、合理小落差和有限绕行，不挖不放',
   argsDoc: '{"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}。旧参数 allowed/historical/maxLateralDrift/maxSegments/maxStepsPerSegment/maxTransitions/maxSearches/maxObservations/maxObservedCells/maxNoProgressSegments/sessionId/deadlineMs 仍兼容，但宿主会按距离和实际进展给默认值；只有想收窄授权或显式续接时才需要填写。distance 是沿方向的实际水平格数。',
   timeoutMs: 60000,
@@ -51,10 +51,10 @@ export const advance: Skill<AdvanceArgs> = {
       return { ok: false, error: 'allowed 需要非空数组，元素只能是 walk、step、drop、jump、ladder；不接受 dig/place/pillar/swim/boat' };
     }
     if (a.historical !== undefined && typeof a.historical !== 'boolean') return { ok: false, error: 'historical 需要布尔值' };
-    const ints: [string, number, number, number][] = [
-      ['maxSegments', 1, 16, 8], ['maxStepsPerSegment', 1, 32, 16], ['maxTransitions', 1, 256, 96],
-      ['maxSearches', 1, 32, 8], ['maxObservations', 0, 8, 4], ['maxObservedCells', 0, 512, 128],
-      ['maxNoProgressSegments', 1, 8, 2],
+    const ints: [string, number, number][] = [
+      ['maxSegments', 1, 64], ['maxStepsPerSegment', 1, 32], ['maxTransitions', 1, 2048],
+      ['maxSearches', 1, 128], ['maxObservations', 0, 64], ['maxObservedCells', 0, 4096],
+      ['maxNoProgressSegments', 1, 8],
     ];
     for (const [key, min, max] of ints) {
       const value = a[key];

@@ -137,15 +137,38 @@ test('A1d 短距离 1 格与对角 NE 都只用方向+距离完成', async (t) =
   assert.equal(short.status, 'succeeded', short.summary);
   assert.ok(oneSetup.adapter.pos.x >= 1.4, `短距离应实际推进，实际 x=${oneSetup.adapter.pos.x}`);
 
-  const diag = openArea(12), diagSetup = setup(diag);
-  t.after(() => diagSetup.ctx.memory.close());
-  const result = await advance.run(diagSetup.ctx, args({ direction: 'NE', distance: 8 }));
-  assert.equal(result.status, 'succeeded', result.summary);
-  const progress = result.data?.progress as { along: number; lateral: number; horizontalNet: number };
-  assert.ok(progress.along >= 7.9, `沿 NE 实测 ${progress.along}`);
-  assert.ok(progress.horizontalNet >= 7.9, `水平净位移 ${progress.horizontalNet}`);
-  assert.ok(diagSetup.adapter.pos.x > 4 && diagSetup.adapter.pos.z < -4, `身体应向东北实际移动：${JSON.stringify(diagSetup.adapter.pos)}`);
-  assert.ok(Math.abs(progress.lateral) <= 16);
+  for (const [direction, sx, sz] of [['NE', 1, -1], ['SE', 1, 1], ['SW', -1, 1], ['NW', -1, -1]] as const) {
+    const diag = openArea(12), diagSetup = setup(diag);
+    t.after(() => diagSetup.ctx.memory.close());
+    const result = await advance.run(diagSetup.ctx, args({ direction, distance: 8 }));
+    assert.equal(result.status, 'succeeded', `${direction}: ${result.summary}`);
+    const progress = result.data?.progress as { along: number; lateral: number; horizontalNet: number };
+    assert.ok(progress.along >= 7.9, `${direction} 实测 ${progress.along}`);
+    assert.ok(progress.horizontalNet >= 7.9, `${direction} 水平净位移 ${progress.horizontalNet}`);
+    assert.ok(diagSetup.adapter.pos.x * sx > 4 && diagSetup.adapter.pos.z * sz > 4,
+      `${direction} 应向该方向实际移动：${JSON.stringify(diagSetup.adapter.pos)}`);
+    assert.ok(Math.abs(progress.lateral) <= 16);
+  }
+});
+
+test('A1h 对角移动不切过被两侧墙夹住的角', async (t) => {
+  const map = openArea(6);
+  fill(map, 'minecraft:stone', [
+    { x: 1, y: 64, z: 0 }, { x: 1, y: 65, z: 0 },
+    { x: 0, y: 64, z: -1 }, { x: 0, y: 65, z: -1 },
+  ]);
+  const { adapter, ctx } = setup(map);
+  t.after(() => ctx.memory.close());
+  const targets: Vec3Like[] = [];
+  const realMove = adapter.moveTo.bind(adapter);
+  adapter.moveTo = async (target, opts) => {
+    if (target.kind === 'feet') targets.push({ x: target.x, y: target.y, z: target.z });
+    return realMove(target, opts);
+  };
+  const r = await advance.run(ctx, args({ direction: 'NE', distance: 3 }));
+  assert.ok(targets.every((p) => !(Math.floor(p.x) === 1 && Math.floor(p.z) === -1)),
+    `不能从 (0,0) 斜切到 (1,-1)：${JSON.stringify(targets)}`);
+  assert.ok(r.status !== 'failed' || !/ARRIVED|DISTANCE_MET/.test(r.summary), '失败时不能声称到达');
 });
 
 test('A1g 低血也能连续通过 2 格无摔伤落差，不要求单独 descend_to', async (t) => {
@@ -738,6 +761,12 @@ test('advance 参数校验：接受八方向与短距离，拒绝未知方向/�
   assert.equal(long.args.maxLateralDrift, 16, '长距离给更宽的宿主绕行容差');
   assert.equal(long.args.maxNoProgressSegments, 4, '普通移动不因一段无进展立即停');
   assert.deepEqual(long.args.allowed, ['walk', 'step', 'drop', 'jump', 'ladder'], '普通移动默认允许已确认的跳跃/梯子');
+  // 宿主自己给出的长距离默认值必须能原样通过同一个校验器。
+  const explicit = advance.validate({
+    direction: 'E', distance: 160, maxSegments: long.args.maxSegments, maxTransitions: long.args.maxTransitions,
+    maxObservations: long.args.maxObservations, maxObservedCells: long.args.maxObservedCells,
+  }, adapter);
+  assert.ok(explicit.ok, explicit.ok ? '' : explicit.error);
 });
 
 test('前方有墙：像 pathfinder 一样先走到离目标最近的已达格，不在原地停下', async (t) => {

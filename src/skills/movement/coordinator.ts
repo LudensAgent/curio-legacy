@@ -853,7 +853,11 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         if (bearing !== undefined && goal.kind === 'cell') {
           const stance = stanceFor(goal, pos);
           if ((stance.x - pos.x) * bearing.x + (stance.z - pos.z) * bearing.z <= 1e-9) {
-            return cellGoal({ x: goal.cell.x + bearing.x, z: goal.cell.z + bearing.z }, waypoint.y, waypoint);
+            // 斜向 bearing 的分量是 0.707，直接加到整数格上时 SE/SW 两轴可能都 floor 回原格，
+            // 目标等于当前站位，反复零进展。这里按方向符号推进一格（对角则两轴各一格）。
+            const stepX = Math.abs(bearing.x) < 1e-6 ? 0 : Math.sign(bearing.x);
+            const stepZ = Math.abs(bearing.z) < 1e-6 ? 0 : Math.sign(bearing.z);
+            return cellGoal({ x: goal.cell.x + stepX, z: goal.cell.z + stepZ }, waypoint.y, waypoint);
           }
         }
         return goal;

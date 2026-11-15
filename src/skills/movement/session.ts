@@ -13,10 +13,9 @@ import type { MakeWayOptions } from './make-way.ts';
 
 export type MoveMode = 'walk' | 'step' | 'drop' | 'jump' | 'ladder';
 /**
- * Default modes for ordinary directional movement (advance): walk/step/drop plus
- * jump/ladder, which the coordinator only uses when the current geometry is
- * confirmed. `navigate_to` keeps its own KINDS list so precise goals still choose
- * their modes explicitly.
+ * Default modes for ordinary movement: walk/step/drop plus jump/ladder, which the
+ * coordinator only uses when the current geometry is confirmed. Precise
+ * `navigate_to` goals also default to these and can narrow via `allowed`.
  */
 export const MOVE_MODES: readonly MoveMode[] = ['walk', 'step', 'drop', 'jump', 'ladder'];
 
