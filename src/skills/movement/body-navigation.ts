@@ -3,6 +3,7 @@ import { walkCollisionProvider } from '../../adapter/walk-collision.ts';
 import { walkLandRules } from '../../adapter/land-rules.ts';
 import type { MoveOpts, MoveTarget, NavigationDelegate, Vec3Like } from '../../adapter/types.ts';
 import { bodyCells } from '../../perception/geometry.ts';
+import { supportSketch } from '../../perception/support.ts';
 import { observedFootY, searchLandRouteAsync, type LandSearchResult } from '../../spatial/land-search.ts';
 import type { CollisionShape } from 'curio-minecraft-3d-memory';
 import { AbortedError } from '../../util.ts';
@@ -537,6 +538,18 @@ function verifyFollow(ctx: SkillCtx, id: number, range: number): boolean {
   return dx * dx + dy * dy + dz * dz <= range * range + 1e-9;
 }
 
+/** reach_block 失败时附上目标支撑/高度事实；不改变错误类别，也不替 Agent 决定补不补。 */
+function withTargetSupport(ctx: SkillCtx, target: Vec3Like, error: unknown): unknown {
+  if (!(error instanceof Error) || error instanceof AbortedError) return error;
+  const holder = error as Error & { data?: Record<string, unknown>; partial?: Record<string, unknown> };
+  if (holder.data?.support) return error;
+  const facts = supportSketch(ctx.adapter, target, ctx.adapter.state().pos.y);
+  error.message = `${error.message}；${facts.text}`;
+  holder.data = { ...(holder.data ?? {}), support: facts.data };
+  if (holder.partial) holder.partial = { ...holder.partial, support: facts.data };
+  return error;
+}
+
 async function navigateCandidates(
   ctx: SkillCtx, candidates: Candidate[], deadline: number, signal: AbortSignal, label: Record<string, unknown>, budget: GoalBudget,
 ): Promise<void> {
@@ -580,9 +593,13 @@ async function navigateBody(ctx: SkillCtx, target: MoveTarget, opts: MoveOpts): 
       return;
     case 'reach_block':
       if (reachSatisfied(ctx, target.pos)) return;
-      await navigateCandidates(ctx, blockCandidates(ctx, target.pos, 'reach_block'), deadline, opts.signal, { requestedTarget: target.pos, kind: 'reach_block' }, goalBudget(deadline));
-      assertLive(ctx, deadline, opts.signal);
-      verifyReachBlock(ctx, target.pos);
+      try {
+        await navigateCandidates(ctx, blockCandidates(ctx, target.pos, 'reach_block'), deadline, opts.signal, { requestedTarget: target.pos, kind: 'reach_block' }, goalBudget(deadline));
+        assertLive(ctx, deadline, opts.signal);
+        verifyReachBlock(ctx, target.pos);
+      } catch (e) {
+        throw withTargetSupport(ctx, target.pos, e);
+      }
       return;
     case 'place_block':
       if (placeSatisfied(ctx, target.pos, target.facing)) return;

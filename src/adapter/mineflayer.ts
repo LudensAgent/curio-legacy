@@ -72,6 +72,7 @@ import type {
   SmeltResult,
 } from './types.ts';
 import { isReplaceable } from '../perception/geometry.ts';
+import { supportSketch } from '../perception/support.ts';
 
 type PillarClearance = { kind: 'blocked' | 'unknown'; min: Vec3Like; max: Vec3Like; blocks: { pos: Vec3Like; rel?: [number, number, number]; facing?: string }[] };
 
@@ -3924,7 +3925,9 @@ export class MineflayerAdapter extends EventEmitter implements GameAdapter {
       await this.afterAction(() => raceAbort(b.sleep(bed), signal, 5000, () => {}), check);
     } catch (e: any) {
       if (e?.name === 'AbortedError') throw e;
-      return { ok: false, reason: String(e?.message ?? e) };
+      // 床被挡/悬空时 mineflayer 只给一句泛化原因；把床两半的上方/下方事实一并带回。
+      const facts = supportSketch(this, bed.position, b.entity.position.y);
+      return { ok: false, reason: `${String(e?.message ?? e)}；${facts.text}` };
     }
     const bedPos = { x: bed.position.x, y: bed.position.y, z: bed.position.z };
     try {
