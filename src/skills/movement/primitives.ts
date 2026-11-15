@@ -844,9 +844,12 @@ const placeCellSkill: Skill<PlaceArgs> = {
         // place_cell 不换站位，所以要点明 place_support 才能贴边放，而不是让心智反复猜“靠近”。
         const drop = feet.y - pos.y;
         const supportLike = Math.abs(pos.x - feet.x) + Math.abs(pos.z - feet.z) === 1 && (drop === 1 || drop === 2);
-        const supportHint = supportLike && /^NO_REFERENCE/.test(adapterReason ?? '')
+        const noReference = /^NO_REFERENCE/.test(adapterReason ?? '');
+        const supportHint = noReference && supportLike
           ? '；这一格与脚格相邻且在下 1–2 格：要贴边放用 place_support（它会潜行到方块边缘），place_cell 不换站位'
-          : '';
+          : noReference && attemptedFaces.length === 0
+            ? '；目标四周没有可贴的实心面：先查 {"kind":"construction","cells":[…]} 排顺序，再按 temporary 垫同层/下方支撑；整面墙/屋顶也可改用 build（简单 spec 会带脚手架）'
+            : '';
         return fail(code, `放不到 ${atText}：${reason}${detail ? `；${detail}` : ''}${supportHint}`, {
           attemptedFaces, ...(adapterReason ? { adapterReason } : {}), ...(adapterError ? { adapterError } : {}),
           ...problemOf(adapterError ? 'PLACEMENT_ADAPTER_ERROR' : 'PLACEMENT_REFUSED', 'execution'), ...effectUnconfirmed('block_placed'), ...after(ctx, args.facing, pos),

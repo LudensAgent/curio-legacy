@@ -223,8 +223,8 @@ async function restoreStations(ctx: Parameters<Skill['run']>[0], project: Buildi
 
 export const build: Skill<BuildArgs> = {
   name: 'build',
-  description: '照图施工：有建筑师画好的图纸就写 draft（复杂/审美建筑推荐）；也可以自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补；觉得够住了就 accept 收工，不想要了就 abandon（不必逐格完美）。',
-  argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）｜{"mode":"accept|abandon"}（够住了收工 / 不要了）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。复杂/审美建筑推荐先 {"kind":"design"}；简单结构可直接 spec.design；小型功能设施可用 place_cell/mine_cell 等组合',
+  description: '照图或简单 spec 施工：有建筑师画好的图纸就写 draft（复杂/审美建筑推荐）；也可以用简单参数 spec 直接盖标准小屋（宽/深/高、屋顶平/坡、材料/门窗，程序生成墙/屋顶/门窗并带脚手架），或者自己设计：spec.design 用字符画分层画出每格放什么（legend 字符→方块，layers 从地板往上，"." 留空，门写下半格），想要什么样就画什么样。程序负责选址（不给 origin 会在附近找干燥平地并整平；给的地方不合适会就近换）、分阶段施工、逐格验收；料不全也照样开工，手上有的先盖（墙基墙身先起来），缺的报给你，补齐后用 projectId 接着盖；返回作品 ID，中断后用 projectId 续建，inspect 检查、repair 修补；觉得够住了就 accept 收工，不想要了就 abandon（不必逐格完美）。',
+  argsDoc: '{"draft":"dr_…"}（新房子：照建筑师的图纸盖）｜{"spec":{…}}（简单小屋：可只写 name/width/depth/height/roof/palette/windows/door，程序生成墙/屋顶/门窗并带脚手架；也可写 spec.design 字符画）｜{"projectId":"作品ID","mode"?:"build|inspect|repair"}（接着盖、检查、修补已有作品）｜{"mode":"accept|abandon"}（够住了收工 / 不要了）；可选 "origin":{"x":0,"y":64,"z":0}、"rotation":0|90|180|270。复杂/审美建筑推荐先 {"kind":"design"}；简单结构可直接 spec.design；小型功能设施可用 place_cell/mine_cell 等组合',
   timeoutMs: 600000,
   movement: true,
   validate(raw, adapter) {
@@ -247,7 +247,7 @@ export const build: Skill<BuildArgs> = {
     const blueprint = String(a.blueprint ?? (a.spec ? 'custom' : 'hut'));
     // 房子由自己设计（spec.design 字符画），不再从预制蓝图里挑；prefab 只给兼容规则模式和测试用
     if (!a.spec && !a.projectId && ['hut', 'big_hut'].includes(blueprint) && a.prefab !== true && (a.mode ?? 'build') === 'build')
-      return { ok: false, error: `房子要自己设计（最好先请建筑师画图纸：思考时输出 {"kind":"design","brief":"…"}，再 build {"draft":"dr_…"}）；或者直接写 spec={"name":"…","design":{legend,layers}}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE_RICH}` };
+      return { ok: false, error: `房子要自己设计（最好先请建筑师画图纸：思考时输出 {"kind":"design","brief":"…"}，再 build {"draft":"dr_…"}）；也可以只写简单 spec（name/width/depth/height/roof/palette/windows/door，程序生成墙/屋顶/门窗），或者直接写 spec={"name":"…","design":{legend,layers}}；不确定先放哪块就先查 {"kind":"construction","cells":[…]}。layers 从下往上（第 0 层地板），每层的行从前（北）到后，一个字符一个方块，"." 留空、空格不管，门只写下半格。例如 spec.design=${DESIGN_EXAMPLE_RICH}` };
     if (!Object.hasOwn(BLUEPRINTS, blueprint) && blueprint !== 'custom') return { ok: false, error: '未知蓝图；可用 hut/big_hut/pillar/wall/custom' };
     if (a.projectId !== undefined && (typeof a.projectId !== 'string' || !a.projectId.trim() || a.projectId.length > 100)) return { ok: false, error: 'projectId 需要有效作品 ID' };
     if (!['build', 'inspect', 'repair', 'accept', 'abandon'].includes(a.mode ?? 'build')) return { ok: false, error: 'mode 支持 build/inspect/repair/accept/abandon' };
@@ -338,22 +338,23 @@ export const build: Skill<BuildArgs> = {
       }
       const own = [...ownStationsAt(ctx).keys()].map((k) => { const [x, y, z] = k.split(',').map(Number); return { x, y, z }; });
       const rotations = args.rotation !== undefined ? [args.rotation] : [rotation, ...([0, 90, 180, 270] as Rotation[]).filter((r) => r !== rotation)];
-      let surveyFrom: { center?: Vec3Like; radius: number; why?: string } | null = origin ? null : { radius: 24 };
+      let surveyFrom: { center?: Vec3Like; radius: number; why?: string; handBuilt?: boolean } | null = origin ? null : { radius: 24 };
       // 模型给了 origin（新工地）：先按同样的标准看一眼那块地，不合适就在它附近 16 格内另找
       if (origin && !old && args.mode === 'build') {
         const check = checkSiteAt(ctx.adapter, ctx.memory, spec, origin, rotation, own, ownFootprints(archive, state.worldId, state.dim));
         if (check.ok) {
           if (check.origin.y !== origin.y) notes.push(`origin 的 y 按地面校正为 ${check.origin.y}`);
           origin = check.origin;
-        } else surveyFrom = { center: origin, radius: 16, why: check.why };
+        } else surveyFrom = { center: origin, radius: 16, why: check.why, handBuilt: check.handBuilt };
       }
       if (surveyFrom) {
         // 先看看附近的地形，挑一块平整、干燥、没出过事的空地，再走过去
         const survey = surveyBuildSite(ctx.adapter, ctx.memory, spec, { radius: surveyFrom.radius, rotations, ownStations: own, avoid: ownFootprints(archive, state.worldId, state.dim), ...(surveyFrom.center ? { center: surveyFrom.center } : {}) });
         const given = surveyFrom.center;
-        if (!survey.best) return fail('NOT_FOUND', `${given ? `原定位置（${given.x},${given.y},${given.z}）不合适（${surveyFrom.why}）；` : ''}${describeSiteFailure(survey, spec, surveyFrom.radius)}${notes.length ? `；${notes.join('；')}` : ''}`, { survey: { checked: survey.checked, rejected: survey.rejected, hint: survey.hint } });
+        if (!survey.best) return fail('NOT_FOUND', `${given ? `原定位置（${given.x},${given.y},${given.z}）不合适（${surveyFrom.why}）；` : ''}${describeSiteFailure(survey, spec, surveyFrom.radius)}${given && surveyFrom.handBuilt ? '；如果这是你手搭到一半的结构：build 不会接管（没有建筑档案），只能在原处继续手工，或放弃后在新 origin 重建' : ''}${notes.length ? `；${notes.join('；')}` : ''}`, { survey: { checked: survey.checked, rejected: survey.rejected, hint: survey.hint } });
         origin = survey.best.origin; rot = survey.best.rotation;
         const lv = survey.best.cut + survey.best.fill ? `；附近没有现成的平地，这块要先整地：铲掉约 ${survey.best.cut} 块、填约 ${survey.best.fill} 块` : '';
+        if (given && surveyFrom.handBuilt) notes.push('原定位置有人造方块/手搭结构：build 不会接管旧结构，会在新地基另起一座');
         notes.push((given
           ? `原定位置不合适（${surveyFrom.why}），改在 (${origin.x},${origin.y},${origin.z})`
           : `选了 ${survey.best.dist} 格外一块${survey.best.cut + survey.best.fill ? '坡地' : `${survey.best.spread ? '基本' : ''}平整、干燥的空地`}（${origin.x},${origin.y},${origin.z}）`) + lv);

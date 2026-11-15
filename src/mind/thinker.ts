@@ -18,6 +18,8 @@ import type { SelfModel } from './self.ts';
 import { cleanLesson, cleanPlanStep } from './self.ts';
 import { designBuilding } from '../building/architect.ts';
 import { surveyBuildSite, terrainSketch } from '../building/site.ts';
+import { planConstruction, type ConstructionPlan } from '../building/plan.ts';
+import { normalizeSpec } from '../building/spec.ts';
 import { homeOf } from './home.ts';
 import { draftsFor } from '../building/drafts.ts';
 import type { SkillBook } from '../knowledge/skillbook.ts';
@@ -28,7 +30,7 @@ import type { BehaviorEngine, BehaviorStats } from './behaviors.ts';
 import { recallLocal, RECALL_LABEL } from './recall.ts';
 
 /** 思考时可以先做的只读查询（不占游戏时间） */
-const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'progress', 'terrain'];
+const QUERY_KINDS = ['recipes', 'recall', 'mechanics', 'skill', 'design', 'moves', 'knowledge', 'progress', 'terrain', 'construction'];
 /** 需要完整上下文（技能、图纸、Wiki 资料、矿道记录）才值得从瞥一眼升级成认真想的查询；其余轻量查询就地回答 */
 const HEAVY_QUERY_KINDS = ['skill', 'design', 'knowledge'];
 /**
@@ -716,6 +718,35 @@ export class Thinker {
           note: 'best 是附近 8 格内按这个足印挑的可整地块（cut/fill 是估算的铲/填量；rotation 是估算时用的朝向；只读）。选址/施工仍由你决定。',
         }).slice(0, 4000);
       }
+      if (kind === 'construction') {
+        // 只读建造顺序：spec 按阶段/层排；cells 按层和可贴面排，并列出需要先放的临时支撑。
+        const hasSpec = raw.spec !== undefined;
+        const cellsRaw = raw.cells;
+        if (hasSpec === Array.isArray(cellsRaw)) return 'construction 只写 spec 或 cells 之一';
+        if (hasSpec) {
+          let spec;
+          try { spec = normalizeSpec(raw.spec); } catch (e) { return `construction.spec 无效：${(e as Error).message}`; }
+          this.bus.publish('construction_query', 'P3', `查建造顺序：spec ${spec.name}`);
+          return boundConstruction(planConstruction(this.adapter, { spec }));
+        }
+        if (!Array.isArray(cellsRaw) || cellsRaw.length < 1 || cellsRaw.length > 150) return 'construction.cells 需要 1–150 项 {pos:[x,y,z],item:"…"}';
+        const cells: { pos: { x: number; y: number; z: number }; name: string }[] = [];
+        for (const c of cellsRaw) {
+          const pos = Array.isArray(c?.pos) ? c.pos : null;
+          const item = String(c?.item ?? '').trim();
+          if (!pos || pos.length !== 3 || !pos.every((v: unknown) => Number.isInteger(v)) || !item) return 'construction.cells 每项需要整数 pos:[x,y,z] 和 item';
+          cells.push({ pos: { x: pos[0], y: pos[1], z: pos[2] }, name: item });
+        }
+        const keepClear: { x: number; y: number; z: number }[] = [];
+        for (const p of Array.isArray(raw.keepClear) ? raw.keepClear : []) {
+          if (!Array.isArray(p) || p.length !== 3 || !p.every((v: unknown) => Number.isInteger(v))) return 'construction.keepClear 每项需要整数 [x,y,z]';
+          keepClear.push({ x: p[0], y: p[1], z: p[2] });
+        }
+        const maxSupport = raw.maxSupport === undefined ? undefined : Number(raw.maxSupport);
+        if (maxSupport !== undefined && (!Number.isInteger(maxSupport) || maxSupport < 1 || maxSupport > 12)) return 'construction.maxSupport 需要 1–12 的整数';
+        this.bus.publish('construction_query', 'P3', `查建造顺序：${cells.length} 格`);
+        return boundConstruction(planConstruction(this.adapter, { cells, keepClear, ...(maxSupport === undefined ? {} : { maxSupport }) }));
+      }
       if (kind === 'skill') {
         const name = String(raw.name ?? '').trim();
         if (!name) {
@@ -897,4 +928,27 @@ export function parseHabits(raw: unknown): Habits | null {
 function wantsDeliberate(raw: unknown): boolean {
   const o = raw as Record<string, any> | null;
   return !!o && [o.activity, o.next].some((part) => Array.isArray(part?.steps) && part.steps.some((st: any) => st?.skill === 'deliberate'));
+}
+
+/** 建造计划按组截断，保证返回完整 JSON；omitted 说明这一组还有多少格没列出。 */
+function boundConstruction(plan: ConstructionPlan): string {
+  for (const limit of [24, 12, 6, 3]) {
+    const part = (cells: unknown[], y?: number) => ({
+      ...(y === undefined ? {} : { y }),
+      cells: cells.slice(0, limit),
+      ...(cells.length > limit ? { omitted: cells.length - limit } : {}),
+    });
+    const text = JSON.stringify({
+      ...plan,
+      ...(plan.phases ? { phases: plan.phases.map((p) => ({ phase: p.phase, ...part(p.cells) })) } : {}),
+      order: plan.order.slice(0, 16).map((l) => part(l.cells, l.y)),
+      ...(plan.order.length > 16 ? { layersOmitted: plan.order.length - 16 } : {}),
+      temporary: plan.temporary.slice(0, limit),
+      ...(plan.temporary.length > limit ? { temporaryOmitted: plan.temporary.length - limit } : {}),
+      warnings: plan.warnings.slice(0, 8),
+      ...(plan.warnings.length > 8 ? { warningsOmitted: plan.warnings.length - 8 } : {}),
+    });
+    if (text.length <= 6000) return text;
+  }
+  return JSON.stringify(plan);
 }

@@ -109,8 +109,9 @@ test('自查会指出悬空的屋顶；缺的木料会折成原木数', () => {
 
 test('build 说明允许简单结构自写 spec，不再要求所有图纸先过建筑师', () => {
   const build = SKILLS.build;
-  assert.match(build.description, /也可以自己设计/);
-  assert.match(build.argsDoc, /简单结构可直接 spec\.design/);
+  assert.match(build.description, /简单参数 spec|自己设计/);
+  assert.match(build.argsDoc, /简单小屋/);
+  assert.match(build.argsDoc, /脚手架/);
   assert.doesNotMatch(build.argsDoc, /不要自己写 spec/);
 });
 

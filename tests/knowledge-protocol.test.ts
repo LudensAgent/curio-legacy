@@ -130,6 +130,37 @@ test('terrain 查询校验范围：越界参数明确拒绝，不静默截断', 
   assert.deepEqual(w.adapter.actions, []);
 });
 
+test('construction 查询返回建造顺序/临时支撑，并校验 cells 参数', async (t) => {
+  const w = fixture(t, [{ kind: 'construction', cells: [
+    { pos: [0, 64, 0], item: 'cobblestone' },
+    { pos: [0, 67, 0], item: 'cobblestone' },
+  ] }, decision]);
+  await w.think();
+  const out = w.calls[1].at(-1)!.content;
+  assert.match(out, /"order"/);
+  assert.match(out, /"temporary"/);
+  assert.match(out, /"notes"/);
+  assert.match(out, /"temporaryMaterials"/);
+  assert.deepEqual(w.adapter.actions, [], '规划查询只读，不产生身体动作');
+
+  const bad = fixture(t, [{ kind: 'construction', cells: [{ pos: [0, 64], item: 'cobblestone' }] }, decision]);
+  await bad.think();
+  assert.match(bad.calls[1].at(-1)!.content, /construction\.cells 每项需要/);
+});
+
+test('construction 查询输出超长时按组截断，仍是完整 JSON', async (t) => {
+  const cells = Array.from({ length: 150 }, (_, x) => ({ pos: [x, 67, 0], item: 'cobblestone' }));
+  const w = fixture(t, [{ kind: 'construction', cells }, decision]);
+  await w.think();
+  const out = w.calls[1].at(-1)!.content;
+  const line = out.split('\n').find((l) => l.includes('{'))!;
+  const plan = JSON.parse(line.slice(line.indexOf('{')));
+  assert.equal(plan.mode, 'cells');
+  assert.equal(plan.materials.cobblestone, 150);
+  assert.ok(plan.order[0].omitted > 0, '超长时应报被省略的格数');
+  assert.ok(plan.warningsOmitted > 0 || plan.warnings.length <= 8);
+});
+
 test('knowledge and existing queries share the three-query budget', async (t) => {
   const w = fixture(t, [{ kind: 'knowledge', query: '床' }, { kind: 'moves', names: ['use_item'] },
     { kind: 'knowledge', id: 'fixture-topic', section: 'effects' }, { kind: 'knowledge', query: '再查一次' }, decision]);

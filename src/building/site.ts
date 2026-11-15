@@ -208,12 +208,12 @@ export function describeSiteFailure(survey: SiteSurvey, spec: Pick<BuildingSpec,
 }
 
 /** 某个指定 origin 能不能盖：能盖返回校正过高度的 origin；不能盖返回原因 */
-export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number; components?: BuildingSpec['components'] }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = [], avoid: SiteRect[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string } {
+export function checkSiteAt(adapter: GameAdapter, memory: WorldMemory | null, spec: Pick<BuildingSpec, 'width' | 'depth' | 'height' | 'layout'> & { maxFoundationDepth?: number; components?: BuildingSpec['components'] }, origin: Vec3Like, rotation: Rotation, ownStations: Vec3Like[] = [], avoid: SiteRect[] = []): { ok: true; origin: Vec3Like } | { ok: false; why: string; handBuilt: boolean } {
   const r = surveyBuildSite(adapter, memory, spec, { radius: 0, rotations: [rotation], ownStations, center: origin, avoid });
   if (r.best && Math.abs(r.best.origin.y - origin.y) <= 2) return { ok: true, origin: r.best.origin };
   const x = r.rejected;
   const why = r.best ? `地面高度是 ${r.best.origin.y - 1}，和给的 y=${origin.y} 差太多` : [x.occupied ? '和自己别的工地重叠' : '', x.wet ? '挨着水/岩浆' : '', x.uneven ? '坡太陡（一边要挖进山里超过 3 格或悬空超过 2 格，整地量太大）' : '', x.unsupported ? '地基下面悬空/支撑太深' : '', x.artificial ? '占地里有不是自然地形的方块' : '', x.hazard ? '在出过事的危险区域' : '', x.unknown ? '地表被山体/洞顶盖住或区块没加载' : ''].filter(Boolean).join('、') || '地形不合适';
-  return { ok: false, why };
+  return { ok: false, why, handBuilt: !!(x.artificial || x.unsupported) };
 }
 
 /** 给建筑师看的地形草图：以自己为中心，每格是这一列地表比脚下高/低几格（只看露在外面的地表） */

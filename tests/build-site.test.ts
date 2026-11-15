@@ -6,6 +6,7 @@ import { compileBuilding, materialCost, normalizeSpec, rotatePosition } from '..
 import { planScaffolding } from '../src/building/scaffold.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { build, buildingArchiveFor, stalledFailures, terrainProblem } from '../src/skills/build.ts';
+import { placeCell } from '../src/skills/movement/index.ts';
 import { rememberStation } from '../src/skills/stations.ts';
 import { InstantBuildWorld, makeCtx } from './survival-helpers.ts';
 
@@ -59,6 +60,69 @@ test('地形草图：人造方块和悬空地表会被标出，建筑师不选�
   assert.equal(siteFor({ x: 0, z: 0 }, floating, [0], [0], { width: 1, depth: 1 }), null, '悬空地表不当地基');
 });
 
+test('build 简单参数 spec：生成带墙/屋顶/门窗的标准小屋，不必画字符画', () => {
+  const w = new InstantBuildWorld();
+  const v = build.validate({ spec: {
+    name: '石屋', width: 7, depth: 7, height: 3, roof: 'gable',
+    palette: { foundation: 'cobblestone', wall: 'cobblestone', roof: 'cobblestone', window: 'glass', door: 'oak_door' },
+  }, origin: { x: 0, y: 64, z: 0 } }, w);
+  assert.ok(v.ok, v.ok ? '' : v.error);
+  if (!v.ok || !v.args.spec) return;
+  const planned = compileBuilding(v.args.spec).cells;
+  assert.ok(planned.some((c) => c.phase === 'roof'), '应有屋顶');
+  assert.ok(planned.some((c) => c.phase === 'enclosure'), '应有墙');
+  assert.ok(planned.some((c) => c.phase === 'openings'), '应有门/窗洞');
+});
+
+test('build 的简单 spec 与 construction 在动作文档/拒绝回执里可发现', () => {
+  const w = new InstantBuildWorld();
+  assert.match(build.argsDoc ?? '', /name\/width\/depth\/height\/roof\/palette/);
+  assert.match(String(build.description), /简单 spec/);
+  const v = build.validate({ blueprint: 'hut' }, w);
+  assert.equal(v.ok, false);
+  if (!v.ok) {
+    assert.match(v.error, /简单 spec/);
+    assert.match(v.error, /construction/);
+  }
+});
+
+test('place_cell 有相邻面但视线被挡时，不误报“四周没有可贴面”', async (t) => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('cobblestone', 8);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  t.mock.method(w, 'placeBlockAt', async () => ({
+    ok: false, reason: 'NO_REFERENCE',
+    detail: '(0,66,0) 有 1 个相邻实心方块，但从当前眼睛位置到这些面的视线被挡或超出 4.4 格',
+    attemptedFaces: [{ ref: { x: 0, y: 65, z: 0 }, face: [0, 1, 0] as [number, number, number], reason: '视线被挡' }],
+  }));
+  const v = placeCell.validate({ xyz: { x: 0, y: 66, z: 0 }, item: 'cobblestone' }, w);
+  assert.ok(v.ok, v.ok ? '' : v.error);
+  if (!v.ok) return;
+  const r = await placeCell.run(ctx, v.args);
+  assert.equal(r.status, 'failed');
+  assert.doesNotMatch(r.summary, /四周没有可贴的实心面/);
+  assert.match(r.summary, /视线/);
+});
+
+test('place_cell 悬空无参照时，回执给出 place_support/build 的替代事实', async (t) => {
+  const w = new InstantBuildWorld();
+  w.pos = { x: 0.5, y: 64, z: 0.5 };
+  w.inv.set('cobblestone', 8);
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  t.mock.method(w, 'placeBlockAt', async () => ({ ok: false, reason: 'NO_REFERENCE', detail: '(0,66,0) 四周没有相邻实心方块（悬空），从当前站位没有可贴的面' }));
+  const v = placeCell.validate({ xyz: { x: 0, y: 66, z: 0 }, item: 'cobblestone' }, w);
+  assert.ok(v.ok, v.ok ? '' : v.error);
+  if (!v.ok) return;
+  const r = await placeCell.run(ctx, v.args);
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /construction/);
+  assert.match(r.summary, /垫同层|下方支撑/);
+  assert.match(r.summary, /build/);
+});
+
 test('选址：自然地表下面是深洞/悬空时不算可整平地', () => {
   const w = new InstantBuildWorld();
   w.pos = { x: 0.5, y: 64, z: 0.5 };
@@ -94,6 +158,7 @@ test('自绘建筑：origin 有人造方块时就近改址，不直接在坏地�
     const r = await build.run(ctx, v.args);
     const origin = r.data?.origin as { x: number; y: number; z: number } | undefined;
     assert.ok(origin && (origin.x !== 0 || origin.z !== 0), '应在坏 origin 附近另选一块地');
+    assert.match(r.summary, /不会接管旧结构|不会接管/, '要说明 build 不接管手搭结构');
   } finally { ctx.memory.close(); }
 });
 
