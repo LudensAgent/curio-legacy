@@ -758,20 +758,44 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
  * 【决策摘要】：只从已有事实里挑 1–5 条最相关的短句，放在【此刻】前。
  * 它不是动作建议、不新增状态，也不复制整份清单/背包/设施列表；没有可用事实时返回空。
  */
+function ageText(at: number | undefined): string | null {
+  if (at === undefined) return null;
+  const minutes = Math.max(0, Math.round((Date.now() - at) / 60_000));
+  return minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`;
+}
+
+const FARM_NEAR = 48, FARM_GLANCE_NEAR = 32, FACILITY_NEAR = 24, BASE_NEAR = 32;
+
 export function decisionBrief(ctx: MindContext): string[] {
   const plan = ctx.plan, glance = ctx.tier === 'glance';
   const next = plan?.steps.find((st) => !st.done);
+  // 缺口复用 budgetFacts：按配方/熔炼与“背包+记得的箱子”合计算，不只按物品名硬减。
+  const budget = plan?.needs ? budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock) : [];
+  const shortfall = budget.map((line, i) => {
+    const at = line.indexOf('还差');
+    const need = plan?.needs?.[i];
+    return at >= 0 && need ? `${need.item}×${need.count}，${line.slice(at)}` : null;
+  }).find((line): line is string => typeof line === 'string');
   // 成熟农田的读取半径与 farmInfo 一致（48）；瞥一眼只看更近的。
-  const farmRadius = glance ? 32 : 48;
+  const farmRadius = glance ? FARM_GLANCE_NEAR : FARM_NEAR;
   const farm = ctx.percept.farms
     .filter((f) => f.mature !== null && f.mature > 0 && f.dist <= farmRadius)
     .sort((a, b) => a.dist - b.dist)[0];
-  // 设施只取最近的一处，作为“附近有什么可用”的事实；可用性仍以现场复核为准。
-  const facility = myFacilities(ctx.memory, ctx.state, ['chest', 'station'])
-    .filter((f) => f.dist <= 24).sort((a, b) => a.dist - b.dist)[0];
-  const opportunity = farm
-    ? `近处农田：${farm.crop} ${farm.cells} 格，成熟 ${farm.mature}（${farm.dist} 格）`
-    : facility ? `近处设施：${facility.label.replace(/^我的/, '')} ${facility.dist} 格（${facility.kind === 'chest' ? '容器' : '工作站'}）` : null;
+  // 设施只取最近的一处；有材料缺口时先找容器，否则容器/工作站按距离。
+  const facilityPool = myFacilities(ctx.memory, ctx.state, ['chest', 'station'])
+    .filter((f) => f.dist <= FACILITY_NEAR).sort((a, b) => a.dist - b.dist);
+  const facility = shortfall ? facilityPool.find((f) => f.kind === 'chest') ?? facilityPool[0] : facilityPool[0];
+  const facilityAge = ageText(facility?.observedAt);
+  const farmDetail = farm ? `${farm.crop} ${farm.cells} 格，成熟 ${farm.mature}（${farm.dist} 格）` : null;
+  const facilityDetail = facility
+    ? `${facility.label.replace(/^我的/, '')} ${facility.dist} 格（${facility.kind === 'chest' ? '容器' : '工作站'}${facilityAge ? `，${facilityAge}记录` : ''}）` : null;
+  // 回到基地附近时，把农田成熟与最近设施放在同一条里；路过的设施/农田仍按各自半径提示。
+  const atBase = ctx.memory.landmarks().some((l) => l.kind === 'base' && l.dim === ctx.state.dim && (l.worldId ?? 'default') === ctx.state.worldId
+    && Math.hypot(l.pos.x - ctx.state.pos.x, l.pos.z - ctx.state.pos.z) <= BASE_NEAR);
+  const opportunity = atBase
+    ? (farmDetail || facilityDetail ? `基地附近（水平 ${BASE_NEAR} 格）：${[farmDetail ? `农田 ${farmDetail}` : null, facilityDetail ? `最近设施 ${facilityDetail}` : null].filter(Boolean).join('；')}` : null)
+    : farmDetail ? `近处农田：${farmDetail}`
+      : facilityDetail ? `近处设施：${facilityDetail}` : null;
   const failure = ctx.repeatedFailures?.[0]
     ?? (ctx.recentActionFailures?.length ? `${ctx.recentActionFailures[0]!.skill}：${ctx.recentActionFailures[0]!.summary}` : null);
   const failureLine = failure ? `近期阻碍：${failure.slice(0, 90)}` : null;
@@ -785,13 +809,6 @@ export function decisionBrief(ctx: MindContext): string[] {
     : ctx.progress?.next ? `局面：主线下一里程碑 ${ctx.progress.next}`
       : ctx.activity ? `局面：正在 ${ctx.activity.what}` : null;
   if (stage) out.push(stage);
-  // 缺口复用 budgetFacts：它会按配方/熔炼与“背包+记得的箱子”合计算，不只按物品名硬减。
-  const budget = plan?.needs ? budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock) : [];
-  const shortfall = budget.map((line, i) => {
-    const at = line.indexOf('还差');
-    const need = plan?.needs?.[i];
-    return at >= 0 && need ? `${need.item}×${need.count}，${line.slice(at)}` : null;
-  }).find((line): line is string => typeof line === 'string');
   const constraints = [
     shortfall ? `直接缺口：${shortfall}（背包+记得的箱子；箱子记录可能过期）` : null,
     failureLine,

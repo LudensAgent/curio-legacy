@@ -76,7 +76,7 @@ test('没有成熟农田时给最近的可用设施；瞥一眼可同时给阻�
   memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 3, y: 64, z: 2 }, 4);
   const withFailure = { ...ctx, percept: ctx.percept, repeatedFailures: ['move_step：被挡住'] };
   const deliberate = decisionBrief(withFailure);
-  assert.ok(deliberate.some((line) => /近处设施：箱子 3 格（容器）/.test(line)), deliberate.join('\n'));
+  assert.ok(deliberate.some((line) => /近处设施：箱子 3 格（容器，/.test(line)), deliberate.join('\n'));
   assert.ok(deliberate.some((line) => /近期阻碍：move_step/.test(line)));
   const glance = decisionBrief({ ...withFailure, tier: 'glance' });
   assert.equal(glance.length, 2, glance.join('\n'));
@@ -89,4 +89,39 @@ test('没有未解决议程问题时用正在验证的实验补位', (t) => {
   self.startExperiment('石锄能翻带草的草方块', 'act_x');
   const lines = decisionBrief(ctx);
   assert.ok(lines.some((line) => /待验证：石锄能翻带草的草方块/.test(line)), lines.join('\n'));
+});
+
+test('回到基地附近时把成熟农田与最近设施放在同一条；离开基地时只按最近半径提示', (t) => {
+  const { adapter, memory, ctx, perceive } = fixture(t);
+  memory.addLandmark('base', '基地', 'overworld', { x: 0, y: 64, z: 0 }, 4);
+  memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 3, y: 64, z: 2 }, 4);
+  adapter.blocks.push({ name: 'wheat', pos: { x: 2, y: 64, z: 0 } });
+  adapter.crops.set('2,64,0', { age: 7, crop: 'wheat' });
+  memory.addFarm({ id: 'farm_test', dim: 'overworld', crop: 'wheat', cells: [{ x: 2, y: 63, z: 0 }], plantedAt: Date.now(), harvests: 0 });
+  const atBase = decisionBrief({ ...ctx, percept: perceive() });
+  assert.ok(atBase.some((line) => /基地附近（水平 32 格）：农田 wheat 1 格，成熟 1（2 格）；最近设施 箱子 3 格/.test(line)), atBase.join('\n'));
+  const away = decisionBrief({ ...ctx, percept: perceive(), state: { ...ctx.state, pos: { x: 200, y: 64, z: 200 } } });
+  assert.ok(away.every((line) => !line.startsWith('基地：')), away.join('\n'));
+});
+
+test('材料缺口时优先选容器；设施带记录时间', (t) => {
+  const { memory, ctx } = fixture(t);
+  const chest = memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 10, y: 64, z: 0 }, 4);
+  if (chest) chest.ts = Date.now() - 2 * 3600_000;
+  memory.addLandmark('discovery', '我的工作台', 'overworld', { x: 2, y: 64, z: 0 }, 4);
+  const plan = { agendaId: 'a_test', goal: '准备远行', setAt: Date.now(), updatedAt: Date.now(), needs: [{ item: 'oak_log', count: 16 }], steps: [{ id: 'po_x', text: '备料', done: false }] };
+  const lines = decisionBrief({ ...ctx, plan, state: { ...ctx.state, inventory: [] } });
+  const opportunity = lines.find((line) => line.includes('设施'))!;
+  assert.match(opportunity, /箱子/, '有材料缺口时优先提示容器');
+  assert.match(opportunity, /记录/);
+});
+
+test('基地判定使用全部基地地标；离开 32 格水平范围就不合并', (t) => {
+  const { memory, ctx } = fixture(t);
+  memory.addLandmark('base', '北边基地', 'overworld', { x: 60, y: 64, z: 0 }, 4);
+  memory.addLandmark('discovery', '我的箱子', 'overworld', { x: 20, y: 64, z: 2 }, 4);
+  const near = decisionBrief({ ...ctx, state: { ...ctx.state, pos: { x: 30, y: 64, z: 0 } } });
+  assert.ok(near.some((line) => line.startsWith('基地附近')), near.join('\n'));
+  const far = decisionBrief({ ...ctx, state: { ...ctx.state, pos: { x: 20, y: 64, z: 0 } } });
+  assert.ok(far.every((line) => !line.startsWith('基地附近')), far.join('\n'));
 });
