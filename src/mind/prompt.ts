@@ -806,6 +806,54 @@ export function decisionBrief(ctx: MindContext): string[] {
   return out;
 }
 
+/**
+ * 【空间判断】：只在建设、出行、找资源或路线受阻时，把“证据覆盖到哪”压成一两句。
+ * 不推断未知方块、不新增空间记忆；只是把已有到访/回执/资源事实按当前问题挑出来。
+ */
+const SPATIAL_NEAR = 32;
+const RESOURCE_SAMPLE = 3;
+const MOVE_SKILLS = ['travel_to', 'explore_toward', 'navigate_to', 'travel_portal', 'swim_path', 'boat_path', 'approach_visible', 'go_near'];
+export function spatialBrief(ctx: MindContext): string[] {
+  if (ctx.tier === 'glance') return [];
+  const kind = ctx.activity?.kind;
+  const skills = new Set((ctx.activity?.steps ?? []).map((st) => st.skill));
+  const routeFailure = [...(ctx.recentActionFailures ?? [])].reverse().find((f) => MOVE_SKILLS.includes(f.skill));
+  const reach = ctx.reach && ctx.reach.dim === ctx.state.dim ? ctx.reach : undefined;
+  const far = reach ? Object.entries(reach.sectors).sort((a, b) => b[1].distance - a[1].distance)[0] : undefined;
+  const reachText = far
+    ? `${Math.round(far[1].distance)} 格向 ${far[0]}（从 (${Math.round(reach!.origin.x)},${Math.round(reach!.origin.y)},${Math.round(reach!.origin.z)}) 起算${reach!.truncated ? '，未读完全部区段' : ''}；${Math.round((Date.now() - reach!.at) / 60_000)} 分钟前读取的脚格）`
+    : null;
+  const lines: string[] = [];
+  if (routeFailure) {
+    const stop = routeFailure.failure_code ?? routeFailure.summary.slice(0, 60);
+    lines.push(`路线记录：最近一次 ${routeFailure.skill} 失败（${stop}）${reachText ? `；身体实测最远 ${reachText}` : ''}。失败/到访记录不证明现在可通行。`);
+  }
+  const building = kind === 'build' || ['build', 'place_cell', 'place_support', 'pillar_one'].some((s) => skills.has(s));
+  const travelling = kind === 'explore' || MOVE_SKILLS.some((s) => skills.has(s));
+  const searching = ['gather', 'find_item', 'mine_cell', 'excavate_run'].some((s) => skills.has(s));
+  if (building) {
+    const facilities = myFacilities(ctx.memory, ctx.state, ['chest', 'station']).filter((f) => f.dist <= SPATIAL_NEAR);
+    const nearestFacility = facilities.sort((a, b) => a.dist - b.dist)[0];
+    const farmsRead = ctx.percept.observation?.ready === true;
+    const farms = farmsRead ? ctx.percept.farms.filter((f) => f.dist <= SPATIAL_NEAR) : [];
+    const tunnels = ctx.memory.landmarks().filter((l) => l.dim === ctx.state.dim && isTunnelLabel(l.label)).length;
+    const facilityText = `近 ${SPATIAL_NEAR} 格已记录设施 ${facilities.length} 处${nearestFacility ? `（最近 ${nearestFacility.label.replace(/^我的/, '')} ${nearestFacility.dist} 格）` : ''}、开挖记录 ${tunnels} 处（都是历史坐标）`;
+    const farmText = farmsRead ? `、已记录农田 ${farms.length} 块` : '、农田状态未读取';
+    lines.push(`工地空间：${facilityText}${farmText}；未记录区域未知，不能当空气或空地；高差/水/人造/悬空可查 terrain（只读）。`);
+  } else if (travelling) {
+    const leg = ctx.excursions?.find((l) => !l.end && l.worldId === ctx.state.worldId && l.dim === ctx.state.dim);
+    const tripText = leg ? `本趟已在线 ${Math.round(leg.onlineMs / 60_000)} 分钟、最远离入口 ${Math.round(leg.farthest.dist)} 格` : null;
+    lines.push(`出行证据：${[reachText ? `身体实测最远 ${reachText}` : null, tripText].filter(Boolean).join('；') || '没有本维度的到访或出行记录'}。到访/路线记录不证明现在可通行，也不等于搜过；可查 spatial_extrema（只读）。`);
+  } else if (searching) {
+    const shown = (seen: 'now' | 'memory') => ctx.percept.nearby.resources
+      .filter((r) => r.seen === seen && (isResourceBlock(r.block) || /(_log|_stem)$/.test(r.block))).sort((a, b) => a.nearest - b.nearest)
+      .slice(0, RESOURCE_SAMPLE).map((r) => `${r.block}×${r.count}${r.dir ? ` ${r.dir}` : ''}${r.nearest}格`).join('、');
+    const now = shown('now'), remembered = shown('memory');
+    lines.push(`搜索证据：当前看见 ${now || '没有记录到资源'}；记得 ${remembered || '没有记录到资源'}（历史观察，可能已变）。走过/记得不等于现在可走或已经搜全；可查 spatial_query（只读）。`);
+  }
+  return lines;
+}
+
 const WEAR_SLOT: Record<string, string> = { head: '头', torso: '胸', legs: '腿', feet: '脚', 'off-hand': '副手' };
 const DIM_ZH: Record<string, string> = { overworld: '主世界', the_nether: '下界', the_end: '末地' };
 /** 【身体】：自己在哪、状态、时间、亮度、背包 */
@@ -1123,6 +1171,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const glance = ctx.tier === 'glance';
   const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
   const brief = decisionBrief(ctx);
+  const spatial = spatialBrief(ctx);
   // 以前查过的资料摘录：只放最近的几条；瞥一眼少带，仍是外部参考，不是现场事实。
   const knowledgeFacts = self.knowledgeFacts(glance ? 3 : 6);
   // 恢复类技能由行为引擎在失败时自动接手，系统索引已按组列出；这里只保留需要手动
@@ -1184,6 +1233,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...(ctx.stageReview ? [['阶段回顾', ctx.stageReview] as [string, Record<string, unknown>]] : []),
     ...(ctx.progressGate ? [['无进展', ctx.progressGate] as [string, Record<string, unknown>]] : []),
     ...(brief.length ? [['决策摘要', { lines: brief }] as [string, Record<string, unknown>]] : []),
+    ...(spatial.length ? [['空间判断', { lines: spatial }] as [string, Record<string, unknown>]] : []),
     ['此刻', {
       why_thinking_now: ctx.reason,
       ...(ctx.recentActionFailures?.length ? { recent_action_failures: { note: '动作结束时的实际反馈，位置和环境可能随后改变', entries: ctx.recentActionFailures } } : {}),
