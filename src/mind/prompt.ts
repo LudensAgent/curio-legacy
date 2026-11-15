@@ -753,6 +753,58 @@ function focusBlock(ctx: MindContext): Record<string, unknown> | null {
   };
 }
 
+/**
+ * 【决策摘要】：只从已有事实里挑 1–5 条最相关的短句，放在【此刻】前。
+ * 它不是动作建议、不新增状态，也不复制整份清单/背包/设施列表；没有可用事实时返回空。
+ */
+export function decisionBrief(ctx: MindContext): string[] {
+  const plan = ctx.plan, glance = ctx.tier === 'glance';
+  const next = plan?.steps.find((st) => !st.done);
+  // 成熟农田的读取半径与 farmInfo 一致（48）；瞥一眼只看更近的。
+  const farmRadius = glance ? 32 : 48;
+  const farm = ctx.percept.farms
+    .filter((f) => f.mature !== null && f.mature > 0 && f.dist <= farmRadius)
+    .sort((a, b) => a.dist - b.dist)[0];
+  // 设施只取最近的一处，作为“附近有什么可用”的事实；可用性仍以现场复核为准。
+  const facility = myFacilities(ctx.memory, ctx.state, ['chest', 'station'])
+    .filter((f) => f.dist <= 24).sort((a, b) => a.dist - b.dist)[0];
+  const opportunity = farm
+    ? `近处农田：${farm.crop} ${farm.cells} 格，成熟 ${farm.mature}（${farm.dist} 格）`
+    : facility ? `近处设施：${facility.label.replace(/^我的/, '')} ${facility.dist} 格（${facility.kind === 'chest' ? '容器' : '工作站'}）` : null;
+  const failure = ctx.repeatedFailures?.[0]
+    ?? (ctx.recentActionFailures?.length ? `${ctx.recentActionFailures[0]!.skill}：${ctx.recentActionFailures[0]!.summary}` : null);
+  const failureLine = failure ? `近期阻碍：${failure.slice(0, 90)}` : null;
+  if (glance) {
+    // 瞥一眼只补“要不要立刻调整”的两类事实：近期阻碍 + 眼前可顺手处理的机会。
+    return [failureLine, opportunity].filter((line): line is string => line !== null);
+  }
+  const out: string[] = [];
+  const stage = plan
+    ? `局面：${plan.goal}${next ? `；下一项 ${next.text}` : '；清单各项已勾完'}`
+    : ctx.progress?.next ? `局面：主线下一里程碑 ${ctx.progress.next}`
+      : ctx.activity ? `局面：正在 ${ctx.activity.what}` : null;
+  if (stage) out.push(stage);
+  // 缺口复用 budgetFacts：它会按配方/熔炼与“背包+记得的箱子”合计算，不只按物品名硬减。
+  const budget = plan?.needs ? budgetFacts(plan.needs, ctx.state.inventory, ctx.percept.storage?.stock) : [];
+  const shortfall = budget.map((line, i) => {
+    const at = line.indexOf('还差');
+    const need = plan?.needs?.[i];
+    return at >= 0 && need ? `${need.item}×${need.count}，${line.slice(at)}` : null;
+  }).find((line): line is string => typeof line === 'string');
+  const constraints = [
+    shortfall ? `直接缺口：${shortfall}（背包+记得的箱子；箱子记录可能过期）` : null,
+    failureLine,
+  ].filter((line): line is string => line !== null);
+  if (constraints.length) out.push(constraints.join('；'));
+  if (opportunity) out.push(opportunity);
+  const question = ctx.self.agenda().find((a) => a.kind === 'question' && a.id !== plan?.agendaId);
+  const running = ctx.self.experiments().find((e) => e.status === 'running');
+  if (question) out.push(`待弄清：${question.text.slice(0, 90)}`);
+  else if (running) out.push(`待验证：${running.hypothesis.slice(0, 90)}`);
+  if (next?.id) out.push(`可查：{"kind":"progress","target":"${next.id}"}（这一项的已记录进展）`);
+  return out;
+}
+
 const WEAR_SLOT: Record<string, string> = { head: '头', torso: '胸', legs: '腿', feet: '脚', 'off-hand': '副手' };
 const DIM_ZH: Record<string, string> = { overworld: '主世界', the_nether: '下界', the_end: '末地' };
 /** 【身体】：自己在哪、状态、时间、亮度、背包 */
@@ -1069,6 +1121,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
   const image = self.selfImage();
   const glance = ctx.tier === 'glance';
   const knowHow = self.relevantKnowHow(context, ctx.activity?.kind, glance ? 3 : 6);
+  const brief = decisionBrief(ctx);
   // 以前查过的资料摘录：只放最近的几条；瞥一眼少带，仍是外部参考，不是现场事实。
   const knowledgeFacts = self.knowledgeFacts(glance ? 3 : 6);
   // 恢复类技能由行为引擎在失败时自动接手，系统索引已按组列出；这里只保留需要手动
@@ -1129,6 +1182,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
     ...(focusBlock(ctx) ? [['专注', focusBlock(ctx)!] as [string, Record<string, unknown>]] : []),
     ...(ctx.stageReview ? [['阶段回顾', ctx.stageReview] as [string, Record<string, unknown>]] : []),
     ...(ctx.progressGate ? [['无进展', ctx.progressGate] as [string, Record<string, unknown>]] : []),
+    ...(brief.length ? [['决策摘要', { lines: brief }] as [string, Record<string, unknown>]] : []),
     ['此刻', {
       why_thinking_now: ctx.reason,
       ...(ctx.recentActionFailures?.length ? { recent_action_failures: { note: '动作结束时的实际反馈，位置和环境可能随后改变', entries: ctx.recentActionFailures } } : {}),
