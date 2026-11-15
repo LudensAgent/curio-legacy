@@ -161,6 +161,35 @@ test('take_items 指到熔炉：不当作消失的箱子，明确指向 collect_
   assert.equal(a.actions.length, 0, '没有把熔炉当箱子打开或移动到别处');
 });
 
+test('目标容器不可见时给出具体 go_near，并说明没有改选目标', async (t) => {
+  const a = new FakeAdapter(), memory = new WorldMemory(null);
+  t.after(() => memory.close());
+  memory.setWorld(a.state().worldId);
+  const target = { x: 200, y: 64, z: 0 };
+  const { o } = await runSkill(a, 'take_items', { item: 'iron_ingot', count: 1, target }, memory);
+  assert.equal(o.result.status, 'failed');
+  assert.equal(o.result.failureCode, 'NOT_FOUND');
+  assert.match(o.result.summary, /go_near \{"target":\{"x":200,"y":64,"z":0\}\}/);
+  assert.match(o.result.summary, /目标坐标没有改变/);
+  assert.match(o.result.summary, /再取/);
+  assert.match(o.result.summary, /take_items 不会自己走过去/);
+  assert.match(o.result.summary, /可能需要分几次/);
+  assert.equal(memory.chests().length, 0, '没有改选其他容器');
+  assert.equal(a.actions.length, 0, '没有自动移动或换箱');
+
+  const near = new FakeAdapter(), nearMemory = new WorldMemory(null);
+  t.after(() => nearMemory.close());
+  nearMemory.setWorld(near.state().worldId);
+  const hidden = { x: 2, y: 64, z: 0 };
+  near.blocks.push({ name: 'chest', pos: hidden }, { name: 'stone', pos: { x: 1, y: 64, z: 0 } }, { name: 'stone', pos: { x: 1, y: 65, z: 0 } });
+  const blocked = await runSkill(near, 'store_items', { items: ['dirt:1'], target: hidden }, nearMemory);
+  assert.equal(blocked.o.result.status, 'failed');
+  assert.equal(blocked.o.result.failureCode, 'NOT_FOUND');
+  assert.match(blocked.o.result.summary, /go_near \{"target":\{"x":2,"y":64,"z":0\}\}/);
+  assert.match(blocked.o.result.summary, /当前视线\/站位不满足/);
+  assert.match(blocked.o.result.summary, /再存/);
+});
+
 test('农业：开垦并播种；成熟后收割补种', async () => {
   const a = new FakeAdapter();
   a.inv.set('wooden_hoe', 1);

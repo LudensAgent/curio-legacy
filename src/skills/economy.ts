@@ -156,6 +156,7 @@ const furnaceTargetHint = (name: string, pos: Vec3Like) =>
   `选定位置当前是 ${bare(name)}，它是有独立取物入口的熔炉类工作站，不是箱子；take_items/store_items 只处理箱子/木桶/潜影盒，未改选，也没有把这次当成“容器消失”，熔炉记录仍保留。熔炉产物/剩料用 collect_furnace {"at":${JSON.stringify(pos)}}；要看/操作界面用 use_gui {"target":${JSON.stringify(pos)}}。`;
 type ContainerTarget = string | Vec3Like;
 const posKey = (pos: Vec3Like) => `${pos.x},${pos.y},${pos.z}`;
+const goNearCommand = (pos: Vec3Like) => `go_near {"target":${JSON.stringify(pos)}}`;
 
 /** Only a fresh non-container observation can invalidate a remembered local store. */
 function forgetObservedContainer(ctx: SkillCtx, pos: Vec3Like) {
@@ -235,7 +236,7 @@ function containerFacts(candidates: ReturnType<typeof containerCandidates>, limi
 }
 
 /** A historical area is a cue to look again, never a concealed exact interaction target. */
-async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
+async function selectedContainer(ctx: SkillCtx, target: ContainerTarget, operation: 'take' | 'store') {
   const state = ctx.adapter.state();
   let pos: Vec3Like;
   if (typeof target === 'string') {
@@ -258,10 +259,13 @@ async function selectedContainer(ctx: SkillCtx, target: ContainerTarget) {
   if (!observed) { await glanceAt(ctx, pos); observed = ctx.senses.observeBlocks?.([pos])[0]; }
   if (!observed) {
     const dist = Math.round(Math.hypot(pos.x - state.pos.x, pos.y - state.pos.y, pos.z - state.pos.z));
+    const verb = operation === 'store' ? '存' : '取';
+    const tool = operation === 'store' ? 'store_items' : 'take_items';
     const why = dist > 48
-      ? `离你约 ${dist} 格（超出 48 格视野，store_items 不会自己走过去）`
+      ? `离你约 ${dist} 格（超出 48 格视野，${tool} 不会自己走过去；这个距离的 go_near 可能需要分几次调用）`
       : `离你约 ${dist} 格，转头看仍看不见（可能被遮挡或未加载）`;
-    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；先 navigate_to 过去、或改选看得见的容器再存${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
+    const gap = dist > 48 ? '当前距离/视线不满足' : '当前视线/站位不满足';
+    return { ok: false as const, result: fail('NOT_FOUND', `选定容器在 (${pos.x},${pos.y},${pos.z})，${why}；目标坐标没有改变，只是${gap}；先 ${goNearCommand(pos)} 到旁边，或改选看得见的容器再${verb}${knownContainersHint(ctx)}`, { candidates: containerCandidates(ctx), pos, distance: dist }) };
   }
   if (!CONTAINERS.includes(bare(observed.name))) {
     if (FURNACE_BLOCKS.has(bare(observed.name))) {
@@ -288,7 +292,7 @@ function chestFailText(reason: string | undefined): string {
 
 export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; note?: string }> = {
   name: 'store_items',
-  description: '会自己走到已看见的容器旁（不必先 go_near，远处/没看见的先 navigate_to）。把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
+  description: '会自己走到已看见的容器旁（不必先 go_near，远处/没看见的先 go_near 到目标旁，超过 48 格可能要分几次）。把点名物品存入 target 指定、重新看见的容器；不带 target 只返回容器线索让你选择。不会制造箱子、挖盖或更换目标；note 可记录用途',
   argsDoc: '{"items":["dirt:32","granite",…],"target"?:{x,y,z}|"容器地标ID","note"?:"放矿的"}；items也收 [{"name":"dirt","count":32}]；make 不会授权此工具选址造箱',
   timeoutMs: 90000,
   movement: true,
@@ -306,7 +310,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
       const candidates = containerCandidates(ctx), facts = containerFacts(candidates);
       return fail('BAD_ARGS', `尚未指定存入哪只容器${facts ? `；${facts}` : ''}；用 target 指定其中一只（坐标或地标 ID）再存`, { candidates });
     }
-    const selected = await selectedContainer(ctx, args.target);
+    const selected = await selectedContainer(ctx, args.target, 'store');
     if (!selected.ok) return selected.result;
     const rememberedFree = selected.rememberedFree;
     const state = ctx.adapter.state(), have = new Map<string, number>();
@@ -353,7 +357,7 @@ export const storeItems: Skill<{ items: StoreSpec[]; target?: ContainerTarget; n
 
 export const takeItems: Skill<{ item: string; count: number; target?: ContainerTarget }> = {
   name: 'take_items',
-  description: '会自己走到已看见的箱子/木桶/潜影盒旁（不必先 go_near，远处/没看见的先 navigate_to）。从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。熔炉不是箱子，产物/剩料用 collect_furnace。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
+  description: '会自己走到已看见的箱子/木桶/潜影盒旁（不必先 go_near，远处/没看见的先 go_near 到目标旁，超过 48 格可能要分几次）。从 target 指定、重新看见的容器取出指定物品；不带 target 只返回容器地点和物品印象。熔炉不是箱子，产物/剩料用 collect_furnace。不会自行翻其他箱子、挖盖、制造设施或决定搜索顺序',
   argsDoc: '{"item":"<物品名>","count"?:1-64,"target"?:{x,y,z}|"容器地标ID"}；未指定target时只列线索，不执行存取；target 只能是箱子/木桶/潜影盒，熔炉用 collect_furnace',
   timeoutMs: 90000,
   movement: true,
@@ -372,7 +376,7 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
       const candidates = containerCandidates(ctx), facts = containerFacts(candidates);
       return fail('BAD_ARGS', `尚未指定翻哪只容器（未自动搜索）${hintText}${facts ? `；${facts}` : ''}；用 target 指定其中一只（坐标或地标 ID）再取物`, { candidates, hints });
     }
-    const selected = await selectedContainer(ctx, args.target);
+    const selected = await selectedContainer(ctx, args.target, 'take');
     if (!selected.ok) return selected.result;
     const before = ctx.adapter.state().inventory.filter((item) => item.name === args.item).reduce((count, item) => count + item.count, 0);
     let container: GuiContainerObservation | undefined;
@@ -471,7 +475,7 @@ export const findItem: Skill<{ item: string; count?: number }> = {
     const shortText = need !== undefined && !sorted.some((r) => r.count >= need) && inChests > 0 ? `；没有单只箱子够 ${need}（箱子里合计×${inChests}）` : '';
     const dimsText = elsewhere.length ? `；其他维度：${elsewhere.slice(0, 4).map((r) => describeRecall(r)).join('；')}` : '';
     const useText = target
-      ? `；用 go_near {"target":${JSON.stringify(target)}} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
+      ? `；用 ${goNearCommand(target)} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
       : '';
     const enoughText = need !== undefined && backpack >= need ? `；背包已够 ${need}` : '';
     const furnaceNote = furnaceText ? `；熔炉：${furnaceText}` : '';
