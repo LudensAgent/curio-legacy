@@ -118,7 +118,7 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
       };
       const r = await adapter.useGui(target, args.ops, signal, { onContainer: rememberContainer });
       if (!recorded && r.container) rememberContainer(r.container);
-      // 熔炉类：关掉后里面的东西留着，记下来（取空了就忘掉）
+      // 熔炉类：关掉后里面的东西留着，记下来；取空了也留下“已确认空”的记录，避免下次又以为里面还有。
       if (typeof pos === 'object' && 'x' in pos && r.view && /^(furnace|blast_furnace|smoker)$/.test(r.view.type)) {
         const at = (i: number) => { const x = r.view!.slots.find((sl) => sl.slot === i); return x?.name && x.count > 0 ? { name: x.name, count: x.count } : null; };
         ctx.memory.setFurnace({ dim: adapter.state().dim, pos, block: r.view.type, input: at(0), output: at(2), fuel: at(1), burning: false });

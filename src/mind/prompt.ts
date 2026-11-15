@@ -776,6 +776,8 @@ function ageText(at: number | undefined): string | null {
 }
 
 const FARM_NEAR = 48, FARM_GLANCE_NEAR = 32, FACILITY_NEAR = 24, BASE_NEAR = 32;
+/** 熔炉类设施：它们的内容状态是“有没有可取的东西”的直接证据，设施表要优先保留。 */
+const FURNACE_FACILITY = /熔炉|高炉|烟熏炉/;
 
 export function decisionBrief(ctx: MindContext): string[] {
   const plan = ctx.plan, glance = ctx.tier === 'glance';
@@ -1045,10 +1047,15 @@ function worldKnowledge(ctx: MindContext) {
   // 床和床边同一小片的设施优先保留，避免远处前哨的床/箱子被身边一堆工作站挤出 8 项列表。
   const near = (a: Facility, b: Facility) => Math.hypot(a.pos.x - b.pos.x, a.pos.y - b.pos.y, a.pos.z - b.pos.z) <= 6;
   const beds = ownFacilities.filter((f) => f.kind === 'bed');
-  const reserved = [
+  // 有记录的熔炉优先保留：否则它会被一堆箱子挤出前 8，模型只记得“铁锭可能在熔炉”，又跑回去掏。
+  // 熔炉数量通常很少；这里按记录全留，而不是只留一个。
+  const furnaceFacilities = ownFacilities.filter((f) => f.contents && FURNACE_FACILITY.test(f.label))
+    .sort((a, b) => Number(a.contents!.startsWith('空')) - Number(b.contents!.startsWith('空')) || a.dist - b.dist).slice(0, 3);
+  const reserved = [...new Set([
     ...beds,
     ...ownFacilities.filter((f) => f.kind !== 'bed' && beds.some((bed) => near(f, bed))),
-  ];
+    ...furnaceFacilities,
+  ])];
   const listedFacilities = ctx.tier === 'deliberate'
     ? [...reserved, ...ownFacilities.filter((f) => !reserved.includes(f))].slice(0, 8).sort((a, b) => a.dist - b.dist)
     : [];
@@ -1065,7 +1072,12 @@ function worldKnowledge(ctx: MindContext) {
     .slice(0, 8)
     .map(({ l }) => `${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}`);
   const nearbyFacilities = ctx.tier === 'glance'
-    ? ownFacilities.filter((f) => f.dist <= 24).slice(0, 3).map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}）`)
+    ? (() => {
+      const near = ownFacilities.filter((f) => f.dist <= 24).sort((a, b) => a.dist - b.dist);
+      const furnaceNear = near.filter((f) => f.contents && FURNACE_FACILITY.test(f.label)).slice(0, 3);
+      const picked = [...furnaceNear, ...near.filter((f) => !furnaceNear.includes(f)).slice(0, 3 - furnaceNear.length)];
+      return picked.map((f) => `${f.label.replace(/^我的/, '')} ${Math.round(f.dist)}格（${facilityUse(f.kind)}${facilityAge(f.observedAt)}${f.contents ? `；${f.contents}` : ''}）`);
+    })()
     : [];
   // 旧开挖入口/进度点单独列出，并区分“入口”（当时开始开挖的位置）和“深层进度前端”。
   const tunnelRows = ctx.tier === 'deliberate'
@@ -1160,7 +1172,7 @@ function worldKnowledge(ctx: MindContext) {
       nearby_farms: farmState.slice(0, 2),
       nearby_farms_note: 'mature=null 表示 48 格内未全部读取或超出范围，成熟以观察为准；minutes_since_planted 是现实时间，只作参考',
     } : {}),
-    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在' } : {}),
+    ...(ctx.tier === 'deliberate' ? { places, ...(tunnels.length ? { my_tunnels: tunnels, my_tunnels_note: '入口是当时开始开挖的位置，深层进度前端是后来推进到的位置；两者都只是历史坐标，不保证从地面有通路。坐标来自当时实测，不代表现在仍连通；是否仍连通只能现场核实' } : {}), ...(facilities.length ? { my_facilities: facilities, my_facilities_note: '容器先 find_item 查线索，再带 target 存取；床也会列在这里，sleep 用坐标；工作站用 use_gui/interact_block；记下时间只说明记录，不代表现在一定还在。熔炉的「空（已确认没有可取的东西）」或「空（只剩燃料 …）」是最近一次打开/取物时的状态；之后没有新的烧炼或取物记录时，它仍是最近一次观察；旧教训只说明当时要检查，不证明现在还有原料/产物；只有写了原料/产物才表示可能还有' } : {}),
       ...(farmState.length ? { my_farms: farmState, my_farms_note: 'minutes_since_planted 是现实时间，只作参考；生长受游戏刻/光照影响，成熟以观察为准；mature=null 表示 48 格内未全部读取或超出范围' } : {}),
       ...(portals.length ? { portals } : {}), explored_around: around,
       explored_around_note: 'explored_around 是身边 32–128 格八个方向各抽 7 个采样环的历史到访，只说明抽样处有没有进过区块，不代表看全或现在能走；要看记录里去过的整体范围与各方向未到访边缘，用 {"skill":"spatial_extrema","args":{"metric":"explored"}}（只读）', ...(visitedExtent === null ? {} : { visited_extent: visitedExtent }) } : {}),

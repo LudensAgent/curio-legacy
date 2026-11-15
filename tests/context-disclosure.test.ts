@@ -44,6 +44,56 @@ test('设施只给容器内容摘要，完整数量按 find_item 查', (t) => {
   assert.doesNotMatch(facilities, /iron_ingot|gold_nugget/, '完整容器记录不应每念展开');
 });
 
+test('取空的熔炉在设施列表里显示为已确认为空，不再只留“里面可能有铁”', (t) => {
+  const { adapter, memory, known } = fixture(t);
+  adapter.blocks.push({ name: 'furnace', pos: { x: 5, y: 64, z: 0 } });
+  memory.addLandmark('discovery', '我的熔炉', 'overworld', { x: 5, y: 64, z: 0 }, 2);
+  memory.setFurnace({ dim: 'overworld', pos: { x: 5, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false, ts: Date.now() - 5 * 60_000 });
+  const facilities = (known().my_facilities as string[]).join('\n');
+  assert.match(facilities, /熔炉/);
+  assert.match(facilities, /空（已确认没有可取的东西）/);
+  assert.match(facilities, /5 分钟前记下/, '空状态带确认时间');
+});
+
+test('没有地标但刚确认空的熔炉也能在设施表里看到', (t) => {
+  const { adapter, memory, known } = fixture(t);
+  adapter.blocks.push({ name: 'furnace', pos: { x: 7, y: 64, z: 0 } });
+  memory.setFurnace({ dim: 'overworld', pos: { x: 7, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false, ts: Date.now() - 2 * 60_000 });
+  const facilities = (known().my_facilities as string[]).join('\n');
+  assert.match(facilities, /熔炉 \(7,64,0\)/);
+  assert.match(facilities, /空（已确认没有可取的东西）/);
+});
+
+test('空熔炉不进入等待提醒；方块消失后空记录也被清掉', (t) => {
+  const adapter = new FakeAdapter();
+  adapter.pos = { x: 0.5, y: 64, z: 0.5 };
+  const memory = new WorldMemory(null);
+  memory.setWorld(adapter.state().worldId);
+  const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
+  t.after(() => memory.close());
+  adapter.blocks.push({ name: 'furnace', pos: { x: 2, y: 64, z: 0 } });
+  memory.setFurnace({ dim: 'overworld', pos: { x: 2, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false });
+  const waiting = perception.update().waiting_on ?? [];
+  assert.ok(!waiting.some((line) => /熔炉/.test(line)), '空熔炉不该提醒回去取');
+  adapter.blocks = [];
+  perception.update();
+  assert.equal(memory.furnaces('overworld').length, 0, '熔炉没了，空记录也要清掉');
+});
+
+test('瞥一眼的附近设施也会保留一个有记录的熔炉状态', (t) => {
+  const { adapter, memory, known } = fixture(t, 'glance');
+  for (const x of [2, 3, 4]) {
+    adapter.blocks.push({ name: 'chest', pos: { x, y: 64, z: 0 } });
+    memory.setChest('overworld', { x, y: 64, z: 0 }, [{ name: 'dirt', count: 1 }]);
+  }
+  adapter.blocks.push({ name: 'furnace', pos: { x: 6, y: 64, z: 0 } });
+  memory.addLandmark('discovery', '我的熔炉', 'overworld', { x: 6, y: 64, z: 0 }, 2);
+  memory.setFurnace({ dim: 'overworld', pos: { x: 6, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false, ts: Date.now() - 5 * 60_000 });
+  const nearby = (known().nearby_facilities as string[]).join('\n');
+  assert.match(nearby, /熔炉/);
+  assert.match(nearby, /空（已确认没有可取的东西）/);
+});
+
 test('places 同坐标的非设施地标也只留一条', (t) => {
   const { memory, known } = fixture(t);
   memory.addLandmark('discovery', '小湖', 'overworld', { x: 12, y: 64, z: 0 }, 0);

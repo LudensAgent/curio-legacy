@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { findItem } from '../src/skills/economy.ts';
+import { collectFurnace, findItem } from '../src/skills/economy.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 
 const ctx = (m: WorldMemory, inventory: { name: string; count: number }[] = []) => ({
@@ -9,6 +9,65 @@ const ctx = (m: WorldMemory, inventory: { name: string; count: number }[] = []) 
   // find_item 现在会把附近未打开的容器说进摘要；纯记忆测试里没有可见方块。
   senses: { refresh() {}, knownBlocks: () => [], observeBlocks: () => [] },
   signal: new AbortController().signal,
+});
+
+test('find_item 把取空的熔炉报成已确认为空，不再让人以为锭还在熔炉里', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  m.setFurnace({ dim: 'overworld', pos: { x: 5, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false, ts: Date.now() - 5 * 60_000 });
+  const r = await findItem.run(ctx(m) as any, { item: 'iron_ingot' });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /记得的熔炉/);
+  assert.match(r.summary, /\(5,64,0\) 空（已确认没有可取的东西）（5 分钟前）/);
+  assert.doesNotMatch(r.summary, /可能在熔炉|还留在熔炉/);
+});
+
+test('find_item 在超过四只熔炉时仍会报出装着目标的那只', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  for (let i = 1; i <= 4; i++) m.setFurnace({ dim: 'overworld', pos: { x: i, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false });
+  m.setFurnace({ dim: 'overworld', pos: { x: 20, y: 64, z: 0 }, block: 'furnace', input: null, output: { name: 'iron_ingot', count: 12 }, fuel: null, burning: false });
+  const r = await findItem.run(ctx(m) as any, { item: 'iron_ingot' });
+  assert.match(r.summary, /\(20,64,0\) 有 iron_ingot/);
+});
+
+test('find_item 报出熔炉里还留着的成品', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  m.setFurnace({ dim: 'overworld', pos: { x: 5, y: 64, z: 0 }, block: 'furnace', input: null, output: { name: 'iron_ingot', count: 12 }, fuel: null, burning: false });
+  const r = await findItem.run(ctx(m) as any, { item: 'iron_ingot' });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /熔炉：\(5,64,0\) 有 iron_ingot/);
+});
+
+test('collect_furnace 不把已确认为空的熔炉当待取目标', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  m.setFurnace({ dim: 'overworld', pos: { x: 5, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: null, burning: false, ts: Date.now() });
+  const base = ctx(m) as any;
+  const r = await collectFurnace.run({ ...base, adapter: { ...base.adapter, emptyFurnace: async () => ({ ok: true, taken: [], left: { input: null, output: null, fuel: null }, burning: false }) } }, { fuel: false });
+  assert.equal(r.status, 'failed');
+  assert.match(r.summary, /不记得哪个熔炉里留着东西/);
+});
+
+test('collect_furnace fuel:true 时会去只剩燃料的熔炉', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  m.setFurnace({ dim: 'overworld', pos: { x: 5, y: 64, z: 0 }, block: 'furnace', input: null, output: null, fuel: { name: 'coal', count: 2 }, burning: false });
+  let target: unknown = null;
+  const base = ctx(m) as any;
+  const r = await collectFurnace.run({ ...base, adapter: { ...base.adapter, blockAt: () => 'furnace', emptyFurnace: async (pos: unknown) => {
+    target = pos;
+    return { ok: true, taken: [], left: { input: null, output: null, fuel: { name: 'coal', count: 2 } }, burning: false };
+  } } }, { fuel: true });
+  assert.equal(r.status, 'succeeded');
+  assert.deepEqual(target, { x: 5, y: 64, z: 0 });
+  assert.match(r.summary, /燃料格里还有 coal×2/);
 });
 
 test('find_item 只返回最近、其次数量最多的箱子，并给合计', async (t) => {

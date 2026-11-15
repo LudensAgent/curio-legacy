@@ -144,12 +144,12 @@ export class ContainerLedger {
     return entry?.worldId === this.worldId ? clone(entry) : undefined;
   }
 
-  setFurnace(rec: Omit<FurnaceRecord, 'worldId' | 'ts'> & { ts?: number }, nodeId?: string): FurnaceEntry | null {
-    const k = this.key(rec.dim, rec.pos);
-    if (!rec.input && !rec.output) {
-      if (delete this.data.furnaces[k]) this.dirty = true;
-      return null;
-    }
+  /**
+   * 记录一次熔炉状态。取空后仍保留 input/output=null 的记录：
+   * 它表示“这个熔炉在 ts 时刻被确认是空的”，否则同一趟掏完后再想起来，
+   * 记忆里只剩更早的“还留着铁锭”，会反复回去找。真正消失的熔炉用 forgetFurnace。
+   */
+  setFurnace(rec: Omit<FurnaceRecord, 'worldId' | 'ts'> & { ts?: number }, nodeId?: string): FurnaceEntry {
     const entry: FurnaceEntry = {
       ...rec,
       worldId: this.worldId,
@@ -157,7 +157,7 @@ export class ContainerLedger {
       ts: rec.ts ?? Date.now(),
       ...(nodeId ? { nodeId } : {}),
     };
-    this.data.furnaces[k] = entry;
+    this.data.furnaces[this.key(rec.dim, rec.pos)] = entry;
     this.dirty = true;
     return clone(entry);
   }

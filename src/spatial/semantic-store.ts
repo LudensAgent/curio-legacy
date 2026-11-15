@@ -1134,12 +1134,7 @@ export class SpatialSemanticStore {
   setFurnace(rec: Omit<FurnaceRecord, 'worldId' | 'ts'> & { ts?: number }) {
     const at = point(rec.pos);
     const node = this.furnaceFacts().find((candidate) => candidate.dim === rec.dim && dist3(candidate.pos, at) <= 2);
-    const entry = this.containerLedgerStore.setFurnace(rec, node?.id);
-    if (!entry) {
-      this.containerLedgerStore.forgetFurnace(rec.dim, rec.pos);
-      if (node) this.markContainerFactGone(node, 'replaced');
-      return;
-    }
+    this.containerLedgerStore.setFurnace(rec, node?.id);
     const observedAt = rec.ts ?? Date.now();
     if (node) {
       this.noteContainerRecord(node.id, { subtype: 'furnace', block: rec.block, label: `furnace${rec.burning ? ' (burning)' : ''}` });

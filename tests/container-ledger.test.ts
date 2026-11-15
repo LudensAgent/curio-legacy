@@ -44,6 +44,23 @@ test('container ledger stores exact contents, chestOps and furnace state across 
   assert.deepEqual(empty.furnaces(), []);
 });
 
+test('取空后的熔炉保留“已确认为空”的记录，重新加载仍在', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-containers-'));
+  const file = path.join(dir, 'containers.json');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const ts = 1_700_000_000_000;
+  const first = new ContainerLedger(file, W);
+  first.setFurnace({ dim: D, pos: at(4, 64, 2), block: 'furnace', input: null, output: null, fuel: null, burning: false, ts });
+  first.flush();
+  const reopened = new ContainerLedger(file, W);
+  assert.equal(reopened.furnaces(D).length, 1, '空状态是“查过了”，不能当成没记录');
+  assert.equal(reopened.furnaces(D)[0]?.input, null);
+  assert.equal(reopened.furnaces(D)[0]?.output, null);
+  assert.equal(reopened.furnaces(D)[0]?.ts, ts);
+  reopened.forgetFurnace(D, at(4, 64, 2));
+  assert.deepEqual(reopened.furnaces(), [], '熔炉真的消失时才清除');
+});
+
 test('container ledger is world-scoped', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-containers-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

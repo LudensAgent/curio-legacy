@@ -1,5 +1,5 @@
 import { chestHint } from './chest-hint.ts';
-import { chestLocation, describeChest, describeRecall, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, describeChest, describeRecall, furnaceContents, isContainerLandmark } from '../memory/chest-memory.ts';
 import type { GuiContainerObservation, InvItem, Vec3Like } from '../adapter/types.ts';
 import { DIRS } from '../perception/perception.ts';
 import { shortId, sleep, throwIfAborted } from '../util.ts';
@@ -95,7 +95,9 @@ export const collectFurnace: Skill<{ at?: Vec3Like; fuel: boolean }> = {
     if (!adapter.emptyFurnace) return fail('ERROR', '当前适配器不支持');
     const s = adapter.state();
     const d = (p: Vec3Like) => Math.round(Math.hypot(p.x - s.pos.x, p.y - s.pos.y, p.z - s.pos.z));
-    const pos = args.at ?? memory.furnaces(s.dim).sort((a, b) => d(a.pos) - d(b.pos))[0]?.pos ?? findStation(ctx, ['furnace'], 16)?.pos;
+    // 只把“还留着原料/产物（或明确要收燃料）”的记录当成待取目标；
+    // 已确认空的记录只是查过的状态，不再反复去掏。
+    const pos = args.at ?? memory.furnaces(s.dim).filter((f) => f.input || f.output || (args.fuel && f.fuel)).sort((a, b) => d(a.pos) - d(b.pos))[0]?.pos ?? findStation(ctx, ['furnace'], 16)?.pos;
     if (!pos) return fail('NOT_FOUND', '不记得哪个熔炉里留着东西，身边也没看到熔炉');
     try {
       const r = await adapter.emptyFurnace(pos, signal, { fuel: args.fuel });
@@ -386,7 +388,7 @@ export const takeItems: Skill<{ item: string; count: number; target?: ContainerT
 // ===================================================================== 查库存
 export const findItem: Skill<{ item: string; count?: number }> = {
   name: 'find_item',
-  description: '查某样东西现在在哪：背包多少，记得的箱子各有多少（按远近列出坐标；带 count 时标出哪只单独够用），箱子里合计与总计多少。只读，不开箱不移动；没打开过的箱子内容未知',
+  description: '查某样东西现在在哪：背包多少，记得的箱子各有多少（按远近列出坐标；带 count 时标出哪只单独够用），记得的熔炉里有没有；箱子里合计与总计多少。只读，不开箱不移动；没打开过的箱子内容未知，熔炉显示最后一次打开/离开时的记录',
   argsDoc: '{"item":"<物品名>","count"?:1-9999（要几个：用来判断哪只箱子单独够用）}',
   timeoutMs: 3000,
   movement: false,
@@ -408,6 +410,26 @@ export const findItem: Skill<{ item: string; count?: number }> = {
     const inChests = here.reduce((n, r) => n + r.count, 0);
     const total = backpack + inChests;
     const need = args.count;
+    // 熔炉也是“东西可能在哪”的来源：把最后一次记录的原料/产物/空状态一起报出来。
+    // 已确认空的记录同样是事实，避免“箱子没有”被误读成“八成还在熔炉里”。
+    const age = (ts: number) => {
+      const minutes = Math.max(0, Math.round((Date.now() - ts) / 60_000));
+      return minutes < 1 ? '刚才' : minutes < 60 ? `${minutes} 分钟前` : minutes < 1440 ? `${Math.round(minutes / 60)} 小时前` : `${Math.round(minutes / 1440)} 天前`;
+    };
+    const furnaceFacts = ctx.memory.furnaces().map((f) => {
+      const slots = [f.input, f.output, f.fuel];
+      return { f, state: furnaceContents(f), hasItem: slots.some((slot) => slot?.name === args.item) };
+    }).sort((a, b) => Math.hypot(a.f.pos.x - s.pos.x, a.f.pos.y - s.pos.y, a.f.pos.z - s.pos.z)
+      - Math.hypot(b.f.pos.x - s.pos.x, b.f.pos.y - s.pos.y, b.f.pos.z - s.pos.z));
+    const hereFurnaces = furnaceFacts.filter((x) => x.f.dim === s.dim)
+      .sort((a, b) => Number(b.hasItem) - Number(a.hasItem)
+        || Math.hypot(a.f.pos.x - s.pos.x, a.f.pos.y - s.pos.y, a.f.pos.z - s.pos.z) - Math.hypot(b.f.pos.x - s.pos.x, b.f.pos.y - s.pos.y, b.f.pos.z - s.pos.z))
+      .slice(0, 4);
+    const otherFurnaces = furnaceFacts.filter((x) => x.f.dim !== s.dim && x.hasItem).slice(0, 3);
+    const furnaceText = [
+      ...hereFurnaces.map((x) => `(${x.f.pos.x},${x.f.pos.y},${x.f.pos.z}) ${x.hasItem ? `有 ${args.item}` : x.state}（${age(x.f.ts)}）${x.hasItem ? `；取用 collect_furnace {"at":{"x":${x.f.pos.x},"y":${x.f.pos.y},"z":${x.f.pos.z}}}` : ''}`),
+      ...otherFurnaces.map((x) => `${x.f.dim} (${x.f.pos.x},${x.f.pos.y},${x.f.pos.z}) 有 ${args.item}`),
+    ].join('；');
     // 距离用三维：同一基地上下层、坡上坡下的箱子不会被水平距离算成一样近。
     const dist3 = (pos: Vec3Like) => Math.round(Math.hypot(pos.x - s.pos.x, pos.y - s.pos.y, pos.z - s.pos.z));
     const sorted = here.slice().sort((a, b) => dist3(a.chest.pos) - dist3(b.chest.pos) || b.count - a.count);
@@ -421,12 +443,13 @@ export const findItem: Skill<{ item: string; count?: number }> = {
     const chosen = (need !== undefined ? sorted.find((r) => r.count >= need) : undefined) ?? sorted[0];
     const chest = chosen ? { pos: chosen.chest.pos, count: chosen.count, dist: dist3(chosen.chest.pos), ...(chosen.chest.note ? { note: chosen.chest.note } : {}), observedAt: chosen.observedAt, ...(chosen.chest.contents.possiblyStale === true ? { possiblyStale: true } : {}) } : null;
     const target = chest ? { x: chest.pos.x, y: chest.pos.y, z: chest.pos.z } : null;
-    if (!backpack && !recalls.length) {
-      // 只查“打开过的记录”不等于箱子是空的：把附近未打开的容器说清楚，
-      // 否则模型会把“不记得”误读成“箱子里没有”，转头去别处找。
+    if (!backpack && !recalls.length && !furnaceFacts.some((x) => x.hasItem)) {
+      // 只查“打开过的记录”不等于箱子是空的：把附近未打开的容器和熔炉的最后状态说清楚，
+      // 否则模型会把“不记得”误读成“箱子里没有”，转头去别处找或反复回熔炉。
       const unopened = containerCandidates(ctx).filter((candidate) => candidate.contents.includes('未打开过')).slice(0, 3);
       const facts = containerFacts(unopened);
-      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录、所有维度）${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
+      const furnaces = furnaceText ? `；记得的熔炉：${furnaceText}` : '';
+      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录、所有维度）${furnaces}${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
         item: args.item, backpack: 0, chest: null, chests: [], target: null, inChests: 0, total: 0, ...(unopened.length ? { unopened } : {}),
       });
     }
@@ -438,7 +461,8 @@ export const findItem: Skill<{ item: string; count?: number }> = {
       ? `；用 go_near {"target":${JSON.stringify(target)}} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
       : '';
     const enoughText = need !== undefined && backpack >= need ? `；背包已够 ${need}` : '';
-    return ok(`${args.item}：背包×${backpack}${listText}；箱子里合计×${inChests}、总计×${total}${enoughText}${shortText}${dimsText}${useText}`, {
+    const furnaceNote = furnaceText ? `；熔炉：${furnaceText}` : '';
+    return ok(`${args.item}：背包×${backpack}${listText}；箱子里合计×${inChests}、总计×${total}${enoughText}${shortText}${dimsText}${furnaceNote}${useText}`, {
       item: args.item, backpack, chest, chests, target, inChests, total,
       ...(need !== undefined ? { needed: need } : {}),
       ...(elsewhere.length ? { elsewhere: elsewhere.slice(0, 8).map((r) => ({ dim: r.chest.dim, pos: r.chest.pos, count: r.count })) } : {}),

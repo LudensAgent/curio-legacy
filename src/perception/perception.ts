@@ -293,6 +293,8 @@ export class Perception {
    * 火灭了、原料还在 → 多半燃料没了；火灭了、原料没了 → 烧完了，成品在等着取。
    */
   private waitingOn(dim: string, here: Vec3Like): string[] {
+    // 空记录也要参与“方块是否还在”的核对：熔炉被拆掉时要把空状态一起清掉，
+    // 但它们不是等待项，只有还有原料/产物时才提醒回去取。
     const recs = this.memory.furnaces(dim);
     if (!recs.length) return this.dropsWaiting(here);
     const seen = new Map(this.vision.observeBlocks(recs.filter((r) => dist3(r.pos, here) <= 48).map((r) => r.pos)).map((o) => [`${o.pos.x},${o.pos.y},${o.pos.z}`, o]));
@@ -302,6 +304,7 @@ export class Perception {
       const at = `熔炉 (${key}) ${d}格`;
       const o = seen.get(key);
       if (o && !/^(furnace|blast_furnace|smoker)$/.test(o.name)) { this.memory.forgetFurnace(dim, r.pos); this.furnaceLit.delete(key); continue; }
+      if (!r.input && !r.output) continue;
       const elapsed = Math.max(0, (Date.now() - r.ts) / 1000);
       const inside = [r.input ? `没烧的 ${r.input.name}×${r.input.count}` : '', r.output ? `烧好的 ${r.output.name}×${r.output.count}` : ''].filter(Boolean).join('、');
       const left = `${elapsed < 1 ? '刚才' : `${durationText(realSecondsToTicks(elapsed))}前（现实时间）`}离开时里面有 ${inside}${r.why === 'out_of_fuel' ? '（当时燃料就烧完了）' : r.why === 'stalled' ? '（当时卡住不动）' : ''}`;

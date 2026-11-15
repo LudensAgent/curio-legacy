@@ -1,7 +1,7 @@
 import type { Vec3Like } from '../adapter/types.ts';
-import type { Landmark, WorldMemory } from '../memory/store.ts';
+import type { FurnaceRecord, Landmark, WorldMemory } from '../memory/store.ts';
 import { STATION_LABEL } from '../skills/stations.ts';
-import { chestLocation, chestName, describeChestSummary, isContainerLandmark } from '../memory/chest-memory.ts';
+import { chestLocation, chestName, describeChestSummary, furnaceContents, isContainerLandmark } from '../memory/chest-memory.ts';
 
 /** 算“设施”的地标：工作台、熔炉、床、箱子这些功能方块，加上农田；盖的房子在 my_builds 里另说 */
 export const FACILITY_LABELS = new Set([...Object.values(STATION_LABEL), '我的床', '我的农田']);
@@ -33,10 +33,12 @@ function myStations(memory: Pick<WorldMemory, 'landmarks'>, s: State): Landmark[
   return out;
 }
 /** 自己的设施，近的在前；kinds 不给就全要 */
-export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 'chestClock'>, s: State, kinds?: FacilityKind[]): Facility[] {
+export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 'chestClock' | 'furnaces'>, s: State, kinds?: FacilityKind[]): Facility[] {
   const want = (k: FacilityKind) => !kinds || kinds.includes(k);
   const out: Facility[] = [];
   const stations = myStations(memory, s);
+  const furnaces = memory.furnaces(s.dim);
+  const matchedFurnaces = new Set<FurnaceRecord>();
   if (want('chest')) {
     const clock = memory.chestClock(s.worldDay);
     for (const c of memory.chests(s.dim)) {
@@ -58,8 +60,17 @@ export function myFacilities(memory: Pick<WorldMemory, 'landmarks' | 'chests' | 
     if (isContainerLandmark(l.label)) continue;
     const kind: FacilityKind = l.label === '我的床' ? 'bed' : 'station';
     if (!want(kind)) continue;
-    out.push({ kind, label: l.label, pos: l.pos, dist: flat(l.pos, s.pos), observedAt: l.ts,
-      text: `${l.label.replace(/^我的/, '')} ${at(l.pos)} ${flat(l.pos, s.pos)}格` });
+    const furnace = furnaces.find((f) => d3(f.pos, l.pos) <= 0.1 && !matchedFurnaces.has(f));
+    if (furnace) matchedFurnaces.add(furnace);
+    out.push({ kind, label: l.label, pos: l.pos, dist: flat(l.pos, s.pos), observedAt: furnace?.ts ?? l.ts,
+      text: `${l.label.replace(/^我的/, '')} ${at(l.pos)} ${flat(l.pos, s.pos)}格`, ...(furnace ? { contents: furnaceContents(furnace) } : {}) });
+  }
+  // 有东西的熔炉、或刚确认过空的熔炉，即使没有对应地标也要能找回来；
+  // 很久以前确认空的记录只挂在地标上，避免凭空多出地点。
+  if (want('station')) for (const f of furnaces) {
+    if (matchedFurnaces.has(f) || (!f.input && !f.output && Date.now() - f.ts >= 30 * 60_000)) continue;
+    out.push({ kind: 'station', label: '熔炉', pos: f.pos, dist: flat(f.pos, s.pos), observedAt: f.ts,
+      text: `熔炉 ${at(f.pos)} ${flat(f.pos, s.pos)}格`, contents: furnaceContents(f) });
   }
   return out.sort((a, b) => a.dist - b.dist);
 }

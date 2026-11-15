@@ -154,6 +154,20 @@ export function describeChestSummary(c: ChestRecord, max = 2): string {
     : freeSlots != null ? `空，剩 ${freeSlots} 格；重新打开才更新` : '内容未知（重新打开才确认）';
 }
 
+export interface FurnaceState {
+  input: { name: string; count: number } | null;
+  output: { name: string; count: number } | null;
+  fuel: { name: string; count: number } | null;
+  burning: boolean;
+}
+
+/** 熔炉上次看到的样子：空也是一条确认事实；只剩燃料时单独说，避免误读成还有产物。 */
+export const furnaceContents = (f: FurnaceState) => {
+  const parts = [f.input ? `原料 ${f.input.name}×${f.input.count}` : '', f.output ? `产物 ${f.output.name}×${f.output.count}` : '', f.fuel ? `燃料 ${f.fuel.name}×${f.fuel.count}` : ''].filter(Boolean);
+  if (f.input || f.output) return `${parts.join('、')}${f.burning ? '，当时还在烧' : ''}`;
+  return f.fuel ? `空（只剩燃料 ${f.fuel.name}×${f.fuel.count}）` : '空（已确认没有可取的东西）';
+};
+
 /** 一条精确回忆说成人话 */
 export function describeRecall(r: ChestRecall, dist?: number, _clock?: Pick<Clock, 'now'>): string {
   const where = `${chestName(r.chest)}${dist != null ? `（${dist} 格外）` : ''}`;
