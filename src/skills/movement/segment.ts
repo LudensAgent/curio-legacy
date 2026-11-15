@@ -1194,12 +1194,14 @@ async function runNavigationSegmentInner(
       const drop = current.pos.y - transition.to.y;
       if (transition.kind === 'drop' && transition.drop > 1) {
         // 路线几何已用当前实测起点复验；摔伤上限按原版 >3 格才计伤害，别把 1–3 格的安全落差
-        // 估成 ceil(drop)+2 点，导致低血时连下一格箱子都被拒绝。
+        // 估成 ceil(drop)+2 点，导致低血时连下一格箱子都被拒绝。只有会掉血的落差才看余量。
         const estimatedDamageUpperBound = estimatedFallDamage(drop);
-        if (!Number.isFinite(current.hp) || current.hp - estimatedDamageUpperBound < 4) {
+        if (!Number.isFinite(current.hp) || (estimatedDamageUpperBound > 0 && current.hp - estimatedDamageUpperBound < 2)) {
           return receipt('physical_failure', {
             stopCode: 'step_failed', failureCode: 'LOW_HP', stepIndex: index, transition,
-            detail: `当前生命 ${current.hp} 不足以保守承受这次约 ${drop.toFixed(1)} 格落差并保留余量`,
+            detail: estimatedDamageUpperBound > 0
+              ? `当前生命 ${current.hp} 不足以承受这次约 ${drop.toFixed(1)} 格落差（预计 ${estimatedDamageUpperBound} 点摔伤并保留 2 点余量）`
+              : `当前生命 ${current.hp} 无法确认安全下行`,
           });
         }
       }

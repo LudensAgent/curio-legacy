@@ -88,8 +88,13 @@ export const descend: Skill<{ target: Vec3Like; allowUnknownCorridor?: boolean }
     if (option.surface === 'water' && option.support.name !== 'water') return refused('该水柱存在气泡等额外作用，当前没有确认其下行风险');
     // 原版摔伤从 >3 格才开始；护甲/附魔只会减少伤害，不会增加。用同一套 estimatedFallDamage
     // 做上限，别把 1–3 格的安全落差估成 ceil(drop)+2 点而挡住低血时的正常下行。
+    // 只有真的会掉血的落差才要求额外余量；无伤落差在 1 点血时也可以下。
     const estimatedDamageUpperBound = option.surface === 'water' ? 0 : estimatedFallDamage(drop);
-    if (!Number.isFinite(initial.hp) || initial.hp - estimatedDamageUpperBound < 4) return refused(`当前生命 ${initial.hp} 不足以保守承受这次约 ${drop.toFixed(1)} 格落差并保留余量`, 'LOW_HP');
+    if (!Number.isFinite(initial.hp) || (estimatedDamageUpperBound > 0 && initial.hp - estimatedDamageUpperBound < 2)) {
+      return refused(estimatedDamageUpperBound > 0
+        ? `当前生命 ${initial.hp} 不足以承受这次约 ${drop.toFixed(1)} 格落差（预计 ${estimatedDamageUpperBound} 点摔伤并保留 2 点余量）`
+        : `当前生命 ${initial.hp} 无法确认安全下行`, 'LOW_HP');
+    }
     const latest = check();
     if (dist3(latest.pos, receipt.from) > 0.35) return refused('观察后站位已经改变，需重新评估落点');
     if (!latest.connected || !latest.alive || !latest.observationReady || !latest.onGround || latest.inWater || latest.inLava

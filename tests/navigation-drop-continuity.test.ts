@@ -104,10 +104,10 @@ test('连续 drop 拒绝 Promise 成功但仍在空中的身体，也保留取�
   }
 });
 
-test('连续多格 drop 保留既有生命余量门槛', async (t) => {
+test('低血也允许无伤落差；只有会掉血的落差才看生命余量', async (t) => {
   const { adapter, ctx, request } = setup();
   t.after(() => ctx.memory.close());
-  adapter.hp = 3; // 2 格落差本身不造成伤害，但 3 血低于下行保留余量
+  adapter.hp = 3; // 2 格落差原版不造成伤害，3 血也应允许通过
   let moves = 0;
   t.mock.method(adapter, 'moveTo', async (target) => {
     if (target.kind !== 'feet') return;
@@ -115,7 +115,7 @@ test('连续多格 drop 保留既有生命余量门槛', async (t) => {
     adapter.pos = { x: target.x, y: target.y, z: target.z };
   });
   const result = await runNavigationSegment(ctx, request);
-  assert.equal(result.failureCode, 'LOW_HP');
-  assert.equal(result.confirmed.length, 1);
-  assert.equal(moves, 1);
+  assert.notEqual(result.failureCode, 'LOW_HP');
+  assert.ok(moves > 1, `2 格无伤落差应继续执行：moves=${moves}`);
+  assert.ok(result.confirmed.length > 1, `确认段应包含落差：${result.confirmed.length}`);
 });
