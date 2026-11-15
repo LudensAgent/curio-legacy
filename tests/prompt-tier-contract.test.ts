@@ -88,7 +88,7 @@ test('施工提醒只对复杂/审美建筑推荐建筑师，简单围栏不触�
 
 test('出发准备只进入认真想：整趟需求、准备标准与停止准备', () => {
   const deliberate = deliberateSystem('P', []);
-  for (const marker of ['【出发准备】', '整趟', '返程与紧急余量', '准备足够就出发', '不为更稳妥无限追加', '一次失败不证明准备标准需要降低']) {
+  for (const marker of ['【出发准备】', '够了就出发', '带缺口出发']) {
     assert.ok(deliberate.includes(marker), `缺少出发准备「${marker}」`);
   }
   const start = deliberate.indexOf('【出发准备】');

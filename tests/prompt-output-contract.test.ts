@@ -6,7 +6,6 @@ test('取物与下一步：find_item 只查线索，take_items 带 target 才取
   for (const system of [deliberateSystem('你叫 Curio。', []), glanceSystem('你叫 Curio。', [])]) {
     for (const marker of [
       'find_item 只查线索',
-      '不代表已取得',
       '别用 inventory_min 验收',
       'take_items 不带 target 只列容器线索',
       'next 也只能写成查询段',
@@ -21,12 +20,22 @@ test('取物与下一步：find_item 只查线索，take_items 带 target 才取
   }
 });
 
-test('出发准备：区分随身/已装备/据点/历史/未取得，身体事实不冒充随身', () => {
+test('出发准备：五类补给状态、来源比较与失败回流', () => {
   const system = deliberateSystem('你叫 Curio。', []);
   for (const marker of [
-    '随身库存', '已装备', '副手槽里放着的', '已核实据点库存', '位置、内容和可访问性', '取出前不算随身',
-    '历史库存', '只是线索，不算随身准备', '未取得资源', '数量未核实', '工具连耐久一起看',
-  ]) assert.ok(system.includes(marker), `缺少补给状态语义「${marker}」`);
+    '随身库存', '已装备（含副手槽）', '已核实据点库存', '位置/内容/可访问性已确认', '取出前不算随身',
+    '历史库存', '只是线索，不算随身准备', '未取得资源', '数量未核实', '工具连耐久', '不代表已取得',
+    '预计工作量与返程', '按这趟需求和已写的 plan.needs 算缺口', '比较来源',
+    '按单次够不够、路线可靠性、代价与风险自己选', '取物/制作/存放/装备后重算',
+    '来源失败保留缺口、重比来源', '说明缺口、风险与替代措施', '不重复同一条失败路线', '带缺口出发要说清缺什么',
+  ]) assert.ok(system.includes(marker), `缺少补给语义「${marker}」`);
+});
+
+test('取物先看背包，多只箱子选单次够缺口且路线可靠的一只', () => {
+  const system = deliberateSystem('你叫 Curio。', []);
+  for (const marker of ['取物先看背包', '多只箱子优先单次够缺口、路线可靠的一只', '带 target 取出']) {
+    assert.ok(system.includes(marker), `缺少取物来源规则「${marker}」`);
+  }
 });
 
 test('plan.needs 与 activity 写的是需求预算，不是已取得物资', () => {
