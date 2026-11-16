@@ -231,18 +231,27 @@ test('桥头擦边：邻列有已记录支撑时允许并加价；无支撑才�
   // 复现：桥面圆石到 x=94 为止，路线保留起点偏移走到 x=95.29，身体只压住 x=94 那列 0.01 格。
   const to = at(95.29, 70, -39.55);
   const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
-  const edgeOnly = fakeReader([[94, 69, -40, recorded('cobblestone')]], 64, []);
-  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, edgeOnly.read)), EDGE_STANCE_COST, '压住邻列边缘有已记录支撑：允许，但加价');
+  const edgeOnly = fakeReader([
+    [94, 69, -40, recorded('cobblestone')], [95, 69, -40, recorded('air')], [95, 68, -40, recorded('stone')],
+  ], 64, []);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, edgeOnly.read)), EDGE_STANCE_COST, '压住邻列边缘、中心列 1 格下有实地：允许，但加价');
   const centred = fakeReader([[95, 69, -40, recorded('cobblestone')]], 64, []);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centred.read)), 0);
-  const centreAir = fakeReader([[94, 69, -40, recorded('cobblestone')], [95, 69, -40, recorded('air')]], 64, []);
-  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, centreAir.read)), EDGE_STANCE_COST, '中心是空气但邻列有支撑：按边缘站姿允许');
-  const unknownBelow = fakeReader([], 64, []);
+  // 中心列未知时不用邻列擦边放行：先观察，不把“没看过”当成“站得住”。
+  const unknownCentre = fakeReader([[94, 69, -40, recorded('cobblestone')]], 64, []);
+  const unknownDecision = hostLandEdgePolicy.evaluate(edge, unknownCentre.read);
+  assert.equal(unknownDecision.allow, false);
+  assert.equal(unknownDecision.observe, true);
+  const unknownBelow = fakeReader([
+    [94, 69, -40, recorded('cobblestone')], [95, 69, -40, recorded('air')],
+  ], 64, []);
   const stillDeferred = hostLandEdgePolicy.evaluate(edge, unknownBelow.read);
   assert.equal(stillDeferred.allow, false);
   assert.equal(stillDeferred.observe, true);
   const unavailableBelow = fakeReader([[95, 69, -40, unavailableCell]], 64, []);
-  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, unavailableBelow.read)), /no observed support/);
+  const unavailableDecision = hostLandEdgePolicy.evaluate(edge, unavailableBelow.read);
+  assert.equal(unavailableDecision.allow, false);
+  assert.equal((unavailableDecision as { observe?: true }).observe, true);
   // 分数脚高（站在下半砖上）：支撑就是脚所在那一格。
   const slab = fakeReader([[95, 69, -40, { kind: 'recorded', state: { name: 'stone_slab', properties: { type: 'bottom' } }, stateComplete: true }]], 64, []);
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(95.5, 69.5, -39.5), { from: at(94.5, 69.5, -39.5) }), slab.read)), 0);
@@ -274,6 +283,25 @@ test('边缘站姿下方是已记录的水时拒绝：连续行走滑过一点�
     [95, 68, -40, recorded('lava')],
   ], 64, []);
   assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, lavaBelow.read)), /dangerous block lava/);
+});
+
+test('边缘站姿下方是深坑/未记录空腔时拒绝：不能靠擦边走下悬崖', () => {
+  const to = at(95.29, 70, -39.55);
+  const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
+  // 中心列 8 格全是已记录空气，邻列有支撑：以前只看 8 格内没有水/岩浆就放行，身体会掉进深坑。
+  const deep = Array.from({ length: 8 }, (_, index) => [95, 69 - index, -40, recorded('air')] as const);
+  const deepReader = fakeReader([[94, 69, -40, recorded('cobblestone')], ...deep], 64, []);
+  const deepDecision = hostLandEdgePolicy.evaluate(edge, deepReader.read);
+  assert.equal(deepDecision.allow, false);
+  assert.equal((deepDecision as { observe?: true }).observe, undefined, '8 格都记录为空气：不是未知，不需要再观察');
+  assert.match(rejectionReason(deepDecision), /no support within 8 blocks/);
+  assert.equal(isConstructionFixablePolicyRejection(rejectionReason(deepDecision)), true, 'place 可以补中心列支撑');
+  // 中心列下面未记录：先交回观察，不按边缘站姿放行。
+  const unknownReader = fakeReader([[94, 69, -40, recorded('cobblestone')], [95, 69, -40, recorded('air')]], 64, []);
+  const unknownDecision = hostLandEdgePolicy.evaluate(edge, unknownReader.read);
+  assert.equal(unknownDecision.allow, false);
+  assert.equal(unknownDecision.observe, true);
+  assert.match(rejectionReason(unknownDecision), /unrecorded drop/);
 });
 
 test('跨缺口跳跃：超出不疾跑起跳能力的宽缺口不规划；落空会掉进火/岩浆的缺口不规划', () => {

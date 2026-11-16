@@ -80,6 +80,8 @@ const GAP_FALL_LOOKDOWN = 8;
 
 /** 边缘站姿（脚底中心是空/未知，但身体足印压住邻列已记录支撑）的额外代价。 */
 export const EDGE_STANCE_COST = 6;
+/** 边缘站姿允许的最大落差：脚底中心列下面必须有这个深度内的已记录支撑；更深就按“悬崖边”处理。 */
+export const EDGE_STANCE_MAX_DROP = 2;
 
 const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: boolean): LandSearchEdgePolicy => ({
   version,
@@ -153,31 +155,42 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
       };
       const cell = read.cell(x, supportY, z);
       if (!supportsFoot(x, z)) {
-        // 边缘站姿的脚底中心没有支撑：先看中心列下面会落到什么。连续行走会在停稳时滑过目标一点，
-        // 若擦边的邻列旁边就是水/岩浆，这一点滑移就足以让人掉进去——这种站姿不能按“旧矿道桥头”放行。
-        if (cell.kind === 'recorded') {
-          for (let dy = 0; dy < GAP_FALL_LOOKDOWN; dy++) {
-            const below = recordedName(read, x, supportY - dy, z);
-            if (below === null) break; // 再往下没有已记录事实，按下面的观察/拒绝路径处理
-            if (isWaterBlock(below)) {
-              return { allow: false, reason: `host policy rejects an edge stance whose unsupported feet-centre column drops into recorded water at (${x},${supportY - dy},${z})` };
-            }
-            if (isDangerousBlock(below)) {
-              return { allow: false, reason: `host policy rejects recorded dangerous block ${below} below the unsupported feet centre at (${x},${supportY - dy},${z})` };
-            }
-            if (supportTop(below.replace(/^minecraft:/, '')) !== null) break; // 下面是实地：落下去也只是小落差
+        // 未记录 ≠ 没有支撑：先把它作为观察边界交回，不用邻列擦边放行。
+        // 中心列可能只是还没看过，也可能下面就是深坑；放行会把“没看过”当成“站得住”。
+        if (cell.kind !== 'recorded') {
+          return { allow: false, observe: true, reason: `support under the feet centre at (${x},${supportY},${z}) is not recorded yet`,
+            supportColumn: { minY: supportY, maxY: supportY } };
+        }
+        // 边缘站姿的脚底中心没有支撑：沿中心列向下找第一个已记录支撑，同时拒绝水/岩浆。
+        // 连续行走会在停稳时滑过目标一点——只有“马上能落到实地”的擦边才算旧矿道桥头；
+        // 若下面是几十格的岩浆空腔，8 格内看不到水/岩浆也不能放行，否则整段人会掉下去。
+        let landing: number | null = null, unknownBelow = false;
+        for (let dy = 0; dy < GAP_FALL_LOOKDOWN; dy++) {
+          const below = recordedName(read, x, supportY - dy, z);
+          if (below === null) { unknownBelow = true; break; }
+          if (isWaterBlock(below)) {
+            return { allow: false, reason: `host policy rejects an edge stance whose unsupported feet-centre column drops into recorded water at (${x},${supportY - dy},${z})` };
           }
+          if (isDangerousBlock(below)) {
+            return { allow: false, reason: `host policy rejects recorded dangerous block ${below} below the unsupported feet centre at (${x},${supportY - dy},${z})` };
+          }
+          if (supportTop(below.replace(/^minecraft:/, '')) !== null) { landing = dy; break; }
         }
         // 身体足印覆盖到的邻列有已记录支撑：站得住，但连续行走可能滑出边缘，给额外代价。
         // 旧矿道/台阶大量是这种站姿；默认允许比“脚底中心必须自己有支撑”更接近原版。
         const edgeSupport = supportColumnsUnder(edge.to, supportY)
           .some((under) => (under.x !== x || under.z !== z) && supportsFoot(under.x, under.z));
-        if (edgeSupport) return { allow: true, extraCost: EDGE_STANCE_COST };
-        if (cell.kind === 'unknown') {
-          // 未记录 ≠ 没有支撑：这一格可能只是还没看过。把它作为观察边界交回，
-          // 让协调器看清脚底中心后再决定；不是永久策略拒绝。
-          return { allow: false, observe: true, reason: `support under the feet centre at (${x},${supportY},${z}) is not recorded yet`,
-            supportColumn: { minY: supportY, maxY: supportY } };
+        if (edgeSupport && landing !== null && landing <= EDGE_STANCE_MAX_DROP) {
+          return { allow: true, extraCost: EDGE_STANCE_COST };
+        }
+        if (edgeSupport) {
+          return { allow: false, ...(unknownBelow ? { observe: true as const } : {}),
+            reason: landing === null
+              ? unknownBelow
+                ? `host policy rejects an edge stance over an unrecorded drop below the unsupported feet centre at (${x},${supportY},${z})`
+                : `host policy rejects an edge stance with no support within ${GAP_FALL_LOOKDOWN} blocks below the unsupported feet centre at (${x},${supportY},${z})`
+              : `host policy rejects an edge stance over a ${landing}-block drop below the unsupported feet centre at (${x},${supportY},${z}); only ${EDGE_STANCE_MAX_DROP} blocks are safe`,
+            supportColumn: { minY: supportY - (landing ?? 0), maxY: supportY } };
         }
         return { allow: false, reason: `host policy rejects a stance with no observed support under the feet centre or body footprint at (${x},${supportY},${z})` };
       }
@@ -210,7 +223,8 @@ export function isFirePolicyRejection(reason: string): boolean {
  */
 export function isConstructionFixablePolicyRejection(reason: string): boolean {
   return reason.includes('no observed support under the feet centre or body footprint')
-    || reason.includes('unsupported feet-centre column drops into recorded water')
+    || reason.includes('support under the feet centre')
+    || reason.includes('edge stance')
     || (reason.includes('cannot clear a') && reason.includes('horizontal gap jump'));
 }
 
@@ -250,5 +264,5 @@ export function policyRemedy(reason: string, opts: { fireClearable: boolean }): 
   return '';
 }
 
-export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.water-below-8.gap-jump-2.fall-only.dry.lava-neighbor-3.v8', new Set(['fall']), false);
-export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.water-below-8.gap-jump-2.fall-wade.lava-neighbor-3.v8', new Set(['fall', 'water_contact']), true);
+export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.maxdrop-2.gap-jump-2.fall-only.dry.lava-neighbor-3.v9', new Set(['fall']), false);
+export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.maxdrop-2.gap-jump-2.fall-wade.lava-neighbor-3.v9', new Set(['fall', 'water_contact']), true);
