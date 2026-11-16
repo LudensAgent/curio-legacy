@@ -23,7 +23,7 @@ import { compileCheck } from './sandbox.ts';
  * 什么时候请模型：有新技能、有新冲突、或者账本里又攒了一批用过技能的经历（够判断效果了）。
  */
 export interface CuratorOptions { checkMs: number; unusedDays: number; candidateUnusedDays: number; disabledDays: number; gapMs: number; minSkills: number; /** 同时留着的自己写的技能最多几份：多了就收起最没用的 */ maxActive: number }
-export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60, candidateUnusedDays: 15, disabledDays: 5, gapMs: 0, minSkills: 4, maxActive: 24 };
+export const DEFAULT_CURATOR: CuratorOptions = { checkMs: 60_000, unusedDays: 60, candidateUnusedDays: 15, disabledDays: 5, gapMs: 10 * 60_000, minSkills: 4, maxActive: 24 };
 const DAY_TICKS = 24_000;
 /** fired 在触发瞬间就加，执行结果要等结束（或取消）才记；刚触发的技能不能当成“触发过却什么都没做”。 */
 const FIRED_GRACE_MS = 10 * 60_000;
@@ -99,6 +99,8 @@ export class SkillCurator {
   busy = false;
   lastRun = 0;
   private lastSignature = '';
+  /** 死亡触发的 postDeath 上下文如果被间隔/签名门槛挡下，留到下一次真正整理时再用，不丢掉。 */
+  private postDeathPending = false;
   private conflictSeen = new Map<string, number>();
   /** 合并生成的替代关系：来源技能 → 并入哪个候选及版本。替代候选还没验收晋升前，来源不能按“被替代”收起（持久化到磁盘，重建整理器后仍生效）。
    *  version 是被并入目标的版本；fromVersion 是来源合并当时的版本——来源后来独立改版后，旧关系不能覆盖新版（不能用覆盖 B1 的证据处理 B2）。文字记录合并用 version/fromVersion=0（文字无版本）。 */
@@ -115,8 +117,8 @@ export class SkillCurator {
   observation: (() => { state: AgentState; paused: boolean }) | null = null;
   private breakObservation = (event: { type: string; data?: Record<string, unknown> }) => {
     if (['paused', 'resumed', 'disconnected', 'death', 'spawn'].includes(event.type)) this.gameClock.resetBaseline();
-    // 死亡是冲突/拉锯技能的致命证据：等死亡播报落定后，强制做一次「合并替代」整理（合并冲突技能并收起来源）
-    if (event.type === 'death') setTimeout(() => void this.check(Date.now(), { force: true, postDeath: true }), 4000).unref?.();
+    // 死亡是冲突/拉锯技能的致命证据：等死亡播报落定后看一眼，但仍走签名/冲突/新证据和最小间隔门槛，不强制每次死亡都请模型。
+    if (event.type === 'death') setTimeout(() => void this.check(Date.now(), { postDeath: true }), 4000).unref?.();
     if (event.type === 'skill_promoted') for (const [key, entry] of this.lifetimes) {
       if (entry.candidate && entry.name === event.data?.name) this.lifetimes.delete(key);
     }
@@ -397,7 +399,10 @@ export class SkillCurator {
 
   /** 定时检查：先收起用不上的、没用的；技能够多、而且有新技能、冲突或看着重复的，才请模型合并 */
   async check(now = Date.now(), opts: { force?: boolean; postDeath?: boolean } = {}): Promise<string | null> {
-    if (this.busy) return opts.force ? '正在整理技能，请等待本次完成' : null;
+    if (this.busy) {
+      if (opts.postDeath) this.postDeathPending = true;
+      return opts.force ? '正在整理技能，请等待本次完成' : null;
+    }
     const retired = [...this.retireUnused(now), ...this.retireLowValue(now)];
     this.saveTime();
     const skills = this.active();
@@ -413,22 +418,27 @@ export class SkillCurator {
     // 只有效果证据的话，技能少也值得看（一两个技能也可能在拖后腿）
     const enough = new Set([...skills, ...notes].map((entry) => entry.name)).size >= this.opts.minSkills || ((newEvidence || conflicted) && skills.length > 0);
     if (!opts.force && (!enough || now - this.lastRun < this.opts.gapMs || (signature === this.lastSignature && !conflicted && !newEvidence))) {
+      if (opts.postDeath) this.postDeathPending = true;
       return retired.length ? `收起 ${retired.join('、')}` : null;
     }
     this.busy = true;
-    this.lastRun = now;
-    for (const b of skills) this.conflictSeen.set(b.name, Object.values(this.engine.statsOf(b.name)?.conflicts ?? {}).reduce((n, v) => n + v, 0));
-    this.lastSignature = signature;
-    this.evidenceSeen = evidence;
+    const postDeath = opts.postDeath || this.postDeathPending;
     this.bus.publish('skill_curate_start', 'P3', `在后台整理技能（${skills.length} 个执行版本、${notes.length} 份文字记录）`, { forced: !!opts.force });
     try {
-      const r = retiredText + await this.curate(opts.postDeath);
+      const r = retiredText + await this.curate(postDeath);
+      this.postDeathPending = false;
+      // 清理成功才记时间/签名/证据：失败时下一轮还能重试，不被 10 分钟间隔困住。
+      this.lastRun = now;
+      for (const b of skills) this.conflictSeen.set(b.name, Object.values(this.engine.statsOf(b.name)?.conflicts ?? {}).reduce((n, v) => n + v, 0));
       // 整理本身改写了技能：记下整理后的样子，免得下一轮把自己的改动当成“有新技能”
       this.lastSignature = this.signature();
+      this.evidenceSeen = evidence;
       this.history = [...this.history, { at: Date.now(), result: r }].slice(-10);
       this.bus.publish('skill_curated', 'P3', `技能整理完成：${r}`, { forced: !!opts.force });
       return r;
     } catch (e) {
+      if (postDeath) this.postDeathPending = true;
+      this.lastRun = now; // 整理失败也按最小间隔退避，避免每分钟重试同一份坏请求；签名/证据不更新，下次还会再试。
       const why = String((e as Error)?.message ?? e).slice(0, 160);
       const result = `${retiredText}整理出错：${why}`;
       this.history = [...this.history, { at: Date.now(), result }].slice(-10);

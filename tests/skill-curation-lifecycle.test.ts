@@ -13,6 +13,7 @@ import { FakeAdapter } from './fake-adapter.ts';
 
 const hour = 3_600_000;
 const day = 24_000;
+const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve)); };
 const definition = { name: 'measured-craft', description: '按点名物品合成并核对背包变化', body: '输入点名物品；只完成指定合成，按实际背包变化确认结果。',
   code: 'return {worked:true};', verify: 'const s = await api.state(); return true;' };
 
@@ -216,4 +217,59 @@ test('模型整理保护已成功稳定应急版，但应急用途不阻止收�
   assert.equal(w.engine.statsOf(rescue.name)?.retired, undefined);
   assert.deepEqual(w.engine.currentStats(rescue.name), { ok: 3, fail: 0 });
   assert.equal(w.engine.candidateRetirement('untested-rescue')?.version, 1);
+});
+
+test('默认整理间隔 10 分钟，书变了也要等间隔', async (t) => {
+  const w = setup(t);
+  for (const name of ['gap-a', 'gap-b', 'gap-c', 'gap-d']) assert.ok(w.engine.write({ ...definition, name }).ok);
+  let count = 0;
+  const curator = new SkillCurator({ ...w.planner, async complete() { count++; return { text: '{"ok":true}', latencyMs: 0 }; } }, w.engine, w.book, w.bus);
+  t.after(() => curator.stop());
+  const now = Date.now();
+  await curator.check(now);
+  assert.equal(count, 1);
+  assert.ok(w.engine.write({ ...definition, name: 'gap-e' }).ok);
+  await curator.check(now + 60_000);
+  assert.equal(count, 1, '签名变了但还没到 10 分钟，不重复请模型');
+  await curator.check(now + 11 * 60_000);
+  assert.equal(count, 2, '过了最小间隔，新签名会整理');
+});
+
+test('死亡不再强制整理；没有新签名/冲突/证据时不请模型', async (t) => {
+  const w = setup(t);
+  for (const name of ['death-a', 'death-b', 'death-c', 'death-d']) assert.ok(w.engine.write({ ...definition, name }).ok);
+  let count = 0;
+  const curator = new SkillCurator({ ...w.planner, async complete() { count++; return { text: '{"ok":true}', latencyMs: 0 }; } }, w.engine, w.book, w.bus, { gapMs: 0 });
+  t.after(() => curator.stop());
+  await curator.check();
+  assert.equal(count, 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  curator.start();
+  w.bus.publish('death', 'P0', '死了', { message: 'Curio was slain by Zombie' });
+  t.mock.timers.tick(4_000);
+  await flush();
+  assert.equal(count, 1, '死亡本身不改变签名/冲突/证据，不强制再请模型');
+});
+
+test('死亡被最小间隔挡下时保留 postDeath 上下文，下一次整理仍带死亡框架', async (t) => {
+  const w = setup(t);
+  for (const name of ['death-f', 'death-g', 'death-h', 'death-i']) assert.ok(w.engine.write({ ...definition, name }).ok);
+  let count = 0;
+  const systems: string[] = [];
+  const curator = new SkillCurator({ ...w.planner, async complete(messages: { content: string }[]) { count++; systems.push(messages[0].content); return { text: '{"ok":true}', latencyMs: 0 }; } }, w.engine, w.book, w.bus);
+  t.after(() => curator.stop());
+  await curator.check();
+  assert.equal(count, 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  curator.start();
+  w.bus.publish('death', 'P0', '死了', { message: 'Curio was slain by Zombie' });
+  t.mock.timers.tick(4_000);
+  await flush();
+  assert.equal(count, 1, '间隔内不强制整理');
+  const later = Date.now() + 11 * 60_000;
+  t.mock.method(Date, 'now', () => later);
+  assert.ok(w.engine.write({ ...definition, name: 'death-j' }).ok);
+  await curator.check();
+  assert.equal(count, 2, '过了间隔且出现新签名，继续整理');
+  assert.match(systems[1]!, /死亡刚发生/, '被间隔挡下的死亡上下文留到下一次整理');
 });
