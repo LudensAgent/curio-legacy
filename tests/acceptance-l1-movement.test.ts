@@ -390,6 +390,21 @@ test('L1-10 确定性失败不重试；未知邻格默认拒绝' , async (t) => 
   t.diagnostic('L1-10 unauthorizedAttempts=2 repeatedUnchanged=1 actionsBeforeExplicitAuth=0');
 });
 
+test('L1-10c mine_cell 目标格是水时，列出相邻实心方块和相对坐标，方便改挖顶盖', async (t) => {
+  const w = flat();
+  w.blocks.push({ name: 'water', pos: { x: 1, y: 65, z: 0 } });
+  w.blocks.push({ name: 'netherrack', pos: { x: 1, y: 66, z: 0 } });
+  const ctx = makeCtx(w);
+  t.after(() => ctx.memory.close());
+  const r = await mineCell.run(ctx, { at: [1, 1, 0], facing: 'E' });
+  assert.equal(r.status, 'failed');
+  assert.equal((r.data?.problem as { kind?: string } | undefined)?.kind, 'TARGET_LIQUID');
+  assert.match(r.summary, /相邻的已加载实心方块/);
+  assert.match(r.summary, /\[1,2,0\].*netherrack|netherrack.*\[1,2,0\]/);
+  const solids = r.data?.solidNeighbors as { name: string; pos: Vec3Like; at: number[] }[] | undefined;
+  assert.deepEqual(solids?.[0], { name: 'netherrack', pos: { x: 1, y: 66, z: 0 }, at: [1, 2, 0] });
+});
+
 test('L1-10b 紧贴身体/脚下的已加载格被挡住视线时按实时方块确认并开挖', async (t) => {
   const w = flat();
   w.blocks.push({ name: 'stone', pos: { x: 1, y: 64, z: 0 } });

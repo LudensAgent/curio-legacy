@@ -549,7 +549,23 @@ const mineCellSkill: Skill<MineArgs> = {
         ...after(ctx, args.facing, pos), noop: true,
       });
     }
-    if (LIQUID_BLOCKS.has(before)) return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了`, { ...after(ctx, args.facing, pos), ...problemOf('TARGET_LIQUID', 'precondition'), ...effectUnconfirmed('block_removed') });
+    if (LIQUID_BLOCKS.has(before)) {
+      // 常见于在水里想“挖头顶换气”：目标格本身是水，真正要挖的顶盖/池壁在相邻格。
+      // 只报“是水，挖不了”会让 Agent 反复重试同一个水格；把相邻的已加载实心方块
+      // 连同相对坐标列出来，让它能改挖正确的格（不替它决定挖哪一格）。
+      const solids = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
+        .flatMap(([dx, dy, dz]) => {
+          const neighbor = { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz };
+          const name = adapter.blockAt(neighbor);
+          return name !== null && !LIQUID_BLOCKS.has(name) && !AIR.has(name) ? [{ pos: neighbor, name }] : [];
+        });
+      const solidText = solids.slice(0, 3)
+        .map((solid) => `[${toRel(feet, args.facing, solid.pos)}] ${solid.name}(${solid.pos.x},${solid.pos.y},${solid.pos.z})`).join('、');
+      return fail('BAD_ARGS', `[${args.at}] 是 ${before}，挖不了${solidText ? `；相邻的已加载实心方块：${solidText}，要挖它就用对应的相对格` : ''}`, {
+        ...after(ctx, args.facing, pos), ...problemOf('TARGET_LIQUID', 'precondition'), ...effectUnconfirmed('block_removed'),
+        ...(solids.length ? { solidNeighbors: solids.map((solid) => ({ name: solid.name, pos: solid.pos, at: toRel(feet, args.facing, solid.pos) })) } : {}),
+      });
+    }
     const neighborPositions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, -1]]
       .map(([dx, dy, dz]) => ({ x: pos.x + dx, y: pos.y + dy, z: pos.z + dz }));
     const seenNeighbors = visibleCells(ctx, neighborPositions);
