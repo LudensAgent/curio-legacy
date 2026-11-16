@@ -583,6 +583,12 @@ function renderSummary(session: MovementSession, stop: StopReceipt, segments: re
     ? `实测沿 ${session.intent.direction} ${session.progress.along} 格、横向 ${session.progress.lateral} 格、水平净位移 ${session.progress.horizontalNet} 格`
     : `实测终点 ${cellText(measured)}，距原目标水平 ${round2(Math.hypot(measured.x - session.intent.to.x, measured.z - session.intent.to.z))} 格`;
   const path = `已确认 ${confirmed} 段 transition（路径长度 ${round2(session.counters.confirmedRouteLength)} 格）`;
+  // 停稳失败时身体可能已经掉下悬崖：把实测垂直落差和液体/触地事实写进摘要，
+  // 不只留一句“没站稳”。40 格下坠进岩浆与 1 格台阶在回执里必须能区分。
+  const vertical = session.measured.start.y - measured.y;
+  const noteworthyVertical = session.measured.inWater || session.measured.inLava || !session.measured.onGround;
+  const verticalNote = Math.abs(vertical) < 1 || (stop.failure === undefined && !noteworthyVertical) ? ''
+    : `；实测垂直${vertical > 0 ? '下降' : '上升'} ${round2(Math.abs(vertical))} 格${session.measured.inWater ? '，身体在水中' : session.measured.inLava ? '，身体在岩浆中' : session.measured.onGround ? '' : '，身体未触地'}`;
   const observation = session.lastObservation as ObservationReceipt | undefined;
   const observationNote = observation === undefined
     ? ''
@@ -594,7 +600,7 @@ function renderSummary(session: MovementSession, stop: StopReceipt, segments: re
     : '';
   const modeNote = stop.modeGap === undefined ? '' : `；能力缺口 ${JSON.stringify(stop.modeGap)}`;
   const failureNote = stop.failure === undefined ? '' : `；停止分类 ${stop.failure}`;
-  return `${intent}：${stop.detail}；${progress}；${path}${observationNote}${boundaryNote}${modeNote}${failureNote}`;
+  return `${intent}：${stop.detail}；${progress}${verticalNote}；${path}${observationNote}${boundaryNote}${modeNote}${failureNote}`;
 }
 
 /**
@@ -764,7 +770,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       }
       session.measured = {
         start: { ...session.frozenOrigin }, current: { ...state.pos }, sampledAt: Date.now(),
-        onGround: state.onGround, inWater: state.inWater,
+        onGround: state.onGround, inWater: state.inWater, inLava: state.inLava,
       };
       session.progress = progressOf(session, state.pos, Date.now());
       const seen = request.checkSighting?.();
@@ -904,7 +910,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
       const after = ctx.adapter.state();
       session.measured = {
         start: { ...session.frozenOrigin }, current: { ...after.pos }, sampledAt: Date.now(),
-        onGround: after.onGround, inWater: after.inWater,
+        onGround: after.onGround, inWater: after.inWater, inLava: after.inLava,
       };
       session.progress = progressOf(session, after.pos, Date.now());
       // 部分位移也是真实进展：动作失败/未确认但身体确实移动了，不能当成 NO_PROGRESS；
@@ -1534,6 +1540,7 @@ export async function runMovementCoordinator(ctx: SkillCtx, request: Coordinator
         sampledAt: Date.now(),
         onGround: ctx.adapter.state().onGround,
         inWater: ctx.adapter.state().inWater,
+        inLava: ctx.adapter.state().inLava,
       };
       session.progress = progressOf(session, session.measured.current, Date.now());
     }

@@ -119,6 +119,7 @@ export interface MovementMeasured {
   sampledAt: number;
   onGround: boolean;
   inWater: boolean;
+  inLava: boolean;
 }
 
 export interface MovementProgress {
@@ -295,7 +296,7 @@ export function createMovementSession(opts: {
     },
     measured: {
       start: { ...opts.origin }, current: { ...opts.origin }, sampledAt: now,
-      onGround: false, inWater: false,
+      onGround: false, inWater: false, inLava: false,
     },
     progress: {
       along: 0, lateral: 0, horizontalNet: 0, verticalDelta: 0,
