@@ -243,7 +243,7 @@ activity.done_when 只结束当前活动；next.requires 只决定下一段能�
 取物：find_item 只查线索、不产出（别用 inventory_min 验收）；take_items 不带 target 只列容器线索，带 target 才取出。容器未知时先 find_item，再单独排带 target 的 take_items；还没拿到容器位置时，next 也只能写成查询段。熔炉里的成品/剩料用 collect_furnace，不要排 take_items 或只开 use_gui 看一眼。next 是下一段会实际执行的活动，不是占位；done_when 必须能由自己的 steps 确认。what 写了多个连续动作时，steps 要包含它们；只有单步能收工时写 1 步。
 新回执仍支持原做法时可以沿用。几个方案眼下都要做同一个可执行动作时，先做它。若必须知道一个现场事实才能决定后续，就把这段活排到能验证它的观察或尝试，等回执再选；已有依据的连续动作可以一次排完。
 核对 continue_effect 后，只有决定原样执行剩余计划才写 decision:"continue"，且不要写 activity——continue 只按原 routine 原参数继续，写 activity（哪怕同名、同样动作只改了参数）会被退回要求澄清。要做新的一段或改现在的动作，写 decision:"new"/"adjust"/"switch"/"detour" 并给出 steps；独白、what、expect、noticed 不会改变执行。routine 1–6 步。顺手、碰运气的步骤加 "optional":true（没成也不算失败）。调整 routine 时：续跑同一个动作（比如恢复后接着爬）在该步骤写 "id":"st_…"（routine 里显示的 #st_… 去掉 #），沿用它的进度与额度；不写 id 表示新建动作、重新计额度；改了参数就不要沿用旧 id。
-operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304），是需求不是已取得物资；activity/next/methods 里写的物资同样只是需求，不自动采集/制作/取物，换 method 不清空未完成 needs（除非明确重估了目标或需求）；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
+operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","note":"…"}；有【操作者的建议】时写 {"status":"adopted|declined","note":"…"}）｜plan（主目标：定下 {"focus":"a_…或一句话","steps":["成果…"],"methods":[{"text":"当前做法","outcome":0}],"needs":[{"item":"oak_log","count":16,"why":"工作台+工具+盾+火把"}]}；needs 是材料预算（物品注册名，数量写在 count 里；最多 8 项，单项 1–2304），是需求不是已取得物资；activity/next/methods 里写的物资同样只是需求，不自动采集/制作/取物，换 method 不清空未完成 needs（除非明确重估了目标或需求）；已勾步骤只是上次判断，复核时按当前背包/装备核对（镐可能断、死亡可能掉、食物可能吃），不满足就取消勾选或重新列为待办，needs 里还缺的物资不算已取得；只换做法 {"focus":"a_…","methods":[…]}/{"method_drop":["pm_…"]}；只改预算 {"focus":"a_…","needs":[…]}；做完一项 {"done":[0]}；删没做完的成果要写 switch_reason）｜skill（见【技能】）｜worth_learning（刚才的事值得练成技能时写：哪里出了问题、想学会什么）
 其他可选字段：say（有新发现、改主意、做成事或遇险时说的一句口语）｜agenda（{"add":[{"text":"想做的事或想弄清的问题","kind":"goal|idea|question","horizon":"today|someday"}],"done":["a_…"],"drop":["a_…"],"focus":"a_…"}，规则不要放这里）｜learned（结果出乎意料时的一句窍门，或 {"revise":"k_…","text":"…"} 修订旧窍门）｜hypothesis（experiment 必填）｜experiment_result（上一段是实验时：supported|refuted|unclear）｜diary（值得记住的一句话）｜liked（刚发现喜欢的东西）｜habits（身体习惯与注意偏好，一直有效：{"torch_every":8} 空闲且暗时相隔约 8 格消耗一支火把，不打断动作；{"eat_below":12} 饿到 12 顺手吃，{"pickup":true} 新掉落物触发瞥一眼；pickup:false 关闭单独提醒，掉落事实仍随下次思考提供，不会自动捡；数值习惯用 0 关闭）`;
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
@@ -284,7 +284,7 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 /** 用户消息分块：越往后越要紧（模型对末尾注意力最强） */
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
 【走到哪】按意图选一个移动动作（失败看回执里的具体原因再决定换法）：
-- 普通朝一个方向走一段，不需要精确目的地 → advance {"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}；宿主处理台阶、分数顶面、合理小落差和已确认的跳跃/梯子，局部被挡会在有限范围内绕行，不挖不放
+- 普通朝一个方向走一段，不需要精确目的地 → advance {"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}；宿主处理台阶、分数顶面、合理小落差和已确认的跳跃/梯子，局部被挡会在有限范围内绕行，不挖不放；遇到水或超过 2 格的缺口它不会自己涉水/搭桥，要用 travel_to / explore_toward 带 swim:true / place
 - 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
 - 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
 - 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工；stairs/stairs_up 只用于上下层，同层找矿/开平巷用 mode:"tunnel"，不写 mode 默认 stairs；停在具体格时先同方向补支撑/填方块，别每段换方向；不负责绕路去某处）
@@ -466,8 +466,17 @@ function planRevisionHint(ctx: MindContext): string | null {
   const outcomeText = { done: '做成', stuck: '卡住', unmet: '没做成', abandoned: '放下', interrupted: '打断', replaced: '换掉' } as const;
   const recent = acts.slice(-3).map((r) => `${r.what.slice(0, 18)}→${outcomeText[r.outcome] ?? r.outcome}`);
   const doneSteps = plan.steps.filter((st) => st.done).map((st) => st.text);
+  // 已勾步骤只是上次判断：把当前 needs 还缺多少列出来，提醒按当前背包复核
+  // （工具会断、死亡会掉、食物会吃）。这不是替它改清单，只是把矛盾摆出来。
+  const unmetNeeds = (plan.needs ?? []).flatMap((need) => {
+    const have = ctx.state.inventory.filter((item) => item.name === need.item).reduce((sum, item) => sum + item.count, 0);
+    return have < need.count ? [`${need.item}×${need.count}（现有 ${have}）`] : [];
+  });
+  const needsText = unmetNeeds.length
+    ? `；needs 仍缺 ${unmetNeeds.join('、')}；已勾步骤只在当前仍满足时保留，装备断了/丢了/吃了就重新列为待办`
+    : '';
   // 完整换目标/改清单规则已经在【专注】里；这里只提这次触发的事实和最短入口，避免整段复述。
-  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。换目标按【专注】（阶段回顾 + switch_reason，或操作者明确指令；被拒别重复）。删改未完成项也按【专注】：平时写 switch_reason、距上次删改满 ${PLAN_REVISION_MIN} 分钟（阶段回顾或这一念明确回应操作者指令时可直接改），只观察停滞不构成删项理由，删项那一念不收工；只是换做法写 {"focus":"${plan.agendaId}","methods":[…]} 即可${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）保留，别写成新步骤` : ''}`;
+  return `主目标「${plan.goal.slice(0, 30)}」的清单已观察到 ${Math.round(stall.minutes)} 在线分钟没勾掉一项${stall.historyUnknown ? '（更早的在线时长未知）' : ''}，最近：${recent.join('；')}。换目标按【专注】（阶段回顾 + switch_reason，或操作者明确指令；被拒别重复）。删改未完成项也按【专注】：平时写 switch_reason、距上次删改满 ${PLAN_REVISION_MIN} 分钟（阶段回顾或这一念明确回应操作者指令时可直接改），只观察停滞不构成删项理由，删项那一念不收工；只是换做法写 {"focus":"${plan.agendaId}","methods":[…]} 即可${needsText}${doneSteps.length ? `；已经勾掉的（${doneSteps.slice(0, 3).map((t) => `「${t.slice(0, 14)}」`).join('、')}）${unmetNeeds.length ? '别当成现在就满足' : '保留，别写成新步骤'}` : ''}`;
 }
 
 /** 这一念的意图文本：当前活动、议程、最近三个念头。提醒里的“想下矿/想回地面”判断共用同一口径。 */

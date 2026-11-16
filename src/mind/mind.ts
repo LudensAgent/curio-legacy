@@ -1311,10 +1311,24 @@ export class Mind {
     };
     this.lastProgressGateAt = now;
     const repeated = [...new Set(activities.map((entry) => entry.what))].slice(0, 4).join('；');
+    // 本地循环卡住时，把“还有哪些没试过的长期目标 / 最近记得的物资在哪、多远”一起交给心智；
+    // 只给事实，不替它决定出门或换目标。
+    const openGoals = this.d.self.agenda().filter((item) => item.status === 'open' && item.kind === 'goal').slice(0, 3);
+    const at = state;
+    const nearestSources = at === null ? [] : (plan.needs ?? []).flatMap((need) => {
+      const best = this.d.memory.recallChests(need.item, { dim: at.dim, from: at.pos })
+        .sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity))[0];
+      return best ? [`${need.item}×${best.count} 在 ${Math.round(best.dist ?? 0)} 格外`] : [];
+    });
+    const extra = [
+      openGoals.length ? `；长期目标里还有 open 的：${openGoals.map((item) => `「${item.text.slice(0, 50)}」（${item.attempts ?? 0} 次尝试）`).join('、')}` : '',
+      nearestSources.length ? `；记得的最近来源：${nearestSources.join('、')}` : '',
+    ].join('');
     this.d.bus.publish('progress_gate', 'P2', `最近 ${activities.length} 段活没有物品/清单/新区块/出行最远点/准备度（空槽、食物、耐久、存入）的变化：${repeated}`, {
       agendaId: plan.agendaId, activities: activities.map((entry) => entry.what), signatures: this.progressGate.signatures,
+      ...(openGoals.length ? { openGoals: openGoals.map((item) => item.text) } : {}), ...(nearestSources.length ? { nearestSources } : {}),
     });
-    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）。结合各段回执、已知地点和已见物资，决定继续、调整做法还是换地点。${GOAL_SWITCH_RULE}`, 'deliberate');
+    this.requestThink(`最近 ${activities.length} 段活没有物品、清单、新区块、出行最远点或准备度（空槽、食物、耐久、存入）的变化（反复：${repeated}）${extra}。结合各段回执、已知地点和已见物资，决定继续、调整做法还是换地点。${GOAL_SWITCH_RULE}`, 'deliberate');
   }
 
   /** 无进展闸门交给模型的事实：试过什么、哪些动作签名重复、可用的搜索方式。 */

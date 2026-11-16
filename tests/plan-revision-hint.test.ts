@@ -49,6 +49,35 @@ test('主目标清单观察在线没进展且最近反复卡住：提示改清�
   assert.doesNotMatch(hint, /清单是成果，做法可以随时换/, '完整规则只在【专注】里出现一次');
 });
 
+test('计划已勾步骤但 needs 仍缺：提示按当前背包复核，装备可能断/丢', (t) => {
+  let now = 1_700_000_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
+  t.after(() => memory.close());
+  const perception = new Perception(adapter, memory, bus, new Vision(adapter));
+  const self = new SelfModel(null);
+  adapter.inv.set('iron_ingot', 1);
+  self.setPlan('备齐下界补给', ['做一把铁镐', '凑 3 份熟食'], [], { needs: [{ item: 'iron_ingot', count: 3, why: '补铁镐/修甲' }] });
+  self.checkPlan([0]);
+  const plan = self.plan()!;
+  self.setOnline(true, now);
+  plan.progressAt = now - 20 * 60_000;
+  plan.stalledOnlineMs = 20 * 60_000;
+  plan.stalledObservedSince = now - 20 * 60_000;
+  plan.stalledHistoryUnknown = false;
+  self.data.history.push(
+    rec('门厅找铁', 'stuck', now - 6 * 60_000),
+    rec('门厅找铁', 'stuck', now - 5 * 60_000),
+    rec('门厅找熟食', 'unmet', now - 4 * 60_000),
+  );
+  const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
+    self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
+    audience: null, notes: [], mySkills: [], persona: 'P' });
+  assert.match(user.content, /needs 仍缺 iron_ingot×3（现有 1）/);
+  assert.match(user.content, /已勾步骤只在当前仍满足时保留/);
+  assert.match(user.content, /别当成现在就满足/);
+});
+
 test('没有停滞、或瞥一眼，不提示改清单', (t) => {
   let now = 1_700_000_000_000;
   t.mock.method(Date, 'now', () => now);

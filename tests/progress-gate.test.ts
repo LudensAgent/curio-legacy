@@ -13,7 +13,8 @@ function harness() {
   mind.d = {
     self,
     bus: { publish: (type: string, _severity: string, msg: string) => events.push({ type, msg }) },
-    memory: { visitedChunkCount: 0 },
+    memory: { visitedChunkCount: 0, recallChests: () => [] },
+    adapter: { state: () => ({ dim: 'overworld', pos: { x: 0, y: 64, z: 0 }, inventory: [] }) },
   };
   Object.assign(mind, {
     noProgressRuns: [], progressGate: null, progressGateRejects: 0, lastProgressGateAt: 0,
@@ -44,6 +45,22 @@ test('连续无进展达到阈值：记录闸门并要求认真想，不替它�
   assert.match(thinks[0]?.reason ?? '', /阶段回顾/);
   // 只陈述量没变，不断言“同一条路没用”，也不要求必须换做法
   assert.doesNotMatch(thinks[0]?.reason ?? '', /不会产生新信息|必须换/);
+});
+
+test('本地循环提示 open 的长期目标和最近记得的来源，只给事实', () => {
+  const { mind, self, activity, thinks } = harness();
+  self.addAgenda('往北面干地走 200 格，绕开东南水洼', 'goal', 'today');
+  self.setPlan('补齐下界补给', ['凑 3 份熟食'], [], { needs: [{ item: 'cooked_beef', count: 3, why: '熟食还差3份' }] });
+  activity.agendaId = self.plan()!.agendaId;
+  mind.d.memory.recallChests = () => [{ chest: { pos: { x: 100, y: 64, z: 0 }, dim: 'overworld' }, item: 'cooked_beef', count: 2, observedAt: 0, dist: 100 }];
+  for (let i = 0; i < Mind.PROGRESS_GATE_ACTIVITIES; i++) {
+    mind.noteProgressOutcome(activity, { outcome: 'done', gained: {}, summary: '没找到' }, false);
+  }
+  const reason = thinks[0]?.reason ?? '';
+  assert.match(reason, /长期目标里还有 open 的/);
+  assert.match(reason, /往北面干地走 200 格/);
+  assert.match(reason, /cooked_beef×2 在 100 格外/);
+  assert.doesNotMatch(reason, /必须去|应该去/);
 });
 
 test('闸门拒绝已出现过的动作签名，换成不同做法则放行并清除', () => {

@@ -237,17 +237,17 @@ export function policyRemedy(reason: string, opts: { fireClearable: boolean }): 
   if (geometric.includes('submersion') || reason.includes('destination head cell (submersion)')) {
     return '淹头/淹没：swim:true 只放宽脚格水和几何 water_contact，这条边授权也改不了；swim:true 的游泳段走 swim_path 的水面路线，不走这条边；';
   }
-  if (reason.includes('destination feet cell; wading was not delegated')) return '脚格是水：swim:true 会让这条边变成涉水边；';
+  if (reason.includes('destination feet cell; wading was not delegated')) return '脚格是水：swim:true 会让这条边变成涉水边（用 travel_to / explore_toward / navigate_to 带 swim:true；advance 不接受 swim）；';
   const stillRejected = geometric.filter((kind) => kind !== 'water_contact');
   if (geometric.includes('water_contact')) {
     return stillRejected.length === 0
-      ? '几何碰到水：water_contact 这类边要 swim:true 才允许；'
-      : `几何碰到水：swim:true 只放宽 water_contact，${stillRejected.join('、')} 仍拒绝这条边；`;
+      ? '几何碰到水：water_contact 这类边要 swim:true 才允许（用 travel_to / explore_toward / navigate_to 带 swim:true；advance 不接受 swim）；'
+      : `几何碰到水：swim:true 只放宽 water_contact，${stillRejected.join('、')} 仍拒绝这条边（用 travel_to / explore_toward 带 swim:true；advance 不接受 swim）；`;
   }
   if (isConstructionFixablePolicyRejection(reason)) {
     return reason.includes('horizontal gap jump')
-      ? '缺口超过 2 格：place 能搭桥缩短缺口；'
-      : '脚底中心缺支撑：只有 place 能补（那一格可放置时才有效）；';
+      ? '缺口超过 2 格：place 能搭桥缩短缺口（用 travel_to / explore_toward 带 place:"方块"；advance 不接受 place）；'
+      : '脚底中心缺支撑：只有 place 能补（那一格可放置时才有效；用 travel_to / explore_toward 带 place，advance 不接受 place）；';
   }
   if (isFirePolicyRejection(reason) && reason.includes('gap jump whose miss would land in recorded')) {
     return '落空路径下方是火：宿主顺手灭火只处理身体要占的格，不会改变这条 jump；';
