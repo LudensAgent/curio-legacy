@@ -154,6 +154,25 @@ test('写技能：攒批——几分钟里的几件事一次请模型看完，�
   r.smith.stop();
 });
 
+test('死亡技能提示要求受击类写 hurt_within，并说明拉锯技能不是永久失效', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const systems: string[] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(msgs: ChatMessage[]) {
+    systems.push(msgs[0].content);
+    return { text: JSON.stringify({ none: true, why: '测试不写' }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 24, repeatMs: 0 });
+  smith.report('death', Date.now(), '被僵尸贴身打死', 0);
+  await flush();
+  assert.match(systems[0]!, /受击\/近战\/远程保命类技能不要只写 hp_below/);
+  assert.match(systems[0]!, /hurt_within/);
+  assert.match(systems[0]!, /拉锯后只在和.*冲突时只提醒/);
+  assert.match(systems[0]!, /不要因为看到“只提醒”就当成已覆盖/);
+  smith.stop();
+});
+
 test('死亡 forge 可以用同名改写只用过两次的技能', async () => {
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(null, tmp());
