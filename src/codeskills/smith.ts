@@ -182,6 +182,8 @@ export class SkillSmith {
   /** 收获账本（投入产出、东西出现在哪）：回顾和效率信号时给模型看 */
   ledger: LedgerView | null = null;
   private lastEfficiency = new Map<string, number>();
+  /** 失败当下提示候选试用的限频：同一候选、同一失败码十分钟内只提醒一次。 */
+  private hintedAt = new Map<string, number>();
   private recurring = new Map<string, { at: number[]; examples: string[]; reasons: Map<string, number>; learnedAt: number; learned?: number }>();
   private actions: { at: number; token: string }[] = [];
   /** 一再缺的东西（没吃的、合成缺料、找不到）：回顾时问能不能变成稳定来源 */
@@ -326,6 +328,25 @@ export class SkillSmith {
     this.report('efficiency', ep.at, headline, Math.max(60_000, ep.sec * 1000 + 10_000), undefined, undefined, sig, `efficiency:${key}`);
   }
 
+  /** 失败当下如果已有候选正管这类失败，提醒心智可以试用；是否试、何时试仍由心智决定。 */
+  private hintTrial(skill: string, code: string, at: number) {
+    let dim = '';
+    try { dim = this.state().dim; } catch { /* 状态暂不可用 */ }
+    const candidate = this.engine.list(true).find((b) => b.candidate
+      && coversFailure(b.when, skill, code)
+      && (!b.when?.dim || !dim || b.when.dim.includes(dim))
+      && this.engine.executionError(b.name, true) === null
+      && !this.engine.candidateRetirement(b.name));
+    if (!candidate) return;
+    const key = `${candidate.name}|${skill}|${code}`;
+    if (at - (this.hintedAt.get(key) ?? 0) < 10 * 60_000) return;
+    this.hintedAt.set(key, at);
+    while (this.hintedAt.size > 200) this.hintedAt.delete(this.hintedAt.keys().next().value!);
+    const st = this.engine.currentStats(candidate.name, true);
+    const args = candidate.needs ? `,"args":{${Object.keys(candidate.needs).map((k) => `"${k}":…`).join(',')}}` : '';
+    this.bus.publish('skill_hint', 'P3', `动作 ${skill} 因 ${code} 失败；候选「${candidate.name}」v${this.engine.versionOf(candidate)} 正管这类失败（试用成 ${st.ok}/败 ${st.fail}）：use_skill {"name":"${candidate.name}","trial":true${args}}；是否试、何时试由你决定`, { skill: candidate.name, failureSkill: skill, code, trial: true });
+  }
+
   /**
    * 同一个动作、同一种失败码又来了：半小时内攒到几次（而且上次为它学过之后又过了一阵）就当成一件值得学的事，
    * 把这些失败的原文和归好类的原因一起交给模型——它能看出是“踩不住”还是“碰头”，该垫脚还是该挖。
@@ -334,6 +355,7 @@ export class SkillSmith {
     if (skill === 'use_skill' || /^(CANCELLED|ABORTED|BAD_ARGS)$/.test(code)) return; // 技能自己的失败由改进器管；写错参数不是身体的问题
     // build 报“尚未验收”是房子的验收结果（缺几块、要不要收工），不是身体的毛病：不为它造身体技能
     if (skill === 'build' && /尚未验收/.test(msg)) return;
+    this.hintTrial(skill, code, at);
     const key = `${skill}:${code}`;
     const r = this.recurring.get(key) ?? { at: [], examples: [], reasons: new Map<string, number>(), learnedAt: 0 };
     this.recurring.set(key, r);

@@ -30,7 +30,7 @@ const FIRED_GRACE_MS = 10 * 60_000;
 /** 一轮整理最多给文字记录带几条资料摘录，避免提示词随记录数膨胀。 */
 const NOTE_KNOWLEDGE_TOTAL = 6;
 
-type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; age: number; idle: number; disabled: number;
+type Lifetime = { world: string; name: string; candidate: boolean; version: number; clock: number; born: number; age: number; idle: number; disabled: number;
   activity: string; restoredAt: number; disabledAt: number; retired: boolean };
 
 /** 名字和说明里的词：名字按 - 拆，说明按相邻两个字（中文没有空格） */
@@ -223,7 +223,7 @@ export class SkillCurator {
       const delta = !fresh && (!b.when?.dim || b.when.dim.includes(dim)) ? Math.max(0, clock - prev.clock) : 0;
       const changed = prev?.version !== version;
       const used = prev && (!changed && prev.activity !== activity || changed && (per?.ok ?? 0) + (per?.fail ?? 0) > 0);
-      this.lifetimes.set(key, { world, name: b.name, candidate, version, clock, activity, retired, restoredAt, disabledAt,
+      this.lifetimes.set(key, { world, name: b.name, candidate, version, clock, born: fresh || changed ? clock : prev.born ?? clock, activity, retired, restoredAt, disabledAt,
         age: fresh || changed ? 0 : prev.age + delta,
         idle: fresh || used || changed && !candidate ? 0 : prev.idle + delta,
         disabled: fresh || !disabledAt || prev.disabledAt !== disabledAt ? 0 : prev.disabled + delta });
@@ -339,6 +339,18 @@ export class SkillCurator {
     return out;
   }
 
+  /** 还没试过一次的新候选先不按容量收：给它一个有效游戏日的试用窗口，过后照常参与容量淘汰。 */
+  private protectedNewCandidate(b: Behavior) {
+    if (!b.candidate || this.engine.candidateRetirement(b.name)) return false;
+    const cur = this.engine.currentStats(b.name, true);
+    if (cur.ok + cur.fail > 0) return false;
+    // 已经触发过（包括验证没确认、跳过、取消）就不再算“还没试过”，照常参与容量淘汰。
+    const usage = this.engine.statsOf(b.name)?.usageByVersion?.[this.engine.versionOf(b)];
+    if ((usage?.uses ?? 0) > 0 || (usage?.skipped ?? 0) > 0 || (usage?.cancelled ?? 0) > 0) return false;
+    const life = this.lifetime(b);
+    return !!life && life.clock - (life.born ?? life.clock) < DAY_TICKS;
+  }
+
   /** 容量整理给新版本半个有效游戏日；明确高失败证据不必等时钟。 */
   private settled(b: Behavior, dim: string) {
     if (b.when?.dim && dim && !b.when.dim.includes(dim)) return false;
@@ -372,7 +384,7 @@ export class SkillCurator {
       const value = (b: Behavior) => { const st = this.engine.currentStats(b.name, !!b.candidate); return st.ok * 3 - st.fail; };
       // 从没用过、也没有负面证据的主动维护技能放到最后：容量仍会按上限收，但不让它只因为 value=0 先于有失败证据的技能被挤掉。
       const unusedProactive = (b: Behavior) => this.protectedProactive(b) && this.engine.currentStats(b.name, !!b.candidate).ok === 0;
-      const victims = left.filter((b) => this.settled(b, dim))
+      const victims = left.filter((b) => !this.protectedNewCandidate(b) && this.settled(b, dim))
         .sort((a, b) => (unusedProactive(a) ? 1 : 0) - (unusedProactive(b) ? 1 : 0) || value(a) - value(b) || (this.lifetime(b)?.idle ?? 0) - (this.lifetime(a)?.idle ?? 0))
         .slice(0, over);
       for (const b of victims) {

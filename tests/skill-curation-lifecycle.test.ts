@@ -161,6 +161,26 @@ test('强制整理绕过自动门槛，保留忙碌和候选证据保护并报�
   assert.match(broken.history.at(-1)!.result, /整理出错：模型暂时不可用/);
 });
 
+test('新候选在试用窗口内不先被容量淘汰，窗口过后照常参与', async (t) => {
+  const w = setup(t);
+  for (const name of ['stable-a', 'stable-b']) {
+    assert.ok(w.engine.write({ ...definition, name }).ok);
+    for (let i = 0; i < 3; i++) w.engine.recordInvocation(name, { status: 'succeeded', summary: '实际完成指定合成', data: { version: 1, verified: true } });
+  }
+  assert.ok(w.engine.write({ ...definition, name: 'fresh-candidate' }, { by: 'mind' }).ok);
+  const curator = new SkillCurator(w.planner, w.engine, w.book, w.bus, { maxActive: 2 });
+  const advance = gameTime(w.adapter, curator);
+  advance(day / 2 + 100);
+  const first = curator.retireLowValue(Date.now() + 2 * hour);
+  assert.equal(first.length, 1, '容量仍按上限执行，但不收未试用的新候选');
+  assert.notEqual(first[0], 'fresh-candidate');
+  assert.equal(w.engine.candidateRetirement('fresh-candidate'), undefined);
+  advance(day);
+  assert.ok(w.engine.write({ ...definition, name: 'stable-c' }).ok);
+  for (let i = 0; i < 3; i++) w.engine.recordInvocation('stable-c', { status: 'succeeded', summary: '实际完成指定合成', data: { version: 1, verified: true } });
+  assert.deepEqual(curator.retireLowValue(Date.now() + 2 * hour), ['fresh-candidate'], '试用窗口过后仍按容量规则处理');
+});
+
 test('同名稳定加候选不重复占容量，模型不能省略版本误收稳定版', async (t) => {
   const w = setup(t);
   assert.ok(w.engine.write(definition).ok);
