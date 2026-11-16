@@ -3,7 +3,7 @@ import { effortFacts } from '../brain/efficiency.ts';
 import { budgetFacts, consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
 import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
-import { dirName, durationText, realSecondsToTicks, sunText, type Percept } from '../perception/perception.ts';
+import { dirName, durationText, realSecondsToTicks, SPAWNER_LABEL, sunText, type Percept } from '../perception/perception.ts';
 import { isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS } from '../perception/surroundings.ts';
 import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, UNEXPLORED_LABEL, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
@@ -40,6 +40,8 @@ import { structureConflictText, structureCoordinateConflicts, type CoordinateSou
 import { EXCAVATION_CHECKPOINT_LABEL, EXCAVATION_ENTRY_LABEL } from '../skills/excavation.ts';
 /** 旧开挖入口/进度点：只是历史记录，不代表现在仍连通。 */
 const isTunnelLabel = (label: string) => label === EXCAVATION_ENTRY_LABEL || label.startsWith(EXCAVATION_CHECKPOINT_LABEL);
+/** 刷怪笼是结构方块，单独列；不要混进临时 danger，也不在 places 里重复。 */
+const isSpawnerLabel = (label: string) => label === SPAWNER_LABEL;
 /** 查过的资料：出处 + 一句摘录 + 读取时间；只作外部参考，不是现场事实。 */
 const knowledgeFactLine = (fact: KnowledgeFact) => {
   const minutes = Math.max(0, Math.round((Date.now() - fact.at) / 60_000));
@@ -1096,7 +1098,7 @@ function worldKnowledge(ctx: MindContext) {
     ...ctx.self.agenda().map((item) => ({ source: `agenda ${item.id}`, text: item.text })),
   ];
   const structureConflicts = structureCoordinateConflicts(structureRows.map(({ l }) => l), structureSources);
-  const places = marks.filter((l) => !isStructureLabel(l.label) && !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd'
+  const places = marks.filter((l) => !isStructureLabel(l.label) && !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !isSpawnerLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd'
     && !ownPos.has(posKey(l.pos)))
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
     .map((l) => ({ l, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) })).sort((a, b) => a.d - b.d)
@@ -1189,6 +1191,12 @@ function worldKnowledge(ctx: MindContext) {
   const ores = oreSpotsByKind(oreSpotsNear(m.resourceLandmarksAround(p.self.dim, here, 256), { worldId: s.worldId, dim: p.self.dim, pos: here }), ctx.tier === 'glance' ? 1 : 2, ctx.tier === 'glance' ? 5 : 8);
   // 记得的生物出没点（不主动攻击的：羊、牛、狼、村民……）：动物会走动，只是大概那一带，带着多久前看见
   const herds = creatureSpotsByKind(creatureSpotsNear(m.landmarks(), { worldId: s.worldId, dim: p.self.dim, pos: here }), 1, ctx.tier === 'glance' ? 5 : 10);
+  // 记得的刷怪笼：位置是看见方块时的记录；刷出什么怪、是否还在要现场确认
+  const spawners = m.landmarks().filter((l) => l.kind === 'discovery' && l.dim === p.self.dim && (l.worldId ?? 'default') === s.worldId && isSpawnerLabel(l.label))
+    .map((l) => ({ l, d: Math.round(Math.hypot(l.pos.x - here.x, l.pos.z - here.z)) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, ctx.tier === 'glance' ? 2 : 4)
+    .map(({ l }) => `刷怪笼[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${bearing(l.pos)}${facilityAge(l.ts)}`);
   return {
     home: `${home ? `${home.label} 在${home.dir}边 ${home.dist} 格 (${Math.round(home.pos.x)},${Math.round(home.pos.y)},${Math.round(home.pos.z)})` : '还没有家'}${baseAlias}`,
     ...(bed ? { my_bed: `(${bed.pos.x},${bed.pos.y},${bed.pos.z}) ${bed.dist}格（sleep${facilityAge(bed.observedAt)}）；要确认它还在不在，直接 inspect_block 这个坐标` } : {}),
@@ -1198,6 +1206,7 @@ function worldKnowledge(ctx: MindContext) {
     ...(remember.length ? { resources_seen_before: remember } : {}),
     ...(Object.keys(ores).length ? { ore_spots: ores } : {}),
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
+    ...(spawners.length ? { spawner_spots: spawners, spawner_spots_note: '刷怪笼位置是看见方块时的记录；刷出什么怪、是否还在要现场确认。' } : {}),
     ...(structures.length ? {
       known_structures: structures,
       known_structures_note: '结构条目是亲眼发现/达成时记下的锚点（目击位置，不是结构中心或确切落脚点），带维度；是否仍在、现在能否到达要现场核实。travel_to 可直接把 [id] 当作 to，range 是你接受的接近半径（不是把锚点当脚点）。不同维度的坐标只作记忆，不能在当前维度直接走。计划或议程里的坐标若与锚点不一致，会列在 structure_coordinate_conflicts；以哪一处为目的由你核对，不要把死亡地点当成结构位置。',

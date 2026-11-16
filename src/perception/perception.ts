@@ -27,8 +27,10 @@ export const DIRS: Record<string, [number, number]> = {
 
 /** 一次感知更新里最多记多少处地标（资源/危险，按同类同片去重后）。 */
 const LANDMARK_NOTES_PER_UPDATE = 12;
-const DANGER = new Set(['lava', 'spawner']);
-const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', 'spawner', 'furnace']);
+/** 接触会伤人的方块；刷怪笼是结构提示，不是接触危险，走 STRUCTURE_HINT。 */
+const DANGER = new Set(['lava']);
+export const SPAWNER_LABEL = 'spawner';
+const STRUCTURE_HINT = new Set(['chest', 'bell', 'hay_block', SPAWNER_LABEL, 'furnace']);
 /** 功能方块地标的标签（'工作台' 或 '我的工作台'）：拆掉/消失后也要从记忆里清掉 */
 const INTERACTIVE_LABELS = new Set(Object.values(INTERACTIVE_BLOCKS));
 const stationLabel = (label: string): string | undefined => {
@@ -544,7 +546,7 @@ export class Perception {
 
   /**
    * 记一次 danger 地标；同一会话同一 16³ 区段只写一次。
-   * 否则 live 地标上限淘汰本地岩浆/刷怪笼后，下一帧会重新写一条，gone 历史就被反复灌满。
+   * 否则 live 地标上限淘汰本地岩浆后，下一帧会重新写一条，gone 历史就被反复灌满。
    */
   private noteDanger(dim: string, name: string, pos: Vec3Like) {
     const key = `${dim}|${name}|${Math.floor(pos.x / 16)},${Math.floor(pos.y / 16)},${Math.floor(pos.z / 16)}`;
