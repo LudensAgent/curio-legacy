@@ -213,10 +213,12 @@ test('place_support 脚下方两格没有同层参照面时如实失败并给替
   assert.deepEqual(edgeAttempt.position, { x: 1.1, y: 64, z: 0.5 }, '尝试站位用适配器报告的边缘位置');
   assert.deepEqual(edgeAttempt.endPosition, { x: 0.5, y: 64, z: 0.5 }, '调用后已退回格心，单独记录');
   assert.match(r.summary, /EDGE_NO_REFERENCE/);
+  assert.match(r.summary, /前方同层 \(1,63,0\).*place_support/, '给出同层搭桥替代：不要直接换方向');
   assert.equal(r.data?.consumed, 0);
   const remediation = r.data?.remediation as { alternatives: string[] };
   assert.ok(remediation.alternatives.some((a) => a.includes('descend_to')));
   assert.ok(remediation.alternatives.some((a) => a.includes('place_cell')));
+  assert.ok(remediation.alternatives.some((a) => a.includes('前方同层')), '结构化替代也带同层搭桥');
 });
 
 test('place_support 三格下不走边缘潜行，不扩成自动施工', async (t) => {

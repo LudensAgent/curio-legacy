@@ -1231,13 +1231,23 @@ const placeSupportSkill: Skill<SupportArgs> = {
       const referenceGap = attempts.some((a) => a.problem !== undefined && REFERENCE_PROBLEMS.has(a.problem.kind));
       // 材料在预检后不可用：按材料缺口报告，不混成参数/站位问题。
       const missingMaterial = attempts.some((a) => a.problem?.kind === 'MISSING_MATERIAL');
+      // 脚下两格、同层没有参照时，玩家通常不是换方向，而是在自己这一层往前搭一格：
+      // 目标格是前方同层（脚下一格），用当前脚下方块的侧面作参照，再走上去。
+      // 用调用开始时的站位算相对格：失败回执里的站姿尝试可能已经移动过身体。
+      const levelBridgeNote = referenceGap && drop === 2 && Math.abs(dx) + Math.abs(dz) === 1
+        ? `；目标在脚下两格且同层没有参照：可以先在前方同层 (${pos.x},${feet.y - 1},${pos.z})（相对 [${dx},-1,${dz}]）用 place_support 放一格，再用 move_step 走过去——这一格用当前脚下方块侧面作参照，不需要下方参照`
+        : '';
       return fail(missingMaterial ? 'MISSING_MATERIALS' : 'BAD_ARGS',
-        `${atText} 没能形成可站立支撑：${attemptText}${firstDetail ? `；${brief(firstDetail)}` : ''}${geometryNote}`, {
+        `${atText} 没能形成可站立支撑：${attemptText}${firstDetail ? `；${brief(firstDetail)}` : ''}${geometryNote}${levelBridgeNote}`, {
         attempts, materials: [...names], ...consumptionFacts(false), targetCell: { ...pos },
         ...(referenceGap ? { failureCause: 'reference' as const } : {}),
         remediation: {
           stance: '换到能看见目标格相邻实心面的站位再 place_support（例如目标格另一侧）',
-          alternatives: ['descend_to 降到下一级后从下方补支撑', 'place_cell 在已有参照面的相邻格放置'],
+          alternatives: [
+            'descend_to 降到下一级后从下方补支撑',
+            'place_cell 在已有参照面的相邻格放置',
+            ...(levelBridgeNote ? [`在前方同层 (${pos.x},${feet.y - 1},${pos.z}) 用 place_support 放一格，再 move_step 走过去`] : []),
+          ],
           ...(firstDetail ? { reference: firstDetail } : {}),
         },
         ...movementFacts(), ...problemOf(missingMaterial ? 'MISSING_MATERIAL' : referenceGap ? 'NO_REFERENCE' : 'PLACEMENT_FAILED', 'precondition'), ...effectUnconfirmed('support_formed'), ...after(ctx, args.facing, pos),
