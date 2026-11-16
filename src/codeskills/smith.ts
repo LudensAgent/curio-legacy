@@ -4,8 +4,9 @@ import type { AgentState } from '../adapter/types.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
 import { normalizeSkillName, type SkillBook } from '../knowledge/skillbook.ts';
 import { instinctNote, type BehaviorEngine } from '../mind/behaviors.ts';
+import type { Predicate } from '../mind/predicate.ts';
 import type { ConsumeSignal, LedgerSignal, LedgerView } from '../mind/ledger.ts';
-import type { ChatMessage } from '../planner/llm.ts';
+import type { ChatMessage, Completion } from '../planner/llm.ts';
 import { extractJson } from '../planner/plan.ts';
 import type { Planner } from '../planner/planner.ts';
 import { API_DOC } from './bridge.ts';
@@ -34,6 +35,23 @@ import { WHEN_SYNTAX } from './when-syntax.ts';
  */
 export type ForgeKind = 'death' | 'pain' | 'noted' | 'review' | 'efficiency' | 'recurring' | 'repeated' | 'goal' | 'undone';
 const KIND_LABEL: Record<ForgeKind, string> = { death: '死亡', pain: '一段吃了大亏的经历', noted: '自己觉得值得学的事', review: '这段时间的回顾', efficiency: '一次收获效率明显变化', recurring: '反复出现的同一种失败', repeated: '一再重复的同一串动作', goal: '一个迟迟推进不了的目标', undone: '做完的事又被自己打破' };
+/** 给模型看的材料量：超预算时逐级缩小，不原样重试同一份。 */
+type ForgeDetail = 'full' | 'compact' | 'minimal';
+const DETAIL: Record<ForgeDetail, { lines: number; contracts: number; lineChars: number }> = {
+  full: { lines: 90, contracts: 3, lineChars: 400 },
+  compact: { lines: 30, contracts: 2, lineChars: 220 },
+  minimal: { lines: 12, contracts: 1, lineChars: 140 },
+};
+/** 死亡材料只留最近这一段：终局事件之后的 90 条经过很少含决定性原因，却最占预算。 */
+const DEATH_LINES = 30;
+const STOP_WORDS = new Set(['task', 'start', 'end', 'skill', 'event', 'status', 'failed', 'failure', 'action', 'true', 'false', 'null', 'with', 'from', 'that', 'this', 'then', 'when', 'info', 'summary', 'data', 'msg', 'death', 'died',
+  '死亡', '失败', '当时', '一个', '这个', '那个', '已经', '没有', '可以', '不能', '身体', '动作', '方块', '我们', '他们', '什么', '因为', '所以', '然后', '正在', '在做', '附近', '看到', '听见']);
+const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max)}…` : text;
+/** 技能条件里的 after_failure 可能在 all 里嵌套，取出来用于“这次失败归谁管”的匹配。 */
+const failureSkills = (when: Predicate | undefined): string[] => [
+  ...(when?.after_failure?.skill ?? []),
+  ...(when?.all?.flatMap(failureSkills) ?? []),
+];
 const ORDER: ForgeKind[] = ['death', 'noted', 'goal', 'recurring', 'undone', 'repeated', 'pain', 'efficiency', 'review'];
 /** 重复的动作串：最短几步、重复几遍算“一套做法”，在多长时间里看，学过之后多久再看同一串 */
 export const REPEATED = { minLen: 2, maxLen: 6, times: 3, windowMs: 10 * 60_000, againMs: 20 * 60_000 };
@@ -89,6 +107,8 @@ interface Incident {
   queuedAt?: number;
   /** 未处理完的请求保留在队列里，延后重试，不冒充已学过。 */
   retryAt?: number;
+  /** 已经延期重试过几次：不无限重试同一件做不成的事。 */
+  tries?: number;
 }
 
 /** 一串动作不管从哪一步数起都是同一串（挖→垫→挖→垫 和 垫→挖→垫→挖）：取字典序最小的那个转法 */
@@ -170,6 +190,8 @@ export class SkillSmith {
   /** 最近一小时请模型写技能的时刻；同一件事（同类、去掉数字后同一句话）上次请模型的时刻 */
   private forgedAt: number[] = [];
   private handledAt = new Map<string, number>();
+  /** 重试上限到了就先放下；同一签名两小时内不再自动重来，避免死亡事件无限重启。 */
+  private abandoned = new Map<string, number>();
   private retryTimer: NodeJS.Timeout | null = null;
   private batchTimer: NodeJS.Timeout | null = null;
   /** 哪件事归哪份技能管（模型说的）：同一件事再来，直接交给它，不再请模型 */
@@ -435,6 +457,9 @@ export class SkillSmith {
     }
   }
 
+  /** 死亡是最高优先级的负证据，不占普通学习的每小时额度。 */
+  private quotaExempt(kind: ForgeKind) { return kind === 'death'; }
+
   private next() {
     if (this.busy || !this.planner.autonomous || !this.queue.length) return;
     const now = Date.now();
@@ -464,7 +489,7 @@ export class SkillSmith {
       if ((c.retryAt ?? 0) > now) break;
       if (batch.length && c.kind === 'death') break;
       // 一小时的额度用完了：死亡照样看，其余的等额度空出来（排队的事太多时旧的会被挤掉）
-      if (!batch.length && c.kind !== 'death' && this.forgedAt.length >= this.limits.maxPerHour) {
+      if (!batch.length && !this.quotaExempt(c.kind) && this.forgedAt.length >= this.limits.maxPerHour) {
         if (!this.retryTimer) {
           const wait = Math.max(5_000, this.forgedAt[0] + 3_600_000 - now);
           this.bus.publish('skill_forge_capped', 'P3', `这一小时已经请模型写了 ${this.forgedAt.length} 次技能，先攒着，${Math.ceil(wait / 60_000)} 分钟后再看`, { queued: this.queue.length });
@@ -483,11 +508,14 @@ export class SkillSmith {
       // 排队时上一批刚判定它归某份技能管
       const owner = this.ownerOf(c.key, now);
       if (owner) { this.handOver(c.kind, c.headline, owner); continue; }
+      if (now - (this.abandoned.get(sig) ?? -Infinity) < 2 * 3600_000) {
+        this.bus.publish('skill_forge_skipped', 'P3', `「${c.headline.slice(0, 60)}」最近重试超限，两小时内不再自动重学；有新证据可由心智显式处理`, { kind: c.kind, headline: c.headline, abandoned: true });
+        continue;
+      }
       batch.push(c);
       if (c.kind === 'death') break;
     }
     if (!batch.length) return;
-    this.forgedAt.push(now);
     const first = batch[0];
     this.busy = { kind: first.kind, startedAt: Date.now() };
     const what = [...new Set(batch.map((i) => KIND_LABEL[i.kind]))].join('、');
@@ -572,14 +600,19 @@ ${API_DOC}`;
   }
 
   /** 一件事给模型看的材料 */
-  private incidentFacts(incident: Incident, maxLines = 90): Record<string, unknown> {
+  private incidentFacts(incident: Incident, detail: ForgeDetail = 'full', maxLines?: number): Record<string, unknown> {
     const review = incident.kind === 'review';
     const sig = incident.signal;
+    const lines = maxLines ?? (incident.kind === 'death' ? Math.min(DEATH_LINES, DETAIL[detail].lines) : DETAIL[detail].lines);
+    const lineChars = DETAIL[detail].lineChars;
     return {
       what_happened: `${KIND_LABEL[incident.kind]}：${incident.headline}`,
       ...(incident.note ? { its_own_note: incident.note } : {}),
-      [review ? 'recent_activities' : 'episode']: incident.lines.slice(-maxLines),
-      ...(incident.events?.length ? { observed_events: incident.events.slice(-maxLines) } : {}),
+      [review ? 'recent_activities' : 'episode']: incident.lines.slice(-lines).map((line) => clip(line, lineChars)),
+      ...(incident.events?.length ? { observed_events: incident.events.slice(-lines).map((event) => {
+        const data = event.data ? clip(JSON.stringify(event.data), lineChars) : undefined;
+        return { ts: event.ts, type: event.type, msg: clip(event.msg, lineChars), ...(data ? { data } : {}) };
+      }) } : {}),
       ...(incident.kind === 'pain' ? { usual_pain: this.pain.baseline() } : {}),
       ...(this.ledger && review ? { harvest_ledger: this.safeLedger(() => this.ledger!.digest(12)) } : {}),
       ...(review && this.chronicShortages().length ? { chronic_shortages: this.chronicShortages() } : {}),
@@ -587,13 +620,50 @@ ${API_DOC}`;
     };
   }
 
+  /** 只把和这次事件沾边的完整契约给模型；整本书的名字仍由 existing_skills 提供，避免一次带几百 KB 代码。 */
+  private relevantContracts(incidents: Incident[], all: ReturnType<BehaviorEngine['list']>, limit: number) {
+    const text = incidents.flatMap((i) => [i.headline, i.note ?? '', ...i.lines.slice(-24)]).join('\n').toLowerCase();
+    const ascii = text.match(/[a-z][a-z0-9_]{2,}/g) ?? [];
+    const cjk = (text.match(/[一-鿿]{2,}/g) ?? []).flatMap((word) => Array.from({ length: word.length - 1 }, (_, i) => word.slice(i, i + 2)));
+    const tokens = new Set([...ascii, ...cjk].filter((token) => !STOP_WORDS.has(token)));
+    const scored = all.map((b) => {
+      const haystack = `${b.name} ${b.description} ${b.body ?? ''} ${JSON.stringify(b.when ?? {})}`.toLowerCase();
+      const after = failureSkills(b.when);
+      const score = (text.includes(b.name.toLowerCase()) ? 20 : 0)
+        + (after.some((skill) => text.includes(skill.toLowerCase())) ? 8 : 0)
+        + [...tokens].filter((token) => haystack.includes(token)).length;
+      return { b, score };
+    }).filter((entry) => entry.score > 0)
+      .sort((a, b) => b.score - a.score);
+    // 中文/新事件可能一个词都对不上：至少带上最近用过的自己写的技能，不让模型完全看不到契约。
+    if (!scored.length) {
+      const usable = all.filter((b) => !this.engine.inactive(b.name));
+      const byRecent = (a: (typeof usable)[number], b: (typeof usable)[number]) => (this.engine.statsOf(b.name)?.lastAt ?? 0) - (this.engine.statsOf(a.name)?.lastAt ?? 0);
+      return [...usable.filter((b) => b.source === 'self').sort(byRecent), ...usable.filter((b) => b.source !== 'self').sort(byRecent)].slice(0, limit);
+    }
+    // 同名稳定版和候选一起给：模型要同名改写时，两边的契约都要看到。
+    const picked: ReturnType<BehaviorEngine['list']> = [];
+    for (const name of new Set(scored.map((entry) => entry.b.name))) {
+      const versions = all.filter((b) => b.name === name);
+      if (picked.length + versions.length > limit) {
+        const candidate = versions.find((b) => b.candidate);
+        if (candidate && picked.length < limit) picked.push(candidate);
+        break;
+      }
+      picked.push(...versions);
+      if (picked.length >= limit) break;
+    }
+    return picked;
+  }
+
   /** 现有技能三张表：给模型判断“这事是不是已经有人管” */
-  private skillTables(incidents: Incident[]) {
+  private skillTables(incidents: Incident[], detail: ForgeDetail = 'full') {
     const about = incidents.flatMap((i) => [i.headline, i.note ?? '', ...i.lines]).join('\n');
     const focus = incidents.map((i) => `${i.headline}\n${i.note ?? ''}`).join('\n');
     const overview = this.engine.forgeOverview(about, focus);
-    const contracts = [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)]
-      .filter((b) => overview.some((line) => line.startsWith(`${b.name}［`)));
+    const all = [...this.engine.list().filter((b) => !b.candidate), ...this.engine.list(true)];
+    const contracts = this.relevantContracts(incidents, all, DETAIL[detail].contracts)
+      .filter((b) => b.candidate || overview.some((line) => line.startsWith(`${b.name}［`)));
     return {
       existing_skills: overview,
       existing_skill_contracts: contracts.map((b) => ({ name: b.name, description: b.description, body: b.body, notes: b.notes,
@@ -605,30 +675,32 @@ ${API_DOC}`;
     };
   }
 
-  messages(incident: Incident): ChatMessage[] {
+  messages(incident: Incident, detail: ForgeDetail = 'full'): ChatMessage[] {
     const review = incident.kind === 'review';
     const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${WHEN_SYNTAX}${this.rules()}
 
 只输出一个 JSON 对象：{"skill":{…}}${review ? ' 或 {"skills":[{…},{…}]}' : ''} 或 {"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}。
 
 ${this.taskFor(incident)}`;
-    const { what_happened, its_own_note, ...rest } = this.incidentFacts(incident) as Record<string, unknown>;
-    const user = { what_happened, ...(its_own_note ? { its_own_note } : {}), ...rest, now: incident.context, ...this.skillTables([incident]) };
+    const { what_happened, its_own_note, ...rest } = this.incidentFacts(incident, detail) as Record<string, unknown>;
+    const user = { what_happened, ...(its_own_note ? { its_own_note } : {}), ...rest, now: incident.context, ...this.skillTables([incident], detail) };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
   }
 
   /** 几件事攒成一批：一次请求看完，最多写 2 份技能 */
-  batchMessages(incidents: Incident[]): ChatMessage[] {
+  batchMessages(incidents: Incident[], detail: ForgeDetail = 'full', skip: ReadonlySet<number> = new Set()): ChatMessage[] {
+    const pending = incidents.flatMap((incident, idx) => skip.has(idx) ? [] : [{ event: idx + 1, how_to_look: this.taskFor(incident), ...this.incidentFacts(incident, detail, Math.min(40, DETAIL[detail].lines)) }]);
+    const context = incidents.filter((_incident, idx) => !skip.has(idx));
     const system = `你是 Minecraft 机器人 Muses 的“身体技能工程师”。${WHEN_SYNTAX}${this.rules()}
 
 只输出一个 JSON 对象：{"results":[{"event":1,"skill":{…}},{"event":2,"none":true,"why":"…","covered_by":"管这件事的技能名（不是因为已有技能管着才不写就省略）","limitation":"身体做不到时才写"}]}，每件事都要有一条。
 
-下面是这几分钟里攒下的 ${incidents.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
+下面是这几分钟里攒下的 ${pending.length} 件事（events），每件带着编号（event）和该怎么看（how_to_look）。
 逐件判断：值得写技能就写，不值得就说为什么；几件说的是同一回事可以合写一份。整批最多写 2 份技能。`;
     const user = {
-      events: incidents.map((i, k) => ({ event: k + 1, how_to_look: this.taskFor(i), ...this.incidentFacts(i, 40) })),
-      now: incidents.at(-1)!.context,
-      ...this.skillTables(incidents),
+      events: pending,
+      now: (context.length ? context : incidents).at(-1)!.context,
+      ...this.skillTables(context.length ? context : incidents, detail),
     };
     return [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(user) }];
   }
@@ -638,16 +710,37 @@ ${this.taskFor(incident)}`;
   private async forge(batch: Incident[]): Promise<string> {
     const expectedTokens = new Map((this.book?.list() ?? this.engine.list()).map((b) => [b.name, this.engine.editToken(b.name)] as const));
     const single = batch.length === 1;
-    const messages = single ? this.messages(batch[0]) : this.batchMessages(batch);
+    let detail: ForgeDetail = 'full';
+    let messages = single ? this.messages(batch[0], detail) : this.batchMessages(batch, detail);
     const label = single ? KIND_LABEL[batch[0].kind] : `一批 ${batch.length} 件`;
     const signal = AbortSignal.timeout(10 * 60_000);
     const settled = new Set<number>();
-    const deferred = new Map<number, 'budget' | 'missing_result' | 'generation_failed'>();
+    const deferred = new Map<number, 'budget' | 'missing_result' | 'generation_failed' | 'transient'>();
     const out: string[] = [];
+    const dropped: string[] = [];
     let written = 0;
+    let quotaCharged = false;
+    let failure: Error | null = null;
+    let result = '';
     try {
       for (let attempt = 0; attempt < 3; attempt++) {
-        const c = await this.planner.complete(messages, { label: `skill:总结（${label}）`, tier: 'full', signal, attempt, maxTokensScale: 2 });
+        let c: Completion;
+        try {
+          c = await this.planner.complete(messages, { label: `skill:总结（${label}）`, tier: 'full', signal, attempt, maxTokensScale: 2 });
+        } catch (e) {
+          const why = String((e as Error)?.message ?? e);
+          const budget = /^PROMPT_BUDGET_EXCEEDED/.test(why);
+          // 超上下文不是“模型写坏了”：缩小材料再发一次，不把同一份 130k+ 的原样重试。
+          if (budget && detail !== 'minimal') {
+            detail = detail === 'full' ? 'compact' : 'minimal';
+            messages = single ? this.messages(batch[0], detail) : this.batchMessages(batch, detail, settled);
+            attempt--;
+            continue;
+          }
+          // 网络/服务端/超时不是这件事本身失败：保留轮候，不消耗三次生成重试。
+          if (!budget) batch.forEach((_inc, idx) => { if (!settled.has(idx)) deferred.set(idx, 'transient'); });
+          throw e;
+        }
         const incomplete = c.finishReason === 'length' ? '输出被长度上限截断' : !c.text.trim() ? '模型没有返回正文' : null;
         if (incomplete) {
           this.planner.noteInvalid('总结技能', incomplete);
@@ -667,6 +760,11 @@ ${this.taskFor(incident)}`;
         // 边界处校验结果对象；漏回、空结果与明确的 none 是不同的结论。
         const results = (Array.isArray(raw.results) ? raw.results : [{ ...raw, event: 1 }])
           .filter((r): r is Record<string, unknown> => !!r && typeof r === 'object' && !Array.isArray(r));
+        // 只有拿到模型的明确结论（写出/不写/明确缺口）才占额度；超预算、空回复、非法 JSON 和死亡都不占。
+        if (results.length && !quotaCharged) {
+          quotaCharged = true;
+          if (!this.quotaExempt(batch[0].kind)) this.forgedAt.push(Date.now());
+        }
         const answered = new Set<number>();
         const errors: string[] = [];
         for (const r of results) {
@@ -733,20 +831,37 @@ ${this.taskFor(incident)}`;
         messages.push({ role: 'assistant', content: c.text.slice(0, 6000) },
           { role: 'user', content: `仍待处理：${errors.join('；')}。已完成事件不要重复，只补这些事件的完整结论（本批还可写 ${2 - written} 份技能），${single ? '只输出 JSON' : '保留原 event 编号和 results 格式'}。` });
       }
-      if (!out.length) throw new Error('三次都没写出能存下的技能或明确结论，未处理事件保留待重试');
-      if (settled.size < batch.length) out.push(`${batch.length - settled.size} 件未处理，已延期重试`);
-      return out.join('；');
+      if (!out.length) failure = new Error('三次都没写出能存下的技能或明确结论，未处理事件保留待重试');
+      else {
+        if (settled.size < batch.length) out.push(`${batch.length - settled.size} 件未处理，已延期重试`);
+        result = out.join('；');
+      }
     } finally {
       const now = Date.now();
       batch.forEach((inc, idx) => {
         if (settled.has(idx)) { this.handledAt.set(SkillSmith.signature(inc), now); return; }
         const reason = deferred.get(idx) ?? 'generation_failed';
+        const why = reason === 'budget' ? '本批已写满 2 份，轮候下一批'
+          : reason === 'transient' ? '模型/网络暂不可用'
+            : reason === 'missing_result' ? '模型没有返回本件结论' : '生成或保存未完成';
+        // 本批写满只是排队，不是这件事失败；生成失败 3 次、模型/网络暂不可用 6 次，都仍有上限。
+        const maxTries = reason === 'transient' ? 6 : 3;
+        const tries = reason === 'budget' ? (inc.tries ?? 0) : (inc.tries ?? 0) + 1;
+        if (reason !== 'budget' && tries > maxTries) {
+          this.abandoned.set(SkillSmith.signature(inc), now);
+          dropped.push(inc.headline.slice(0, 60));
+          this.bus.publish('skill_forge_abandoned', 'P2', `「${inc.headline.slice(0, 60)}」已重试 ${maxTries} 次仍没处理完，停止自动重试：${why}`, { kind: inc.kind, headline: inc.headline, reason, tries });
+          return;
+        }
         const retryAt = now + Math.max(60_000, this.limits.repeatMs);
-        this.queue.push({ ...inc, retryAt, queuedAt: now });
-        const why = reason === 'budget' ? '本批写入额度已用完' : reason === 'missing_result' ? '模型没有返回本件结论' : '生成或保存未完成';
-        this.bus.publish('skill_forge_deferred', 'P3', `「${inc.headline.slice(0, 60)}」${why}，保留请求，延期重试`, { kind: inc.kind, headline: inc.headline, reason, retryAt });
+        this.queue.push({ ...inc, retryAt, queuedAt: now, tries });
+        this.bus.publish('skill_forge_deferred', 'P3', `「${inc.headline.slice(0, 60)}」${why}，保留请求，延期重试`, { kind: inc.kind, headline: inc.headline, reason, retryAt, tries });
       });
       while (this.handledAt.size > 200) this.handledAt.delete(this.handledAt.keys().next().value!);
+      while (this.abandoned.size > 200) this.abandoned.delete(this.abandoned.keys().next().value!);
     }
+    const tail = dropped.length ? `${dropped.length} 件已停止自动重试` : '';
+    if (failure && dropped.length < batch.length) throw failure;
+    return [result, tail].filter(Boolean).join('；') || '没有写出技能或明确结论';
   }
 }

@@ -10,6 +10,7 @@ import { EventBus } from '../src/events.ts';
 import { SkillBook } from '../src/knowledge/skillbook.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { BehaviorEngine } from '../src/mind/behaviors.ts';
+import type { ChatMessage } from '../src/planner/llm.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { setBehaviorRegistry } from '../src/skills/use-skill.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -17,6 +18,10 @@ import { FakeAdapter } from './fake-adapter.ts';
 const flush = async () => { for (let i = 0; i < 10; i++) await setImmediate(); };
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'curio-forge-'));
 const noSenses = { perceivedEntities: () => [], knownBlocks: () => [], refresh() {}, markSweep() {} };
+const asPlanner = (planner: object) => planner as unknown as ConstructorParameters<typeof SkillSmith>[0];
+const internals = (smith: SkillSmith) => smith as unknown as { forgedAt: number[]; queue: { retryAt?: number; queuedAt?: number }[]; next(): void };
+type ForgePayload = { existing_skill_contracts: { name: string }[]; episode: string[]; observed_events?: { data?: string }[] };
+const payload = (messages: ChatMessage[]) => JSON.parse(messages[1].content) as ForgePayload;
 
 function rig(limits: { maxPerHour: number; repeatMs: number }) {
   const adapter = new FakeAdapter(), bus = new EventBus();
@@ -147,4 +152,136 @@ test('写技能：攒批——几分钟里的几件事一次请模型看完，�
   await flush();
   assert.equal(r.prompts.length, 2, '死亡不等批');
   r.smith.stop();
+});
+
+test('死亡包只带相关契约，超预算时自动缩小材料', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const base = { code: 'return 1;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "已死亡";' };
+  for (const name of ['explore-edge-a', 'explore-edge-b', 'explore-edge-c', 'explore-edge-d']) {
+    assert.ok(engine.write({ ...base, name, description: 'explore_toward 因为边缘/坠落停下时先稳住落点', when: { after_failure: { skill: ['explore_toward'] } } }).ok);
+  }
+  assert.ok(engine.write({ ...base, name: 'cook-food', description: '饿了就烤食物' }).ok);
+  const calls: ChatMessage[][] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(msgs: ChatMessage[]) {
+    calls.push(msgs);
+    if (calls.length === 1) throw new Error('PROMPT_BUDGET_EXCEEDED: 200000/128000');
+    return { text: JSON.stringify({ none: true, why: '测试不写' }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 24, repeatMs: 0 });
+  smith.start();
+  const long = 'x'.repeat(2000);
+  bus.publish('task_end', 'P2', `task_end explore_toward ${long}`, { status: 'failed', skill: 'explore_toward', failureCode: 'EFFECT_NOT_CONFIRMED', detail: long });
+  smith.report('death', Date.now(), 'Curio tried to swim in lava（在做 explore_toward N）', 60_000, undefined,
+    Array.from({ length: 90 }, (_, i) => `[${i}s] task_end explore_toward ${long}`));
+  await flush();
+  assert.equal(calls.length, 2, '第一次超预算后缩小材料重发一次');
+  const first = payload(calls[0]);
+  const second = payload(calls[1]);
+  assert.ok(first.existing_skill_contracts.length <= 3, '完整材料最多带 3 份相关契约');
+  assert.ok(first.existing_skill_contracts.some((s) => s.name === 'explore-edge-a'));
+  assert.ok(!first.existing_skill_contracts.some((s) => s.name === 'cook-food'), '无关技能不整份带入');
+  assert.ok(first.episode.length <= 30 && first.episode.length > 0, '完整死亡材料也只留最近 30 条');
+  assert.ok(first.observed_events?.some((event) => typeof event.data === 'string' && event.data.length <= 401), '完整材料的事件 data 也截断');
+  assert.ok(second.existing_skill_contracts.length < first.existing_skill_contracts.length, '缩小后契约更少');
+  assert.ok(second.episode.length <= 30 && second.episode.length > 0, '死亡只留最近 30 条经过');
+  assert.ok(second.episode.every((line) => line.length <= 221), '单条经过截断');
+  assert.ok(second.observed_events?.some((event) => typeof event.data === 'string' && event.data.length <= 221), `事件 data 截断保留：${JSON.stringify(second.observed_events)?.slice(0, 200)}`);
+  smith.stop();
+});
+
+test('中文死亡与 all 里嵌套的 after_failure 也能选中相关契约', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const base = { code: 'return 1;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "已死亡";' };
+  assert.ok(engine.write({ ...base, name: 'lava-edge-recover', description: '岩浆边先退到干地', when: { all: [{ after_failure: { skill: ['explore_toward'] } }] } }).ok);
+  assert.ok(engine.write({ ...base, name: 'cook-food', description: '饿了就烤食物' }).ok);
+  const prompts: ChatMessage[][] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(msgs: ChatMessage[]) {
+    prompts.push(msgs);
+    return { text: JSON.stringify({ none: true, why: '测试不写' }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 24, repeatMs: 0 });
+  smith.report('death', Date.now(), '死亡：被岩浆烧死', 0, undefined, ['explore_toward 掉进岩浆']);
+  await flush();
+  const user = payload(prompts[0]);
+  assert.ok(user.existing_skill_contracts.some((s) => s.name === 'lava-edge-recover'));
+  assert.ok(!user.existing_skill_contracts.some((s) => s.name === 'cook-food'));
+  smith.stop();
+});
+
+test('没有词能对上时仍带最近的自学契约（含只有候选的技能）', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  assert.ok(engine.write({ name: 'candidate-only', description: '完全无关描述', code: 'return 1;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "已死亡";' }, { by: 'mind' }).ok);
+  const prompts: ChatMessage[][] = [];
+  const planner = { autonomous: true, noteInvalid() {}, async complete(msgs: ChatMessage[]) {
+    prompts.push(msgs);
+    return { text: JSON.stringify({ none: true, why: '测试不写' }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 24, repeatMs: 0 });
+  smith.report('death', Date.now(), '死亡', 0, undefined, ['qqq']);
+  await flush();
+  const user = payload(prompts[0]);
+  assert.ok(user.existing_skill_contracts.some((s) => s.name === 'candidate-only'));
+  smith.stop();
+});
+
+test('超预算失败不占每小时额度，死亡也不占', async () => {
+  let calls = 0;
+  const r = ownedRig(() => {
+    calls++;
+    if (calls === 1) throw new Error('PROMPT_BUDGET_EXCEEDED: 200000/128000');
+    return { none: true, why: '测试不写' };
+  }, { maxPerHour: 2 });
+  r.smith.report('noted', Date.now(), '第一件值得学的事', 0);
+  await flush();
+  assert.equal(internals(r.smith).forgedAt.length, 1, '只有真正到模型的缩减请求计数');
+  r.smith.report('death', Date.now(), 'Curio was slain by Zombie', 0);
+  await flush();
+  assert.equal(internals(r.smith).forgedAt.length, 1, '死亡不占普通学习额度');
+  r.smith.stop();
+});
+
+test('模型持续不可用时也有重试上限', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const events: { type: string; msg: string }[] = [];
+  bus.on('event', (e: { type: string; msg: string }) => events.push({ type: e.type, msg: e.msg }));
+  const planner = { autonomous: true, noteInvalid() {}, async complete() { throw new Error('模拟网络失败'); } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 99, repeatMs: 0 });
+  smith.report('noted', Date.now(), '网络一直不通的事', 0);
+  await flush();
+  for (let i = 0; i < 8; i++) {
+    internals(smith).queue.forEach((q) => { q.retryAt = 0; q.queuedAt = 0; });
+    internals(smith).next();
+    await flush();
+  }
+  assert.equal(internals(smith).queue.length, 0, '超过上限后不再回到队列');
+  assert.ok(events.some((e) => e.type === 'skill_forge_abandoned' && /6 次/.test(e.msg)));
+  smith.stop();
+});
+
+test('同一件事实在写不出来时有重试上限', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const events: { type: string; msg: string }[] = [];
+  bus.on('event', (e: { type: string; msg: string }) => events.push({ type: e.type, msg: e.msg }));
+  const planner = { autonomous: true, noteInvalid() {}, async complete() { throw new Error('PROMPT_BUDGET_EXCEEDED: 999999/128000'); } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 99, repeatMs: 0 });
+  smith.report('noted', Date.now(), '一直写不出来的事', 0);
+  await flush();
+  for (let i = 0; i < 5; i++) {
+    internals(smith).queue.forEach((q) => { q.retryAt = 0; q.queuedAt = 0; });
+    internals(smith).next();
+    await flush();
+  }
+  assert.equal(internals(smith).queue.length, 0, '超过上限后不再回到队列');
+  assert.ok(events.some((e) => e.type === 'skill_forge_abandoned' && /停止自动重试/.test(e.msg)));
+  smith.stop();
 });

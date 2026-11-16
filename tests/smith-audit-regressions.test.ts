@@ -108,7 +108,7 @@ test('F7：模型调用抛错也保留尚无结论的事件，不立即循环请
   assert.equal(r.bus.recent().filter((e) => e.type === 'skill_forge_failed').length, 1);
 });
 
-test('生成材料保留完整旧契约、候选状态和未截断的结构化事件', async (t) => {
+test('生成材料保留完整旧契约、候选状态和截断后的结构化事件', async (t) => {
   const r = setup(t, () => ({ none: true, why: '保留待试用候选' }));
   const code = `const s = await api.state();\n${'// original contract details\n'.repeat(120)}return s.hp;`;
   assert.ok(r.engine.write({ name: 'full-contract', description: '带参数的完整旧契约', body: '检查当前状态后结束，不移动。',
@@ -130,7 +130,8 @@ test('生成材料保留完整旧契约、候选状态和未截断的结构化�
   assert.ok(stable.verify);
   assert.ok(facts.existing_skill_contracts.some((x) => x.status === 'candidate_pending_trial' && x.verify));
   assert.equal(facts.observed_events[0].msg, msg);
-  assert.deepEqual(facts.observed_events[0].data, data);
+  assert.equal(typeof facts.observed_events[0].data, 'string');
+  assert.match(facts.observed_events[0].data as string, /oak_planks/);
   assert.match(r.prompts[0][0].content, /候选不是已覆盖的能力/);
 });
 
