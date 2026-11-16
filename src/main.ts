@@ -27,6 +27,7 @@ import { draftsFor } from './building/drafts.ts';
 import { config, envFile } from './config.ts';
 import { EventBus } from './events.ts';
 import { attachLogger, JsonlWriter } from './log.ts';
+import { structureFromAchievement } from './memory/structure-achievements.ts';
 import { WorldMemory } from './memory/store.ts';
 import { ContainerLedger } from './memory/container-ledger.ts';
 import { SpatialSemanticStore } from './spatial/semantic-store.ts';
@@ -240,6 +241,8 @@ try {
   }) + '\n');
   process.exit(1);
 }
+// 旧的结构成就原先只记成 note/diary；启动时补成可检索的 discovery 地标。
+memory.promoteStructureAchievements();
 // 保存成功后按水位遗忘最不重要的已提交体素（manual 模式、会话不忙、有冷却）。
 // 选择与执行分开：RetentionRunner 只读目录/事实/账本/地标，交给 planRetention 选列，
 // 再调用 pruneSections；失败只发布事实，不影响保存本身。
@@ -625,6 +628,10 @@ adapter.on('game_message', (text: string) => {
   if (gameLog.length > 50) gameLog.splice(0, gameLog.length - 50);
   bus.publish('game_message', parsed.kind === 'death_self' ? 'P1' : 'P3', parsed.text, { kind: parsed.kind, ...(parsed.cause ? { cause: parsed.cause } : {}), ...(parsed.by ? { by: parsed.by } : {}) });
   if (parsed.kind === 'death_self' || parsed.kind === 'advancement_self') memory.addNote('fact', `游戏提示：${parsed.text}`, s.dim, s.pos);
+  if (parsed.kind === 'advancement_self') {
+    const found = structureFromAchievement(parsed.text);
+    if (found) memory.addLandmark('discovery', found.label, s.dim, s.pos, 32);
+  }
   // 死亡事件先到、播报后到：补记到这次死亡上
   if (parsed.kind === 'death_self' && Date.now() - lastDeathAt < 6000) {
     memory.updateDeathMessage(parsed.text, parsed.cause);

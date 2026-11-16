@@ -29,6 +29,21 @@ function fixture(t: { after: (fn: () => void) => void }, tier: 'glance' | 'delib
   return { adapter, memory, self, section, known };
 }
 
+test('已知结构位置进入 known_structures，不靠最近 5 条日记', (t) => {
+  const { memory, known } = fixture(t);
+  memory.addLandmark('discovery', '下界要塞（暗红砖）', 'overworld', { x: 219, y: 60, z: -224 }, 8);
+  const places = known();
+  assert.match((places.known_structures as string[]).join('\n'), /下界要塞（暗红砖）.*219,60,-224/);
+  assert.match(places.known_structures_note as string, /不要把死亡地点当成结构位置/);
+});
+
+test('其他维度的已知结构也进入 known_structures，并标出维度', (t) => {
+  const { memory, known } = fixture(t);
+  memory.addLandmark('discovery', '下界要塞（暗红砖）', 'the_nether', { x: 219, y: 60, z: -224 }, 8);
+  const places = known();
+  assert.match((places.known_structures as string[]).join('\n'), /下界 下界要塞（暗红砖）.*219,60,-224.*另一维度/);
+});
+
 test('设施只给容器内容摘要，完整数量按 find_item 查', (t) => {
   const { adapter, memory, known } = fixture(t);
   adapter.blocks.push({ name: 'crafting_table', pos: { x: 2, y: 64, z: 0 } }, { name: 'chest', pos: { x: 3, y: 64, z: 0 } });

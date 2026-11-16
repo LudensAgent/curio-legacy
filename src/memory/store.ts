@@ -18,6 +18,7 @@ import {
 } from '../spatial/semantic-store.ts';
 import { createInMemoryLibraryStores } from '../spatial/in-memory.ts';
 import { ContainerLedger } from './container-ledger.ts';
+import { structureFromAchievement } from './structure-achievements.ts';
 
 export type { ChestRecord, ChestRecall, ChestContents, ChestUse } from './chest-memory.ts';
 export { BASE_CAP, DISCOVERY_LABEL_CAP, EXCAVATION_WAYPOINT_CAP, HERD_CAP, LANDMARK_CAP };
@@ -623,6 +624,17 @@ export class WorldMemory {
     const cut = opts.withinMs ? Date.now() - opts.withinMs : 0;
     return this.data.notes.filter((x) => this.inWorld(x) && x.ts >= cut && (!opts.dimension || !x.dimension || x.dimension === opts.dimension))
       .slice(-(opts.n ?? 10)).map((x) => structuredClone(x));
+  }
+
+  /** 把已有的结构成就 note 补成 discovery 地标；启动时跑一次，旧记录不用等 Agent 再发现。 */
+  promoteStructureAchievements(): number {
+    let added = 0;
+    for (const note of this.notesFor({ n: 60 })) {
+      if (!note.pos || !note.dimension) continue;
+      const found = structureFromAchievement(note.text);
+      if (found && this.addLandmark('discovery', found.label, note.dimension, note.pos, 32)) added++;
+    }
+    return added;
   }
 
   // ------------------------------------------------ 死亡与掉落物
