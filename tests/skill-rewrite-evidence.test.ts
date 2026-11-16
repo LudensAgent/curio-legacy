@@ -44,6 +44,51 @@ test('改进器的新版本观察期只由当前版程序错误豁免', (t) => {
   assert.equal(improver.consider(definition.name, 'failures'), null);
 });
 
+test('死亡负证据可改写只用过 1–2 次的技能，零成功边界仍拦住', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-rewrite-death-'));
+  const bus = new EventBus(), book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, new FakeAdapter(), null, bus, { perceivedEntities: () => [] });
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  assert.ok(engine.write({ ...definition, name: 'death-guard', description: '死亡前该管住的处境' }).ok);
+  engine.recordInvocation('death-guard', { status: 'failed', failureCode: 'ERROR', summary: '第一次没管住', data: { version: 1 } });
+  engine.recordInvocation('death-guard', { status: 'failed', failureCode: 'ERROR', summary: '第二次没管住', data: { version: 1 } });
+  assert.match(engine.rewriteGate('death-guard')!, /证据还不够/);
+  assert.equal(engine.write({ ...definition, name: 'death-guard', description: '按死亡负证据改写' }, { by: 'forge' }).ok, false);
+  assert.ok(engine.write({ ...definition, name: 'death-guard', description: '按死亡负证据改写' }, { by: 'forge', deathEvidence: true }).ok);
+  assert.equal(engine.get('death-guard')?.description, '死亡前该管住的处境');
+  assert.equal(engine.get('death-guard', true)?.description, '按死亡负证据改写');
+
+  assert.ok(engine.write({ ...definition, name: 'zero-success', description: '连续失败的做法' }).ok);
+  for (const why of ['一次', '两次', '三次']) engine.recordInvocation('zero-success', { status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: why, data: { version: 1 } });
+  assert.match(engine.rewriteGate('zero-success')!, /一次都没成/);
+  assert.equal(engine.write({ ...definition, name: 'zero-success', description: '死亡也不该绕过零成功' }, { by: 'forge', deathEvidence: true }).ok, false);
+});
+
+test('死亡负证据不绕过未试用候选、刚换上版本、墓碑和已收起候选', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-rewrite-deny-'));
+  const bus = new EventBus(), book = new SkillBook(null, directory);
+  const engine = new BehaviorEngine(book, new FakeAdapter(), null, bus, { perceivedEntities: () => [] });
+  t.after(() => { engine.dispose(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const write = (name: string, extra: Record<string, unknown> = {}) => engine.write({ ...definition, name, ...extra });
+
+  assert.ok(engine.write({ ...definition, name: 'untested-candidate' }, { by: 'mind' }).ok);
+  assert.match(engine.rewriteGate('untested-candidate', { deathEvidence: true })!, /还没用过/);
+  assert.equal(engine.write({ ...definition, name: 'untested-candidate', description: '死亡也别急改未试用候选' }, { by: 'forge', deathEvidence: true }).ok, false);
+
+  assert.ok(write('fresh-version').ok);
+  engine.statsOf('fresh-version')!.swappedAt = Date.now();
+  assert.match(engine.rewriteGate('fresh-version', { deathEvidence: true })!, /换上/);
+  assert.equal(engine.write({ ...definition, name: 'fresh-version', description: '死亡也别急改' }, { by: 'forge', deathEvidence: true }).ok, false);
+
+  assert.ok(write('tombstoned').ok);
+  assert.ok(engine.retire('tombstoned', '之前做坏了'));
+  assert.equal(engine.write({ ...definition, name: 'tombstoned', description: '死亡也别复活' }, { by: 'forge', deathEvidence: true }).ok, false);
+
+  assert.ok(engine.write({ ...definition, name: 'retired-candidate' }, { by: 'mind' }).ok);
+  assert.ok(engine.retireCandidate('retired-candidate', 1, '候选做坏了'));
+  assert.equal(engine.write({ ...definition, name: 'retired-candidate', description: '死亡也别复活候选' }, { by: 'forge', deathEvidence: true }).ok, false);
+});
+
 test('零成功技能用够次数后不再自动重写，交给整理收起', (t) => {
   const { engine } = setup(t);
   const name = definition.name;

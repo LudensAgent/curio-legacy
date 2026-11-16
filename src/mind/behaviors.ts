@@ -737,7 +737,7 @@ export class BehaviorEngine {
   /**
    * 模型写出的版本先存候选，稳定版继续使用；disable 同时拦调度和直接调用。
    */
-  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; restored?: boolean; improving?: boolean; candidate?: boolean; unchanged?: boolean } | { ok: false; error: string; gated?: boolean } {
+  write(raw: unknown, opts: { by?: 'mind' | 'forge' | 'curator' | 'improve'; expectedToken?: string; /** 死亡事件作为负证据：允许改写只用过 1–2 次的技能 */ deathEvidence?: boolean } = {}): { ok: true; name: string; created: boolean; mode: SkillMode; disabled?: boolean; restored?: boolean; improving?: boolean; candidate?: boolean; unchanged?: boolean } | { ok: false; error: string; gated?: boolean } {
     const o = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
     const requestedName = normalizeSkillName(String(o.name ?? ''));
     if (Object.hasOwn(opts, 'expectedToken') && opts.expectedToken !== this.editToken(requestedName)) return { ok: false, error: '技能在生成期间已修订、停用或收起，忽略过期结果', gated: true };
@@ -802,7 +802,7 @@ export class BehaviorEngine {
     // 后台总结（每死一次、每吃一次亏都会来一遍）不能推翻一个还没攒够证据的版本：
     // 否则同一个技能在几种打法之间来回改，没有一个版本用够几次，永远不知道哪个管用
     if (opts.by === 'forge' || opts.by && opts.by !== 'mind' && previousCandidate) {
-      const gate = this.rewriteGate(v.name) ?? (inheritCandidatePermit ? null : this.tombstone(v.name));
+      const gate = this.rewriteGate(v.name, { deathEvidence: opts.deathEvidence === true }) ?? (inheritCandidatePermit ? null : this.tombstone(v.name));
       if (gate) {
         this.bus.publish('skill_revision_deferred', 'P2', gate, { name: v.name, version: previousCandidate?.version, by: opts.by });
         return { ok: false, error: gate, gated: true };
@@ -917,8 +917,8 @@ export class BehaviorEngine {
     if (adv) return `拉锯后只提醒、不自动接手（${adv.why}）`;
     return null;
   }
-  /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外） */
-  rewriteGate(name: string): string | null {
+  /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外）。死亡负证据可豁免“只用了 1–2 次”这一档。 */
+  rewriteGate(name: string, opts: { deathEvidence?: boolean } = {}): string | null {
     const b = this.get(name, true) ?? this.get(name);
     const st = this.stats[name];
     if (!b || b.source !== 'self' || !st || st.disabled && !b.candidate) return null;
@@ -941,6 +941,7 @@ export class BehaviorEngine {
     if (uses >= BehaviorEngine.MIN_EVIDENCE && cur.ok === 0)
       return `「${name}」当前版本用了 ${uses} 次一次都没成（成 ${cur.ok} 败 ${cur.fail}）：重写多半还是同一套失败，先等整理收起，或由心智显式修订；这次的经过已经记进它的成败`;
     if (uses >= BehaviorEngine.MIN_EVIDENCE) return null;
+    if (opts.deathEvidence) return null;
     return `「${name}」当前版本只用了 ${uses} 次（成 ${cur.ok} 败 ${cur.fail}），证据还不够，先不改写它；这次的经过已经记进它的成败，等用够 ${BehaviorEngine.MIN_EVIDENCE} 次再看要不要改`;
   }
 

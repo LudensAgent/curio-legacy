@@ -154,6 +154,26 @@ test('写技能：攒批——几分钟里的几件事一次请模型看完，�
   r.smith.stop();
 });
 
+test('死亡 forge 可以用同名改写只用过两次的技能', async () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  const book = new SkillBook(null, tmp());
+  const engine = new BehaviorEngine(book, adapter, null, bus, noSenses);
+  const skill = { name: 'shield-guard', description: '被近战贴住时举盾', code: 'return 1;', verify: 'const s = await api.state(); return s.hp > 0 ? true : "已死亡";' };
+  assert.ok(engine.write(skill).ok);
+  engine.recordInvocation(skill.name, { status: 'failed', failureCode: 'ERROR', summary: '第一次没管住', data: { version: 1 } });
+  engine.recordInvocation(skill.name, { status: 'failed', failureCode: 'ERROR', summary: '第二次没管住', data: { version: 1 } });
+  const planner = { autonomous: true, noteInvalid() {}, async complete() {
+    return { text: JSON.stringify({ skill: { ...skill, description: '按这次死亡改写举盾时机' } }), latencyMs: 1 };
+  } };
+  const smith = new SkillSmith(asPlanner(planner), engine, book, bus, () => adapter.state(), () => [], { maxPerHour: 24, repeatMs: 0 });
+  smith.report('death', Date.now(), 'Curio was slain by Zombie（在做 advance）', 0);
+  await flush();
+  assert.equal(engine.get(skill.name)?.description, '被近战贴住时举盾', '稳定版不被后台直接替换');
+  assert.equal(engine.get(skill.name, true)?.description, '按这次死亡改写举盾时机', '死亡负证据写进候选');
+  assert.ok(bus.recent().some((event) => event.type === 'skill_forged' && event.data?.name === skill.name));
+  smith.stop();
+});
+
 test('死亡包只带相关契约，超预算时自动缩小材料', async () => {
   const adapter = new FakeAdapter(), bus = new EventBus();
   const book = new SkillBook(null, tmp());
