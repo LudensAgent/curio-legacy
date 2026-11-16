@@ -248,6 +248,34 @@ test('桥头擦边：邻列有已记录支撑时允许并加价；无支撑才�
   assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edgeAt(at(95.5, 69.5, -39.5), { from: at(94.5, 69.5, -39.5) }), slab.read)), 0);
 });
 
+test('边缘站姿下方是已记录的水时拒绝：连续行走滑过一点就会掉进去', () => {
+  const to = at(95.29, 70, -39.55);
+  const edge = edgeAt(to, { from: at(94.29, 70, -39.55) });
+  // 中心列 (95,69,-40) 是空气，下面 y=68 是水；邻列 (94,69,-40) 有圆石支撑。
+  const waterBelow = fakeReader([
+    [94, 69, -40, recorded('cobblestone')],
+    [95, 69, -40, recorded('air')],
+    [95, 68, -40, recorded('water')],
+  ], 64, []);
+  const reason = rejectionReason(hostLandEdgePolicy.evaluate(edge, waterBelow.read));
+  assert.match(reason, /unsupported feet-centre column drops into recorded water/);
+  assert.equal(isConstructionFixablePolicyRejection(reason), true, 'place 可以补上脚底中心支撑');
+  // 下面是干实地：仍按旧矿道/桥头的边缘站姿放行并加价。
+  const dryBelow = fakeReader([
+    [94, 69, -40, recorded('cobblestone')],
+    [95, 69, -40, recorded('air')],
+    [95, 68, -40, recorded('stone')],
+  ], 64, []);
+  assert.equal(allowedCost(hostLandEdgePolicy.evaluate(edge, dryBelow.read)), EDGE_STANCE_COST);
+  // 下面是岩浆：按危险格拒绝，不是 place 能直接补的普通缺口。
+  const lavaBelow = fakeReader([
+    [94, 69, -40, recorded('cobblestone')],
+    [95, 69, -40, recorded('air')],
+    [95, 68, -40, recorded('lava')],
+  ], 64, []);
+  assert.match(rejectionReason(hostLandEdgePolicy.evaluate(edge, lavaBelow.read)), /dangerous block lava/);
+});
+
 test('跨缺口跳跃：超出不疾跑起跳能力的宽缺口不规划；落空会掉进火/岩浆的缺口不规划', () => {
   // 复现：从 (-73.39,69) 水平跳 3 格到 (-70.39,69)，缺口下方 3 格是火。
   const wide = edgeAt(at(-70.39, 69, -18.55), { kind: 'jump', from: at(-73.39, 69, -18.55) });

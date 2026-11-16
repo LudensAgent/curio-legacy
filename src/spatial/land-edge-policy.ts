@@ -153,6 +153,21 @@ const policyFor = (version: string, allowedHazards: ReadonlySet<string>, wade: b
       };
       const cell = read.cell(x, supportY, z);
       if (!supportsFoot(x, z)) {
+        // 边缘站姿的脚底中心没有支撑：先看中心列下面会落到什么。连续行走会在停稳时滑过目标一点，
+        // 若擦边的邻列旁边就是水/岩浆，这一点滑移就足以让人掉进去——这种站姿不能按“旧矿道桥头”放行。
+        if (cell.kind === 'recorded') {
+          for (let dy = 0; dy < GAP_FALL_LOOKDOWN; dy++) {
+            const below = recordedName(read, x, supportY - dy, z);
+            if (below === null) break; // 再往下没有已记录事实，按下面的观察/拒绝路径处理
+            if (isWaterBlock(below)) {
+              return { allow: false, reason: `host policy rejects an edge stance whose unsupported feet-centre column drops into recorded water at (${x},${supportY - dy},${z})` };
+            }
+            if (isDangerousBlock(below)) {
+              return { allow: false, reason: `host policy rejects recorded dangerous block ${below} below the unsupported feet centre at (${x},${supportY - dy},${z})` };
+            }
+            if (supportTop(below.replace(/^minecraft:/, '')) !== null) break; // 下面是实地：落下去也只是小落差
+          }
+        }
         // 身体足印覆盖到的邻列有已记录支撑：站得住，但连续行走可能滑出边缘，给额外代价。
         // 旧矿道/台阶大量是这种站姿；默认允许比“脚底中心必须自己有支撑”更接近原版。
         const edgeSupport = supportColumnsUnder(edge.to, supportY)
@@ -195,6 +210,7 @@ export function isFirePolicyRejection(reason: string): boolean {
  */
 export function isConstructionFixablePolicyRejection(reason: string): boolean {
   return reason.includes('no observed support under the feet centre or body footprint')
+    || reason.includes('unsupported feet-centre column drops into recorded water')
     || (reason.includes('cannot clear a') && reason.includes('horizontal gap jump'));
 }
 
@@ -234,5 +250,5 @@ export function policyRemedy(reason: string, opts: { fireClearable: boolean }): 
   return '';
 }
 
-export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.gap-jump-2.fall-only.dry.lava-neighbor-3.v7', new Set(['fall']), false);
-export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.gap-jump-2.fall-wade.lava-neighbor-3.v7', new Set(['fall', 'water_contact']), true);
+export const hostLandEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.water-below-8.gap-jump-2.fall-only.dry.lava-neighbor-3.v8', new Set(['fall']), false);
+export const hostWadingEdgePolicy = policyFor('host-land-edge-policy.danger-swept.edge-stance-cost-6.water-below-8.gap-jump-2.fall-wade.lava-neighbor-3.v8', new Set(['fall', 'water_contact']), true);
