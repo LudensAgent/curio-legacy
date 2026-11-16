@@ -6,6 +6,7 @@ import { bodyCells, bodyProbe, estimatedFallDamage, footSurfaceY, isReplaceable,
 import { feetCell } from '../perception/local.ts';
 import { codeFromError, fail, isAbort, obj, ok, traceOf, type FailureCode, type Skill, type SkillCtx } from './types.ts';
 import { placeSupport } from './movement/primitives.ts';
+import { PLACEABLE } from './survival.ts';
 import { toolRequirementText } from './movement/tool-requirement.ts';
 import { markSelfModified } from '../spatial/shared-session.ts';
 
@@ -550,11 +551,22 @@ export async function excavatePath(ctx: SkillCtx, args: ExcavationArgs, stopOnOb
               // 仍归为“缺支撑”，不能把“没有可点的面”误当成材料/工具能力缺口。
               const referenceGap = data?.failureCause === 'reference' || /NO_REFERENCE|NO_PLACEMENT_FACE|EDGE_/.test(placed.summary);
               const failureCode = referenceGap ? 'PATH_NOT_FOUND' : (placed.failureCode ?? 'PATH_NOT_FOUND');
+              // 缺材料/缺参考面都给出可执行事实：背包里有哪些能垫的方块、站位该往哪退。
+              // 否则 Agent 只看到“没有 cobblestone”就换方向，在同一个空腔边缘绕圈。
+              const availableFill = PLACEABLE.filter((name) => ctx.adapter.state().inventory.some((item) => item.name === name && item.count > 0));
+              const materialNote = args.fill !== 'any' && (/MISSING_MATERIALS|没有/.test(placed.summary))
+                ? availableFill.length
+                  ? `；背包里可垫的方块：${availableFill.slice(0, 6).join('、')}（fill 可写 any 自动选）`
+                  : '；背包里没有可垫的方块'
+                : '';
+              const referenceNote = referenceGap
+                ? '；站位没有可贴的参考面：先退到有实心邻格的站位，或用 mine_cell 挖出参考面再补，不要原地重复'
+                : '';
               // 只有「仍无支撑」才是缺支撑；材料/工具/效果类失败是能力缺口，不能继续报 missing_support。
               // 把 place_support 的实际原因放在摘要最前面：后面的 cavity 提示会把总长推到
               // clipFeedback 的上限，原来的“下一落点…没成：…”前缀正好把 edge 原因挤到被截掉的中间。
               const stop = new ExcavationStop(failureCode,
-                `[${args.direction}] 补支撑失败（fill:"${args.fill}"）：${placed.summary}；下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 仍是 ${supportState.name}`, false, referenceGap ? 'missing_support' : 'capability');
+                `[${args.direction}] 补支撑失败（fill:"${args.fill}"）：${placed.summary}${materialNote}${referenceNote}；下一落点 (${next.x},${next.y},${next.z}) 的支撑格 (${supportCell.x},${supportCell.y},${supportCell.z}) 仍是 ${supportState.name}`, false, referenceGap ? 'missing_support' : 'capability');
               if (Array.isArray(attempts)) stop.fillAttempts = attempts as Record<string, unknown>[];
               stop.nextLanding = { ...next };
               stop.supportMissing = supportGap(stop.nextLanding, args.direction, args.fill);

@@ -20,6 +20,7 @@ import { isDiggableFire, MAKE_WAY_MAX_EDITS, planMakeWay, type MakeWayOptions, t
 import { mineCell, pillarOne, placeSupport } from './primitives.ts';
 import { swimPath } from './water.ts';
 import { toolRequirementText } from './tool-requirement.ts';
+import { PLACEABLE } from '../survival.ts';
 import {
   acquireSessionLease, createMovementSession, findMovementSession, intentKeyOf, makeWayEditBudget as makeWayEditBudgetOf, releaseSessionLease,
   type MovementAuthorization, type MovementBudget, type MovementIntent, type MovementSession, type MoveScope, type StopReceipt, type StopReason,
@@ -240,6 +241,14 @@ export async function runMakeWay(
       failure = (step.kind === 'pillar'
         ? await run(pillarOne, { item })
         : await run(placeSupport, { xyz: [step.place!.x, step.place!.y, step.place!.z], item })) ?? undefined;
+      // 指定建材不足时列出背包里能垫的方块：Agent 常因此换方向，实际上 place:"any"
+      // 或换个现有材料就能在同一方向继续补支撑。
+      if (failure !== undefined && item !== 'any' && /背包里没有/.test(failure)) {
+        const available = PLACEABLE.filter((name) => ctx.adapter.state().inventory.some((entry) => entry.name === name && entry.count > 0));
+        failure += available.length
+          ? `；背包里可垫的方块：${available.slice(0, 6).join('、')}（place 可写 any 自动选）`
+          : '；背包里没有可垫的方块';
+      }
       if (failure !== undefined) break;
       const placed = step.kind === 'pillar' ? { x: step.to.x, y: step.to.y - 1, z: step.to.z } : step.place!;
       // 刚放下时视觉可能还没重写这一格：指定了方块就记它，写 any 才读体素。

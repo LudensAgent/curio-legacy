@@ -444,6 +444,7 @@ export class Mind {
     this.seenAlive = true;
     this.d.memory.setWorld(state.worldId);
     if (!this.paused) this.safe(() => this.d.excursions?.sample(state), undefined);
+    this.safe(() => this.noteCircling(state), undefined);
     const sessionChanged = !!this.lastSession && this.lastSession !== state.sessionId;
     // 换作用域后，在途思考和预排 next 都绑定旧世界的观察/坐标，先作废；重新评估后才启动。
     // 主动 travel_portal 与非预期传送都适用：跨维度的下一步应在到达后按新位置重新确认。
@@ -1580,6 +1581,31 @@ export class Mind {
       fallbackEnd: state.pos, at: Date.now(), dim: state.dim,
     });
     if (record) this.d.excursions?.noteExplore(record);
+  }
+
+  /**
+   * 同一趟出行里换了很多方向、最远点却很久没推进时，给一条事实提醒：
+   * 换方向没有越过同一片边界；可续接原 session，或用 dig/place/descend 处理边界。
+   * 只提示，不替 Agent 选方向或路线。
+   */
+  private noteCircling(state: AgentState) {
+    const leg = this.d.excursions?.current(state.worldId);
+    if (!leg || leg.dim !== state.dim) return;
+    const now = Date.now();
+    const lastFrontier = leg.frontier.at(-1) ?? leg.startedAt;
+    if (now - lastFrontier < 8 * 60_000) return;
+    const dirs = new Set<string>();
+    for (const [dir, point] of Object.entries(leg.farthestByDirection ?? {})) {
+      if (now - point.at <= 10 * 60_000 && point.dist > 0) dirs.add(dir);
+    }
+    for (const attempt of leg.explores ?? []) {
+      if (now - attempt.at <= 10 * 60_000) dirs.add(attempt.direction);
+    }
+    if (dirs.size < 3) return;
+    const minutes = Math.max(1, Math.round((now - lastFrontier) / 60_000));
+    this.attention.notice(`circling:${leg.id}`,
+      `这一趟已换过 ${[...dirs].join('/')} ${dirs.size} 个方向，最远 ${leg.farthest.dist} 格、${minutes} 分钟没再推进；换方向没有越过同一片边界。可续接 sessionId，或用 dig/place/descend 处理边界；要不要先离开这带由你决定。`,
+      0.6, 10 * 60_000);
   }
 
   // ---------------------------------------------------------------- 动作结果

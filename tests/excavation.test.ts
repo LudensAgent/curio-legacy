@@ -691,6 +691,18 @@ test('fill 材料不足时按 capability 分类，仍返回 supportMissing（含
   assert.ok(!world.actions.some((action) => action.startsWith('place:')), '补支撑失败没有自行换材料');
 });
 
+test('fill 指定材料不足时列出背包里可用的垫脚方块和 fill:any', async () => {
+  const world = new ExcavationWorld();
+  world.setBlock({ x: 1, y: 63, z: 0 }, 'air');
+  world.inv.set('dirt', 3);
+  const result = await excavationSkill.run(context(world), args({ mode: 'tunnel', steps: 1, fill: 'netherrack' }));
+  assert.equal(result.status, 'failed', result.summary);
+  assert.match(result.summary, /背包里可垫的方块：dirt/);
+  assert.match(result.summary, /fill 可写 any 自动选/);
+  assert.equal(world.digs.length, 0);
+  assert.equal(world.moves.length, 0);
+});
+
 test('fill 补支撑仍无支撑时报 missing_support，并带出结构化站位尝试', async () => {
   const world = new ExcavationWorld();
   world.setBlock({ x: 1, y: 63, z: 0 }, 'air');
