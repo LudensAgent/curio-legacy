@@ -72,8 +72,9 @@ export interface BehaviorStats {
   lastRestoration?: { at: number; retiredAt: number; reason: string };
   /** 不是代码的技能每改写一次加一（代码技能用自己的版本号）：成败按版本记，改写不清空历史 */
   rev?: number;
-  /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；只压被降级的那个版本，改写出的新版本重新获得机会 */
-  advisory?: { since: number; why: string; version?: string };
+  /** 拉锯里输掉的一方：条件成立也不自动接手，只提醒心智；只压被降级的那个版本，改写出的新版本重新获得机会。
+   *  with 是当时互相拉锯的另一份技能：只有它的条件也成立时才拦，避免水中拉锯把陆地保命一起永久锁死。 */
+  advisory?: { since: number; why: string; version?: string; with?: string };
   /** 和别的技能来回拉锯过（A 做完 B 又把它推回去）：给整理用 */
   loops?: { with: string; at: number; times: number }[];
   /** 条件成立接手、却什么都没做就返回（白白打断手上的活）的次数：when 多半比代码里的判断宽。给整理用 */
@@ -463,8 +464,23 @@ export class BehaviorEngine {
         const candidateCanTake = !!candidate && candidate.mode === 'auto' && isEmergency(candidate)
           && !this.inactive(b.name) && !this.candidateRetirement(b.name)
           && (adv.version === undefined || adv.version !== this.versionOf(candidate));
-        if (!candidateCanTake) this.waiting(b, cur, now, adv.why);
-        continue;
+        if (!candidateCanTake) {
+          // 只有当时互相拉锯的那份技能此刻也适用，才继续只提醒；否则这只是另一情境的旧冲突，不该锁住这里。
+          // 同时看稳定版和候选：调度器实际会跑稳定版；候选 retired 不能把仍适用的稳定版一起当成无关。
+          const withName = this.advisoryOther(adv);
+          if (!withName) { this.waiting(b, cur, now, adv.why); continue; }
+          const others = [this.get(withName), this.get(withName, true)].filter((v): v is Behavior => !!v);
+          let otherApplies = false;
+          for (const other of others) {
+            if (this.inactive(other.name) || (other.candidate && this.candidateRetirement(other.name))) continue;
+            // 普通候选不会自动接手；它条件成立也不能把保命技能锁住。
+            if (other.candidate && !isEmergency(other)) continue;
+            if (!other.when || other.mode === 'recover') continue;
+            s ??= this.sense(cur);
+            if (evalPredicate(other.when, s)) { otherApplies = true; break; }
+          }
+          if (otherApplies) { this.waiting(b, cur, now, adv.why); continue; }
+        }
       }
       if (now - (this.lastFired.get(b.name) ?? 0) < b.cooldownMs) continue;
       s ??= this.sense(cur);
@@ -538,10 +554,12 @@ export class BehaviorEngine {
       const loser = A && B ? (this.choiceScore(A) >= this.choiceScore(B) ? B : A) : (A ?? B);
       record(loop.a, loop.b); record(loop.b, loop.a);
       if (loser) {
-        const why = `和「${loser.name === loop.a ? loop.b : loop.a}」来回拉锯`;
+        const other = loser.name === loop.a ? loop.b : loop.a;
+        const why = `和「${other}」来回拉锯`;
         this.holds.set(loser.name, { until: now + BehaviorEngine.HOLD_MS, why, version: this.versionOf(loser) });
-        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）才恢复
-        this.touch(loser.name, (st) => { st.advisory = { since: now, why, version: this.versionOf(loser) }; });
+        // 只歇一会儿压不住：降成“只提醒、不接手”，直到它被改写（整理时拆开条件）才恢复。
+        // 记下对方是谁：只有对方条件也成立时才拦，别把无关情境一起锁住。
+        this.touch(loser.name, (st) => { st.advisory = { since: now, why, version: this.versionOf(loser), with: other }; });
       }
       this.bus.publish('skill_loop', 'P1', `技能「${loop.a}」和「${loop.b}」在来回拉锯：一个做完另一个又把它推回去（几分钟里 ${loop.times} 回）${loser ? `；「${loser.name}」先改成只提醒、不自动接手，直到它被改写` : ''}`,
         { kind: loop.kind, a: loop.a, b: loop.b, times: loop.times, held: loser?.name ?? null });
@@ -894,6 +912,15 @@ export class BehaviorEngine {
 
   /** 拉锯里输掉、只提醒不自动接手的技能：显式调用和组合仍可用，但不能宣称它自动覆盖某件事。 */
   isAdvisory(name: string): boolean { return !!this.stats[name]?.advisory; }
+  /** 拉锯对象：新数据有 with，旧数据从 why 的「技能名」解析。 */
+  private advisoryOther(adv: NonNullable<BehaviorStats['advisory']>) { return adv.with ?? adv.why.match(/「([^」]+)」/)?.[1]; }
+  /** 给提示词看的实际口径：能解析冲突对象才说“只在那个情境只提醒”；解析不到时仍全局保守。 */
+  private advisoryText(adv: NonNullable<BehaviorStats['advisory']>) {
+    const other = this.advisoryOther(adv);
+    return other
+      ? `拉锯后只在和「${other}」冲突时只提醒，其他情境仍会按条件自动接手`
+      : '拉锯后只提醒、不自动接手（旧记录没有冲突对象）';
+  }
 
   /** 技能能不能真正接管某件事（covered_by 用它判断“这事已有技能管”，不是只问有没有这个名字）。
    *  区分可试验候选与可复用的稳定版：候选（需 trial:true 才可试）不算覆盖；稳定版无论显式调用还是自动接手都可算覆盖，
@@ -904,7 +931,7 @@ export class BehaviorEngine {
     if (b.candidate) return `${name} 尚为候选，需要显式试用验收`;
     if (this.inactive(name)) return `${name} 已收起或停用`;
     const adv = this.stats[name]?.advisory;
-    if (adv) return `${name} 拉锯后只提醒、不自动接手：${adv.why}`;
+    if (adv) return `${name} ${this.advisoryText(adv)}；不能简单当作已覆盖`;
     return null;
   }
 
@@ -914,7 +941,7 @@ export class BehaviorEngine {
     if (!b || b.mode !== 'auto') return null;
     if (this.inactive(name)) return '已收起或停用';
     const adv = this.stats[name]?.advisory;
-    if (adv) return `拉锯后只提醒、不自动接手（${adv.why}）`;
+    if (adv) return `${this.advisoryText(adv)}（${adv.why}）`;
     return null;
   }
   /** 能不能改写这份技能：当前版本用得太少就先别动（停用了、或者代码本身报错的除外）。死亡负证据可豁免“只用了 1–2 次”这一档。 */
@@ -1367,7 +1394,7 @@ export class BehaviorEngine {
         : candidate ? `；候选 v${candidate.version} 尚未启用，用 use_skill {name:"${b.name}",trial:true} 试用，试用成${this.currentStats(b.name, true).ok}/败${this.currentStats(b.name, true).fail}` : '';
       const successful = this.successfulEmergencyVersions(b.name);
       const history = successful.length ? `；保留成功过的应急版本 ${successful.slice(0, 4).map((entry) => `v${entry.version}（成${entry.ok}/败${entry.fail}）`).join('、')}，可查技能历史，由心智用 from_version 选为新候选再试` : '';
-      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${st?.advisory ? ` 拉锯后只提醒不自动接手（${st.advisory.why.slice(0, 24)}）` : ''}${untested}${trial}${history}`;
+      return `${b.name}［${b.mode === 'auto' ? '自动' : b.mode === 'recover' ? '失败时先试' : '调用'}${b.code ? `，代码 v${b.version ?? 1}` : ''}${b.overrides.length ? `，代替本能 ${b.overrides.map((o) => INSTINCTS[o]?.off ? `${o}（这条本能本来就没开）` : o).join('/')}` : ''}${b.needs ? `，调用时给 args.${Object.keys(b.needs).join('/')}` : ''}］${st && st.ok + st.fail ? ` 成${st.ok}/败${st.fail}` : ''}${st?.retired ? ` 已收起（${st.retired.slice(0, 30)}）` : st?.disabled ? ' 已停用' : ''}${st?.advisory ? ` ${this.advisoryText(st.advisory)}` : ''}${untested}${trial}${history}`;
     }), ...[...this.invalid].map(([n, why]) => `${n}：${why}`),
       ...[...this.invalidCandidates].map(([n, why]) => `${n}：候选未通过校验：${why}`)];
   }

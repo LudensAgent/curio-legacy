@@ -12,7 +12,7 @@ import { config } from '../src/config.ts';
 import { EventBus } from '../src/events.ts';
 import { BUILTIN_SKILLS_DIR, SkillBook } from '../src/knowledge/skillbook.ts';
 import { WorldMemory } from '../src/memory/store.ts';
-import { BehaviorEngine, validateBehavior } from '../src/mind/behaviors.ts';
+import { BehaviorEngine, validateBehavior, type BehaviorStats } from '../src/mind/behaviors.ts';
 import { Mind } from '../src/mind/mind.ts';
 import { evalPredicate, senseNow, validatePredicate } from '../src/mind/predicate.ts';
 import { buildMindMessages } from '../src/mind/prompt.ts';
@@ -171,6 +171,75 @@ test('advisory 只压被降级的版本：同名候选改写后重新获得自�
     st.advisory.version = '0';
     assert.equal(engine.tick(current), true, 'advisory 不再匹配当前版本时重新获得自动接手机会');
     assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-retreat-test');
+  } finally { engine.dispose(); }
+});
+
+test('advisory 只在原来冲突的技能也适用时阻拦；另一情境不锁住保命技能', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.hp = 10;
+  const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 5, name: 'zombie', kind: 'hostile', dist: 2, perception: 'seen', pos: { x: 2, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-scoped', '贴身怪时举盾后撤', '候选', { when: { hp_below: 16, hostile: { within: 6 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  book.write('water-scoped', '在水里处理怪', '水里才成立', { when: { in_water: true }, steps: [{ skill: 'look_around' }] });
+  book.write('water-scoped', '水里处理怪的窄条件候选', '候选', { when: { in_water: true, hp_below: 5 }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, zombie);
+  const waterVersion = engine.get('water-scoped', true)?.version;
+  assert.ok(waterVersion);
+  assert.ok(engine.retireCandidate('water-scoped', waterVersion!, '候选不适用'));
+  try {
+    (engine as unknown as { stats: Record<string, BehaviorStats> }).stats['shield-scoped'] = { fired: 0, ok: 0, fail: 0, lastAt: 0,
+      advisory: { since: 0, why: '和「water-scoped」来回拉锯', version: '1' } }; // 旧数据没有 with，从 why 解析
+    adapter.inWater = false;
+    assert.equal(engine.tick(current), true, '另一份技能的条件不成立，保命技能恢复自动接手');
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-scoped');
+    adapter.inWater = true;
+    const before = starts.length;
+    engine.tick(current);
+    assert.equal(starts.length, before, '原来冲突的技能也适用时仍保持只提醒');
+  } finally { engine.dispose(); }
+});
+
+test('advisory 指向的冲突技能不存在或已完全收起时，保命技能恢复自动接手', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.hp = 10;
+  const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 6, name: 'zombie', kind: 'hostile', dist: 2, perception: 'seen', pos: { x: 2, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-orphan', '贴身怪时举盾后撤', '候选', { when: { hp_below: 16, hostile: { within: 6 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, zombie);
+  try {
+    (engine as unknown as { stats: Record<string, BehaviorStats> }).stats['shield-orphan'] = { fired: 0, ok: 0, fail: 0, lastAt: 0,
+      advisory: { since: 0, why: '和「已经不在的技能」来回拉锯', version: '1', with: '已经不在的技能' } };
+    assert.equal(engine.tick(current), true);
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-orphan');
+  } finally { engine.dispose(); }
+});
+
+test('advisory 不会被不会自动接手的普通候选锁住', () => {
+  const adapter = new FakeAdapter(), bus = new EventBus();
+  adapter.hp = 10;
+  adapter.inWater = true;
+  const zombie: Senses = { ...noSenses, perceivedEntities: () => [{ id: 7, name: 'zombie', kind: 'hostile', dist: 2, perception: 'seen', pos: { x: 2, y: 64, z: 0 } } as EntityInfo] };
+  const starts: Step[] = [];
+  const current = { id: 'task', planVersion: 1, skill: 'mine_cell', args: {}, source: 'llm', progress: 0, note: '', startedAt: Date.now(), deadline: Date.now() + 30000, movement: false } as TaskInfo;
+  const arbiter = { paused: false, info: () => current, on() {}, off() {},
+    start: (step: Step, source: TaskSource) => { starts.push(step); return { ...current, id: 'learned', skill: step.skill, args: step.args, source }; } } as unknown as Arbiter;
+  const book = new SkillBook(null, tmp());
+  book.write('shield-vs-idle', '贴身怪时举盾后撤', '候选', { when: { hp_below: 16, hostile: { within: 6 } }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  book.write('idle-partner', '只在水里看的候选', '候选', { when: { in_water: true }, steps: [{ skill: 'look_around' }] }, { candidate: true });
+  const engine = new BehaviorEngine(book, adapter, arbiter, bus, zombie);
+  try {
+    (engine as unknown as { stats: Record<string, BehaviorStats> }).stats['shield-vs-idle'] = { fired: 0, ok: 0, fail: 0, lastAt: 0,
+      advisory: { since: 0, why: '和「idle-partner」来回拉锯', version: '1', with: 'idle-partner' } };
+    assert.equal(engine.tick(current), true);
+    assert.equal((starts.at(-1)?.args as { name: string }).name, 'shield-vs-idle');
   } finally { engine.dispose(); }
 });
 
