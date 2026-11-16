@@ -1,6 +1,7 @@
 import { DIRS } from '../perception/perception.ts';
 import { facingOfYaw } from '../perception/local.ts';
 import { isTreeSaplingItem } from '../perception/surroundings.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { AbortedError, dist3, sleep, throwIfAborted, yawDelta } from '../util.ts';
 import type { DriveKeys, EntityInfo, Vec3Like } from '../adapter/types.ts';
 import { sighted, yawOfDir } from './movement.ts';
@@ -212,7 +213,7 @@ export const useItem: Skill<{ item: string; on: string | Vec3Like; dir?: string 
       if (!target) {
         // on 写的是生物（牛、猪、羊……）不是方块：拿着东西右键生物就是 interact
         const on = args.on;
-        const creature = !fluid && senses.perceivedEntities(32).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, on));
+        const creature = !fluid && senses.perceivedEntities(SENSE_ENTITY_RADIUS).some((e) => e.kind !== 'item' && e.perception !== 'heard' && matchesEntity(e.name, on));
         if (creature) return interact.run(ctx, { entity: on, with: args.item });
         if (collectSource && hadSurface) return fail('NOT_FOUND', `附近能看见的 ${args.on} 都是流动的，没有源方块（空桶只能从源方块取）；去源头装，或自己倒一桶水先造源`);
         if (stale.length) {
@@ -292,7 +293,7 @@ export const interact: Skill<{ entity: string | number; with?: string }> = {
     const served = (e: EntityInfo) => !!args.with && servedWith.has(`${e.id}:${args.with}`);
     const find = () => {
       senses.refresh();
-      return senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && e.perception !== 'heard' && (typeof args.entity === 'number' ? e.id === args.entity : matchesEntity(e.name, args.entity)))
+      return senses.perceivedEntities(SENSE_ENTITY_RADIUS).filter((e) => e.kind !== 'item' && e.perception !== 'heard' && (typeof args.entity === 'number' ? e.id === args.entity : matchesEntity(e.name, args.entity)))
         .sort((a, b) => Number(served(a)) - Number(served(b)) || a.dist - b.dist)[0];
     };
     let target = find();
@@ -306,7 +307,7 @@ export const interact: Skill<{ entity: string | number; with?: string }> = {
         await adapter.moveTo({ kind: 'follow_entity', entityId: targetId, range: 2 }, { signal, timeoutMs: 15000 });
         await sleep(150, signal);
         senses.refresh();
-        const current = senses.perceivedEntities(32).find((e) => e.id === targetId && e.perception !== 'heard');
+        const current = senses.perceivedEntities(SENSE_ENTITY_RADIUS).find((e) => e.id === targetId && e.perception !== 'heard');
         if (!current) return fail('TARGET_GONE', `走近后看不见原来的实体 ${targetId}，未改选其他实体`);
         target = current;
         if (target.dist > 3) return fail('PATH_NOT_FOUND', `尚未走到 ${target.name} 的交互范围内`, { entityId: targetId, pos: target.pos });

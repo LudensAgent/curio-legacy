@@ -1,4 +1,5 @@
 import type { Vec3Like } from '../adapter/types.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { facingOfYaw, feetCell, toWorld, type Facing } from '../perception/local.ts';
 import type { SkillCtx } from './types.ts';
 
@@ -321,7 +322,7 @@ export function constrainRecoveryAction(ctx: SkillCtx, name: string, values: Rec
     if (name === 'defend' && original.target !== undefined && args.target !== original.target) throw new Error('恢复必须保留原目标种类');
     if (scope.skill === 'defend' && typeof original.target === 'string' && typeof id === 'number') {
       ctx.senses.refresh();
-      const target = ctx.senses.perceivedEntities(32).find((entity) => entity.id === id && entity.perception !== 'heard');
+      const target = ctx.senses.perceivedEntities(SENSE_ENTITY_RADIUS).find((entity) => entity.id === id && entity.perception !== 'heard');
       if (!target || target.name !== original.target) throw new Error('当前没有看见符合原种类的实体，恢复不能改打其他目标');
     }
   }

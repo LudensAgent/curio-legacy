@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BlockObservation } from '../src/adapter/types.ts';
-import { makeBridge, visibleActionSenses } from '../src/codeskills/bridge.ts';
+import { API_DOC, makeBridge, visibleActionSenses } from '../src/codeskills/bridge.ts';
 import { localMap } from '../src/perception/local.ts';
 import { Vision } from '../src/perception/vision.ts';
 import { FakeAdapter } from './fake-adapter.ts';
@@ -21,6 +21,23 @@ test('delegated primitives cannot turn remembered ores into current unseen block
   visible = true;
   assert.deepEqual(senses.knownBlocks(['diamond_ore'], 32), remembered);
   assert.deepEqual(ctx.senses.knownBlocks(['diamond_ore'], 32), remembered, '历史记忆仍保留，当前视觉与记忆不同');
+});
+
+test('entities uses the body sense radius and API doc states the lava guard/unsafe pair', async (t) => {
+  const adapter = new FakeAdapter();
+  const seen: number[] = [];
+  const ctx = makeCtx(adapter, { senses: { perceivedEntities: (radius: number) => { seen.push(radius); return []; } } });
+  t.after(() => ctx.memory.close());
+  const api = makeBridge(ctx);
+  assert.deepEqual(await api('entities', [48]), []);
+  assert.deepEqual(await api('entities', [999]), []);
+  const move = await api('move', [{ forward: true }, 200, { face: 7 }]) as { ok: boolean };
+  const shoot = await api('shoot', [7]) as { ok: boolean };
+  assert.equal(move.ok, false);
+  assert.equal(shoot.ok, false);
+  assert.ok(seen.length >= 4 && seen.every((radius) => radius === 48), '实体查询和按 ID 行动统一用 48 格，不再有 32 格旧上限');
+  assert.match(API_DOC, /api\.entities\(半径≤48\)/);
+  assert.match(API_DOC, /stopped:"lava"[\s\S]*\{unsafe:true\}/);
 });
 
 test('blockAt and region share visual observations; hidden names and geometry remain unknown', async (t) => {

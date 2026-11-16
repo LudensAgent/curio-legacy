@@ -1,4 +1,5 @@
 import { dist3 } from '../util.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { DIRS } from '../perception/perception.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
@@ -60,14 +61,14 @@ export const tossItem: Skill<{ item: string; count: number | null; sourceSlot?: 
       if (args.to) {
         const match = (n: string) => n === args.to || n.endsWith(`_${args.to}`) || n.replace(/^player:/, '') === args.to;
         senses.refresh();
-        const target = senses.perceivedEntities(32).filter((e) => e.kind !== 'item' && match(e.name)).sort((a, b) => a.dist - b.dist)[0];
+        const target = senses.perceivedEntities(SENSE_ENTITY_RADIUS).filter((e) => e.kind !== 'item' && match(e.name)).sort((a, b) => a.dist - b.dist)[0];
         if (!target) return fail('NOT_FOUND', `看不见 ${args.to}，没有扔`);
         if (target.dist > 3) {
           ctx.progress(0.3, `走到 ${target.name} 旁边`);
           await adapter.moveTo({ kind: 'near', pos: target.pos, range: 2 }, { signal, timeoutMs: Math.max(5000, ctx.deadline - Date.now() - 5000) });
         }
         senses.refresh();
-        const now = senses.perceivedEntities(32).find((e) => e.id === target.id) ?? target;
+        const now = senses.perceivedEntities(SENSE_ENTITY_RADIUS).find((e) => e.id === target.id) ?? target;
         if (dist3(adapter.state().pos, now.pos) > 6) return fail('PATH_NOT_FOUND', `走不到 ${target.name} 跟前，没有扔`);
         face = now.pos;
         toName = now.name;

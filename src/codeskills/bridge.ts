@@ -3,6 +3,7 @@ import type { EventBus } from '../events.ts';
 import { facingOfYaw, feetCell } from '../perception/local.ts';
 import { dirName } from '../perception/perception.ts';
 import { AIR_BLOCKS, isSoftBlock, LIQUID_BLOCKS } from '../perception/surroundings.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { SKILLS } from '../skills/index.ts';
 import { LLM_HIDDEN } from '../skills/index.ts';
 import { constrainRecoveryAction, worldPoint } from '../skills/recovery.ts';
@@ -23,7 +24,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.state() → {pos, feet:{x,y,z}, feetBlock, headBlock, bodyPortal, hp, food, oxygen, onGround, inWater, inLava, isDay, dim, yaw, facing, held, riding（载具名或 null）, inventory:[{name,count}]}；feetBlock/headBlock 形如 {name, kind}（与 blockAt 同一 kind 口径），bodyPortal 为方块名或 null；三者都是触觉事实（adapter 直接读身体占据格，不受视野限制，站在门方块里时为 nether_portal）
 - api.blockAt(x,y,z) → {name, kind}；kind = open（无整身碰撞盒：空气、草、雪层、地毯等）| solid | liquid | unknown；open 不等于空格：雪层、地毯仍占据该格，并可能提供较低的站立顶面；只读取身边 48 格内当前视野可见的格子。遮挡、视野外、黑暗或未加载时返回 {name:null,kind:"unknown"}，不透露隐藏的矿、液体或洞穴；先用 api.lookAt 转头，再读取。unknown 不能当空气或实心。要挖/迈身边的格子，直接用 digAt/stepTo（它们自己会转头、处理遮挡、如实回报），别先 blockAt 预检再因为 unknown 就 throw——紧邻格没转头时 blockAt 常返回 unknown，只代表还没看清，不代表没法处理
 - api.region(x1,y1,z1,x2,y2,z2) → {min, size:[sx,sy,sz], palette:[名字或"?"], kinds:[同上], data:[下标]}；第 i 格：i = (y-min.y)*sx*sz + (z-min.z)*sx + (x-min.x)；最多 40000 格；与 blockAt 共用当前可见观测，未知格为 "?"/unknown，记忆不能冒充当前观测
-- api.entities(半径≤32) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标。when.hostile 同样匹配听见的怪——按位置/ID 行动时 when 写 seen:true，或在代码里处理 heard
+- api.entities(半径≤${SENSE_ENTITY_RADIUS}) → 看见的实体 [{id,name,kind,dist,pos,how:"seen",fusing?}]（kind=item 的是掉落物，name 形如 item:cobblestone）；只听见的返回 {name,kind,how:"heard",dir,dist,fusing?}，没有精确位置或实体id，距离约两格精度，只能据此决定转头或搜索。挥击、射击、跟踪和 api.act 的实体动作只能选择当前看见的目标。when.hostile 同样匹配听见的怪——按位置/ID 行动时 when 写 seen:true，或在代码里处理 heard
 - api.drops(半径≤32) → 地上的掉落物 [{id,item,count?,pos,dist,seen,ageSec?}]：seen=true 是眼前看得见的；seen=false 是刚才亲眼见过、现在不在视野里（记得的位置，ageSec 秒前）。扔完东西核对“走开了没有、有没有被捡回来”就看这个
 - api.nearestLand() → 最近候选干地经当前视野确认后返回 {stand:{x,y,z} 站上去时脚的位置, dir, dist, dy 比脚高几格} 或 null（支撑为实心、上面两格为空气、不是水底）；历史位置或被遮挡的位置不能当作已确认落点，null 不代表四周一定没有陆地
 - api.stepTo(x,y,z) 迈到相邻一格（平走、上一级、下一级；一次只迈一格，不能跨多格；陆上不自动改成更低的落点，水中可朝岸爬出）｜api.digAt(x,y,z, {wet:true,lava:true,fall:true}?)（旁边有液体默认不挖；wet:true 接受进水，lava:true 接受进岩浆；fall:true 接受移除脚下支撑后的坠落风险，三项分别显式选择，恢复不能追加原委托未授权的风险）｜api.placeAt(x,y,z,"方块名|any") → {ok,code,summary,data?}；检查 ok 和失败原因，stepTo 的 data 可包含实际位置、目标格及未确认支撑的位置和已观察方块（null 表示未看清）。迈步的「支撑」按当前碰撞形状判断：整块、上下半砖、雪层、地毯都能站（实际脚高按它们的顶面，半砖半格、雪层更矮，不取整）；火把、花草这类没有碰撞盒的方块不挡路也不提供支撑，会看它下面那格的顶面；门开着可穿、关着挡路。缺支撑或脚高与请求不符就如实报出支撑格，不会自动补块或改落点。同一次代码技能里，api.stepTo 或 api.act("move_step") 失败后，下一步“相对 at”的 mine_cell/place_cell/place_support 会按错误站位解析，会被直接拒绝并提示先确认实际站位；绝对 xyz 的 digAt/placeAt 仍按原目标执行。placeAt 会填空气格，也会替换可替换的植物（草/花/树苗等）和液体；目标格被不可替换的方块（含雪层、地毯、火把、半砖、门）占住时只如实报占用，不把错误材料当完成
@@ -32,7 +33,7 @@ export const API_DOC = `代码是一个 async 函数体，参数 api 和 args �
 - api.look(yaw,pitch)｜api.lookAt(x,y,z)｜api.sleep(毫秒≤5000)｜api.log(…) 记一句给自己看｜api.progress(0..1)
 身体的细动作（打架、走位、躲闪都靠这些拼，怎么打由这些细动作组合）：
 - api.move({forward,back,left,right,jump,sprint,sneak}, 毫秒 50–1000 的整数, {face: 实体id 或 [x,y,z]}?) 按住这些键一小会儿，期间一直盯着 face（实体：直视；坐标点：只水平朝向它、平视，贴近 0.3 格内不再转身） → {ok, moved 走了几格, stopped?: "lava"|"cliff"}；时长超出 50–1000 会报参数错误（press_keys 的 50–10000 是另一个入口的上限，两者不共用）；
-  前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；{unsafe:true} 关掉这个保护
+  前面是岩浆/火或一脚会摔 4 格以上，身体会自己停下（ok=false）；保护检查朝前 0.7 格的格子和脚下落差，不读身体所在格，所以身处岩浆但前方已确认是干地时可能直接放行。被保护挡下时返回 stopped:"lava"|"cliff"；{unsafe:true} 可关掉保护（同时不再拦悬崖/坠落），风险由调用方承担
 - api.attack(实体id) 朝它挥一下（4 格内才打得到）→ {ok, sinceLastMs 距上次挥了多久}；挥得太勤伤害很低：剑约 625ms、斧约 1000ms、空手 250ms 才恢复满
 - api.equip(物品名或null, "hand"|"off-hand"|"head"|"torso"|"legs"|"feet", {sourceSlot}?) 指定现有槽位可区分同名物品；null 清空该装备位。api.act("inspect_inventory",{}) 查看槽位、附魔、名称和NBT｜api.shield(true/false) 举起/放下副手的盾（要先把 shield equip 到 off-hand；举着时走得慢、挡正面的近战和箭）
 - api.draw("bow"|"crossbow"|"trident") 开始蓄力 → api.release([x,y,z]?) 转向那一点松手 → {ok, chargedMs}；弓蓄 1000ms 以上才是满力，远处要往上抬（箭会下坠）
@@ -200,7 +201,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         return { min, size, palette, kinds, data };
       }
       case 'entities': {
-        const r = Math.max(1, Math.min(32, Number(a[0]) || 16));
+        const r = Math.max(1, Math.min(SENSE_ENTITY_RADIUS, Number(a[0]) || 16));
         const r2 = (v: number) => Math.round(v * 100) / 100;
         ctx.senses.refresh();
         const here = ctx.adapter.state().pos;
@@ -312,7 +313,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
         if (typeof face === 'number') {
           constrainRecoveryAction(ctx, 'hit_entity', { entity: face });
           ctx.senses.refresh();
-          if (!ctx.senses.perceivedEntities(32).some((e) => e.id === face && e.perception !== 'heard')) return { ok: false, moved: 0, error: '看不见这个实体，不能精确跟踪；先转头确认' };
+          if (!ctx.senses.perceivedEntities(SENSE_ENTITY_RADIUS).some((e) => e.id === face && e.perception !== 'heard')) return { ok: false, moved: 0, error: '看不见这个实体，不能精确跟踪；先转头确认' };
         }
         const r = await need(ctx.adapter.drive?.bind(ctx.adapter), 'move')(keys, ms, ctx.signal, {
           ...(typeof face === 'number' ? { faceEntity: face } : face !== undefined ? { facePoint: point(face, 'face') } : {}), guard: o.unsafe !== true });
@@ -353,7 +354,7 @@ export function makeBridge(ctx: SkillCtx): SandboxHandler {
       case 'shoot': {
         constrainRecoveryAction(ctx, 'hit_entity', { entity: Number(a[0]) });
         ctx.senses.refresh();
-        if (!ctx.senses.perceivedEntities(32).some((e) => e.id === Number(a[0]) && e.perception !== 'heard')) return { ok: false, code: 'NOT_FOUND', error: '看不见这个实体，不能精确瞄准；先转头确认' };
+        if (!ctx.senses.perceivedEntities(SENSE_ENTITY_RADIUS).some((e) => e.id === Number(a[0]) && e.perception !== 'heard')) return { ok: false, code: 'NOT_FOUND', error: '看不见这个实体，不能精确瞄准；先转头确认' };
         const r = await need(ctx.adapter.rangedAttack?.bind(ctx.adapter), 'shoot')(Number(a[0]), ctx.signal);
         return { ok: r.ok, ...(r.reason ? { code: r.reason } : {}) };
       }

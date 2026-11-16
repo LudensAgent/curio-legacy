@@ -1,4 +1,5 @@
 import { DIR_OFFSETS, surroundings } from '../perception/surroundings.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { facingOfYaw } from '../perception/local.ts';
 import { climbUp } from './body.ts';
 import { hasPlaceable, PLACEABLE } from './survival.ts';
@@ -114,7 +115,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       return hits.length > shown.length ? `${shown.join('、')} 等 ${hits.length} 处` : shown.join('、');
     };
     // 未指定 for 时给出扫描后仍在视野里的实体稳定引用；block 目标请用 for 精确查找。
-    const visibleNow = () => ctx.senses.perceivedEntities(32)
+    const visibleNow = () => ctx.senses.perceivedEntities(SENSE_ENTITY_RADIUS)
       .filter((entity) => entity.perception !== 'heard')
       .slice(0, 8)
       .map((entity) => ({ id: entity.id, name: entity.name, pos: { ...entity.pos }, dist: Math.round(entity.dist) }));

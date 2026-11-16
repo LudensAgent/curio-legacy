@@ -1,5 +1,6 @@
 import type { GuiContainerObservation, GuiOp, GuiTarget, GuiView, TradeView, Vec3Like } from '../adapter/types.ts';
 import { dist3 } from '../util.ts';
+import { SENSE_ENTITY_RADIUS } from '../perception/vision.ts';
 import { glanceAt, inspectBlock } from './observation.ts';
 import { codeFromError, fail, isAbort, obj, ok, type Skill } from './types.ts';
 import { resolveItemAlias } from './work.ts';
@@ -92,7 +93,7 @@ export const useGui: Skill<{ target: string | Vec3Like | { entityId: number }; o
       else if (typeof args.target === 'object' && 'entityId' in args.target) {
         const id = args.target.entityId;
         senses.refresh();
-        if (!senses.perceivedEntities(32).some((e) => e.id === id && e.perception !== 'heard')) return fail('NOT_FOUND', '当前看不见指定实体，未打开容器');
+        if (!senses.perceivedEntities(SENSE_ENTITY_RADIUS).some((e) => e.id === id && e.perception !== 'heard')) return fail('NOT_FOUND', '当前看不见指定实体，未打开容器');
         target = args.target;
       } else {
         const names = typeof args.target === 'string' ? [args.target, ...adapter.resolveBlockNames(args.target)] : null;
