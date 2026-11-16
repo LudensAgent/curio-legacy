@@ -36,6 +36,7 @@ import { creatureSpotsByKind, creatureSpotsNear } from '../memory/creature-spots
 import { chestLocation, isContainerLandmark } from '../memory/chest-memory.ts';
 import { noteGoneSpots, recallText } from '../memory/recollection.ts';
 import { isStructureLabel } from '../memory/structure-achievements.ts';
+import { structureConflictText, structureCoordinateConflicts, type CoordinateSource } from './coordinates.ts';
 import { EXCAVATION_CHECKPOINT_LABEL, EXCAVATION_ENTRY_LABEL } from '../skills/excavation.ts';
 /** 旧开挖入口/进度点：只是历史记录，不代表现在仍连通。 */
 const isTunnelLabel = (label: string) => label === EXCAVATION_ENTRY_LABEL || label.startsWith(EXCAVATION_CHECKPOINT_LABEL);
@@ -1076,13 +1077,25 @@ function worldKnowledge(ctx: MindContext) {
   // 同一坐标的多份历史地标（如门与门厅）只留按距离排序的第一条，旧记录仍在记忆里。
   const posKey = (pos: Vec3Like) => `${Math.round(pos.x)},${Math.round(pos.y)},${Math.round(pos.z)}`;
   const ownPos = new Set([...listedFacilities.map((f) => posKey(f.pos)), ...portalRows.map(({ e }) => posKey(e.pos))]);
-  const structures = m.landmarks().filter((l) => (l.worldId ?? 'default') === s.worldId && l.kind === 'discovery'
+  const structureRows = m.landmarks().filter((l) => (l.worldId ?? 'default') === s.worldId && l.kind === 'discovery'
     && isStructureLabel(l.label) && !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label))
     .map((l) => ({ l, here: l.dim === p.self.dim, d: Math.hypot(l.pos.x - here.x, l.pos.z - here.z) }))
     .sort((a, b) => Number(b.here) - Number(a.here) || a.d - b.d)
     .filter((entry, i, all) => all.findIndex((other) => posKey(other.l.pos) === posKey(entry.l.pos) && other.l.dim === entry.l.dim) === i)
-    .slice(0, 6)
-    .map(({ l, here, d }) => `${DIM_ZH[l.dim] ?? l.dim} ${l.label}[${l.id}] (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${here ? `${Math.round(d)}格` : '另一维度'}`);
+    .slice(0, 6);
+  const structures = structureRows
+    .map(({ l, here, d }) => `${DIM_ZH[l.dim] ?? l.dim} ${l.label}[${l.id}] 锚点 (${Math.round(l.pos.x)},${Math.round(l.pos.y)},${Math.round(l.pos.z)}) ${here ? `${Math.round(d)}格` : '另一维度'}`);
+  // 计划/议程里的坐标与已发现结构锚点不一致时，只列事实和来源，不改写 Agent 的目标。
+  // 只看主目标、未完成的清单步骤和启用中的做法；已勾掉的步骤是历史，不再当作当前目的地。
+  const structureSources: CoordinateSource[] = [
+    ...(ctx.plan ? [
+      { source: 'plan.goal', text: ctx.plan.goal },
+      ...ctx.plan.steps.filter((step) => !step.done).map((step) => ({ source: 'plan.step', text: step.text })),
+      ...(ctx.plan.methods ?? []).filter((method) => method.status === 'active').map((method) => ({ source: 'plan.method', text: method.text })),
+    ] : []),
+    ...ctx.self.agenda().map((item) => ({ source: `agenda ${item.id}`, text: item.text })),
+  ];
+  const structureConflicts = structureCoordinateConflicts(structureRows.map(({ l }) => l), structureSources);
   const places = marks.filter((l) => !isStructureLabel(l.label) && !FACILITY_LABELS.has(l.label) && !isTunnelLabel(l.label) && !(l.kind === 'resource' && isResourceBlock(l.label)) && l.kind !== 'herd'
     && !ownPos.has(posKey(l.pos)))
     .map((l) => isContainerLandmark(l.label) ? { ...l, ...chestLocation(l) } : { ...l, radius: 0, precise: true })
@@ -1187,7 +1200,8 @@ function worldKnowledge(ctx: MindContext) {
     ...(Object.keys(herds).length ? { animal_spots: herds } : {}),
     ...(structures.length ? {
       known_structures: structures,
-      known_structures_note: '亲眼发现/达成并记下的结构位置，带维度；只是历史观测，结构是否仍在、现在能否到达要现场核实。不同维度的坐标只作记忆，不能在当前维度直接走。计划或议程里的近似坐标若与这里不同，先核对，不要把死亡地点当成结构位置。',
+      known_structures_note: '结构条目是亲眼发现/达成时记下的锚点（目击位置，不是结构中心或确切落脚点），带维度；是否仍在、现在能否到达要现场核实。travel_to 可直接把 [id] 当作 to，range 是你接受的接近半径（不是把锚点当脚点）。不同维度的坐标只作记忆，不能在当前维度直接走。计划或议程里的坐标若与锚点不一致，会列在 structure_coordinate_conflicts；以哪一处为目的由你核对，不要把死亡地点当成结构位置。',
+      ...(structureConflicts.length ? { structure_coordinate_conflicts: structureConflicts.map(structureConflictText) } : {}),
     } : {}),
     ...(ctx.tier === 'glance' && untouched.length ? { unexplored_near: `身边 8 个方向在 32–128 格各抽 7 个采样环，这些方向的到访记录很少（不到四分之一，不分地上地下）：${untouched.join('、')}；只是抽样到访记录，不代表没去过、没有东西、看全或现在能走` } : {}),
     ...(ctx.tier === 'glance' && nearbyFacilities.length ? { nearby_facilities: nearbyFacilities } : {}),
