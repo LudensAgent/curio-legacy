@@ -259,7 +259,7 @@ export const buildPortal: Skill<{ origin: Vec3Like; axis: 'x' | 'z'; allowTower:
 };
 
 export const observePortal: Skill<{}> = {
-  name: 'observe_portal', description: '记录亲眼见过且当前能核对的下界门或末地门；不会猜测另一端的位置。', argsDoc: '{}', timeoutMs: 15000, movement: false,
+  name: 'observe_portal', description: '记录亲眼见过且当前能核对的下界门或末地门；不会猜测另一端的位置。只记录已激活的门方块：未点燃的黑曜石框不是门（框规则查 knowledge:obsidian-and-portal-building）', argsDoc: '{}', timeoutMs: 15000, movement: false,
   validate: () => ({ ok: true, args: {} }),
   async run(ctx) {
     ctx.senses.refresh();
@@ -301,8 +301,8 @@ export const observePortal: Skill<{}> = {
     }
     if (!portal) {
       return fail('NOT_FOUND', remembered.length
-        ? `记得附近有门（${remembered.length} 处），转头看了 ${turned} 处，这次视野仍核对不到门方块（可能被挡住或已不在）`
-        : '附近没有已观察并能核对的传送门', { remembered: remembered.slice(0, 3), turned });
+        ? `记得附近有门（${remembered.length} 处），转头看了 ${turned} 处，这次视野仍核对不到门方块（可能被挡住或已不在）；未点燃的黑曜石框不是门（框规则查 knowledge:obsidian-and-portal-building）`
+        : '附近没有已观察并能核对的传送门；未点燃的黑曜石框不是门（框规则查 knowledge:obsidian-and-portal-building）', { remembered: remembered.slice(0, 3), turned });
     }
     // 身体 AABB 压着的门方块才是“我在门里”的触觉事实；优先用适配器按 AABB 算出的字段，
     // 拿不到时退回脚/头两格（end_gateway 不靠身体接触触发，不算）。
@@ -330,9 +330,17 @@ async function traverse(ctx: SkillCtx, endpoint: PortalEndpoint) {
   try {
     const nowBlock = adapter.blockAt(endpoint.pos);
     if (nowBlock !== endpoint.kind) {
-      return fail('NOT_FOUND', `门方块现在的实际方块是 ${nowBlock ?? '未加载'}，不是记录时的 ${endpoint.kind}（记录于 ${portalAgeText(endpoint.observedAt)}）`, {
+      // 直接读到门方块位置上的实际方块，是当前观测：门不在就作废这条记录，
+      // 不再让 recall/observe_portal 把它当成“记录里仍是门方块”反复使用。
+      // 未加载（null）只说明看不了，不能据此判定门已消失。
+      const invalidated = nowBlock != null;
+      if (invalidated) {
+        ctx.memory.markGone(endpoint.kind, endpoint.dim, endpoint.pos, nowBlock);
+        ctx.memory.markGone(`${PORTAL_LABEL[endpoint.kind]} ${endpoint.id}`, endpoint.dim, endpoint.pos, nowBlock);
+      }
+      return fail('NOT_FOUND', `门方块现在的实际方块是 ${nowBlock ?? '未加载'}，不是记录时的 ${endpoint.kind}（记录于 ${portalAgeText(endpoint.observedAt)}）${invalidated ? '；已作废这条门记录，不再列为可用门' : '；那片没加载，不能确认门已消失'}`, {
         portalId: endpoint.id, pos: endpoint.pos, expected: endpoint.kind, actual: nowBlock,
-        portalObserved: endpoint.portalObserved, observedAt: endpoint.observedAt,
+        portalObserved: endpoint.portalObserved, observedAt: endpoint.observedAt, invalidated,
       });
     }
     ctx.setStationaryWait?.(true);

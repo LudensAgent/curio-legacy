@@ -691,7 +691,12 @@ test('stale portal endpoint reports the actual block and record age, not a frame
   assert.match(outcome.result.summary, /记录于/);
   assert.doesNotMatch(outcome.result.summary, /黑曜石框/);
   assert.equal(outcome.result.data?.actual, 'air');
+  assert.equal(outcome.result.data?.invalidated, true);
+  assert.match(outcome.result.summary, /已作废这条门记录/);
+  assert.equal(travelStore(memory).snapshot(adapter.worldId).endpoints.length, 0, '作废后不再列为可用门');
 
+  // 另记一座仍然存在的门，确认 knownPortals 仍会列出门方块曾被实际观察到的端点。
+  travelStore(memory).observe(adapter.state(), { x: 5, y: 64, z: 0 }, 'nether_portal');
   const missing = await run('travel_portal', { portalId: 'portal_missing' });
   assert.match(missing.result.summary, /门方块曾实际观察到/);
   assert.match(missing.result.summary, /记录于/);
