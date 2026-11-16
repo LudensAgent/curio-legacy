@@ -46,6 +46,8 @@ interface SelfData {
   taskFacts?: TaskFacts;
   /** 查过的外部资料摘录：跨重启保留，供之后的思考和回想对照；不是当前世界事实。 */
   knowledgeFacts?: KnowledgeFact[];
+  /** 已经跑过的一次性数据修正（防止每次重启重复改历史文本）。 */
+  patches?: string[];
 }
 
 export interface KnowledgeFact {
@@ -333,7 +335,36 @@ export class SelfModel {
       const cleaned = cleanNeeds(this.data.plan.needs);
       if (cleaned?.length) this.data.plan.needs = cleaned; else delete this.data.plan.needs;
     }
+    this.applyDataPatches();
     if (file) { this.timer = setInterval(() => this.flush(), 5000); this.timer.unref?.(); }
+  }
+
+  /**
+   * 一次性数据修正：旧议程把“被烈焰人烧死的地点”写成了下界要塞坐标，
+   * 后来发现真实暗红砖位置是 (219,60,-224)。只改仍活跃的议程/计划/窍门，
+   * 不改 diary/history 的历史观测；跑过之后用 patches 标记。
+   */
+  private applyDataPatches() {
+    const PATCH = 'fortress-coordinate-20261116';
+    if (this.data.patches?.includes(PATCH)) return;
+    const wrong = /(?:\(|（)?\s*(?:219|221|222)\s*,\s*60\s*,\s*(?:-262|-261)\s*(?:\)|）)?/g;
+    const fix = (text: string) => text
+      .replace(wrong, '(219,60,-224)')
+      .replace(/上次被烈焰人烧死的地点/g, '亲眼看见成片暗红砖的位置')
+      .replace(/被烈焰人烧死的地方/g, '亲眼看见暗红砖的地方');
+    for (const item of this.data.agenda) {
+      if (item.status !== 'open' && item.status !== 'active') continue;
+      item.text = fix(item.text);
+    }
+    for (const lesson of this.data.knowHow) lesson.text = fix(lesson.text);
+    const plan = this.data.plan;
+    if (plan) {
+      plan.goal = fix(plan.goal);
+      for (const step of plan.steps) step.text = fix(step.text);
+      for (const method of plan.methods ?? []) method.text = fix(method.text);
+    }
+    this.data.patches = [...(this.data.patches ?? []), PATCH];
+    this.touch();
   }
 
   private touch() { this.dirty = true; }
