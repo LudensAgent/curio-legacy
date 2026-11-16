@@ -1102,6 +1102,23 @@ for (const s of [
   assert.ok(!w.bus.recent().some((e) => e.type === 'attempt_end' && /replaced|abandoned/.test(e.msg)), '没有记成换掉/放弃');
 });
 
+test('紧急活动结束但人还在水里/缺氧：不恢复原活动，先交回心智脱险', async (t) => {
+  const w = fixture(t);
+  await w.tick();
+  await w.reply(0, { monologue: '砍树', decision: 'new', activity: { what: '砍树', steps: [step()] } });
+  w.mind.attention.notice('danger', '有危险', 0.9);
+  (w.mind as any).lastThoughtAt = 0;
+  await w.tick();
+  await w.reply(1, { monologue: '先躲', decision: 'switch', activity: { what: '躲开', steps: [step(2)] } });
+  assert.equal(w.mind.activity?.what, '躲开');
+  w.adapter.inWater = true;
+  w.adapter.oxygen = 5;
+  await w.finish(ok('换了口气'));
+  assert.equal(w.mind.activity, null, '危险未解除时不把原活动交回手上');
+  assert.ok(w.mind.suspended.some((a) => a.what === '砍树'), '原活动仍挂起，等安全后再复核');
+  assert.ok(!w.bus.recent().some((e) => e.type === 'activity_start' && /回到/.test(e.msg)), '没有恢复原活动');
+});
+
 test('已挂着的操作者指令这一念写 doing：照做，不受紧急挂起限制', async (t) => {
   const w = fixture(t);
   await w.tick();

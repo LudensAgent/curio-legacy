@@ -1196,8 +1196,18 @@ export class Mind {
     if (outcome === 'done' && record.completion !== 'condition' && (gains || record.durationSec > 90) && Date.now() - this.lastDiaryAt > this.timing.diaryGapMs) this.diary(`${a.what}${gains ? `，得到 ${gains}` : ''}`);
     // 绕路的事做完了：回到被打断的那段活
     if (outcome === 'done' || outcome === 'unmet' || outcome === 'stuck') {
-      const resume = this.suspended.pop();
+      const resume = this.suspended.at(-1);
       if (resume) {
+        // 紧急避险结束不等于危险解除：人还在水里/岩浆里或氧气见底时，
+        // 不把暂停的钓鱼/采集活动自动恢复回手上，否则会一边溺水一边“回到刚才的事”。
+        const now = this.d.adapter.state();
+        const danger = now.inWater || now.inLava || now.oxygen < 8;
+        if (danger) {
+          const why = now.inWater ? '还在水里' : now.inLava ? '还在岩浆里' : `氧气只剩 ${now.oxygen}/20`;
+          this.requestThink(`紧急避险结束了，但身体${why}；原来放下的「${resume.what}」暂不恢复，先决定怎么脱险`, 'deliberate');
+          return;
+        }
+        this.suspended.pop();
         this.activity = resume;
         this.activityThoughtAt = Date.now();
         this.d.bus.publish('activity_start', 'P2', `回到：${resume.what}`, { activity: describeActivity(resume, state, this.safe(() => this.d.perception.snapshot(), undefined)) });
