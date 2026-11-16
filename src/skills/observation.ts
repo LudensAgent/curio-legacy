@@ -15,8 +15,8 @@ export async function glanceAt(ctx: SkillCtx, pos: Vec3Like) {
 
 export const inspectBlock: Skill<{ target: string | Vec3Like }> = {
   name: 'inspect_block',
-  description: '只读查看当前视野内指定方块的实际名称和属性（如门的 open、作物 age）；遮挡或视野外返回未知',
-  argsDoc: '{"target":"<方块名>" | {"x":整数,"y":整数,"z":整数}}',
+  description: '只读查看当前视野内指定方块的实际名称和属性（如门的 open、作物 age）；给方块名时返回这次视野里所有可见位置（最多 16 处，positions），用来判断门框/结构形状；给坐标时只看那一格。遮挡或视野外返回未知',
+  argsDoc: '{"target":"<方块名>" | {"x":整数,"y":整数,"z":整数}}；方块名回执含 positions 数组',
   timeoutMs: 3000,
   movement: false,
   readOnly: true,
@@ -31,15 +31,25 @@ export const inspectBlock: Skill<{ target: string | Vec3Like }> = {
   async run(ctx, args) {
     if (!ctx.senses.observeBlocks) return fail('NOT_FOUND', '当前感官没有提供可见方块状态，不能凭坐标读取');
     ctx.senses.refresh();
+    const names = typeof args.target === 'string' ? [args.target, ...ctx.adapter.resolveBlockNames(args.target)] : [];
     const positions = typeof args.target === 'string'
-      ? ctx.senses.knownBlocks([args.target, ...ctx.adapter.resolveBlockNames(args.target)], 32).slice(0, 16).map((b) => b.pos)
+      ? ctx.senses.knownBlocks(names, 32).slice(0, 16).map((b) => b.pos)
       : [args.target];
-    let observed = ctx.senses.observeBlocks(positions)[0];
+    const observe = () => ctx.senses.observeBlocks?.(positions) ?? [];
+    let observed = observe();
     // 不在视野里（在身后、头顶、脚下）：先转头看过去再说，不要直接说看不见
-    if (!observed && positions[0]) { await glanceAt(ctx, positions[0]); observed = ctx.senses.observeBlocks(positions)[0]; }
-    if (!observed) return fail('NOT_FOUND', '转头看过去也没看见：被挡住、太暗、太远或区块没加载；状态仍未知（空气格本身看不见，只能看到它周围）');
-    return ok(`看见 ${observed.name} 在 ${observed.pos.x},${observed.pos.y},${observed.pos.z}，属性 ${JSON.stringify(observed.properties)}`,
-      { target: observed.name, pos: observed.pos, actual: observed, effectEvidence: { verified: true, changed: false, reasons: ['只读视觉观测'] } });
+    if (!observed.length && positions[0]) { await glanceAt(ctx, positions[0]); observed = observe(); }
+    if (!observed.length) return fail('NOT_FOUND', '转头看过去也没看见：被挡住、太暗、太远或区块没加载；状态仍未知（空气格本身看不见，只能看到它周围）');
+    const actual = observed[0], listed = observed.slice(0, 16);
+    const observedData = listed.map((block) => ({ name: block.name, pos: block.pos, properties: block.properties }));
+    const effectEvidence = { verified: true, changed: false, reasons: ['只读视觉观测'] };
+    if (listed.length === 1) {
+      return ok(`看见 ${actual.name} 在 ${actual.pos.x},${actual.pos.y},${actual.pos.z}，属性 ${JSON.stringify(actual.properties)}`,
+        { target: actual.name, pos: actual.pos, actual, positions: observedData, effectEvidence });
+    }
+    const body = listed.map((block) => `${block.name}(${block.pos.x},${block.pos.y},${block.pos.z})`).join('、');
+    return ok(`看见 ${observed.length} 处：${body}${observed.length > listed.length ? ` 等 ${observed.length} 处` : ''}；${actual.name} 属性 ${JSON.stringify(actual.properties)}`,
+      { target: actual.name, pos: actual.pos, actual, positions: observedData, effectEvidence });
   },
 };
 

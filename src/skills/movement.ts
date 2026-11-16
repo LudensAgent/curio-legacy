@@ -34,7 +34,13 @@ type SightRef = { kind: 'block'; pos: Vec3Like } | { kind: 'entity'; id: number;
 const entityIdOf = (ref?: SightRef) => ref?.kind === 'entity' ? ref.id : undefined;
 
 /** target 是否已在视野/近期记忆中：方块（log、iron_ore…）或实体（cow、sheep…）；可写 "cow|sheep" 或类别 "animal" */
-export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string; currentViewOnly?: boolean } = {}): { what: string; dist: number; key: string; pos?: Vec3Like; ref?: SightRef } | null {
+export type SightHit = { what: string; dist: number; key: string; pos?: Vec3Like; ref?: SightRef };
+
+/**
+ * 同 sighted，但返回同一批已核对候选里的全部命中（方块按位置去重，实体仍只返回一个）。
+ * 用于“看清这堆方块摆成什么形状”：只给最近一块，Agent 会把 8/10 的门框当成散块。
+ */
+export function sightedAll(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string; currentViewOnly?: boolean } = {}): SightHit[] {
   const here = ctx.adapter.state().pos;
   const sector = options.direction ? DIRS[options.direction] : null;
   const inDirection = (pos: Vec3Like) => !sector || Math.abs(Math.atan2(Math.sin(yawOfDir(pos.x - here.x, pos.z - here.z) - yawOfDir(...sector)),
@@ -50,41 +56,34 @@ export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: 
         const candidates = matches.filter((b) => inDirection({ x: b.pos.x + .5, y: b.pos.y, z: b.pos.z + .5 }));
         const hits = options.visibleOnly ? Array.from({ length: Math.ceil(candidates.length / 32) }, (_, index) =>
           ctx.senses.observeBlocks?.(candidates.slice(index * 32, (index + 1) * 32).map((b) => b.pos)) ?? []).flat() : candidates;
-        const hit = hits.find((b) => names.includes(b.name));
-        if (hit) {
-          return {
-            what: hit.name, dist: Math.round(dist3(here, hit.pos)),
-            key: `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}`,
-            pos: hit.pos, ref: { kind: 'block', pos: { ...hit.pos } },
-          };
+        const found = new Map<string, SightHit>();
+        for (const hit of hits) {
+          if (!names.includes(hit.name)) continue;
+          const key = `${hit.name}:${hit.pos.x},${hit.pos.y},${hit.pos.z}`;
+          if (!found.has(key)) found.set(key, {
+            what: hit.name, dist: Math.round(dist3(here, hit.pos)), key, pos: hit.pos, ref: { kind: 'block', pos: { ...hit.pos } },
+          });
         }
+        if (found.size) return [...found.values()];
       }
     }
     const e = ctx.senses.perceivedEntities(48).find((x) => (!options.visibleOnly || x.perception === 'seen') && inDirection(x.pos)
       && wanted.some((t) => x.name === t || x.name.replace(/^player:/, '') === t || x.name.endsWith(`_${t}`)));
-    if (e) return { what: e.name, dist: Math.round(e.dist), key: `entity:${e.id}`, pos: e.pos, ref: { kind: 'entity', id: e.id, name: e.name } };
+    if (e) return [{ what: e.name, dist: Math.round(e.dist), key: `entity:${e.id}`, pos: e.pos, ref: { kind: 'entity', id: e.id, name: e.name } }];
   }
-  return null;
+  return [];
 }
 
-/**
- * 看见的真实位置/稳定引用要进回执摘要：只有方向+距离时，模型会把方向点或自己推算的坐标
- * 误当成真实目标。实体给 id，方块给精确方块坐标。
- */
-const seenAt = (hit: { pos?: Vec3Like; ref?: SightRef }) => {
-  const parts = [
-    entityIdOf(hit.ref) === undefined ? '' : `实体 id=${entityIdOf(hit.ref)}`,
-    hit.pos ? `位置 (${Math.floor(hit.pos.x)},${Math.floor(hit.pos.y)},${Math.floor(hit.pos.z)})` : '',
-  ].filter(Boolean);
-  return parts.length ? `，${parts.join('，')}` : '';
-};
+export function sighted(ctx: SkillCtx, target: string, options: { visibleOnly?: boolean; direction?: string; currentViewOnly?: boolean } = {}): SightHit | null {
+  return sightedAll(ctx, target, options)[0] ?? null;
+}
 
 // ------------------------------------------------------------------ look_around
 export const lookAround: Skill<{ seconds: number; for?: string; direction?: string }> = {
   name: 'look_around',
   readOnly: true,
-  description: '停下来专门找东西（for），或扫描某个方向（direction）；看见就停。看见时回执给真实位置和实体 id（foundRef），方向+距离不是坐标，不要自己推算。已在视野里的目标不触发转头，扫描结束也不保证面朝扇区中心',
-  argsDoc: '{"for"?: "<要找的方块或生物>", "direction"?: "N|NE|E|SE|S|SW|W|NW", "seconds"?: 2-20}；回执的 foundPos/foundRef/visibleEntities 才是真实坐标或稳定引用；方向+距离不是坐标，不要自己推算。',
+  description: '停下来专门找东西（for），或扫描某个方向（direction）；看见就停。for 是方块时，回执列出这次视野里所有可见位置（摘要最多 16 处，foundPositions 最多 32 条），不只是最近一块，用来判断门框/结构形状；实体仍给 id 和位置。方向+距离不是坐标，不要自己推算。已在视野里的目标不触发转头，扫描结束也不保证面朝扇区中心',
+  argsDoc: '{"for"?: "<要找的方块或生物>", "direction"?: "N|NE|E|SE|S|SW|W|NW", "seconds"?: 2-20}；回执的 foundPositions/foundPos/foundRef/visibleEntities 才是真实坐标或稳定引用；方向+距离不是坐标，不要自己推算。',
   timeoutMs: 25000,
   movement: false,
   outcomeBoundary: true,
@@ -101,14 +100,26 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       .flatMap((name) => ctx.adapter.resolveBlockNames(name));
     const priorKnown = new Set([...ctx.senses.knownBlocks(names, 96).map((b) => `${b.name}:${b.pos.x},${b.pos.y},${b.pos.z}`),
       ...ctx.senses.perceivedEntities(48).map((e) => `entity:${e.id}`)]);
-    const observed = () => args.for ? sighted(ctx, args.for, { visibleOnly: true, direction: args.direction }) : null;
+    const observedHits = () => args.for ? sightedAll(ctx, args.for, { visibleOnly: true, direction: args.direction }) : [];
+    const hitsText = (hits: SightHit[]) => {
+      if (hits.length === 1) {
+        const hit = hits[0], id = entityIdOf(hit.ref);
+        return `${hit.what}（${hit.dist} 格外${id === undefined ? '' : `，实体 id=${id}`}${hit.pos ? `，位置 (${Math.floor(hit.pos.x)},${Math.floor(hit.pos.y)},${Math.floor(hit.pos.z)})` : ''}）`;
+      }
+      const shown = hits.slice(0, 16).map((hit) => {
+        const place = hit.pos ? `(${Math.floor(hit.pos.x)},${Math.floor(hit.pos.y)},${Math.floor(hit.pos.z)})` : '';
+        const id = entityIdOf(hit.ref);
+        return `${hit.what}${id === undefined ? place : `(id=${id}${place ? `，位置 ${place}` : ''})`}`;
+      });
+      return hits.length > shown.length ? `${shown.join('、')} 等 ${hits.length} 处` : shown.join('、');
+    };
     // 未指定 for 时给出扫描后仍在视野里的实体稳定引用；block 目标请用 for 精确查找。
     const visibleNow = () => ctx.senses.perceivedEntities(32)
       .filter((entity) => entity.perception !== 'heard')
       .slice(0, 8)
       .map((entity) => ({ id: entity.id, name: entity.name, pos: { ...entity.pos }, dist: Math.round(entity.dist) }));
-    const facts = (views: number, hit: ReturnType<typeof sighted> = null, visibleEntities?: ReturnType<typeof visibleNow>) => {
-      const eye = ctx.adapter.eye();
+    const facts = (views: number, hits: SightHit[] = [], visibleEntities?: ReturnType<typeof visibleNow>) => {
+      const eye = ctx.adapter.eye(), hit = hits[0];
       return { searched: views > 0, scanViews: views, turned: views > 0,
         // directionInspected 只说明扫过这个扇区；currentFacing 是扫描结束时身体的实际朝向。
         // 扫视不等于转向完成，后续按世界方向移动要显式定向。
@@ -122,13 +133,18 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
           ...(hit.pos ? { foundPos: hit.pos } : {}),
           ...(hit.ref === undefined ? {} : { foundRef: hit.ref }),
           ...(entityIdOf(hit.ref) === undefined ? {} : { foundEntityId: entityIdOf(hit.ref) }),
+          // 同一眼看到的全部位置：只给最近一块不足以看清门框/结构形状。
+          foundPositions: hits.slice(0, 32).map((h) => ({
+            name: h.what, ...(h.pos ? { pos: h.pos } : {}), dist: h.dist,
+            ...(entityIdOf(h.ref) === undefined ? {} : { entityId: entityIdOf(h.ref) }),
+          })),
           source: 'current_vision',
         } : {}),
         ...(visibleEntities !== undefined && visibleEntities.length > 0 ? { visibleEntities } : {}) };
     };
     if (args.for) {
-      const known = observed();
-      if (known) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${known.what}（${known.dist} 格外${seenAt(known)}）；没有转头，也没有新的搜索发现`, facts(0, known));
+      const hits = observedHits();
+      if (hits.length) return ok(`${args.direction ? `${args.direction} 方向` : '当前视野'}已看见 ${hits.length} 处：${hitsText(hits)}；没有转头，也没有新的搜索发现`, facts(0, hits));
     }
     // 定向：在该方向 ±75° 扇形里看 5 个角度；全向：转一圈 8 个角度
     const sector = args.direction ? DIRS[args.direction] : null;
@@ -143,8 +159,8 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
       ctx.senses.refresh();
       ctx.progress((k + 1) / yaws.length, args.for ? `寻找 ${args.for}` : '环顾四周');
       if (args.for) {
-        const f = observed();
-        if (f) return ok(`${args.direction ? `${args.direction} 方向` : '转头后'}看见 ${f.what}（${f.dist} 格外${seenAt(f)}）${priorKnown.has(f.key) ? '，是已知目标的当前观察' : '，本次新发现'}`, facts(k + 1, f));
+        const hits = observedHits();
+        if (hits.length) return ok(`${args.direction ? `${args.direction} 方向` : '转头后'}看见 ${hits.length} 处：${hitsText(hits)}${priorKnown.has(hits[0].key) ? '，是已知目标的当前观察' : '，本次新发现'}`, facts(k + 1, hits));
       }
     }
     if (!sector) ctx.senses.markSweep();
@@ -161,7 +177,7 @@ export const lookAround: Skill<{ seconds: number; for?: string; direction?: stri
     const nearby = visibleEntities?.length
       ? `；附近看见 ${visibleEntities.slice(0, 3).map((entity) => `${entity.name}(id=${entity.id}，${entity.dist} 格，位置 (${Math.floor(entity.pos.x)},${Math.floor(entity.pos.y)},${Math.floor(entity.pos.z)}))`).join('；')}${visibleEntities.length > 3 ? ` 等 ${visibleEntities.length} 个` : ''}`
       : '';
-    return ok(`${args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈'}${facingNote}${nearby}`, facts(yaws.length, null, visibleEntities));
+    return ok(`${args.direction ? `看了看 ${args.direction} 方向` : '环顾了一圈'}${facingNote}${nearby}`, facts(yaws.length, [], visibleEntities));
   },
 };
 

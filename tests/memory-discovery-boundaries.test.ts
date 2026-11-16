@@ -4,6 +4,7 @@ import type { BlockObservation } from '../src/adapter/types.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { ride } from '../src/skills/actions.ts';
 import { lookAround } from '../src/skills/movement.ts';
+import { inspectBlock } from '../src/skills/observation.ts';
 import { observePortal, travelPortal, useEndGateway } from '../src/skills/travel.ts';
 import { travelStore } from '../src/travel/store.ts';
 import { makeCtx, TestWorld } from './survival-helpers.ts';
@@ -51,6 +52,36 @@ test('a visible target after the first thirty-two historical candidates is still
   const result = await lookAround.run(ctx, { for: 'iron_ore', seconds: 2 });
   assert.equal(result.data?.found, 'iron_ore');
   assert.deepEqual(batches, [32, 1]);
+});
+
+test('look_around returns all visible positions for a block target, not just the nearest', async (t) => {
+  const { world, memory, ctx, sight } = fixture();
+  t.after(() => memory.close());
+  const positions = [{ x: 3, y: 64, z: 0 }, { x: 3, y: 65, z: 0 }, { x: 4, y: 64, z: 0 }];
+  positions.forEach((pos) => world.setBlock(pos, 'obsidian'));
+  ctx.senses.knownBlocks = (names) => names.includes('obsidian') ? positions.map((pos, index) => ({ name: 'obsidian', pos, dist: index + 1 })) : [];
+  sight.visible = true;
+  const result = await lookAround.run(ctx, { for: 'obsidian', seconds: 2 });
+  assert.equal(result.status, 'succeeded', result.summary);
+  const data = result.data as any;
+  assert.deepEqual(data?.foundPositions?.map((entry: any) => entry.pos), positions);
+  assert.match(result.summary, /obsidian\(3,64,0\)/);
+  assert.match(result.summary, /obsidian\(4,64,0\)/);
+  assert.equal(result.data?.found, 'obsidian');
+});
+
+test('inspect_block returns all visible positions for a block name', async (t) => {
+  const { world, memory, ctx, sight } = fixture();
+  t.after(() => memory.close());
+  const positions = [{ x: 3, y: 64, z: 0 }, { x: 3, y: 65, z: 0 }, { x: 4, y: 64, z: 0 }];
+  positions.forEach((pos) => world.setBlock(pos, 'obsidian'));
+  ctx.senses.knownBlocks = (names) => names.includes('obsidian') ? positions.map((pos, index) => ({ name: 'obsidian', pos, dist: index + 1 })) : [];
+  sight.visible = true;
+  const result = await inspectBlock.run(ctx, { target: 'obsidian' });
+  assert.equal(result.status, 'succeeded', result.summary);
+  const data = result.data as any;
+  assert.deepEqual(data?.positions?.map((entry: any) => entry.pos), positions);
+  assert.match(result.summary, /看见 3 处/);
 });
 
 test('look_around does not promote hearing to a precise visual discovery', async (t) => {
