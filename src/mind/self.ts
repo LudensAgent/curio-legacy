@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { shortId } from '../util.ts';
 import { applyProgress, emptyProgressLedger, progressSummary, type ProgressEntry, type ProgressInput, type ProgressLedger } from './progress-ledger.ts';
+import { refreshProvisionalMethodLimit, mergeLessonLimits, needsProvisionalMethodLimit } from './lesson-quality.ts';
 import { AGENDA_NOTE_MAX, type ActivityKind, type ActivityRecord, type AgendaItem, type DiaryEntry, type Experiment, type Habits, type KnowHow, type Mood, type Thought } from './types.ts';
 
 /** 查过的资料只留最近几条，供之后几次思考对照，不堆成资料库。 */
@@ -336,6 +337,8 @@ export class SelfModel {
       if (cleaned?.length) this.data.plan.needs = cleaned; else delete this.data.plan.needs;
     }
     this.applyDataPatches();
+    // 旧存档里没有边界的方法选择规则：补一条程序标注，供反思和主动 recall 看出它只是暂定假设。
+    if (this.data.knowHow.reduce((changed, lesson) => refreshProvisionalMethodLimit(lesson) || changed, false)) this.touch();
     if (file) { this.timer = setInterval(() => this.flush(), 5000); this.timer.unref?.(); }
   }
 
@@ -820,6 +823,7 @@ export class SelfModel {
         }]).slice(-8);
         this.data.counterexamplesSinceReflect = (this.data.counterexamplesSinceReflect ?? 0) + 1;
       }
+      refreshProvisionalMethodLimit(k);
       k.updatedAt = Date.now();
     }
     this.touch();
@@ -840,9 +844,10 @@ export class SelfModel {
     for (const r of [...this.data.history].reverse()) { if (r.kind !== kind) break; n++; }
     return n;
   }
-  learn(text: string, opts: { kind?: ActivityKind; tags?: string[]; signature?: string; source: KnowHow['source']; outcome?: ActivityRecord['outcome']; revise?: string }): KnowHow | null {
+  learn(text: string, opts: { kind?: ActivityKind; tags?: string[]; signature?: string; source: KnowHow['source']; outcome?: ActivityRecord['outcome']; revise?: string; limits?: string[] }): KnowHow | null {
     const t = cleanLesson(text);
     if (t.length < 4) return null;
+    const limits = [...new Set((opts.limits ?? []).map((limit) => limit.trim()).filter(Boolean))].slice(0, 12);
     const k = keywords(t);
     const context = lessonContext(t);
     const revised = opts.revise ? this.data.knowHow.find((h) => h.id === opts.revise) : undefined;
@@ -865,15 +870,18 @@ export class SelfModel {
       same.kind = opts.kind ?? same.kind;
       same.source = opts.source;
       same.tags = [...new Set([...same.tags, ...(opts.tags ?? []), ...[...k].filter((w) => /^[a-z]/.test(w))])].slice(0, 12);
+      if (limits.length) same.limits = mergeLessonLimits(same.limits, limits);
       // 改写过结论时，这次带来的签名仍属于旧做法：新结论要等未来明确应用，不靠旧动作签名验证。
       if (opts.signature && !changed && !same.signature) same.signature = opts.signature;
+      refreshProvisionalMethodLimit(same);
       this.touch();
       return same;
     }
     const h: KnowHow = { id: shortId('k_'), text: t, kind: opts.kind, tags: [...new Set([...(opts.tags ?? []), ...[...k].filter((w) => /^[a-z]/.test(w))])].slice(0, 12),
       signature: opts.signature, wins: opts.outcome === 'done' ? 1 : 0, losses: opts.outcome === 'stuck' ? 1 : 0,
-      unverified: opts.outcome !== 'done',
+      unverified: opts.outcome !== 'done', ...(limits.length ? { limits } : {}),
       createdAt: Date.now(), updatedAt: Date.now(), source: opts.source };
+    refreshProvisionalMethodLimit(h);
     this.data.knowHow.push(h);
     // 太多时先忘掉被证明不靠谱、又很久没用的
     if (this.data.knowHow.length > 80) {
@@ -886,7 +894,7 @@ export class SelfModel {
   /** 挑出和眼下有关的窍门：关键词重叠 + 同类活动 + 可信度 */
   relevantKnowHow(context: string, kind?: ActivityKind, n = 5): KnowHow[] {
     const k = keywords(context);
-    return this.data.knowHow.map((h) => {
+    return this.data.knowHow.filter((h) => !needsProvisionalMethodLimit(h)).map((h) => {
       const rel = overlap(keywords(h.text), k) + h.tags.filter((t) => k.has(t)).length * 2 + (kind && h.kind === kind ? 2 : 0);
       const trust = (h.wins + 1) / (h.wins + h.losses + 2);
       // 最近一次明确应用失败、且反例多于成功证据：默认注入时降权，避免刚失败的做法立刻满屏召回；
@@ -1015,7 +1023,7 @@ export class SelfModel {
       const unchanged = parts.every((k) => cleanLesson(k.text) === cleanLesson(m.text) && k.signature === keep.signature);
       // 反例和适用边界是历史事实：合并/改写只让结论重新验证，不删除这些证据。
       const counterexamples = dedupeCounterexamples(parts.flatMap((k) => k.counterexamples ?? []).sort((a, b) => a.at - b.at)).slice(-8);
-      const limits = [...new Set(parts.flatMap((k) => k.limits ?? []))].slice(0, 12);
+      const limits = mergeLessonLimits(parts.flatMap((k) => k.limits ?? []), undefined);
       // 措辞变了：新说法从零计，旧说法（含被并入的几条）累计的成败记到 prior 里。
       if (!unchanged) keep.prior = {
         wins: parts.reduce((n, k) => n + k.wins + (k.prior?.wins ?? 0), 0),
@@ -1035,6 +1043,7 @@ export class SelfModel {
       keep.applications = unchanged ? parts.flatMap((k) => k.applications ?? []).sort((a, b) => a.at - b.at).slice(-8) : undefined;
       keep.counterexamples = counterexamples;
       keep.limits = limits;
+      refreshProvisionalMethodLimit(keep);
       if (!unchanged) { keep.signature = undefined; keep.source = 'reflection'; }
       keep.tags = [...new Set(parts.flatMap((k) => k.tags))].slice(0, 12);
       keep.updatedAt = Date.now();
@@ -1048,10 +1057,15 @@ export class SelfModel {
         // 新说法来自这次反思，不再是原来的亲历观察；createdAt 保留原观察时间，不改成现在。
         k.source = 'reflection';
       }
+      if (r.limits?.length) k.limits = mergeLessonLimits(k.limits, r.limits);
       k.text = r.text; k.updatedAt = Date.now();
+      refreshProvisionalMethodLimit(k);
     } }
     if (c.drop.length) { const drop = new Set(c.drop); this.data.knowHow = this.data.knowHow.filter((k) => !drop.has(k.id)); }
-    for (const t of c.add) this.learn(t, { source: 'reflection' });
+    c.add.forEach((draft) => {
+      if (typeof draft === 'string') { this.learn(draft, { source: 'reflection' }); return; }
+      this.learn(draft.text, { source: 'reflection', ...(draft.limits?.length ? { limits: draft.limits } : {}) });
+    });
     // 回想是整理零碎点子的，不能顺手把正在推进的主目标也收掉（10-26 晚回想合并“矿口前哨”几条点子时，把正在凑头盔的
     // “攒够铁做一整套铁盔甲”一起丢了，之后就一直没有主目标）。正在推进的目标留着，交给下一次认真想自己决定放不放
     const keptGoals: { id: string; text: string }[] = [];

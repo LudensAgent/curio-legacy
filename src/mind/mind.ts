@@ -2339,7 +2339,8 @@ export class Mind {
       // 回想想放下正在推进的主目标：不替它放，告诉它，下一次认真想时自己决定
       for (const g of keptGoals) this.keptHint = `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了`;
       for (const g of keptGoals) this.d.bus.publish('goal_kept', 'P3', `回想时觉得主目标「${g.text.slice(0, 40)}」可以放下了，但它还在推进中，先留着：真要放下就在阶段回顾里决定，或按操作者的明确指令`, { agendaId: g.id });
-      for (const k of this.d.self.data.knowHow) if (c.add.includes(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
+      const addedTexts = new Set(c.add.map((draft) => typeof draft === 'string' ? draft : draft.text));
+      for (const k of this.d.self.data.knowHow) if (addedTexts.has(k.text) || c.merge.some((m) => m.text === k.text) || c.rewrite.some((r) => r.id === k.id)) {
         this.d.memory.addLesson(k.text, { source: 'model', key: `${KNOW_HOW_LESSON_KEY_PREFIX}${k.id}` });
       }
       if (c.skill?.raw && this.d.behaviors && (Array.isArray(c.skill.raw.steps) || typeof c.skill.raw.code === 'string' || typeof c.skill.raw.improve === 'string' || c.skill.raw.when !== undefined)) {

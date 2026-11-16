@@ -356,10 +356,10 @@ export interface Noticing { at: number; key: string; what: string; salience: num
 
 /** 休息/睡前回想时对窍门的整理（模型输出、校验后） */
 export interface Consolidation {
-  rewrite: { id: string; text: string }[];
+  rewrite: { id: string; text: string; limits?: string[] }[];
   merge: { ids: string[]; text: string }[];
   drop: string[];
-  add: string[];
+  add: (string | { text: string; limits?: string[] })[];
   agendaDrop: string[];
   /** 策略回顾想出的新玩法：放进议程的点子或目标 */
   agendaAdd?: { text: string; kind: 'goal' | 'idea'; horizon: 'today' | 'someday'; note?: string }[];

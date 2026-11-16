@@ -1291,7 +1291,7 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
         ...(k.applications?.length ? { applications: k.applications.reduce((n, a) => ({ count: n.count + 1, done: n.done + Number(a.outcome === 'done' && a.completion !== 'condition' && a.completion !== 'attempt' && !a.searchUnconfirmed && !a.limited), stuck: n.stuck + Number(a.outcome === 'stuck') }), { count: 0, done: 0, stuck: 0 }) } : {}),
         ...(k.counterexamples?.length ? { counterexamples: { count: k.counterexamples.length, last: `${k.counterexamples[k.counterexamples.length - 1]!.reason}：${k.counterexamples[k.counterexamples.length - 1]!.summary.slice(0, 80)}`, ...(k.counterexamples[k.counterexamples.length - 1]!.claim ? { against: k.counterexamples[k.counterexamples.length - 1]!.claim!.slice(0, 80) } : {}) } } : {}),
         ...(k.limits?.length ? { limits: k.limits.slice(0, 4) } : {}) })),
-      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是 Agent 写下的适用边界；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
+      ...(knowHow.length ? { know_how_note: 'source=来源；unverified=true 是尚未验证；before_rewrite 是这条改写/合并前旧说法的成败，wins/losses 只计现在这个说法；evidence=none 是没有动作签名或应用证据的暂定结论；counterexamples 是明确应用后失败/受阻的反例（改写/合并后仍保留）；limits 是写下的适用边界（含程序标注的暂定边界）；要按某条窍门做，在 activity/next 写 applying:"k_…"，applications 是这类明确应用的结果计数，只供复核，不等于自动证明结论正确' } : {}),
       ...(knowledgeFacts.length ? { knowledge_facts: knowledgeFacts.map(knowledgeFactLine),
         knowledge_facts_note: '以前查到的外部资料摘录（reference_not_current_state）：不是当前世界已有资源或现场事实；是否适用按当前世界与目标核对。' } : {}),
       // 只给正在验证和尚未得出结论的试验；已结论的留给反思与自我模型，不在每次决策里展开。
@@ -1453,6 +1453,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
 - 改写或合并时保留来源和适用条件（地形、方向、材料、授权、工具等）；一次有限情形的失败/成功只写成那次的具体情况，不要升级成普遍规则。unverified 且没有应用证据的条目仍只是暂定结论，没有新证据支持就不要当成已经成立的规律。counterexamples 是明确应用后失败/受阻的反例，limits 是已写下的适用边界：改写或合并不能把它们洗掉；反例说明这条说法在哪里不成立。
 - 失败明显多于成功、或被后来的经历推翻的丢掉（drop）；只是一次性的流水账也丢掉。before_rewrite 是改写前旧说法累计的成败：改写只换措辞、做法没变时，这些失败仍是这个做法的记录。
 - 零碎想法里被最近经历证实的，才整理成新的窍门（add，最多 5 条）；没证实的就让它过去。
+- 方法选择规则（例如“别用/改用某个动作”）请写 limits：说明它在什么地形、距离、授权、工具或材料条件下成立；未验证、没有成功记录也没有确认应用的规则不会自动当作每次行动的依据。
 - 议程里已经过时、做不成或不再想做的，可以放下（agenda_drop）。
 - 整理后窍门总数最好不超过 25 条。
 - 如果这段时间琢磨出了一整套成体系、以后还会用到的做法（比如怎么在深洞里照明、怎么顺着矿脉找钻石、夜里怎么过），可以写成一份自己的技能（skill：英文小写名字、一句用途、几行 Markdown 写清步骤和要点），以后直接翻开用；已有同名的自己写的技能会被更新。没有就省略。
@@ -1463,7 +1464,7 @@ export function buildReflectionMessages(self: SelfModel, persona: string, mySkil
   只有它要专门花几段活去做成一件事（比如去下界要塞拿烈焰棒、合成末影之眼找要塞）时，才放进议程 agenda_add（{"text":"要做成的事","kind":"idea|goal","note":"可复核的来源（短，可选）"}，最多 3 条，写成“做成什么”，不要写成“以后要怎样”）；没想到就不写，不要硬凑。
 - 用一句话写日记（diary）记下这段时间最值得记住的事，再用一句独白（monologue）说说现在的感受。
 只输出一个 JSON 对象：
-{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…"}],"drop":["k_…"],"add":["…"],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea","note":"来源（短，可选）"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
+{"merge":[{"ids":["k_…","k_…"],"text":"…"}],"rewrite":[{"id":"k_…","text":"…","limits":["…"]}],"drop":["k_…"],"add":["…",{"text":"…","limits":["…"]}],"agenda_drop":["a_…"],"agenda_add":[{"text":"…","kind":"idea","note":"来源（短，可选）"}],"skill":{"name":"…","description":"…","body":"…"},"diary":"…","monologue":"…"}`;
   const knowledgeFacts = self.knowledgeFacts(6);
   const payload = {
     know_how: self.data.knowHow.map((k) => ({ id: k.id, text: historical(cleanLesson(k.text), k.source === 'observed' ? k.createdAt : 0), wins: k.wins, losses: k.losses,

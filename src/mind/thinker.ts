@@ -910,12 +910,25 @@ export function parseConsolidation(raw: unknown, knowHowIds: Set<string>, agenda
   const o = raw as Record<string, any>;
   const ids = (v: unknown, pool: Set<string>) => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === 'string' && pool.has(x));
   const used = new Set<string>();
+  const lessonDraft = (value: unknown) => {
+    const object = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+    const limits = (Array.isArray(object?.limits) ? object.limits : [])
+      .map((entry) => cleanLesson(String(entry ?? ''))).filter((entry) => entry.length >= 2).slice(0, 4);
+    return { id: String(object?.id ?? ''), text: cleanLesson(typeof value === 'string' ? value : String(object?.text ?? '')), limits };
+  };
   const merge = (Array.isArray(o.merge) ? o.merge : []).map((m: any) => ({ ids: [...new Set(ids(m?.ids, knowHowIds))], text: cleanLesson(String(m?.text ?? '')) }))
     .filter((m: { ids: string[]; text: string }) => m.ids.length >= 2 && m.text.length >= 4 && m.ids.every((id) => !used.has(id)) && (m.ids.forEach((id) => used.add(id)), true));
-  const rewrite = (Array.isArray(o.rewrite) ? o.rewrite : []).map((r: any) => ({ id: String(r?.id ?? ''), text: cleanLesson(String(r?.text ?? '')) }))
-    .filter((r: { id: string; text: string }) => knowHowIds.has(r.id) && !used.has(r.id) && r.text.length >= 4 && (used.add(r.id), true));
+  const rewrite = (Array.isArray(o.rewrite) ? o.rewrite : []).flatMap((raw) => {
+    const draft = lessonDraft(raw);
+    if (!knowHowIds.has(draft.id) || used.has(draft.id) || draft.text.length < 4) return [];
+    used.add(draft.id);
+    return [{ id: draft.id, text: draft.text, ...(draft.limits.length ? { limits: draft.limits } : {}) }];
+  });
   const drop = ids(o.drop, knowHowIds).filter((id) => !used.has(id));
-  const add = (Array.isArray(o.add) ? o.add : []).map((t: unknown) => cleanLesson(String(t ?? ''))).filter((t: string) => t.length >= 4).slice(0, 5);
+  const add = (Array.isArray(o.add) ? o.add : []).flatMap((raw) => {
+    const draft = lessonDraft(raw);
+    return draft.text.length < 4 ? [] : [draft.limits.length ? { text: draft.text, limits: draft.limits } : draft.text];
+  }).slice(0, 5);
   const sk = o.skill && typeof o.skill === 'object' && !Array.isArray(o.skill) ? o.skill as Record<string, unknown> : null;
   const executable = !!sk && (Array.isArray(sk.steps) || sk.when !== undefined);
   const skill = sk && typeof sk.name === 'string' && typeof sk.description === 'string' && (typeof sk.body === 'string' && sk.body.trim().length >= 20 || executable)
