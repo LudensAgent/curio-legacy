@@ -219,7 +219,7 @@ function containerCandidates(ctx: SkillCtx) {
 /** 报错时把记下的容器精确坐标顺口说给心智：坐标错了就照着改，而不是继续从方位心算。 */
 function knownContainersHint(ctx: SkillCtx): string {
   const candidates = containerCandidates(ctx).slice(0, 3);
-  return candidates.length ? `；记得的容器：${candidates.map((c) => `${c.label} ${c.location.text}`).join('、')}` : '';
+  return candidates.length ? `；记得的容器：${candidates.map((c) => `${c.label} ${c.location.text}（${c.distance} 格外）`).join('、')}` : '';
 }
 
 /**
@@ -231,7 +231,9 @@ function containerFacts(candidates: ReturnType<typeof containerCandidates>, limi
     const label = candidate.label && candidate.label !== candidate.location.text
       ? `${String(candidate.label).slice(0, 24)} ` : '容器 ';
     const target = candidate.target === undefined ? '' : `，target ${JSON.stringify(candidate.target)}`;
-    return `${label}${candidate.location.text}${target}（${candidate.contents.slice(0, 80)}）`;
+    // 距离必须和坐标一起给出：Agent 常把别处箱子的内容当成“旁边这只箱子的”。
+    const distance = candidate.distance > 48 ? `${candidate.distance} 格外，远` : `${candidate.distance} 格外`;
+    return `${label}${candidate.location.text}（${distance}）${target}（${candidate.contents.slice(0, 80)}）`;
   }).join('；');
 }
 
@@ -444,7 +446,10 @@ export const findItem: Skill<{ item: string; count?: number }> = {
       .slice(0, 4);
     const otherFurnaces = furnaceFacts.filter((x) => x.f.dim !== s.dim && x.hasItem).slice(0, 3);
     const furnaceText = [
-      ...hereFurnaces.map((x) => `(${x.f.pos.x},${x.f.pos.y},${x.f.pos.z}) ${x.hasItem ? `有 ${args.item}` : x.state}（${age(x.f.ts)}）${x.hasItem ? `；取用 collect_furnace {"at":{"x":${x.f.pos.x},"y":${x.f.pos.y},"z":${x.f.pos.z}}}` : ''}`),
+      ...hereFurnaces.map((x) => {
+        const d = Math.round(Math.hypot(x.f.pos.x - s.pos.x, x.f.pos.y - s.pos.y, x.f.pos.z - s.pos.z));
+        return `(${x.f.pos.x},${x.f.pos.y},${x.f.pos.z}) ${x.hasItem ? `有 ${args.item}` : x.state}（${d} 格外，${age(x.f.ts)}）${x.hasItem ? `；取用 collect_furnace {"at":{"x":${x.f.pos.x},"y":${x.f.pos.y},"z":${x.f.pos.z}}}` : ''}`;
+      }),
       ...otherFurnaces.map((x) => `${x.f.dim} (${x.f.pos.x},${x.f.pos.y},${x.f.pos.z}) 有 ${args.item}`),
     ].join('；');
     // 距离用三维：同一基地上下层、坡上坡下的箱子不会被水平距离算成一样近。
@@ -466,7 +471,7 @@ export const findItem: Skill<{ item: string; count?: number }> = {
       const unopened = containerCandidates(ctx).filter((candidate) => candidate.contents.includes('未打开过')).slice(0, 3);
       const facts = containerFacts(unopened);
       const furnaces = furnaceText ? `；记得的熔炉：${furnaceText}` : '';
-      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录、所有维度）${furnaces}${facts ? `；附近有未打开的容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
+      return ok(`背包和记得的箱子里都没有 ${args.item}（只查已打开记录、所有维度）${furnaces}${facts ? `；记得的未打开容器：${facts}，用 take_items/store_items 指定 target 打开才知道里面有什么` : '；没打开过的箱子内容未知'}`, {
         item: args.item, backpack: 0, chest: null, chests: [], target: null, inChests: 0, total: 0, ...(unopened.length ? { unopened } : {}),
       });
     }
@@ -474,8 +479,10 @@ export const findItem: Skill<{ item: string; count?: number }> = {
     const listText = chests.length ? `；记得 ${here.length > chests.length ? `${chests.length}/${here.length}` : `${chests.length}`} 只箱子有它：${chests.map(label).join('、')}` : '';
     const shortText = need !== undefined && !sorted.some((r) => r.count >= need) && inChests > 0 ? `；没有单只箱子够 ${need}（箱子里合计×${inChests}）` : '';
     const dimsText = elsewhere.length ? `；其他维度：${elsewhere.slice(0, 4).map((r) => describeRecall(r)).join('；')}` : '';
-    const useText = target
-      ? `；用 ${goNearCommand(target)} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
+    const useText = target && chest
+      ? chest.dist > 48
+        ? `；目标在 ${chest.dist} 格外，用 travel_to {"to":${JSON.stringify(target)}} 过去（go_near 只适合已经看见的近处容器），再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
+        : `；用 ${goNearCommand(target)} 到旁边，再 take_items {"item":"${args.item}"${need !== undefined ? `,"count":${need}` : ''},"target":${JSON.stringify(target)}}`
       : '';
     const enoughText = need !== undefined && backpack >= need ? `；背包已够 ${need}` : '';
     const furnaceNote = furnaceText ? `；熔炉：${furnaceText}` : '';

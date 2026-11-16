@@ -19,7 +19,7 @@ test('find_item 把取空的熔炉报成已确认为空，不再让人以为锭�
   const r = await findItem.run(ctx(m) as any, { item: 'iron_ingot' });
   assert.equal(r.status, 'succeeded');
   assert.match(r.summary, /记得的熔炉/);
-  assert.match(r.summary, /\(5,64,0\) 空（已确认没有可取的东西）（5 分钟前）/);
+  assert.match(r.summary, /\(5,64,0\) 空（已确认没有可取的东西）（5 格外，5 分钟前）/);
   assert.doesNotMatch(r.summary, /可能在熔炉|还留在熔炉/);
 });
 
@@ -140,7 +140,7 @@ test('find_item 没有打开记录时，列出看见的未打开容器和 target
   };
   const r = await findItem.run(c as any, { item: 'diamond' });
   assert.equal(r.status, 'succeeded');
-  assert.match(r.summary, /附近有未打开的容器/);
+  assert.match(r.summary, /记得的未打开容器/);
   assert.ok(r.summary.includes('target {"x":2,"y":64,"z":0}'), r.summary);
 });
 
@@ -183,4 +183,16 @@ test('find_item 按三维距离排序：上下层的箱子不会算成一样近'
   m.setChest('overworld', { x: 3, y: 64, z: 0 }, [{ name: 'coal', count: 1 }]);
   const r = await findItem.run(ctx(m) as any, { item: 'coal' });
   assert.deepEqual((r.data as any).chest.pos, { x: 3, y: 64, z: 0 }, '按三维距离，脚边那只才算最近');
+});
+
+test('find_item 远处箱子给出距离和 travel_to，而不是让 go_near 当近处箱', async (t) => {
+  const m = new WorldMemory(null);
+  t.after(() => m.close());
+  m.setWorld('w');
+  m.setChest('overworld', { x: 100, y: 64, z: 0 }, [{ name: 'coal', count: 5 }]);
+  const r = await findItem.run(ctx(m) as any, { item: 'coal' });
+  assert.equal(r.status, 'succeeded');
+  assert.match(r.summary, /目标在 100 格外，用 travel_to/);
+  assert.match(r.summary, /（100 格外）/);
+  assert.doesNotMatch(r.summary, /用 go_near \{"target":\{"x":100/);
 });
