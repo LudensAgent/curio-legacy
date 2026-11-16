@@ -287,8 +287,8 @@ const SKILL_INDEX = (skills: string[], brief = false) => skills.length
 const READING = `【方位】北 N=z减 南 S=z加 东 E=x加 西 W=x减。resolve_target 只算绝对落点、不会移动；别自己算绝对坐标；[前,上,右] 按指定 facing 换算。
 【走到哪】按意图选一个移动动作（失败看回执里的具体原因再决定换法）：
 - 普通朝一个方向走一段，不需要精确目的地 → advance {"direction":"N|NE|E|SE|S|SW|W|NW","distance":1-160}；宿主处理台阶、分数顶面、合理小落差和已确认的跳跃/梯子，局部被挡会在有限范围内绕行，不挖不放；遇到水或超过 2 格的缺口它不会自己涉水/搭桥，要用 travel_to / explore_toward 带 swim:true / place
-- 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
-- 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）
+- 去一个确定的地方（坐标、记得的地标、base、死亡点、已登记的门）→ travel_to {"to":{"x":0,"y":64,"z":0},"range":2}；记得的地标可写方括号里的 id（不带括号）或名字，range 是接近半径、不是脚点；路上要挖开挡路或搭路就加 "dig":true / "place":"方块名"
+- 没有具体目的地，朝一个方向去没去过的地方找东西 → explore_toward {"direction":"E","distance":96,"until":"log"}（until 写类别 log=各种原木、stem=菌柄，或 "a|b" 列几种；写 oak_log 就只认橡木）；它不接收目的地坐标，只保证沿方向推进、看到 until 就停，不保证到达指定点
 - 往下挖矿、开隧道、开阶梯这类施工 → excavate_run（按方向、模式、步数直线施工；stairs/stairs_up 只用于上下层，同层找矿/开平巷用 mode:"tunnel"，不写 mode 默认 stairs；停在具体格时先同方向补支撑/填方块，别每段换方向；不负责绕路去某处）
 - 只有需要精确到相邻某一格（建筑、挖放、贴边、指定材料）才用 move_step；普通走路优先 advance。改变指定的一格 → mine_cell / place_cell / place_support / pillar_one
 - 站到看见过/记得的附近目标旁 → approach_visible；箱子/木桶/潜影盒/门/床/传送门方块旁 → go_near {"target":{x,y,z}}，再 take_items/sleep/travel_portal（进门先 observe_portal 拿 portalId）；熔炉产物/剩料 → collect_furnace {"at":{x,y,z}}，take_items 只处理箱子/木桶/潜影盒
@@ -313,7 +313,7 @@ const CHOOSE = `【选动作】
 - 穿下界门/末地门 → 先 observe_portal 拿 portalId，再 travel_portal {"portalId":"…"} 穿过去；travel_portal 不行时，自己走到门面正前那一格、面向门面走进去（进入门方块后要连续停留约 4 秒；先看 body_in_portal/身体所在格确认自己是否已在门里；portal 方块站不住也挖不掉，别用 move_step/mine_cell）
 - ${ARCHITECT_SCOPE}用 design ${ARCHITECT_RULE}再 build；简单功能设施用基础动作或 spec.design
 - 上不去的高处：用梯子、pillar_one/place_support 垫高、另找路，或让 travel_to/explore_toward 写 place 在走不通时代为垫高；navigate_to 不挖不放。
-- 目标远于一列/挖不到的距离用 travel_to/navigate_to/explore_toward，别用 move_step/mine_cell 的绝对坐标去够；同列没有可站立面是事实，不是重试信号。
+- 目标远于一列/挖不到的距离用 travel_to/navigate_to；没有具体目的地、只知方向才用 explore_toward；别用 move_step/mine_cell 的绝对坐标去够；同列没有可站立面是事实，不是重试信号。
 - 副手用 hold_item {"item":"物品名","to":"off-hand"} 或 equip_armor；slot 只配 to:"hand" 的快捷栏 0–8；方块上用物品用 interact_block {"target","item"}。`;
 
 const PRINCIPLES = `【原则】

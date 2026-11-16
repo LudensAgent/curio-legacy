@@ -237,6 +237,9 @@ export const travelTo: Skill<TravelToArgs> = {
       }), 'FAILED');
     }
     const goal = { x: point.x, y: goalY, z: point.z };
+    // 未到达时区分“路线受阻”和“换目标语义”：方向探索不接收目的地坐标，不能当成等价替代。
+    const unchangedFact = `原坐标目标 (${Math.round(goal.x)},${Math.round(goal.y)},${Math.round(goal.z)}) 未变：explore_toward 只按方向推进、不接收这个目的地坐标，也不保证到达它；有未过期的 sessionId 就原样续接，已授权 dig/place 时也可先短段挖/垫再续`;
+    const failedSummary = (detail: string) => `travel_to 原目标尚未满足；${detail}；${unchangedFact}`;
 
     const direct = Math.hypot(goal.x - start.x, goal.y - start.y, goal.z - start.z);
     const maxSteps = Math.min(HARD_MAX_STEPS, Math.max(16, Math.ceil(direct * MAX_DETOUR_FACTOR) + DETOUR_SLACK));
@@ -323,7 +326,7 @@ export const travelTo: Skill<TravelToArgs> = {
     }
     if ((moved.data?.lastSegment as SegmentReceipt | undefined)?.stopCode === 'settlement_failed') {
       const outcome = moved.failureCode === 'TIMEOUT' ? 'TIMEOUT' : 'FAILED';
-      return receipt({ ...moved, data: { ...routeFacts, outcome } }, outcome, true);
+      return receipt({ ...moved, summary: failedSummary(moved.summary), data: { ...routeFacts, outcome } }, outcome, true);
     }
     // 实测进入范围不能授权一个被拒绝的会话/意图，也不能覆盖身体或作用域失效。
     if (moved.failureCode === 'BAD_ARGS' || moved.failureCode === 'WRONG_DIMENSION' || moved.failureCode === 'NOT_CONNECTED') {
@@ -341,7 +344,7 @@ export const travelTo: Skill<TravelToArgs> = {
     const outcome: NavOutcome = moved.failureCode === 'TIMEOUT' ? 'TIMEOUT' : movedFacts.closer > 0 ? 'PARTIAL' : 'FAILED';
     return receipt({
       ...moved, status: 'failed', failureCode: moved.failureCode ?? 'EFFECT_NOT_CONFIRMED',
-      summary: 'travel_to 原目标尚未满足；' + moved.summary + (routeHint ? `；${routeHint}` : ''),
+      summary: failedSummary(`${moved.summary}${routeHint ? `；${routeHint}` : ''}`),
       data: { ...routeFacts, outcome },
     }, outcome);
   },

@@ -106,6 +106,10 @@ test('委托保留坐标、期限、signal、sessionId 与未到达进展', asyn
   assert.equal(result.data?.sessionId, 'same');
   assert.equal(result.data?.searchStatus, 'BUDGET_EXHAUSTED');
   assert.deepEqual(result.data?.position, adapter.pos);
+  assert.match(result.summary, /原坐标目标 \(\d+,\d+,\d+\) 未变/);
+  assert.match(result.summary, /explore_toward 只按方向推进、不接收这个目的地坐标/);
+  assert.match(result.summary, /有未过期的 sessionId 就原样续接/);
+  assert.match(result.summary, /已授权 dig\/place 时也可先短段挖\/垫再续/);
 });
 
 test('取消即使已经进入范围也保留 cancelled 与实测位置', async (t) => {
@@ -175,6 +179,8 @@ test('连续移动实测提前进入 range，但释放控制后停稳超时不�
   assert.equal(result.failureCode, 'TIMEOUT');
   assert.equal(result.data?.stopReason, 'TIMEOUT');
   assert.equal((result.data?.lastSegment as { stopCode: string }).stopCode, 'settlement_failed');
+  assert.match(result.summary, /travel_to 原目标尚未满足/);
+  assert.match(result.summary, /原坐标目标 \(\d+,\d+,\d+\) 未变/);
   assert.deepEqual(result.data?.requestedTarget, target);
   const arrival = result.data?.arrival as { satisfied: boolean; measured: unknown };
   assert.equal(arrival.satisfied, false);
