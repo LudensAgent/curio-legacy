@@ -7,6 +7,7 @@ import { Arbiter } from './arbiter/arbiter.ts';
 import { Reflex } from './brain/reflex.ts';
 import { supplyReading } from './brain/supply.ts';
 import { Mind } from './mind/mind.ts';
+import { taskKey } from './mind/task-label.ts';
 import { parseGameMessage, type ParsedGameMessage } from './memory/game-messages.ts';
 import { SelfModel } from './mind/self.ts';
 import { applyMindPatch } from './mind/mind-patch.ts';
@@ -595,12 +596,6 @@ let invSnapshot: { name: string; count: number }[] = [];
 let awaitingRespawnLoss = false;
 // 死前几秒的状态（氧气、水、岩浆、饥饿、附近的怪、在做的事）：死亡时据此判断死因
 let vitals: VitalSample[] = [];
-const taskKey = (t: { skill: string; args?: unknown } | null | undefined) => {
-  if (!t) return undefined;
-  const a = (t.args ?? {}) as Record<string, unknown>;
-  const key = a.block ?? a.item ?? a.animal ?? a.target ?? a.to ?? a.direction ?? a.blueprint ?? '';
-  return `${t.skill}${key ? ` ${String(key)}` : ''}`;
-};
 let lastWork: string | undefined;
 function sampleVitals() {
   const st = adapter.state();
