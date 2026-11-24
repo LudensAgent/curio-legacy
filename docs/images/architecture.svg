@@ -1,0 +1,349 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 924 760" width="924" height="760" role="img" aria-label="Curio Architecture Diagram">
+  <style>
+    :root {
+      --canvas-bg: #ffffff;
+      --canvas-border: #e2e8f0;
+      --fg: #0f172a;
+      --muted: #475569;
+      --card-bg: #ffffff;
+      --card-border: #cbd5e1;
+      --group-bg: #f8fafc;
+      --pill-muted-bg: #f1f5f9;
+      --pill-muted-border: #cbd5e1;
+      --badge-bg: #ffffff;
+      --badge-border: #cbd5e1;
+
+      --server-bg: #f0fdf4;
+      --server-hdr: #dcfce7;
+      --server-border: #86efac;
+      --server-accent: #15803d;
+      --server-line: #16a34a;
+      --server-pill-bg: #dcfce7;
+      --server-pill-border: #86efac;
+
+      --llm-bg: #faf5ff;
+      --llm-hdr: #f3e8ff;
+      --llm-border: #d8b4fe;
+      --llm-accent: #7e22ce;
+      --llm-line: #9333ea;
+      --llm-pill-bg: #f3e8ff;
+      --llm-pill-border: #d8b4fe;
+
+      --bot-bg: #fffbeb;
+      --bot-hdr: #fef3c7;
+      --bot-border: #fcd34d;
+      --bot-accent: #b45309;
+      --bot-line: #d97706;
+      --bot-pill-bg: #fef3c7;
+      --bot-pill-border: #fcd34d;
+
+      --client-bg: #f0f9ff;
+      --client-hdr: #e0f2fe;
+      --client-border: #93c5fd;
+      --client-accent: #1d4ed8;
+      --client-line: #2563eb;
+      --client-pill-bg: #dbeafe;
+      --client-pill-border: #93c5fd;
+
+      --merge-bg: #fefce8;
+      --merge-border: #f59e0b;
+      --dashed-bg: #f8fafc;
+      --dashed-border: #94a3b8;
+      --rcon-line: #64748b;
+      --int-line: #d97706;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas-bg: #0d1117;
+        --canvas-border: #30363d;
+        --fg: #f0f6fc;
+        --muted: #9ca3af;
+        --card-bg: #161b22;
+        --card-border: #30363d;
+        --group-bg: #11161d;
+        --pill-muted-bg: #21262d;
+        --pill-muted-border: #3b434d;
+        --badge-bg: #161b22;
+        --badge-border: #3b434d;
+
+        --server-bg: #0f2018;
+        --server-hdr: #142c20;
+        --server-border: #235c3e;
+        --server-accent: #4ade80;
+        --server-line: #22c55e;
+        --server-pill-bg: #143222;
+        --server-pill-border: #236342;
+
+        --llm-bg: #1b1228;
+        --llm-hdr: #251738;
+        --llm-border: #58358a;
+        --llm-accent: #c084fc;
+        --llm-line: #a855f7;
+        --llm-pill-bg: #291a3f;
+        --llm-pill-border: #6b3fa0;
+
+        --bot-bg: #20180e;
+        --bot-hdr: #2d2111;
+        --bot-border: #784b14;
+        --bot-accent: #fbbf24;
+        --bot-line: #f59e0b;
+        --bot-pill-bg: #322310;
+        --bot-pill-border: #8a5616;
+
+        --client-bg: #0f1726;
+        --client-hdr: #142038;
+        --client-border: #26487a;
+        --client-accent: #60a5fa;
+        --client-line: #3b82f6;
+        --client-pill-bg: #16294a;
+        --client-pill-border: #2c5594;
+
+        --merge-bg: #271d0f;
+        --merge-border: #d97706;
+        --dashed-bg: #161b22;
+        --dashed-border: #4b5563;
+        --rcon-line: #9ca3af;
+        --int-line: #fbbf24;
+      }
+    }
+
+    text {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .canvas { fill: var(--canvas-bg); stroke: var(--canvas-border); }
+    .box-server { fill: var(--server-bg); stroke: var(--server-border); }
+    .box-llm { fill: var(--llm-bg); stroke: var(--llm-border); }
+    .box-bot { fill: var(--bot-bg); stroke: var(--bot-border); }
+    .box-client { fill: var(--client-bg); stroke: var(--client-border); }
+    .hdr-server { fill: var(--server-hdr); }
+    .hdr-llm { fill: var(--llm-hdr); }
+    .hdr-bot { fill: var(--bot-hdr); }
+    .hdr-client { fill: var(--client-hdr); }
+    .subcard { fill: var(--card-bg); stroke: var(--card-border); }
+    .subcard-dashed { fill: var(--dashed-bg); stroke: var(--dashed-border); stroke-dasharray: 4 3; }
+    .subcard-merge { fill: var(--merge-bg); stroke: var(--merge-border); }
+
+    .pill-server { fill: var(--server-pill-bg); stroke: var(--server-pill-border); }
+    .pill-llm { fill: var(--llm-pill-bg); stroke: var(--llm-pill-border); }
+    .pill-bot { fill: var(--bot-pill-bg); stroke: var(--bot-pill-border); }
+    .pill-info { fill: var(--client-pill-bg); stroke: var(--client-pill-border); }
+    .pill-muted { fill: var(--pill-muted-bg); stroke: var(--pill-muted-border); }
+    .badge-bg { fill: var(--badge-bg); stroke: var(--badge-border); }
+    .badge-mc { fill: var(--server-pill-bg); stroke: var(--server-border); }
+    .badge-llm { fill: var(--llm-pill-bg); stroke: var(--llm-border); }
+    .badge-sse { fill: var(--client-pill-bg); stroke: var(--client-border); }
+
+    .t-title { fill: var(--fg); font-size: 14.5px; font-weight: 700; }
+    .t-card-title { fill: var(--fg); font-size: 12.6px; font-weight: 650; }
+    .t-body { fill: var(--muted); font-size: 11.2px; font-weight: 450; }
+    .t-small { fill: var(--muted); font-size: 10.4px; font-weight: 450; }
+    .t-pill-server { fill: var(--server-accent); font-size: 10.6px; font-weight: 600; }
+    .t-pill-llm { fill: var(--llm-accent); font-size: 10.6px; font-weight: 600; }
+    .t-pill-bot { fill: var(--bot-accent); font-size: 10.6px; font-weight: 600; }
+    .t-pill-info { fill: var(--client-accent); font-size: 10.6px; font-weight: 600; }
+    .t-pill-muted { fill: var(--fg); font-size: 10.4px; font-weight: 600; }
+
+    .dot-server { fill: var(--server-line); }
+    .dot-llm { fill: var(--llm-line); }
+    .dot-bot { fill: var(--bot-line); }
+    .dot-client { fill: var(--client-line); }
+
+    .line-mc { stroke: var(--server-line); stroke-width: 1.9; fill: none; }
+    .line-rcon { stroke: var(--rcon-line); stroke-width: 1.6; stroke-dasharray: 4 3; fill: none; }
+    .line-llm { stroke: var(--llm-line); stroke-width: 1.9; fill: none; }
+    .line-sse { stroke: var(--client-line); stroke-width: 2.0; fill: none; }
+    .line-internal { stroke: var(--int-line); stroke-width: 1.6; fill: none; }
+
+    .arr-mc { fill: var(--server-line); }
+    .arr-rcon { fill: var(--rcon-line); }
+    .arr-llm { fill: var(--llm-line); }
+    .arr-sse { fill: var(--client-line); }
+    .arr-int { fill: var(--int-line); }
+  </style>
+
+  <defs>
+    <marker id="arr-mc" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path class="arr-mc" d="M 1 1.5 L 9 5 L 1 8.5 z" />
+    </marker>
+    <marker id="arr-rcon" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path class="arr-rcon" d="M 1 1.5 L 9 5 L 1 8.5 z" />
+    </marker>
+    <marker id="arr-llm" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path class="arr-llm" d="M 1 1.5 L 9 5 L 1 8.5 z" />
+    </marker>
+    <marker id="arr-sse" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path class="arr-sse" d="M 1 1.5 L 9 5 L 1 8.5 z" />
+    </marker>
+    <marker id="arr-int" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path class="arr-int" d="M 1 1.5 L 9 5 L 1 8.5 z" />
+    </marker>
+    <clipPath id="clip-server"><rect x="14" y="12" width="438" height="170" rx="12" /></clipPath>
+    <clipPath id="clip-llm"><rect x="472" y="12" width="438" height="170" rx="12" /></clipPath>
+    <clipPath id="clip-bot"><rect x="14" y="246" width="896" height="318" rx="12" /></clipPath>
+    <clipPath id="clip-client"><rect x="14" y="624" width="896" height="124" rx="12" /></clipPath>
+  </defs>
+
+  <rect class="canvas" x="1" y="1" width="922" height="758" rx="14" stroke-width="1" />
+
+  <!-- ==================== TOP LEFT: MINECRAFT SERVER ==================== -->
+  <g>
+    <rect class="box-server" x="14" y="12" width="438" height="170" rx="12" stroke-width="1.5" />
+    <rect class="hdr-server" x="14" y="12" width="438" height="36" clip-path="url(#clip-server)" />
+    <circle class="dot-server" cx="32" cy="30" r="5" />
+    <text class="t-title" x="45" y="35">Minecraft 1.20.1 Server</text>
+    <rect class="pill-server" x="278" y="20" width="162" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-server" x="359" y="34" text-anchor="middle">Vanilla · No server mod</text>
+
+    <rect class="subcard" x="28" y="58" width="410" height="52" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="40" y="76">Vanilla Game Protocol (TCP 25565)</text>
+    <text class="t-body" x="40" y="95">Chunks, entities, physics, inventory, chat &amp; advancements</text>
+
+    <rect class="subcard-dashed" x="28" y="118" width="410" height="52" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="40" y="136">Optional RCON Channel (TCP 25575)</text>
+    <text class="t-body" x="40" y="155">Auto <tspan class="mono">/spectate</tspan>, gamerules &amp; dashboard rescue/admin tools</text>
+  </g>
+
+  <!-- ==================== TOP RIGHT: LLM & MEMORY SERVICES ==================== -->
+  <g>
+    <rect class="box-llm" x="472" y="12" width="438" height="170" rx="12" stroke-width="1.5" />
+    <rect class="hdr-llm" x="472" y="12" width="438" height="36" clip-path="url(#clip-llm)" />
+    <circle class="dot-llm" cx="490" cy="30" r="5" />
+    <text class="t-title" x="503" y="35">LLM &amp; Memory Backends</text>
+    <rect class="pill-llm" x="748" y="20" width="150" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-llm" x="823" y="34" text-anchor="middle">OpenAI-Compatible</text>
+
+    <rect class="subcard" x="486" y="58" width="410" height="52" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="498" y="76">LLM Providers (OpenAI · DeepSeek · Ollama · mock)</text>
+    <text class="t-body" x="498" y="95">Streaming <tspan class="mono">/chat/completions</tspan> · separate Coder LLM &amp; prefix cache</text>
+
+    <rect class="subcard-dashed" x="486" y="118" width="410" height="52" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="498" y="136">Optional Hindsight Memory (Docker :8888)</text>
+    <text class="t-body" x="498" y="155">Long-term episodic consolidation &amp; cue recall · local fallback</text>
+  </g>
+
+  <!-- ==================== TOP <-> AGENT CONNECTORS ==================== -->
+  <g>
+    <line class="line-mc" x1="154" y1="185" x2="154" y2="243" marker-start="url(#arr-mc)" marker-end="url(#arr-mc)" />
+    <rect class="badge-mc" x="76" y="201" width="156" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-server" x="154" y="217" text-anchor="middle">Mineflayer Protocol</text>
+
+    <line class="line-rcon" x1="340" y1="246" x2="340" y2="185" marker-end="url(#arr-rcon)" />
+    <rect class="badge-bg" x="266" y="201" width="148" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-muted" x="340" y="217" text-anchor="middle">Optional RCON</text>
+
+    <line class="line-llm" x1="596" y1="185" x2="596" y2="243" marker-start="url(#arr-llm)" marker-end="url(#arr-llm)" />
+    <rect class="badge-llm" x="514" y="201" width="164" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-llm" x="596" y="217" text-anchor="middle">Async LLM Requests</text>
+
+    <line class="line-rcon" x1="786" y1="185" x2="786" y2="243" marker-start="url(#arr-rcon)" marker-end="url(#arr-rcon)" />
+    <rect class="badge-bg" x="708" y="201" width="156" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-muted" x="786" y="217" text-anchor="middle">Retain / Recall API</text>
+  </g>
+
+  <!-- ==================== MIDDLE: CURIO AGENT PROCESS ==================== -->
+  <g>
+    <rect class="box-bot" x="14" y="246" width="896" height="318" rx="12" stroke-width="1.5" />
+    <rect class="hdr-bot" x="14" y="246" width="896" height="36" clip-path="url(#clip-bot)" />
+    <circle class="dot-bot" cx="32" cy="264" r="5" />
+    <text class="t-title" x="45" y="269">Curio Agent Process</text>
+    <text class="t-body" x="198" y="269">Node.js 22 LTS · TypeScript · Supervisor Auto-Restart</text>
+
+    <rect class="pill-bot" x="562" y="254" width="114" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-bot" x="619" y="268" text-anchor="middle">No X-Ray Vision</text>
+    <rect class="pill-bot" x="682" y="254" width="102" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-bot" x="733" y="268" text-anchor="middle">Think While Act</text>
+    <rect class="pill-bot" x="790" y="254" width="108" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-bot" x="844" y="268" text-anchor="middle">JS Skill Sandbox</text>
+
+    <!-- Tier 1: Perception, Memory, Knowledge -->
+    <rect class="subcard" x="28" y="294" width="282" height="72" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="40" y="313">Vision &amp; Perception · <tspan class="mono">src/perception/</tspan></text>
+    <text class="t-body" x="40" y="332">Raycast FOV, occlusion, light &amp; hearing</text>
+    <text class="t-small" x="40" y="350">Blocks raw X-ray APIs · structured percept</text>
+
+    <rect class="subcard" x="322" y="294" width="280" height="72" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="334" y="313">3D Spatial &amp; Memory · <tspan class="mono">src/spatial/</tspan></text>
+    <text class="t-body" x="334" y="332">SQLite 3D voxel memory + bounded retention</text>
+    <text class="t-small" x="334" y="350">Landmarks, container ledger &amp; episodic store</text>
+
+    <rect class="subcard" x="614" y="294" width="282" height="72" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="626" y="313">Knowledge &amp; Skill Book · <tspan class="mono">knowledge/</tspan></text>
+    <text class="t-body" x="626" y="332">Local Java 1.20.1 wiki &amp; control manual</text>
+    <text class="t-small" x="626" y="350">On-demand queries · <tspan class="mono">skills/*/SKILL.md</tspan></text>
+
+    <line class="line-internal" x1="169" y1="366" x2="169" y2="387" marker-end="url(#arr-int)" />
+    <line class="line-internal" x1="462" y1="366" x2="462" y2="387" marker-end="url(#arr-int)" />
+    <line class="line-internal" x1="755" y1="366" x2="755" y2="387" marker-end="url(#arr-int)" />
+
+    <!-- Tier 2: Mind & Learning Loop -->
+    <rect class="subcard-merge" x="28" y="390" width="868" height="74" rx="8" stroke-width="1.3" />
+    <text class="t-card-title" x="42" y="410">Human-Like Mind &amp; Self-Learning Loop · <tspan class="mono">src/mind/ · src/codeskills/ · src/building/</tspan></text>
+    <rect class="pill-bot" x="676" y="396" width="206" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-bot" x="779" y="410" text-anchor="middle">Agent chooses goals &amp; methods</text>
+
+    <rect class="pill-muted" x="42" y="428" width="112" height="23" rx="6" stroke-width="1" />
+    <text class="t-pill-muted" x="98" y="443.5" text-anchor="middle">1. Attention</text>
+    <text class="t-card-title" x="162" y="444" text-anchor="middle">›</text>
+    <rect class="pill-llm" x="170" y="428" width="154" height="23" rx="6" stroke-width="1" />
+    <text class="t-pill-llm" x="247" y="443.5" text-anchor="middle">2. Glance / Deliberate</text>
+    <text class="t-card-title" x="332" y="444" text-anchor="middle">›</text>
+    <rect class="pill-bot" x="340" y="428" width="146" height="23" rx="6" stroke-width="1" />
+    <text class="t-pill-bot" x="413" y="443.5" text-anchor="middle">3. Activity Routine</text>
+    <text class="t-card-title" x="494" y="444" text-anchor="middle">›</text>
+    <rect class="pill-server" x="502" y="428" width="150" height="23" rx="6" stroke-width="1" />
+    <text class="t-pill-server" x="577" y="443.5" text-anchor="middle">4. Verify &amp; Reflect</text>
+    <text class="t-card-title" x="660" y="444" text-anchor="middle">›</text>
+    <rect class="pill-info" x="668" y="428" width="214" height="23" rx="6" stroke-width="1" />
+    <text class="t-pill-info" x="775" y="443.5" text-anchor="middle">5. Skill Forge · Architect</text>
+
+    <line class="line-internal" x1="252" y1="464" x2="252" y2="485" marker-end="url(#arr-int)" />
+    <line class="line-internal" x1="672" y1="464" x2="672" y2="485" marker-end="url(#arr-int)" />
+
+    <!-- Tier 3: Execution & Safety -->
+    <rect class="subcard" x="28" y="488" width="428" height="64" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="40" y="507">Arbiter &amp; Reflex · <tspan class="mono">src/arbiter/ · src/brain/</tspan></text>
+    <text class="t-body" x="40" y="526">Plan versioning, cancellation, action guards &amp; stuck detection</text>
+    <text class="t-small" x="40" y="542">Behavior triggers run verified self-learned skills on live evidence</text>
+
+    <rect class="subcard" x="468" y="488" width="428" height="64" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="480" y="507">Skills &amp; GameAdapter · <tspan class="mono">src/skills/ · src/adapter/</tspan></text>
+    <text class="t-body" x="480" y="526">Composable primitives: move, dig, place, craft, GUI, combat, portals</text>
+    <text class="t-small" x="480" y="542">Isolated worker-thread VM sandbox for agent-authored JS skills</text>
+  </g>
+
+  <!-- ==================== AGENT <-> OBSERVATION CONNECTORS ==================== -->
+  <g>
+    <line class="line-sse" x1="242" y1="567" x2="242" y2="621" marker-start="url(#arr-sse)" marker-end="url(#arr-sse)" />
+    <rect class="badge-sse" x="112" y="582" width="260" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-info" x="242" y="598" text-anchor="middle">HTTP / SSE · Controls &amp; Live State</text>
+
+    <line class="line-sse" x1="682" y1="564" x2="682" y2="621" marker-end="url(#arr-sse)" />
+    <rect class="badge-sse" x="546" y="582" width="272" height="24" rx="6" stroke-width="1" />
+    <text class="t-pill-info" x="682" y="598" text-anchor="middle">Read-Only SSE · /api/observer/stream</text>
+  </g>
+
+  <!-- ==================== BOTTOM: OBSERVATION & CONTROL ==================== -->
+  <g>
+    <rect class="box-client" x="14" y="624" width="896" height="124" rx="12" stroke-width="1.5" />
+    <rect class="hdr-client" x="14" y="624" width="896" height="34" clip-path="url(#clip-client)" />
+    <circle class="dot-client" cx="32" cy="641" r="5" />
+    <text class="t-title" x="45" y="646">Local Observation &amp; Control</text>
+    <text class="t-body" x="248" y="646">Bound to <tspan class="mono">127.0.0.1:3001</tspan> by default</text>
+    <rect class="pill-info" x="720" y="631" width="176" height="20" rx="10" stroke-width="1" />
+    <text class="t-pill-info" x="808" y="645" text-anchor="middle">Dashboard · Observer HUD</text>
+
+    <rect class="subcard" x="28" y="668" width="428" height="68" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="40" y="687">Local Web Dashboard · <tspan class="mono">public/dashboard.html</tspan></text>
+    <text class="t-body" x="40" y="706">Mind, skills, raycast vision/depth, memory, events &amp; streaming LLM</text>
+    <text class="t-small" x="40" y="723">Pause/resume, suggest, rescue, dawn, give/kill &amp; <tspan class="mono">.env</tspan> editor</text>
+
+    <rect class="subcard-dashed" x="468" y="668" width="428" height="68" rx="8" stroke-width="1" />
+    <text class="t-card-title" x="480" y="687">Optional Curio Observer &amp; Spectator Client (Fabric 1.20.1)</text>
+    <text class="t-body" x="480" y="706">RCON auto <tspan class="mono">/spectate</tspan> + first-person bot HUD &amp; crafting windows</text>
+    <text class="t-small" x="480" y="723">HUD layout, camera &amp; brightening configurable from dashboard</text>
+  </g>
+</svg>
