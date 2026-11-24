@@ -1,6 +1,7 @@
-# Curio
+# Curio Legacy
 
 <p>
+  <img src="https://img.shields.io/badge/status-archived%20%2F%20unmaintained-lightgrey.svg" alt="Status: Archived / Unmaintained">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/minecraft-1.20.1-62B47A.svg" alt="Minecraft Version">
   <img src="https://img.shields.io/badge/node-22_LTS-339933.svg" alt="Node.js Version">
@@ -9,6 +10,9 @@
 </p>
 
 English | [简体中文](README.zh-CN.md)
+
+> [!WARNING]
+> **Archived / Legacy Implementation**: This repository (`curio-legacy`) preserves the legacy implementation of Curio for archival and reference purposes. It is **no longer maintained or updated**—no further development, bug fixes, or feature updates will be made here.
 
 An autonomous curiosity-driven Minecraft agent for **Minecraft Java 1.20.1**, built with
 Mineflayer, OpenAI-compatible LLMs, non-X-ray raycast vision, persistent 3D spatial memory,

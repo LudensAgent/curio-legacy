@@ -1,6 +1,7 @@
-# Curio
+# Curio Legacy
 
 <p>
+  <img src="https://img.shields.io/badge/status-archived%20%2F%20unmaintained-lightgrey.svg" alt="状态：已归档 / 停止维护">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/minecraft-1.20.1-62B47A.svg" alt="Minecraft 版本">
   <img src="https://img.shields.io/badge/node-22_LTS-339933.svg" alt="Node.js 版本">
@@ -9,6 +10,9 @@
 </p>
 
 [English](README.md) | 简体中文
+
+> [!WARNING]
+> **旧版归档说明**：本仓库（`curio-legacy`）为 Curio 的旧有实现归档，仅供查阅与参考，**不再继续维护或更新**（不再进行新功能开发、缺陷修复或后续迭代）。
 
 面向 **Minecraft Java 1.20.1** 的自主探索与学习 Agent，基于 Mineflayer、OpenAI 兼容 LLM、非透视射线视觉、持久化 3D 空间记忆与本地 Web 控制台构建。
 
