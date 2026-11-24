@@ -30,7 +30,7 @@ test('模式文件在公共 .env 之上覆盖，公共值仍然生效', async (t
   fs.writeFileSync(path.join(root, '.env'), 'LLM_MODEL=base-model\nHINDSIGHT_URL=http://base-host:8888\nDATA_DIR=./base-data\nMC_HOST=192.168.1.50\n');
   fs.writeFileSync(path.join(root, '.env.local'), 'MC_HOST=127.0.0.1\nDATA_DIR=./data/local\n');
   process.env.ENV_FILE = '.env.local';
-  const { config, envFile, requireLocalMode } = await loadConfig();
+  const { config, envFile } = await loadConfig();
   assert.equal(envFile, path.join(root, '.env.local'));
   assert.equal(config.mode, 'local');
   assert.equal(config.dataDir, path.join(root, 'data', 'local'));      // 模式文件覆盖公共
@@ -38,20 +38,6 @@ test('模式文件在公共 .env 之上覆盖，公共值仍然生效', async (t
   assert.equal(config.llm.model, 'base-model');                         // 公共值仍然生效
   assert.equal(config.memory.baseUrl, 'http://base-host:8888');         // 公共值仍然生效
   assert.equal(process.env.LLM_MODEL, 'base-model');                    // 公共配置已合并进进程
-  assert.doesNotThrow(() => requireLocalMode('存读档'));
-});
-
-test('Node --env-file 选中的直播文件保持直播模式，拒绝本地管理', async (t) => {
-  const root = project(t);
-  fs.writeFileSync(path.join(root, '.env.live'), 'CURIO_MODE=local\nMC_HOST=192.168.1.50\nDATA_DIR=./data/live\n');
-  process.env.ENV_FILE = '.env.other';
-  process.execArgv.push('--env-file=.env.live');
-  const { config, envFile, requireLocalMode } = await loadConfig();
-  assert.equal(envFile, path.join(root, '.env.live'));
-  assert.equal(config.mode, 'live');
-  assert.equal(config.mc.host, '192.168.1.50');
-  assert.equal(config.dataDir, path.join(root, 'data', 'live'));
-  assert.throws(() => requireLocalMode('存读档'), /直播配置.*存读档.*本地配置/);
 });
 
 test('显式配置缺失或模式无效时报错，默认无 .env 仍可本地启动', async (t) => {
@@ -125,7 +111,7 @@ test('example/.env.test 的所有可写路径都落在 TEST_ROOT_DIR 内，test:
   assert.equal(envFile, path.join(root, '.env.test'));
   assert.equal(config.mode, 'test');
   const testRoot = path.join(root, 'test');
-  const writable = [config.dataDir, config.serverDir, config.agentsDir, config.llmArchiveDir, config.danmakuArchiveDir, config.observerHudConfig, path.dirname(config.spatial.databasePath)];
+  const writable = [config.dataDir, config.serverDir, config.agentsDir, config.llmArchiveDir, config.observerHudConfig, path.dirname(config.spatial.databasePath)];
   for (const dir of writable) {
     const rel = path.relative(testRoot, dir);
     assert.ok(rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`)), `${dir} 应位于测试根目录 ${testRoot} 内`);
@@ -137,22 +123,20 @@ test('example/.env.test 的所有可写路径都落在 TEST_ROOT_DIR 内，test:
   assert.notEqual(path.relative(seed, config.serverDir), '', '种子源与 SERVER_DIR 不能是同一目录');
 });
 
-test('未填写目录时按模式读取独立角色与记忆身份，直播文件名保持直播默认值', async (t) => {
+test('未填写目录时按模式读取独立角色与记忆身份', async (t) => {
   const root = project(t);
-  for (const mode of ['local', 'live']) {
-    const directory = path.join(root, 'data', mode);
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, 'agent.json'), JSON.stringify({
-      worldId: 'saved-world', botUsername: 'TestBot', bankId: `mc-${(mode === 'local' ? 'a' : 'b').repeat(32)}`,
-    }));
-    fs.writeFileSync(path.join(root, `.env.${mode}`), 'CURIO_MODE=local\nMEMORY_WORLD_ID=saved-world\nBOT_USERNAME=TestBot\n');
-    process.env.ENV_FILE = `.env.${mode}`;
-    const { config } = await loadConfig();
-    assert.equal(config.mode, mode);
-    assert.equal(config.dataDir, directory);
-    assert.equal(config.memory.bankId, `mc-${(mode === 'local' ? 'a' : 'b').repeat(32)}`);
-    assert.equal(config.dashboard.port, mode === 'local' ? 3001 : 3000);
-    assert.equal(config.llmArchiveDir, path.join(root, 'archives', mode, 'llm-calls'));
-    assert.equal(config.observerHudConfig, path.join(root, 'live', mode === 'live' ? 'observer-hud.json' : 'observer-hud.local.json'));
-  }
+  const directory = path.join(root, 'data', 'local');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'agent.json'), JSON.stringify({
+    worldId: 'saved-world', botUsername: 'TestBot', bankId: `mc-${'a'.repeat(32)}`,
+  }));
+  fs.writeFileSync(path.join(root, '.env.local'), 'CURIO_MODE=local\nMEMORY_WORLD_ID=saved-world\nBOT_USERNAME=TestBot\n');
+  process.env.ENV_FILE = '.env.local';
+  const { config } = await loadConfig();
+  assert.equal(config.mode, 'local');
+  assert.equal(config.dataDir, directory);
+  assert.equal(config.memory.bankId, `mc-${'a'.repeat(32)}`);
+  assert.equal(config.dashboard.port, 3001);
+  assert.equal(config.llmArchiveDir, path.join(root, 'archives', 'local', 'llm-calls'));
+  assert.equal(config.observerHudConfig, path.join(root, 'observer-hud.local.json'));
 });

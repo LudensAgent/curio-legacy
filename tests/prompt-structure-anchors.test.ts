@@ -28,7 +28,7 @@ function buildRememberedSection(t: TestContext, planText: string,
   assert.ok(plan);
   const [, user] = buildMindMessages({ tier: opts.tier ?? 'deliberate', reason: '查看地标', percept, state, self, memory, plan, activity: null,
     recentActionFailures: [], suspended: [], lastRecord: null, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   const line = user.content.split('\n').find((entry) => entry.startsWith('【记得的地方】'))!;
   return { section: JSON.parse(line.slice('【记得的地方】'.length)), self };
 }

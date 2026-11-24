@@ -15,7 +15,7 @@ function messagesFor(what: string, why: string, recentActionFailures: MindContex
   const percept = perception.update(), state = adapter.state(), self = new SelfModel(null);
   const activity = createActivity({ what, why, kind: 'gather', repeat: 1, steps: [{ skill: 'look_around', args: { seconds: 1 } }] }, '', 'llm', state);
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept, state, self, memory, activity,
-    recentActionFailures, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    recentActionFailures, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   return { memory, user };
 }
 

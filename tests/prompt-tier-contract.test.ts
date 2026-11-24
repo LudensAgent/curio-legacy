@@ -36,8 +36,7 @@ test('【专注】在瞥一眼只保留目标/清单/下一项，认真想才展
   }, '', 'llm', adapter.state());
   const ctx = (tier: 'glance' | 'deliberate'): MindContext => ({
     tier, reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, plan,
-    activity, suspended: [activity], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P',
+    activity, suspended: [activity], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P',
   });
   const focusOf = (tier: 'glance' | 'deliberate') => {
     const [, user] = buildMindMessages(ctx(tier));
@@ -80,7 +79,7 @@ test('施工提醒只对复杂/审美建筑推荐建筑师，简单围栏不触�
   const context = (what: string): MindContext => ({
     tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
     activity: createActivity({ what, why: '', kind: 'build', repeat: 1, steps: [{ skill: 'wait', args: { seconds: 1 } }] }, '', 'llm', adapter.state()),
-    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P',
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P',
   });
   assert.doesNotMatch(situationalReminders(context('在营地边围一圈木栅栏')).join(' '), /design/);
   assert.match(situationalReminders(context('盖一座大型前哨')).join(' '), /design/);
@@ -104,8 +103,7 @@ test('瞥一眼在非主世界也能看到进阶动作提醒', (t) => {
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const context: MindContext = {
     tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P',
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P',
   };
   const [, user] = buildMindMessages(context);
   assert.match(user.content, /进阶动作可用/);

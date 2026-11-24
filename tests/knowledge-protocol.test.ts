@@ -51,7 +51,7 @@ ${body}
   const knowledge = new KnowledgeBase('1.20.1', directory);
   const thinker = new Thinker(planner, adapter, memory, bus, null, knowledge);
   const ctx: MindContext = { tier, reason: '查看知识资料', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '你是 Curio。' };
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '你是 Curio。' };
   t.after(() => {
     memory.close();
     assert.equal(path.dirname(directory), path.resolve(os.tmpdir()));

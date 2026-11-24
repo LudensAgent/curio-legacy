@@ -13,7 +13,6 @@ function testLayout(base: string, overrides: Partial<Layout> = {}): Layout {
     serverDir: d('curio/world-test'),
     agentsDir: d('curio/agents/test'),
     llmArchiveDir: d('curio/archives/test/llm-calls'),
-    danmakuArchiveDir: d('curio/archives/test/danmaku'),
     observerHudConfig: d('curio/observer-hud.test.json'),
     spatialDbPath: d('curio/data/test/spatial/spatial.sqlite'),
     worldId: 'curio-test-01',
@@ -34,7 +33,6 @@ function localLayout(base: string, overrides: Partial<Layout> = {}): Layout {
     serverDir: d('curio/world'),
     agentsDir: d('curio/agents/local'),
     llmArchiveDir: d('curio/archives/local/llm-calls'),
-    danmakuArchiveDir: d('curio/archives/local/danmaku'),
     observerHudConfig: d('curio/observer-hud.local.json'),
     spatialDbPath: d('curio/data/local/spatial/spatial.sqlite'),
     worldId: 'curio-local',
@@ -106,25 +104,21 @@ test('peerLayouts 合并公共 .env 与模式文件，同时保留默认入口�
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
   fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nMC_PORT=25565\nMEMORY_WORLD_ID=127.0.0.1:25565\n');
   fs.writeFileSync(path.join(root, '.env.local'), 'DATA_DIR=./data/local\nMEMORY_WORLD_ID=curio-local\nDASHBOARD_PORT=3001\n');
-  fs.writeFileSync(path.join(root, '.env.live'), 'DATA_DIR=./data/live\nMC_HOST=192.168.1.50\nDASHBOARD_PORT=3000\n');
   const peers = peerLayouts(root, 'test');
   // 默认入口（仅公共 .env）与 .env.local 是两套独立布局，都要保留，不能按模式名去重覆盖。
-  assert.equal(peers.length, 3);
+  assert.equal(peers.length, 2);
   const defaultLocal = peers.find((p) => p.mode === 'local' && p.worldId === '127.0.0.1:25565')!;
   assert.equal(defaultLocal.dataDir, path.join(root, 'data', 'local'));
   assert.equal(defaultLocal.serverDir, path.join(root, 'world'));
   const localFile = peers.find((p) => p.mode === 'local' && p.worldId === 'curio-local')!;
   assert.equal(localFile.serverDir, path.join(root, 'world'));
-  const live = peers.find((p) => p.mode === 'live')!;
-  assert.equal(live.mcHost, '192.168.1.50');
-  assert.equal(live.worldId, '127.0.0.1:25565'); // 继承公共 .env
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('peerLayouts 把仅由公共 .env 构成的默认 local 纳入比较（缺 .env.local 不跳过）', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-iso-'));
   fs.writeFileSync(path.join(root, '.env'), 'SERVER_DIR=./world\nDATA_DIR=./data/local\nMC_PORT=25565\nRCON_PORT=25575\n');
-  // 没有 .env.local / .env.live：默认运行环境仍存在。
+  // 没有 .env.local：默认运行环境仍存在。
   const peers = peerLayouts(root, 'test');
   assert.equal(peers.length, 1);
   assert.equal(peers[0].mode, 'local');
@@ -208,7 +202,6 @@ test('assertTestIsolation 强制所有可写目录落在指定根目录内', () 
     dataDir: path.join(root, 'curio-data'),
     agentsDir: path.join(root, 'curio-data', 'agents'),
     llmArchiveDir: path.join(root, 'curio-data', 'archives', 'llm-calls'),
-    danmakuArchiveDir: path.join(root, 'curio-data', 'archives', 'danmaku'),
     observerHudConfig: path.join(root, 'observer-hud.test.json'),
     spatialDbPath: path.join(root, 'curio-data', 'spatial', 'spatial.sqlite'),
   });

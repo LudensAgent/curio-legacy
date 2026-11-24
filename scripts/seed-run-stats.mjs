@@ -1,5 +1,5 @@
 // 升级到“重启不清零”的版本之前跑一次：从正在运行的控制台读出当前的累计数字，写进 DATA_DIR/run-stats.json，
-// 这样重启后死亡、token、调用次数等接着这次直播的数往下加。只读控制台、只写这一个文件，不碰游戏进程。
+// 这样重启后死亡、token、调用次数等接着累计。只读控制台、只写这一个文件，不碰游戏进程。
 // 用法：node --env-file=.env.local scripts/seed-run-stats.mjs [控制台地址] [数据目录]；默认跟随所选配置。
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,9 +10,9 @@ const hasEnv = fs.existsSync(envFile);
 if (selectedEnv && !hasEnv) throw new Error(`找不到配置文件：${envFile}`);
 if (hasEnv) process.loadEnvFile(envFile);
 const configuredMode = process.env.CURIO_MODE?.trim() || 'local';
-if (configuredMode !== 'local' && configuredMode !== 'live') throw new Error('CURIO_MODE 必须为 local 或 live');
-const mode = path.basename(envFile) === '.env.live' ? 'live' : configuredMode;
-const base = process.argv[2] ?? `http://127.0.0.1:${process.env.DASHBOARD_PORT || (mode === 'live' ? 3000 : 3001)}`;
+if (configuredMode !== 'local' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local 或 test');
+const mode = path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
+const base = process.argv[2] ?? `http://127.0.0.1:${process.env.DASHBOARD_PORT || (mode === 'test' ? 3002 : 3001)}`;
 const dataDir = path.resolve(process.argv[3] ?? (process.env.DATA_DIR?.trim() || `./data/${mode}`));
 const file = path.join(dataDir, 'run-stats.json');
 if (fs.existsSync(file)) { console.log(`已经有 ${file}，不覆盖（新版本已经在记了）`); process.exit(0); }

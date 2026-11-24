@@ -53,7 +53,7 @@ export interface LlmStats {
  */
 export class Planner {
   private window: number[] = [];
-  /** 最近一分钟每次调用的上传/下载 token（直播 HUD 的实时速率） */
+  /** 最近一分钟每次调用的上传/下载 token（观察者 HUD 的实时速率） */
   private recentUsage: { t: number; input: number; output: number }[] = [];
   stats: LlmStats;
   /** 这个规划器用的模型和它的价格（认不出的模型没有价格，不算钱） */

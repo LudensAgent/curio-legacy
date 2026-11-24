@@ -46,7 +46,7 @@ export interface BuildingProject {
   /** complete：逐格验收通过，或者被认定“能住、这样就行了”（acceptance）；abandoned：不要了，不再惦记 */
   status: 'planned' | 'building' | 'incomplete' | 'complete' | 'abandoned';
   /** 没逐格验收通过、但被认定可以收工：谁认定的、当时还差几处 */
-  acceptance?: { at: number; by: 'agent' | 'operator' | 'audience'; note: string; defectsLeft: number };
+  acceptance?: { at: number; by: 'agent' | 'operator'; note: string; defectsLeft: number };
   abandonedAt?: number;
   abandonNote?: string;
   versions: DesignVersion[];
@@ -191,7 +191,7 @@ export class BuildingArchive {
   }
 
   /** 认定可以收工（没逐格验收通过也算能住）：之后不再当成没盖完的工地 */
-  accept(id: string, by: 'agent' | 'operator' | 'audience', note: string) {
+  accept(id: string, by: 'agent' | 'operator', note: string) {
     const project = this.require(id);
     project.acceptance = { at: Date.now(), by, note: note.slice(0, 300), defectsLeft: project.inspections.at(-1)?.defects.length ?? 0 };
     project.status = 'complete';

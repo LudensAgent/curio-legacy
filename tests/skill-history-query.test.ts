@@ -43,7 +43,7 @@ test('收起技能的版本、证据和仅有代码的历史可只读查询，�
   const thinker = new Thinker(planner, adapter, memory, bus, book);
   thinker.skillStats = (name) => engine.statsOf(name);
   const ctx: MindContext = { tier: 'deliberate', reason: '阅读旧技能', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '你是 Curio。' };
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '你是 Curio。' };
   const before = structuredClone(engine.statsOf('test-descent'));
   const result = await thinker.think(ctx, new AbortController().signal);
   assert.equal(result.activity?.steps[0].skill, 'look_around');

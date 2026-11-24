@@ -20,7 +20,7 @@ test('回矿道和地表找矿不因关键词自动收到开挖阶梯指令', (t
     const activity = createActivity({ what, why: '', kind: 'explore', repeat: 1,
       steps: [{ skill: 'travel_to', args: { to: { x: 16, y: 64, z: 0 } } }] }, '', 'llm', state);
     const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self, memory, activity,
-      suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', lastRecord: null };
+      suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', lastRecord: null };
     const reminders = situationalReminders(ctx).join('\n');
     assert.doesNotMatch(reminders, /excavate_run|下矿有稳定下行辅助|手工阶梯的固有限制/);
     assert.match(reminders, /keepInventory 开着（死亡不掉落）/);
@@ -49,7 +49,7 @@ test('保存的目标与清单标明模型来源，不能凭文字标注变成�
   const plan = self.setPlan(goal, steps)!;
   for (const tier of ['deliberate', 'glance'] as const) {
     const [, user] = buildMindMessages({ tier, reason: '重新开始', percept, state: adapter.state(), self, memory, activity: null,
-      suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', lastRecord: null,
+      suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', lastRecord: null,
       plan, operatorOrder: { text: '尝试用 explore_toward 移动', ageSec: 0, status: 'new' } });
     const source = user.content.split('\n').find((line) => line.startsWith('【我】'))!;
     assert.match(source, /agenda_and_plan_source.*你自己保存的计划.*不等于操作者原话/);

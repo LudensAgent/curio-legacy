@@ -29,7 +29,7 @@ test('同一位置连续路径失败时，用户提醒保留失败事实，不�
     position: { ...state.pos }, observed_at: new Date().toISOString(), repeats: 2,
   }));
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept, state, self, memory, activity: null,
-    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '',
+    suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '',
     lastRecord: null, recentActionFailures: failures });
   assert.match(user.content, /【局部恢复】/);
   const recovery = user.content.split('\n').find((line) => line.includes('【局部恢复】'))!;
@@ -105,7 +105,7 @@ test('瞥一眼同时看到原导航请求、仍在执行的动作、受伤中�
   activity.results.push({ skill: 'travel_to', args, status: 'failed', failureCode: 'PATH_NOT_FOUND', summary: '按当前授权没找到可执行路线', at: Date.now() - 1000, durationMs: 1000, pos: { ...state.pos } });
   const runningStep = { skill: 'travel_to', args, source: 'llm', startedAt: Date.now() - 70_000 };
   const [, user] = buildMindMessages({ tier: 'glance', reason: '核对执行状态', percept, state, self, memory, activity, runningStep, lastRecord: null,
-    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+    suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
   const line = user.content.split('\n').find((item) => item.startsWith('【手上的活】'))!;
   const current = JSON.parse(line.slice('【手上的活】'.length)).current_activity;
   assert.match(current.routine[0], /"range":2/);
@@ -132,7 +132,7 @@ test('both prompt tiers expose the current and previous reference frames separat
   self.record(lastRecord);
   for (const tier of ['deliberate', 'glance'] as const) {
     const [system, user] = buildMindMessages({ tier, reason: '核对方向', percept, state, self, memory, activity, lastRecord,
-      suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+      suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
     const activityLine = user.content.split('\n').find((line) => line.startsWith('【手上的活】'));
     const recentLine = user.content.split('\n').find((line) => line.startsWith('【最近】'));
     assert.ok(activityLine && recentLine);

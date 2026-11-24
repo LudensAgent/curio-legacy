@@ -36,8 +36,8 @@ export function envVars(envFile) {
 
 export function modeFrom(envFile, env) {
   const configuredMode = (env.CURIO_MODE ?? '').trim() || 'local';
-  if (configuredMode !== 'local' && configuredMode !== 'live' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local、live 或 test');
-  return path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
+  if (configuredMode !== 'local' && configuredMode !== 'test') throw new Error('CURIO_MODE 必须为 local 或 test');
+  return path.basename(envFile) === '.env.test' ? 'test' : configuredMode;
 }
 
 /** 守护日志跟随所选配置；与子进程相同的数据目录（相对路径按配置文件所在目录解析）。 */
@@ -172,7 +172,7 @@ const mb = (n) => (typeof n === 'number' ? `${Math.round(n / 1048576)} MB` : '?'
 // ------------------------------------------------------------ 命令行入口
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  // CURIO_ROOT：数据 + env 文件放在项目外（如 /path/to/curio）时，用它定位模式文件。
+  // CURIO_ROOT：数据 + env 文件放在项目外时，用它定位模式文件。
   // 优先进程环境变量，其次读项目根目录 .env（与子进程加载顺序一致）。
   const rootEnvVars = (() => {
     const f = path.join(root, '.env');
@@ -181,7 +181,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const curioRoot = (process.env.CURIO_ROOT || rootEnvVars.CURIO_ROOT || '').trim();
   const curioArg = process.argv.find((a) => a.startsWith('--curio='))?.slice('--curio='.length);
   if (curioArg) {
-    if (curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
+    if (curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 local / test，收到：${curioArg}`);
     if (!curioRoot) throw new Error('--curio 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）');
   }
   // 多个 --env-file 时最后一个才是模式覆盖文件（与 src/config.ts 一致），否则会把子进程指向公共 .env。
@@ -190,7 +190,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     ? path.join(curioRoot, `.env.${curioArg}`)
     : execArgvEnvFile[execArgvEnvFile.length - 1]
       || process.env.ENV_FILE?.trim();
-  if (selectedEnv === 'live' || selectedEnv === 'local' || selectedEnv === 'test') {
+  if (selectedEnv === 'local' || selectedEnv === 'test') {
     if (!curioRoot) throw new Error(`裸模式 ${selectedEnv} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
     selectedEnv = path.join(curioRoot, `.env.${selectedEnv}`);
   }

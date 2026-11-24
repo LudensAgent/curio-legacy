@@ -82,7 +82,7 @@ test('提示词只投影当前目标摘要；详情留在按需查询的账本�
   const percept = perception.update(), state = adapter.state();
   const [, user] = buildMindMessages({
     tier: 'deliberate', reason: '测试', percept, state, self, memory, plan, activity: null,
-    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', lastRecord: null,
+    suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', lastRecord: null,
   } as any);
   assert.match(user.content, /progress_trend/);
   assert.match(user.content, /repeat_visits/);
@@ -137,7 +137,7 @@ test('提示词把移动覆盖与施工/目标证据分开投影，并带出最�
   const percept = perception.update(), state = adapter.state();
   const [, user] = buildMindMessages({
     tier: 'deliberate', reason: '测试', percept, state, self, memory, plan, activity: null,
-    suspended: [], noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', lastRecord: null,
+    suspended: [], noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', lastRecord: null,
   } as any);
   assert.match(user.content, /"passage":\{"dug":0,"filled":0,"openSteps":24\}/);
   assert.match(user.content, /"target_evidence":\{"located":false,"acquired":false\}/);

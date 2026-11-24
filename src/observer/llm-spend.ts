@@ -2,12 +2,11 @@ import type { Planner } from '../planner/planner.ts';
 import { costOf, isPeak, priceFor } from '../planner/pricing.ts';
 
 /**
- * 直播 HUD 用的 LLM 用量：上传（输入）/ 下载（输出）token、缓存命中、最近一分钟的速率、在用的模型和真实花费。
+ * 观察者 HUD 与控制台用的 LLM 用量：上传（输入）/ 下载（输出）token、缓存命中、最近一分钟的速率、在用的模型和真实花费。
  *
  * 花费 = 每次调用当时按价格表（含 DeepSeek 高峰价）算好的累计值；升级前就存在 run-stats 里的用量没有逐次价格，
  * 按闲时价补估（只差在高峰时段那部分会少算一点）。认不出价格的模型不算钱，全都认不出时 cost 为 null。
  * 这里只算游戏（规划器）的用量；Hindsight 记忆服务的用量由下面的 MemorySpend 单独算，再用 withMemory 合并。
- * 直播侧边聊天自己调的 LLM 不算在内。
  */
 export interface LlmSpend {
   inputTokens: number;

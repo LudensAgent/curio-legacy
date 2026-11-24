@@ -91,7 +91,7 @@ test('preflightConfig 对独立合法的 test 配置返回 0', () => {
   fs.writeFileSync(path.join(root, '.env.test'), [
     'MEMORY_WORLD_ID=curio-test-01', 'DATA_DIR=./data/test', 'SERVER_DIR=./world-test', 'MC_PORT=25566',
     'RCON_PORT=25576', 'DASHBOARD_PORT=3002', 'AGENTS_DIR=./agents/test', 'LLM_ARCHIVE_DIR=./archives/test/llm-calls',
-    'DANMAKU_ARCHIVE_DIR=./archives/test/danmaku', 'OBSERVER_HUD_CONFIG=./live/observer-hud.test.json',
+    'OBSERVER_HUD_CONFIG=./observer-hud.test.json',
     'TEST_ROOT_DIR=.',
   ].join('\n') + '\n');
   const r = preflightConfig(path.join(root, '.env.test'), REPO, { CURIO_ROOT: root });

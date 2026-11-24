@@ -22,8 +22,7 @@ test('focus prompt distinguishes observed online stagnation from calendar age', 
   self.setOnline(true, now);
   now += 2 * 60_000;
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
-    self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P' });
+    self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /"goal_age_wall_clock_min":602/);
   assert.match(user.content, /"no_progress_observed_online_min":2/);
   assert.match(user.content, /"earlier_online_time":"未知"/);

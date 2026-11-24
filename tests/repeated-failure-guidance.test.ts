@@ -19,7 +19,7 @@ test('同一动作反复失败时，提示先改这一步而不是整段重写',
   const state = adapter.state(), self = new SelfModel(null);
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state, self, memory,
     activity: null, recentActionFailures: [fail(state, 3)], suspended: [], lastRecord: null, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /反复 PATH_NOT_FOUND/);
   assert.match(user.content, /不必把整段活推倒重来/);
 });
@@ -31,6 +31,6 @@ test('失败没有反复时不提示整段重写', (t) => {
   const state = adapter.state(), self = new SelfModel(null);
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state, self, memory,
     activity: null, recentActionFailures: [fail(state)], suspended: [], lastRecord: null, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.doesNotMatch(user.content, /不必把整段活推倒重来/);
 });

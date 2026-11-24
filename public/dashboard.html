@@ -271,12 +271,12 @@
     .widevision { display: block; }
     .scroll { max-height: none; }
   }
-  /* 直播页：观察者 HUD 布局、镜头与亮度、LLM 用量、弹幕存档 */
-  #pane-live { overflow: auto; }
-  #pane-live .livegrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
-  @media (max-width: 1200px) { #pane-live .livegrid { grid-template-columns: 1fr; } }
-  #pane-live .card + .card { margin-top: 0; }
-  #pane-live .stackcol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  /* 观察者页：观察者 HUD 布局、镜头与亮度、LLM 用量 */
+  #pane-observer { overflow: auto; }
+  #pane-observer .livegrid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 12px; }
+  @media (max-width: 1200px) { #pane-observer .livegrid { grid-template-columns: 1fr; } }
+  #pane-observer .card + .card { margin-top: 0; }
+  #pane-observer .stackcol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
   .hudstage { position: relative; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; user-select: none; touch-action: none;
               background: linear-gradient(180deg, #8fb7d9 0%, #a9c8e4 55%, #6f9a55 56%, #5b8446 100%); border: 1px solid var(--line); }
   .hudcanvas { position: absolute; inset: 0; overflow: hidden; }
@@ -301,17 +301,6 @@
   .hudnote { font-size: 12px; color: var(--dim); margin-top: 6px; }
   .hudnote.bad { color: var(--bad); }
   .spend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px; }
-  .dmbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-  .dmbar input[type=search] { flex: 1; min-width: 140px; }
-  .dmlist { list-style: none; margin: 0; padding: 0; max-height: 520px; overflow: auto; }
-  .dmlist li { display: grid; grid-template-columns: 62px minmax(0, 120px) minmax(0, 1fr); gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); font-size: 12px; }
-  .dmlist li:first-child { border-top: 0; }
-  .dmlist .t { font: 11px var(--mono); color: var(--dim); }
-  .dmlist .u { color: var(--info); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dmlist .q { background: var(--info-soft); border-radius: 6px; }
-  .dmlist .tag { display: inline-block; font: 10px var(--mono); padding: 0 5px; border-radius: 99px; margin-left: 6px; border: 1px solid var(--line); color: var(--dim); }
-  .dmlist .tag.bad { color: var(--bad); border-color: var(--bad-soft); background: var(--bad-soft); }
-  .dmlist .tag.warn { color: var(--warn); border-color: var(--warn-soft); background: var(--warn-soft); }
   .stack { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--soft); margin: 8px 0; }
   .stack i { display: block; height: 100%; }
 </style>
@@ -448,7 +437,7 @@
 
     <div class="tabsarea">
     <nav class="tabs" id="tabs">
-      <button class="tab" data-tab="live">直播</button>
+      <button class="tab" data-tab="observer">观察者</button>
       <button class="tab" data-tab="learning">学习曲线</button>
       <button class="tab" data-tab="mind">心智</button>
       <button class="tab" data-tab="skills">技能<span class="n" id="nSkills"></span></button>
@@ -483,7 +472,7 @@
       </div>
     </section>
 
-    <section class="pane" id="pane-live">
+    <section class="pane" id="pane-observer">
       <div class="livegrid">
         <div class="stackcol">
           <div class="card">
@@ -525,18 +514,7 @@
           <div class="card">
             <h2>LLM 用量 <span class="r dim" id="spendModel">-</span></h2>
             <div class="spend mono" id="spendBody"><span class="dim">等待数据…</span></div>
-            <div class="hudnote">花费按每次调用当时的价格（含 DeepSeek 高峰价）累计；游戏和记忆服务分开统计，不含侧边聊天。</div>
-          </div>
-          <div class="card">
-            <h2>弹幕存档 <span class="r dim" id="dmMeta">-</span></h2>
-            <div class="dmbar">
-              <select id="dmDate"></select>
-              <input type="search" id="dmSearch" placeholder="搜索弹幕或昵称">
-              <label><input type="checkbox" id="dmQuestions"> 只看提问</label>
-              <label><input type="checkbox" id="dmBlocked"> 含被拦下的</label>
-              <button id="dmReload">刷新</button>
-            </div>
-            <ul class="dmlist" id="dmList"><li class="empty">读取中…</li></ul>
+            <div class="hudnote">花费按每次调用当时的价格（含 DeepSeek 高峰价）累计；游戏和记忆服务分开统计。</div>
           </div>
         </div>
       </div>
@@ -816,7 +794,7 @@ async function doKillEntities() {
   const type = $('killType').value.trim();
   const radius = parseInt($('killRadius').value, 10) || 10;
   if (!type) { $('killType').focus(); return; }
-  if (!confirm(`清除周围 ${radius} 格内所有的「${type}」？会在游戏里显示「紧急救援：主包对「${type}」大开杀戒了」。`)) return;
+  if (!confirm(`清除周围 ${radius} 格内所有的「${type}」？会在游戏里广播清除提示。`)) return;
   const btn = $('killBtn'); btn.disabled = true;
   const out = $('killResult');
   let r;
@@ -848,7 +826,7 @@ async function rescueBot() {
 /** 一键天亮：确认后让后台 /time set day；结果在按钮上显示几秒 */
 async function dawnBot() {
   const btn = $('dawnBtn');
-  if (btn.disabled || !confirm('把游戏时间跳到白天？会在游戏里显示「天亮了：主包看不下去了」。')) return;
+  if (btn.disabled || !confirm('把游戏时间跳到白天？会在游戏里广播天亮提示。')) return;
   btn.disabled = true; btn.textContent = '天亮中…';
   let msg;
   try {
@@ -934,7 +912,7 @@ async function saveEnv() {
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || r.status);
     await loadEnv();
-    cfgNote(`已保存 ${j.changed.length} 项：${j.changed.join('、')}。重启 Curio 后生效（侧边聊天 / Live2D 桥也要重启）。`, 'ok');
+    cfgNote(`已保存 ${j.changed.length} 项：${j.changed.join('、')}。重启 Curio 后生效。`, 'ok');
   } catch (e) { cfgNote('保存失败：' + e.message, 'bad'); }
   finally { $('cfgSave').disabled = false; }
 }
@@ -1938,7 +1916,7 @@ es.addEventListener('ev', (e) => addEvent(JSON.parse(e.data)));
 es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').className = 'dot off'; };
 </script>
 <script>
-// ———— 直播页：观察者 HUD（/api/observer/hud）、LLM 用量、弹幕存档（/api/danmaku）
+// ———— 观察者页：观察者 HUD（/api/observer/hud）、LLM 用量
 (() => {
   const PANELS = [
     { id: 'info', name: '状态 / 当前动作' },
@@ -2128,46 +2106,11 @@ es.onerror = () => { $('conn').textContent = '控制台断开'; $('connDot').cla
     ].map(([k, v]) => `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`).join('');
   }
 
-  // —— 弹幕存档
-  const BLOCK = { injection: '想改规则', command: '要命令', secret: '套密钥', spam: '广告', blocked: '屏蔽词', flood: '刷屏' };
-  async function loadDates() {
-    try {
-      const j = await (await fetch('/api/danmaku?dates=1')).json();
-      const sel = $('dmDate'), keep = sel.value;
-      sel.innerHTML = (j.dates || []).map((d) => `<option>${esc(d)}</option>`).join('') || '<option value="">还没有存档</option>';
-      if (keep && (j.dates || []).includes(keep)) sel.value = keep;
-    } catch { /* 旧版 Curio 没有这个接口 */ }
-  }
-  async function loadDanmaku() {
-    const q = new URLSearchParams({ limit: '500' });
-    if ($('dmDate').value) q.set('date', $('dmDate').value);
-    if ($('dmSearch').value.trim()) q.set('q', $('dmSearch').value.trim());
-    if ($('dmQuestions').checked) q.set('questions', '1');
-    if ($('dmBlocked').checked) q.set('blocked', '1');
-    try {
-      const r = await fetch('/api/danmaku?' + q);
-      if (!r.ok) throw new Error(r.status === 404 ? '这个版本的 Curio 没有弹幕存档' : 'HTTP ' + r.status);
-      const j = await r.json();
-      $('dmMeta').textContent = j.date ? `${j.date} · 共 ${j.total} 条 · 提问 ${j.questions} · 拦下 ${j.blocked}` : '还没有存档';
-      $('dmList').innerHTML = list(j.records, (d) => `<li class="${d.question && !d.blocked ? 'q' : ''}"><span class="t">${new Date(d.ts).toLocaleTimeString('zh-CN', { hour12: false })}</span>` +
-        `<span class="u" title="uid ${esc(d.uid)}">${esc(d.user || '匿名')}</span><span>${esc(d.text)}` +
-        `${d.kind === 'superchat' ? `<span class="tag warn">SC ${esc(d.price ?? '')}</span>` : d.kind === 'gift' ? '<span class="tag">礼物</span>' : ''}` +
-        `${d.question && !d.blocked ? '<span class="tag">提问</span>' : ''}${d.risky ? '<span class="tag warn">有风险</span>' : ''}` +
-        `${d.blocked ? `<span class="tag bad">${esc(BLOCK[d.blocked] || d.blocked)}</span>` : ''}</span></li>`, '没有符合条件的弹幕');
-    } catch (e) { $('dmList').innerHTML = `<li class="empty">${esc(e.message)}</li>`; }
-  }
-  let dmTimer = null;
-  $('dmReload').addEventListener('click', async () => { await loadDates(); loadDanmaku(); });
-  for (const id of ['dmDate', 'dmQuestions', 'dmBlocked']) $(id).addEventListener('change', loadDanmaku);
-  $('dmSearch').addEventListener('input', () => { clearTimeout(dmTimer); dmTimer = setTimeout(loadDanmaku, 250); });
-
-  const onLiveTab = () => $('pane-live').classList.contains('on');
-  async function openLive() { loadHud(); loadLayout(); renderSpend(); await loadDates(); loadDanmaku(); }
-  document.querySelector('.tab[data-tab="live"]').addEventListener('click', openLive);
-  if (onLiveTab()) openLive();
-  setInterval(() => { if (onLiveTab()) { renderSpend(); loadLayout(); } }, 1000);
-  // 看着的时候，今天的新弹幕自动出现
-  setInterval(() => { if (onLiveTab() && !$('dmSearch').value && $('dmDate').selectedIndex <= 0) loadDanmaku(); }, 10000);
+  const onObserverTab = () => $('pane-observer').classList.contains('on');
+  async function openObserver() { loadHud(); loadLayout(); renderSpend(); }
+  document.querySelector('.tab[data-tab="observer"]').addEventListener('click', openObserver);
+  if (onObserverTab()) openObserver();
+  setInterval(() => { if (onObserverTab()) { renderSpend(); loadLayout(); } }, 1000);
 })();
 </script>
 </body>

@@ -7,7 +7,7 @@ import { isMethodChoiceRule, needsProvisionalMethodLimit, PROVISIONAL_METHOD_LIM
 import { SelfModel } from '../src/mind/self.ts';
 import { parseConsolidation } from '../src/mind/thinker.ts';
 
-// 以下三条是 2026-11-17 01:35 线上 /path/to/curio/data/live/mind.json 的原文，用来锁定实际误判/误伤风险。
+// 以下三条是来自实际运行的典型案例，用来锁定误判/误伤风险。
 const directFortress = '长距离回已知坐标别用 travel_to 直连（常被宿主边缘策略拒、连段无进展）；改 explore_toward 分段：direction+distance 48–96、segment 48、dig:true、place:"any"、maxDescent 8，一段段推（近期45/51格成段）。';
 const shortTrip = '下界推进当短途往返：从门沿实岩开10–20格短巷，长段用 explore_toward 带 dig+place 一段段推；落点支撑是 air 或同层连断就是薄壳，别逐格补，换向或抬/降一层；开巷前带一组垫料，用完先回门口补；血/饱食见底退回。';
 const parameterRule = '回已知坐标用 travel_to 必须写全 {x,y,z} 并授权 dig/place，缺 y 直接 BAD_ARGS、缺授权停在半路；报 BLOCKED 就原地挖开续走；explore_toward 要写 dig 才挖墙；go_near 只对身边看得见的容器/门/床/传送门用。';

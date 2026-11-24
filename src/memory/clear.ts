@@ -38,8 +38,8 @@ export function inspectMemoryDirectory(dataDir: string, projectDir: string): { d
 
   const realDirectory = fs.realpathSync(directory);
   validateDirectory(realDirectory, project);
-  if (realDirectory === path.join(project, 'data') && ['local', 'live'].some((name) => fs.existsSync(path.join(realDirectory, name)))) {
-    throw new Error('DATA_DIR 指向本地与直播的公共目录，请选择 data/local 或 data/live。');
+  if (realDirectory === path.join(project, 'data') && ['local', 'test'].some((name) => fs.existsSync(path.join(realDirectory, name)))) {
+    throw new Error('DATA_DIR 指向多环境的公共父目录，请选择具体子目录（如 data/local）。');
   }
   if (['.git', 'package.json', 'server.properties', 'level.dat'].some((name) => fs.existsSync(path.join(realDirectory, name)))) {
     throw new Error(`DATA_DIR 包含项目或 Minecraft 存档文件，拒绝清空：${realDirectory}`);

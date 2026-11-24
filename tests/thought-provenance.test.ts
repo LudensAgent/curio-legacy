@@ -20,7 +20,7 @@ test('prior thoughts and activity reasons stay separate from observed feedback',
   activity.results.push({ skill: 'look_around', args: {}, status: 'succeeded', summary: '看到了箱子', at: Date.now(), durationMs: 1 });
   for (const tier of ['glance', 'deliberate'] as const) {
     const [, user] = buildMindMessages({ tier, reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, activity,
-      suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+      suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
     const recent = JSON.parse(user.content.match(/【最近】(.*)/)![1]);
     assert.deepEqual(recent.stream, [`[此前想法，未经核实] ${oldThought}`, '[outcome] 挖到了 raw_iron×2', '[notice] 背包剩余 4 个空位']);
     const work = JSON.parse(user.content.match(/【手上的活】(.*)/)![1]);

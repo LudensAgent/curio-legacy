@@ -3,7 +3,6 @@ import { shortId } from '../util.ts';
 import type { AgentState, GameAdapter, Vec3Like } from '../adapter/types.ts';
 import type { Arbiter, Step, TaskInfo, TaskOutcome } from '../arbiter/arbiter.ts';
 import type { AgentEvent, EventBus } from '../events.ts';
-import type { AudienceContext } from '../live/audience.ts';
 import { compileBuilding, normalizeSpec } from '../building/spec.ts';
 import { KNOW_HOW_LESSON_KEY_PREFIX, type Hazard, type WorldMemory } from '../memory/store.ts';
 import { materialPlan } from '../methods/shortfall.ts';
@@ -43,7 +42,6 @@ export interface MindDeps {
   researchContext?: () => unknown;
   /** 主线进度事实（已达成里程碑 + 下一个未达成的目标）：来自 scorecard，只作方向参考，不是硬目标 */
   progress?: () => { reached: number; total: number; done: string[]; next: string | null; branches: { group: string; done: number; total: number; next: string[] }[] };
-  audience?: { context(tier?: 'light' | 'full'): AudienceContext | null; buildConsensus?(windowMs?: number): { viewers: number; messages: number; samples: string[] }; clearBuildConsensus?(): void };
   onGoalEnd?: (status: string) => void;
   /** 主目标很久没进展：交给后台想“要做到它还缺什么能力” */
   onGoalStuck?: (goal: string, lines: string[]) => void;
@@ -552,7 +550,6 @@ export class Mind {
         if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
       }
     }
-    this.safe(() => this.audienceOnBuilding(), undefined);
     this.safe(() => this.autoCheckPlan(p), undefined);
     this.safe(() => this.strategy.onTick(p.time.phase, this.bedDist(), this.activity?.what), undefined);
     this.safe(() => this.goalStuckCheck(), undefined);
@@ -612,30 +609,6 @@ export class Mind {
       return this.think(Mind.NEAR_END_REASON, 'glance');
     }
     if (Date.now() - Math.max(this.activityThoughtAt, this.lastThoughtAt) > this.timing.checkInMs) return this.think('做了一会儿了，抬头看看', 'glance');
-  }
-
-  /**
-   * 造房子阶段听观众的：好几位观众（或一再有人）劝“房子够了、别修了”，就把手边那座没盖完的房子认定为能住。
-   * 只在确实在盖/补这座房子时才算（离工地近、最近在上面干过活、手上的事和盖房有关），别的时候这些弹幕只是普通弹幕。
-   */
-  private audienceOnBuilding() {
-    const a = this.d.audience;
-    if (!a?.buildConsensus) return;
-    const c = a.buildConsensus(Mind.AUDIENCE_ACCEPT.windowMs);
-    if (c.viewers < Mind.AUDIENCE_ACCEPT.viewers && !(c.messages >= Mind.AUDIENCE_ACCEPT.messages && c.viewers >= 2)) return;
-    const s = this.d.adapter.state();
-    const site = myBuilds(this.d.memory, s, 20).find((b) => b.status !== 'complete' && b.dist <= 32 && b.attempts >= 1 && Date.now() - b.lastWorkedAt <= 15 * 60_000);
-    if (!site) return;
-    const doing = [this.activity?.what, this.activity?.why, this.d.self.plan()?.goal, ...(this.d.self.plan()?.steps.filter((x) => !x.done).map((x) => x.text) ?? [])].filter(Boolean).join(' ');
-    const building = this.activity?.kind === 'build' || this.activity?.steps.some((st) => st.skill === 'build') || /屋|房|家|缺口|补|盖|建|build/.test(doing);
-    if (!building) return;
-    const r = settleBuild(this.d.memory, site.id, 'accept', 'audience', `观众一再劝够了（${c.viewers} 位、${c.messages} 条）：${c.samples.join(' / ')}`.slice(0, 300));
-    a.clearBuildConsensus?.();
-    if (!r.ok) return;
-    this.d.bus.publish('build_accepted', 'P2', `${r.text}（听了观众的：${c.samples[0] ?? ''}）`, { projectId: site.id, by: 'audience', viewers: c.viewers, messages: c.messages });
-    this.d.self.think(`观众一再说「${c.samples[0] ?? '够了'}」，${r.text}`, 'outcome');
-    const n = this.attention.notice(`audience_accept:${site.id}`, `观众们一再劝房子够了：${r.text}——可以去做别的事了`, 0.6, 0);
-    if (n) this.d.bus.publish('notice', 'P2', `注意到：${n.what}`, { salience: n.salience, level: n.level });
   }
 
   /** 主目标清单 30 分钟以上、8 段活以上没勾掉一项：目标卡住了 */
@@ -726,9 +699,6 @@ export class Mind {
       this.d.bus.publish('plan_done', 'P2', `主目标完成：${now.goal}`);
     }
   }
-
-  /** 观众劝“够了”多少才算共识：5 分钟内 3 位观众，或至少 2 位观众说了 3 条以上 */
-  static AUDIENCE_ACCEPT = { windowMs: 5 * 60_000, viewers: 3, messages: 3 };
 
   /** 需要看看全局了吗：好久没认真想过、做完了好几段活、情绪到了临界、刚卡住 */
   private needsBigPicture(): boolean {
@@ -2181,7 +2151,7 @@ export class Mind {
       next: this.queuedNext?.draft ?? null,
       lastRecord: this.lastRecord, noticed, changes: this.changesSinceLastThought(), userSuggestion: this.userSuggestion,
       operatorOrder: this.order ? { text: this.order.text, ageSec: Math.round((Date.now() - this.order.at) / 1000), status: this.order.status, kind: this.order.kind } : null,
-      audience: this.d.audience?.context(tier === 'glance' ? 'light' : 'full') ?? null, notes: this.notes,
+      notes: this.notes,
       mySkills: tier === 'deliberate' ? this.safe(() => this.d.mySkills?.() ?? [], []) : [],
       researchContext: tier === 'deliberate' && reflect ? this.safe(() => this.d.researchContext?.(), undefined) : undefined,
       persona: this.d.persona,

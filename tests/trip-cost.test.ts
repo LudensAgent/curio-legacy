@@ -30,7 +30,7 @@ const setup = (kind: 'gather' | 'explore' | 'craft' = 'gather') => {
 const messages = (s: ReturnType<typeof setup>, excursions = true) => {
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: s.perception.update(), state: s.adapter.state(),
     self: s.self, memory: s.memory, plan: s.plan, activity: s.activity, suspended: [], lastRecord: null, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', excursions: excursions ? [s.leg] : [] });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P', excursions: excursions ? [s.leg] : [] });
   return user.content;
 };
 

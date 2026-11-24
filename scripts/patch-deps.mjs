@@ -88,7 +88,7 @@ function patch(rel, mark, anchor, replacement, done, missing) {
 }
 
 // mineflayer 背包：craft / transfer / deposit / toss / equip 内部调的是模块里的本地 clickWindow，不走 bot.clickWindow，
-// 外面包不到；合成、整理箱子几十下点击在几十毫秒内全部发完，直播观众根本看不清。
+// 外面包不到；合成、整理箱子几十下点击在几十毫秒内全部发完，观察者界面几乎看不清。
 // 在 clickWindow 入口留一个钩子：bot.beforeWindowClick 存在时每次点击前先等它（Agent 里按 UI_PACING_MS 停顿）。
 {
   const mark = '/* curio-patch: window click hook */';

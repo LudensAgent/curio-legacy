@@ -59,14 +59,11 @@ export interface DashboardHandlers {
   forgetMindNotes?(kind: 'knowHow' | 'diary', ids: string[] | number[]): { ok: boolean; error?: string; removed?: { id?: string; at?: number; text: string }[] };
   /** 切换自动旁观（附着到 Bot / 自由旁观） */
   spectate?(on: boolean): Promise<unknown> | unknown;
-  /** 弹幕存档：?dates=1 列出有存档的日期；否则按 date / q / questions / blocked / limit 查询 */
-  danmaku?(query: URLSearchParams): unknown;
 }
 
 /**
  * 本地控制台：只绑定 127.0.0.1。
  * - /          控制台
- * - /overlay   OBS 浏览器源（透明背景的状态叠加）
  * - /api/stream  Server-Sent Events：每秒推送状态 + 实时事件
  */
 /** extraRoutes：在布局遥测之外的控制台路由之前尝试的处理器（返回 true 表示已处理），用于挂载 Curio Observer 数据流 */
@@ -97,7 +94,7 @@ export function startDashboard(
       c.destroy();
       slowDropped++;
       // 在总线的事件回调里，别同步再发事件
-      queueMicrotask(() => bus.publish('dashboard_slow_client', 'P1', `控制台/叠加页的一个实时连接 ${mb} MB 没读走，断开它（它会自己重连）`, { mb }));
+      queueMicrotask(() => bus.publish('dashboard_slow_client', 'P1', `控制台的一个实时连接 ${mb} MB 没读走，断开它（它会自己重连）`, { mb }));
     }
   };
   const broadcast = (line: string, droppable = false) => { for (const c of [...clients]) push(c, line, droppable); };
@@ -174,7 +171,6 @@ export function startDashboard(
     }
     for (const route of extraRoutes) if (route(req, res)) return;
     if (req.method === 'GET' && p === '/') return file(res, 'dashboard.html');
-    if (req.method === 'GET' && p === '/overlay') return file(res, 'overlay.html');
     // 背包里的物品贴图：/textures/item/oak_log.png
     if (req.method === 'GET' && p.startsWith('/textures/item/')) {
       const file = textures.resolve(decodeURIComponent(p.slice('/textures/item/'.length)).replace(/\.png$/, ''));
@@ -218,10 +214,6 @@ export function startDashboard(
       res.on('close', () => clients.delete(res));
       req.on('close', () => { if (res.destroyed) clients.delete(res); });
       return;
-    }
-    if (req.method === 'GET' && p === '/api/danmaku') {
-      if (!h.danmaku) return send(res, 404, '{"error":"not supported"}');
-      return send(res, 200, JSON.stringify(h.danmaku(url.searchParams)));
     }
     if (req.method === 'GET' && p === '/api/skills') {
       if (!h.listSkills) return send(res, 404, '{"error":"not supported"}');
@@ -349,6 +341,6 @@ export function startDashboard(
     send(res, 404, '{"error":"not found"}');
   });
   server.on('error', (e) => bus.publish('dashboard', 'P1', `控制台启动失败：${e.message}`));
-  server.listen(port, host, () => bus.publish('dashboard', 'P3', `控制台 http://${host}:${port}  ·  OBS 叠加 http://${host}:${port}/overlay`));
+  server.listen(port, host, () => bus.publish('dashboard', 'P3', `控制台 http://${host}:${port}`));
   return Object.assign(server, { streamStats });
 }

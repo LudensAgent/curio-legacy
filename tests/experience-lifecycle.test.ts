@@ -236,7 +236,7 @@ test('亲历观察被反思改写成新说法后来源变为反思，观察时�
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   self.addAgenda('河对岸有露天铁矿', 'question', 'today');
   const [, user] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
   const me = JSON.parse(user.content.split('\n').find((line) => line.startsWith('【我】'))!.slice('【我】'.length));
   assert.equal(me.know_how.find((x: { id: string }) => x.id === observed.id)?.source, 'reflection', '主提示词不能把改写后的新推断标成亲历观察');
   memory.close();
@@ -270,7 +270,7 @@ test('回想保留窍门的来源和未验证状态；know_how 副本不再作�
   const bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const [, user] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', recalled: first });
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', recalled: first });
   assert.match(user.content, /\[教训[^\]]*\] 模型推断（来源\/验证状态未记录）：旧记录里的推断做法/);
   assert.match(user.content, /\[教训[^\]]*\] 亲历观察：河对岸有露天铁矿/);
 
@@ -288,7 +288,7 @@ test('主提示词的窍门条目保留来源、未验证和应用证据计数',
   const k = self.learn('在矿道里卡住时先朝上坡方向开巷', { source: 'reflection' })!;
   self.record(record({ id: 'a1', applying: k.id, applyingText: k.text, outcome: 'stuck', summary: '下一级支撑是空的' }));
   const [system, user] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
   const selfLine = user.content.split('\n').find((line) => line.startsWith('【我】'))!;
   const me = JSON.parse(selfLine.slice('【我】'.length));
   const entry = me.know_how.find((x: { id: string }) => x.id === k.id);
@@ -400,7 +400,7 @@ test('查过的资料会跨思考保留并标成外部参考，不写成窍门',
   self.recordKnowledgeFacts([{ docId: 'blazes-and-fortresses', title: '烈焰人与下界要塞', section: 'generation', sectionTitle: '生成', fact: '要塞按 432×432 区域生成' }]);
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
   const me = JSON.parse(user.content.split('\n').find((line) => line.startsWith('【我】'))!.slice('【我】'.length));
   assert.match(me.knowledge_facts[0], /^blazes-and-fortresses#generation｜烈焰人与下界要塞：要塞按 432×432 区域生成（.+查到）$/);
   assert.match(me.knowledge_facts_note, /不是当前世界已有资源或现场事实/);
@@ -431,7 +431,7 @@ test('提示词给出身边未到访方向，并指向更完整的空间到访�
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), self = new SelfModel(null);
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' };
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' };
   const [system, user] = buildMindMessages({ ...base, tier: 'deliberate' });
   assert.doesNotMatch(user.content, /unexplored_near/, '认真想时已有完整三档到访覆盖，不重复短提示');
   assert.match(user.content, /"explored_around":/, '保留原有八方向到访覆盖');
@@ -453,7 +453,7 @@ test('八个方向都有到访记录时，瞥一眼不再提示未探索方向',
   for (const [dx, dz] of dirs) for (let r = 32; r <= 128; r += 16) memory.visit('overworld', { x: Math.floor(dx * r), y: 64, z: Math.floor(dz * r) });
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const [, glance] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' });
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' });
   assert.doesNotMatch(glance.content, /unexplored_near/);
   memory.close();
 });

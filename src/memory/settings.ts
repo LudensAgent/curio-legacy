@@ -9,7 +9,7 @@ export const legacyBankId = (worldId: string, agentId: string) => `mc-${createHa
 /** 当前角色（DATA_DIR/agent.json）自己的 bank：每个角色一份，切换角色就换 bank（npm run agents:*） */
 function agentBank(env: NodeJS.ProcessEnv, worldId: string, agentId: string): string | null {
   try {
-    const meta = JSON.parse(fs.readFileSync(path.join(path.resolve((env.DATA_DIR ?? '').trim() || path.join('data', env.CURIO_MODE === 'live' ? 'live' : 'local')), 'agent.json'), 'utf8'));
+    const meta = JSON.parse(fs.readFileSync(path.join(path.resolve((env.DATA_DIR ?? '').trim() || path.join('data', env.CURIO_MODE === 'test' ? 'test' : 'local')), 'agent.json'), 'utf8'));
     // 只认同一个世界、同一个名字的角色（换了服务器或 BOT_USERNAME 就不是它了）
     if (meta?.worldId !== worldId || meta?.botUsername !== agentId) return null;
     return typeof meta?.bankId === 'string' && /^mc-[a-f0-9]{32}$/.test(meta.bankId) ? meta.bankId : null;

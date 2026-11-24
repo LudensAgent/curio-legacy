@@ -5,8 +5,6 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { projectRect, surveyBuildSite } from '../src/building/site.ts';
 import { coversFailure } from '../src/codeskills/smith.ts';
-import { AudienceChannel } from '../src/live/audience.ts';
-import type { LiveMessage } from '../src/live/bilibili.ts';
 import { WorldMemory } from '../src/memory/store.ts';
 import { myBuilds, describeBuild } from '../src/mind/home.ts';
 import { SelfModel } from '../src/mind/self.ts';
@@ -14,27 +12,6 @@ import { StrategyLog } from '../src/mind/strategy.ts';
 import { parsePlan } from '../src/mind/thinker.ts';
 import { buildingArchiveFor, ownFootprints, settleBuild } from '../src/skills/build.ts';
 import { normalizeSpec } from '../src/building/spec.ts';
-
-const dm = (uid: string, text: string): LiveMessage => ({ platform: 'bilibili', kind: 'danmaku', uid, user: `用户${uid}`, text, ts: Date.now() });
-const cfg = { maxInPrompt: 8, windowSec: 300, blockWords: [], perUserGapSec: 8 };
-
-test('观众劝“房子够了”：只数说够了的弹幕，不够/还差不算；能按人数和条数看共识', () => {
-  let now = 1_000_000;
-  const a = new AudienceChannel(cfg, undefined, () => now);
-  a.ingest(dm('1', '房子够住了别修了'));
-  now += 10_000; a.ingest(dm('2', '差不多了去干别的'));
-  now += 10_000; a.ingest(dm('3', '还不够，继续补'));
-  now += 10_000; a.ingest(dm('4', '去挖矿'));
-  let c = a.buildConsensus();
-  assert.equal(c.viewers, 2);
-  assert.equal(c.messages, 2);
-  now += 10_000; a.ingest(dm('5', '可以了可以了'));
-  c = a.buildConsensus();
-  assert.equal(c.viewers, 3);
-  now += 10 * 60_000;
-  assert.equal(a.buildConsensus().messages, 0, '五分钟以前的不算');
-  a.clearBuildConsensus();
-});
 
 function memoryWithHouse() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'curio-attn-'));
@@ -50,10 +27,10 @@ test('房子可以认定“这样就行了”或“不要了”：收工的算�
   const { memory, archive, id } = memoryWithHouse();
   const st = { worldId: memory.worldId, dim: 'overworld', pos: { x: 0, y: 64, z: 0 } };
   assert.match(describeBuild(myBuilds(memory, st)[0]), /没盖完/);
-  const r = settleBuild(memory, id, 'accept', 'audience', '观众说够了');
+  const r = settleBuild(memory, id, 'accept', 'operator', '操作者确认够用');
   assert.ok(r.ok);
   assert.equal(archive.get(id)!.status, 'complete');
-  assert.equal(archive.get(id)!.acceptance!.by, 'audience');
+  assert.equal(archive.get(id)!.acceptance!.by, 'operator');
   archive.inspect(id, { at: Date.now(), complete: false, checked: 10, defects: [], functions: {} });
   assert.equal(archive.get(id)!.status, 'complete', '认定过的作品复查后仍算收工');
   assert.match(describeBuild(myBuilds(memory, st)[0]), /收工了，能住/);

@@ -1,6 +1,6 @@
 /** 先退出 Agent，保持 Hindsight 可访问；删除远程专属 bank 后清空 DATA_DIR。 */
 import { fileURLToPath } from 'node:url';
-import { config, requireLocalMode } from '../src/config.ts';
+import { config } from '../src/config.ts';
 import { resetTestSession } from '../src/maintenance/reset.ts';
 import { prepareNewWorld } from '../src/seeds/new-world.ts';
 
@@ -12,7 +12,6 @@ try {
   if (args.has('--help')) {
     console.log('npm run memory:clear [-- --full] [--dry-run] [--hindsight]；npm run memory:reset 为完整重置。先退出 Agent；完整重置还需停止 Minecraft 服务器，Hindsight 保持可用。');
   } else {
-    requireLocalMode('清空记忆和重置世界');
     const projectDir = fileURLToPath(new URL('../', import.meta.url));
     const outcome = await resetTestSession({
       dataDir: config.dataDir,

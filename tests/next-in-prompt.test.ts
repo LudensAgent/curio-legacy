@@ -20,7 +20,7 @@ test('提前想好的下一段（next）会如实回显进提示词，不因清�
   try {
     const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
       self, memory, activity: null, suspended: [], next: { what: '挖短巷', why: '通到矿点' }, lastRecord: null, noticed: [], changes: [],
-      userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+      userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
     assert.match(user.content, /已经想好接下来做「挖短巷」/);
     assert.match(user.content, /（通到矿点）/);
   } finally {
@@ -34,7 +34,7 @@ test('next.requires 作为下一段的前置条件如实回显，区别于当前
     const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
       self, memory, activity: null, suspended: [],
       next: { what: '挖铁', why: '做镐', requires: { type: 'inventory_min', item: 'raw_iron', count: 3 } },
-      lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+      lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
     assert.match(user.content, /queued_next_requires/);
     assert.match(user.content, /开始前会按当时状态验收/);
     assert.match(user.content, /raw_iron/);
@@ -48,7 +48,7 @@ test('系统提示词先要求核对 continue_effect，只有决定原样执行�
   try {
     const [system] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(),
       self, memory, activity: null, suspended: [], next: null, lastRecord: null, noticed: [], changes: [],
-      userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+      userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
     assert.match(system.content, /核对【手上的活】的 continue_effect/);
     assert.match(system.content, /只有决定原样执行剩余计划才 continue/);
     assert.match(system.content, /adjust/);
@@ -66,7 +66,7 @@ test('完成的活动记录里保留采集回执快照，并标明是历史值',
   try {
     const at = Date.now();
     const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
-      self, memory, activity: null, suspended: [], next: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P',
+      self, memory, activity: null, suspended: [], next: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P',
       lastRecord: {
         id: 'act_done', what: '挖铁', kind: 'gather', outcome: 'done', summary: 'raw_iron 2→3（目标 3，已达成）',
         durationSec: 3, gained: { raw_iron: 1 }, lost: {}, at, signature: 'gather:iron_ore', failures: 0,
@@ -86,7 +86,7 @@ test('没有 next 时不出现多余的下一段提示', () => {
   try {
     const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
       self, memory, activity: null, suspended: [], next: null, lastRecord: null, noticed: [], changes: [],
-      userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+      userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
     assert.doesNotMatch(user.content, /已经想好接下来做/);
   } finally {
     memory.close();

@@ -25,8 +25,7 @@ const harness = () => {
   ] };
   const context = (tier: 'glance' | 'deliberate', farms = percept.farms): MindContext => ({
     tier, reason: '测试', percept: { ...percept, farms }, state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P',
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P',
   });
   return { context, memory, close };
 };

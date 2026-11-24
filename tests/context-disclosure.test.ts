@@ -21,7 +21,7 @@ function fixture(t: { after: (fn: () => void) => void }, tier: 'glance' | 'delib
   t.after(() => { self.close(); memory.close(); });
   const section = (name: string, over: Partial<MindContext> = {}) => {
     const ctx: MindContext = { tier, reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '', skills: [], ...over };
+      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '', skills: [], ...over };
     const [, user] = buildMindMessages(ctx);
     return JSON.parse(user.content.match(new RegExp(`【${name}】(.*)`))![1]);
   };

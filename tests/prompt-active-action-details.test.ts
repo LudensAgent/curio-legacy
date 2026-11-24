@@ -15,7 +15,7 @@ function userFor(tier: 'glance' | 'deliberate', skill: string, args: Record<stri
   const state = adapter.state(), self = new SelfModel(null);
   const activity = createActivity({ what: '试一下', why: '测试', kind: 'experiment', repeat: 1, steps: [{ skill, args }] }, '', 'llm', state);
   const [, user] = buildMindMessages({ tier, reason: '测试', percept: perception.update(), state, self, memory, activity,
-    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   memory.close();
   return user.content;
 }

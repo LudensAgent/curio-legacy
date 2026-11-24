@@ -5,7 +5,7 @@ import type { Metrics } from './metrics.ts';
 
 /**
  * 一次测试（一个存档、一份数据目录）从头到尾的累计数字：死亡、LLM 调用次数和 token、任务成败、走了多远、累计运行时长……
- * 重启 Agent 不清零（直播时数字要连贯）；清空记忆或重置世界会连数据目录一起清掉，那就是新的一次测试，从零开始。
+ * 重启 Agent 不清零；清空记忆或重置世界会连数据目录一起清掉，那就是新的一次测试，从零开始。
  *
  * 做法：定时把计数器存进 DATA_DIR/run-stats.json，启动时读回来接着加。
  */
@@ -98,7 +98,7 @@ export class RunStats {
       ...(Object.keys(extras).length ? { extras } : {}) };
   }
 
-  /** 所有模型加起来用了多少 token（直播叠层用），含 Hindsight 记忆服务这类额外来源 */
+  /** 所有模型加起来用了多少 token（观察者 HUD 与控制台用），含 Hindsight 记忆服务这类额外来源 */
   totalTokens(): number {
     return Object.values(this.planners).reduce((n, p) => n + (p?.stats.tokenUsage.totalTokens ?? 0), 0)
       + Object.values(this.extras).reduce((n, x) => n + (x?.totalTokens?.() ?? 0), 0);

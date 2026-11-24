@@ -13,7 +13,7 @@ function knownPlaces(adapter: FakeAdapter, memory: WorldMemory) {
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const [system, user] = buildMindMessages({
     tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [],
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [],
     persona: 'P', skills: [], blockAt: (p) => adapter.blockAt(p),
   });
   return { system, known: JSON.parse(user.content.match(/【记得的地方】(.*)/)![1]) };

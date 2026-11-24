@@ -2,17 +2,17 @@
  * test 环境的隔离校验。纯函数，不连接游戏、不启动服务器、不建库、不写盘。
  *
  * 目标：test 是宿主运行环境（不等于单元测试进程），必须使用独立的连接配置、世界副本和运行状态，
- * 不能复用 local/live 的地址、数据库或数据目录。校验在 config 加载阶段完成，早于任何有副作用的初始化。
+ * 不能复用 local 的地址、数据库或数据目录。校验在 config 加载阶段完成，早于任何有副作用的初始化。
  *
- * 空间记忆库继续接受显式参数；这里只比较最终解析出的可写路径与端口，不向库注入 local/live/test 分支。
+ * 空间记忆库继续接受显式参数；这里只比较最终解析出的可写路径与端口，不向库注入 local/test 分支。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
 
-export type EnvMode = 'local' | 'live' | 'test';
+export type EnvMode = 'local' | 'test';
 
-const ENV_MODES: readonly EnvMode[] = ['local', 'live', 'test'];
+const ENV_MODES: readonly EnvMode[] = ['local', 'test'];
 
 /** 一个环境最终解析出的布局：全部为绝对路径。 */
 export interface Layout {
@@ -25,8 +25,6 @@ export interface Layout {
   agentsDir: string;
   /** LLM 调用完整归档目录。 */
   llmArchiveDir: string;
-  /** 弹幕归档目录。 */
-  danmakuArchiveDir: string;
   /** 观察者 HUD 配置文件（单个文件）。 */
   observerHudConfig: string;
   /** 空间记忆 SQLite 数据库文件（显式传给空间记忆库）。 */
@@ -42,7 +40,7 @@ export interface Layout {
 
 /** 该布局的可写目录（数据、世界、角色、归档、空间库）。 */
 export function writableDirsOf(layout: Layout): string[] {
-  return [layout.dataDir, layout.serverDir, layout.agentsDir, layout.llmArchiveDir, layout.danmakuArchiveDir, path.dirname(layout.spatialDbPath)];
+  return [layout.dataDir, layout.serverDir, layout.agentsDir, layout.llmArchiveDir, path.dirname(layout.spatialDbPath)];
 }
 
 /** 相对路径按 baseDir 解析；数字与默认值口径和 config.ts 保持一致。 */
@@ -54,22 +52,20 @@ export function resolveLayout(mode: EnvMode, vars: Record<string, string | undef
   };
   const res = (value: string) => path.resolve(baseDir, value);
   const dataDir = res(v('DATA_DIR') || path.join('data', mode));
-  const hudName = mode === 'live' ? 'observer-hud.json' : `observer-hud.${mode}.json`;
   return {
     mode,
     dataDir,
     serverDir: res(v('SERVER_DIR') || 'world'),
     agentsDir: res(v('AGENTS_DIR') || path.join('agents', mode)),
     llmArchiveDir: res(v('LLM_ARCHIVE_DIR') || path.join('archives', mode, 'llm-calls')),
-    danmakuArchiveDir: res(v('DANMAKU_ARCHIVE_DIR') || path.join('archives', mode, 'danmaku')),
-    observerHudConfig: res(v('OBSERVER_HUD_CONFIG') || path.join('live', hudName)),
+    observerHudConfig: res(v('OBSERVER_HUD_CONFIG') || `observer-hud.${mode}.json`),
     spatialDbPath: res(v('SPATIAL_DB_PATH') || path.join(dataDir, 'spatial', 'spatial.sqlite')),
     worldId: v('MEMORY_WORLD_ID') || `${v('MC_HOST') || '127.0.0.1'}:${num('MC_PORT', 25565)}`,
     mcHost: v('MC_HOST') || '127.0.0.1',
     mcPort: num('MC_PORT', 25565),
     rconHost: v('RCON_HOST') || '127.0.0.1',
     rconPort: num('RCON_PORT', 25575),
-    dashboardPort: num('DASHBOARD_PORT', mode === 'live' ? 3000 : mode === 'test' ? 3002 : 3001),
+    dashboardPort: num('DASHBOARD_PORT', mode === 'test' ? 3002 : 3001),
   };
 }
 
@@ -87,7 +83,7 @@ export function peerLayouts(baseDir: string, currentMode: EnvMode): Layout[] {
   // 默认运行环境（仅由公共 .env 构成，CURIO_MODE 缺省为 local）始终存在：
   // 不能因为缺少 .env.local 就跳过它，否则 test 会静默沿用公共 .env 里 local 的目录与端口。
   const rawMode = (common.CURIO_MODE ?? '').trim();
-  const defaultMode: EnvMode = rawMode === 'live' || rawMode === 'test' ? rawMode : 'local';
+  const defaultMode: EnvMode = rawMode === 'test' ? 'test' : 'local';
   const peers: Layout[] = [];
   if (defaultMode !== currentMode) peers.push(resolveLayout(defaultMode, common, baseDir));
   for (const mode of ENV_MODES) {
@@ -129,8 +125,8 @@ export function assertTestIsolation(test: Layout, peers: Layout[], opts: { world
   if (!opts.worldIdExplicit) {
     throw new Error('test 环境必须显式配置 MEMORY_WORLD_ID（不能沿用公共 .env 的默认值），否则无法保证独立的世界身份。');
   }
-  // 指定根目录（如 /path/to/curio\test-setver）：测试实例的所有可写路径（含 HUD 配置文件）都必须落在该根目录内，
-  // 不能散落到根目录之外；仅比较与 local/live 是否冲突不能保证这一点。rootDir 由 config 层强制传入。
+  // 指定根目录：测试实例的所有可写路径（含 HUD 配置文件）都必须落在该根目录内，
+  // 不能散落到根目录之外；仅比较与 local 是否冲突不能保证这一点。rootDir 由 config 层强制传入。
   if (opts.rootDir) {
     for (const dir of [...writableDirsOf(test), test.observerHudConfig]) {
       if (!sameOrNested(opts.rootDir, dir)) {

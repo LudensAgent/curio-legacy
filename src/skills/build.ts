@@ -107,9 +107,9 @@ export function ownFootprints(archive: BuildingArchive, worldId: string, dim: st
 /**
  * 认定一座作品“这样就行了”（accept）或“不要了”（abandon）。
  * 真人盖房不会为屋顶一块台阶放成木板就一直补下去：能进门、能挡怪，觉得够了就收工；地方选错了、烂尾了就放下。
- * 由心智自己（或听了操作者、观众的话）决定，程序只记下这个决定，并把家设在收了工的房子里。
+ * 由心智自己（或听了操作者的话）决定，程序只记下这个决定，并把家设在收了工的房子里。
  */
-export function settleBuild(memory: WorldMemory, projectId: string, how: 'accept' | 'abandon', by: 'agent' | 'operator' | 'audience', note: string): { ok: true; project: BuildingProject; text: string } | { ok: false; error: string } {
+export function settleBuild(memory: WorldMemory, projectId: string, how: 'accept' | 'abandon', by: 'agent' | 'operator', note: string): { ok: true; project: BuildingProject; text: string } | { ok: false; error: string } {
   const archive = buildingArchiveFor(memory);
   const old = archive.get(projectId);
   if (!old) return { ok: false, error: `没有建筑档案 ${projectId}` };

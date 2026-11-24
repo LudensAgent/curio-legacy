@@ -27,7 +27,7 @@ export interface EnvSection {
   items: EnvItem[];
 }
 
-const SECRET = /(API_KEY|SECRET|PASSWORD|COOKIE|TOKEN|ACCESS_KEY|SESSDATA)/i;
+const SECRET = /(API_KEY|SECRET|PASSWORD|COOKIE|TOKEN|ACCESS_KEY)/i;
 export const isSecretKey = (k: string) => SECRET.test(k);
 
 const KEY_LINE = /^\s*(#\s*)?([A-Z][A-Z0-9_]*)\s*=(.*)$/;
@@ -171,7 +171,7 @@ export function envStore(opts: EnvStoreOptions = {}) {
   const example = path.resolve(opts.example ?? 'example/.env');
   const read = (f: string) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
   const startedWith = parseEnv(read(file));
-  const mode = path.basename(file) === '.env.live' || startedWith.get('CURIO_MODE')?.trim() === 'live' ? 'live' : 'local';
+  const mode = path.basename(file) === '.env.test' || startedWith.get('CURIO_MODE')?.trim() === 'test' ? 'test' : 'local';
   const backupDir = path.resolve(opts.backupDir ?? path.join(startedWith.get('DATA_DIR')?.trim() || path.join('data', mode), 'env-backups'));
 
   function schema() {

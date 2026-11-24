@@ -143,7 +143,7 @@ episodic.stop();
 
 ## 记忆服务的 LLM 用量与推理
 
-- Hindsight 自己调 LLM（写入时抽取事实、合并观察、反思），这些调用不经过 Curio，本地 `data/logs/llm-*.jsonl` 里没有。Curio 每 30 秒读一次 `HINDSIGHT_URL/metrics` 里的 `hindsight_llm_*` 计数，按用途累计进 `data/run-stats.json` 的 `extras.memoryLlm`（重启 Curio 不清零），控制台顶栏显示为「记忆 … tokens」，悬停看分用途明细；直播叠层的总 token 也包含它。
+- Hindsight 自己调 LLM（写入时抽取事实、合并观察、反思），这些调用不经过 Curio，本地 `data/logs/llm-*.jsonl` 里没有。Curio 每 30 秒读一次 `HINDSIGHT_URL/metrics` 里的 `hindsight_llm_*` 计数，按用途累计进 `data/run-stats.json` 的 `extras.memoryLlm`（重启 Curio 不清零），控制台顶栏显示为「记忆 … tokens」，悬停看分用途明细；观察者 HUD 的总 token 也包含它。
 - 第一次接上时容器里已有的数不算进本次测试，只记成 baseline；容器重启后计数器归零，会自动接着算。
 - `HINDSIGHT_API_LLM_API_KEY`：给记忆服务单独一个 key，服务商后台就能把它的花费分开看；留空回退到 `LLM_API_KEY`。
 - `HINDSIGHT_API_LLM_EXTRA_BODY={"thinking":{"type":"disabled"}}`：DeepSeek 默认开思考、力度 high，抽取事实用不着，关掉能省下大部分输出 token。换成别家模型时清空它，需要的话改设 `HINDSIGHT_API_LLM_REASONING_EFFORT`。

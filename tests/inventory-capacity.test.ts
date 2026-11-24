@@ -41,7 +41,7 @@ test('both thinking tiers receive conditional per-stack space and shared empty-s
   ] };
   for (const tier of ['glance', 'deliberate'] as const) {
     const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-      noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier } as any);
+      noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier } as any);
     const body = JSON.parse(user.content.match(/【身体】(\{.*)/)![1]);
     assert.equal(body.empty_slots, '4 个空槽（每槽放一叠，不是一件）', '空槽自带叠放语义，且与背包来自同一个状态快照');
     assert.match(body.inventory[0], /槽9 2\/64，该叠可再放 62 个数据相同的物品；槽10 5\/64，该叠可再放 59 个数据相同的物品/);
@@ -55,7 +55,7 @@ test('both thinking tiers receive conditional per-stack space and shared empty-s
   }
   const [, noSpace] = buildMindMessages({ reason: '测试', percept, state: { ...state, emptySlots: 0,
     inventory: [{ name: 'raw_iron', count: 64, stackSize: 64, stacks: [{ slot: 9, count: 64 }] }] }, self: new SelfModel(null), memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'glance' } as any);
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'glance' } as any);
   const full = JSON.parse(noSpace.content.match(/【身体】(\{.*)/)![1]);
   assert.match(full.inventory[0], /槽9 64\/64，该叠可再放 0 个/);
   assert.match(full.inventory_space, /现有物品堆都满了/);
@@ -71,7 +71,7 @@ test('0 个空槽时直说未满的同类堆还能装多少：铁矿石不必等
     { name: 'cobblestone', count: 116, stackSize: 64, stacks: [{ slot: 10, count: 64 }, { slot: 11, count: 52 }] },
   ] };
   const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'glance' } as any);
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'glance' } as any);
   const body = JSON.parse(user.content.match(/【身体】(\{.*)/)![1]);
   assert.match(body.inventory_space, /没有空槽，但未满的同类堆还能继续装/);
   assert.match(body.inventory_space, /raw_iron 还能装 61 个/);
@@ -89,7 +89,7 @@ test('跨叠的物品标出共几叠，消除「×70（上限64）」的歧义',
     { name: 'bucket', count: 2, stackSize: 16, stacks: [{ slot: 11, count: 2 }] },
   ] };
   const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
   const body = JSON.parse(user.content.match(/【身体】(\{.*)/)![1]);
   assert.equal(body.inventory[0], 'raw_iron×70（每叠上限 64，共 2 叠）');
   assert.equal(body.inventory[1], 'bucket×2（每叠上限 16）');

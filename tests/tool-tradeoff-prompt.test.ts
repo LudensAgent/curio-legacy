@@ -136,7 +136,7 @@ test('提示词：工具事实不占 5 条提醒配额，真实挖掘上下文�
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const activity = createActivity({
     what: '沿矿道横着挖到 y12 以下，找钻石露头', why: '测试', kind: 'gather', repeat: 1,
     steps: [{ skill: 'excavate_run', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }],
@@ -157,7 +157,7 @@ test('提示词：下矿的账/顺手采集不占 5 条提醒配额，不注入�
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const activity = createActivity({
     what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1,
     steps: [
@@ -192,7 +192,7 @@ test('提示词：木料历史账只报事实、区分背包实时与箱子旧�
   adapter.inv.set('oak_sapling', 2);
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: trips ? Date.now() - 5 * 60_000 : null });
   const userOf = (ctx: MindContext) => buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
   const materials = { wood: tally(7, 30, 795, 114), ore: tally(1, 5, 90, 90) };
@@ -241,7 +241,7 @@ test('提示词：矿石历史账含锭的现有量但不把锭算成矿石，�
   adapter.inv.set('raw_iron_block', 8);
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const tally = (trips: number, units: number, walked: number, recentWalked: number) => ({ trips, units, walked, recentWalked, lastAt: Date.now() - 2 * 60_000 });
   const miningActivity = createActivity({ what: '沿矿道往下挖，找钻石', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { entry: 'current', mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', adapter.state());
   const materials = { wood: tally(7, 30, 795, 114), ore: tally(3, 12, 260, 80) };
@@ -344,7 +344,7 @@ test('提示词不再宣传旧 passage/附近路径', () => {
   const state = adapter.state();
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self: new SelfModel(null),
     memory, activity: createActivity({ what: '下矿找钻石，下到 y=-50', why: '测试', kind: 'gather', repeat: 1, steps: [{ skill: 'excavate_run', args: { mode: 'stairs', direction: 'east', steps: 4 } }] }, '', 'llm', state),
-    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const text = decisionReminders(ctx).join('\n');
   assert.doesNotMatch(text, /记得自己走过|psg_near|psg_far/, '旧 passage/nearby_paths 不再进入提示词');
   const portalTrip = { ...ctx, activity: createActivity({ what: '回传送门门厅，再去下界找要塞', why: '测试', kind: 'explore', repeat: 1, steps: [] }, '', 'llm', state) };
@@ -359,7 +359,7 @@ test('提示词：记得好几个基地时说明移动目标 "base" 指哪一处
   memory.setBase('overworld', { x: 800, y: 64, z: 0 }, '远处小屋', { select: true });
   memory.setBase('overworld', { x: 5, y: 64, z: 0 }, '门厅');
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' };
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const user = buildMindMessages(ctx).find((m) => m.role === 'user')!.content;
   assert.match(user, /\\"base\\" 指 远处小屋（800 格外），另记得 1 处基地/);
   memory.close();

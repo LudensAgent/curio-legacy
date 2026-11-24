@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { config, requireLocalMode } from '../src/config.ts';
+import { config } from '../src/config.ts';
 
 const argv = process.argv.slice(2);
 const dataIndex = argv.indexOf('--data');
@@ -22,7 +22,6 @@ if (args.has('--help')) {
   process.exit(0);
 }
 
-requireLocalMode('切换学习链数据');
 const dataDir = path.resolve(explicitData ?? config.dataDir);
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const backup = (file: string) => {

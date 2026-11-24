@@ -99,7 +99,7 @@ export class KnowledgeBase {
       aliases: ['操作', '接口', '动作', '身体', '工具参数', 'controls', 'mineflayer', 'mineflyer'],
       sources: [
         { url: 'repo:src/skills/index.ts', title: '当前注册技能接口' },
-        { url: 'repo:docs/spatial-memory-retention-20261114.md', title: '宿主空间记忆保留策略' },
+        { url: 'repo:src/spatial/retention.ts', title: '宿主空间记忆保留策略' },
       ],
       versionNote: '按当前注册接口生成，包含基础操作和已有复合动作；接口存在不代表 Agent 已学会对应策略。moves/mechanics 可继续查询参数，recipes 可查结构化配方。',
       sections: [...Object.values(SKILLS).filter((skill) => !LLM_HIDDEN.has(skill.name) && !isSkillDisabled(skill.name)).map((skill) => ({ id: skill.name, title: skill.name,

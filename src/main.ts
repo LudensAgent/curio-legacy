@@ -74,10 +74,6 @@ import { reachTraversed } from './skills/spatial-extrema.ts';
 import { MockProvider, OpenAICompatibleProvider, type LlmProvider } from './planner/llm.ts';
 import { ruleProposal } from './planner/plan.ts';
 import { Planner } from './planner/planner.ts';
-import { liveAudience } from './planner/prompt.ts';
-import { AudienceChannel } from './live/audience.ts';
-import { BilibiliLive, type LiveMessage, type LiveStatus } from './live/bilibili.ts';
-import { DanmakuLog } from './live/danmaku-log.ts';
 import { hudLandmarks } from './observer/landmarks-hud.ts';
 import { MemorySpend, llmSpend, withMemory } from './observer/llm-spend.ts';
 import { SkillLibrary } from './skills/library.ts';
@@ -341,17 +337,6 @@ setInterval(() => library.prune(), 60_000).unref();
     },
   });
 }
-// ------------------------------------------------------------ 直播间（可选）：弹幕只作参考
-const audience = config.live.bilibili.enabled ? new AudienceChannel(config.live.audience, bus) : null;
-const live = config.live.bilibili.enabled ? new BilibiliLive(config.live.bilibili, { log: (sev, msg) => bus.publish('live', sev, msg) }) : null;
-const danmakuLog = new DanmakuLog(config.danmakuArchiveDir, (msg) => bus.publish('live', 'P1', msg));
-if (live && audience) {
-  liveAudience.enabled = true;
-  liveAudience.inPrompt = config.live.audience.inPrompt;
-  live.on('message', (m: LiveMessage) => { danmakuLog.record(m, audience.ingest(m)); });
-  live.on('status', (st: LiveStatus) => bus.publish('live_status', st.state === 'error' ? 'P1' : 'P3', `B 站直播间：${st.state}${st.detail ? `（${st.detail}）` : ''}`));
-}
-
 // Preserve old records, but do not keep executing automatic habits whose only
 // evidence was the old right-click acknowledgement. Explicit macros stay intact.
 adapter.on('spawn', () => {
@@ -465,7 +450,6 @@ const mind = new Mind({
   reach: (dim, origin, signal) => reachTraversed(spatial, dim, origin, 512, signal, Date.now() + 20_000),
   onWorthLearning: (note: string) => smith.noted(note),
   onGoalStuck: (goal, lines) => smith.goalStuck(goal, lines),
-  ...(audience ? { audience } : {}),
   mySkills,
   researchContext: () => methods.researchContext(),
   progress: () => scorecard.progressFacts(),
@@ -501,7 +485,7 @@ actionChat.start();
 // ------------------------------------------------------------ Curio Observer（观察者客户端模组的数据流）
 const feed = config.observerFeed ? new ObserverFeed({ botName: config.mc.username, mcVersion: config.mc.version, agentVersion: '0.3.0',
   hudConfigPath: config.observerHudConfig }) : null;
-/** 直播 HUD 的 LLM 用量：游戏和记忆分开的上传/下载 token、缓存命中，每分钟速率、模型和真实花费（合计 + 其中记忆） */
+/** 观察者 HUD 的 LLM 用量：游戏和记忆分开的上传/下载 token、缓存命中，每分钟速率、模型和真实花费（合计 + 其中记忆） */
 const memorySpend = memoryLlm ? new MemorySpend(memoryLlm, { price: config.memoryLlmPrice, holidays: config.llm.priceHolidays }) : null;
 const currentSpend = () => withMemory(llmSpend([planner, coderPlanner], { holidays: config.llm.priceHolidays }), memorySpend?.sample(),
   Date.now(), config.llm.priceHolidays);
@@ -527,7 +511,7 @@ function attachObserver() {
   observedBot = adapter.bot;
   bus.publish('observer_feed', 'P3', `Curio Observer 数据流已挂载到 ${config.mc.username}`);
 }
-// 直播 HUD「此刻的想法」：和控制台「在想」同一来源——最近一次决策的独白，没有就取最近一条独白——
+// 观察者 HUD「此刻的想法」：和控制台「在想」同一来源——最近一次决策的独白，没有就取最近一条独白——
 // 一直显示到有新的想法为止（游戏内聊天仍走跟动作绑定、会过期的表达状态）
 let hudThoughtKey = '';
 if (feed) setInterval(() => {
@@ -538,7 +522,7 @@ if (feed) setInterval(() => {
   hudThoughtKey = key;
   feed.thought(goal, thought);
 }, 500).unref();
-// 直播 HUD「记得的地点」：家、最近的死亡点、自己的东西和资源，每秒按当前位置刷新距离
+// 观察者 HUD「记得的地点」：家、最近的死亡点、自己的东西和资源，每秒按当前位置刷新距离
 if (feed) setInterval(() => {
   try {
     const s = adapter.state();
@@ -804,7 +788,6 @@ function snapshot() {
     exec: executive.snapshot(),
     expression: actionChat.snapshot(),
     spectator: spectator.status,
-    live: live ? { status: live.status(), audience: audience?.stats() } : null,
     llmSpend: currentSpend(),
     ...heavyCache,
   };
@@ -817,14 +800,9 @@ executive.start();
 reflex.start();
 spectator.start();
 metrics.start();
-live?.start();
 loadDisabledSkills(config.dataDir);
 const dashboard = startDashboard(config.dashboard.host, config.dashboard.port, bus, {
   snapshot,
-  danmaku: (q) => q.get('dates') === '1' ? { dates: danmakuLog.dates() } : danmakuLog.query({
-    date: q.get('date') ?? undefined, q: q.get('q') ?? undefined, questions: q.get('questions') === '1',
-    blocked: q.get('blocked') === '1', limit: Number(q.get('limit')) || undefined,
-  }),
   pause: () => executive.pause(),
   resume: () => executive.resume(),
   replan: () => executive.replan(),
@@ -915,8 +893,8 @@ async function rescue(): Promise<{ ok: boolean; error?: string; to?: SurfaceSpot
       bus.publish('rescue', 'P1', `紧急救援失败：RCON 命令没发出去（${e?.message ?? e}）`);
       return { ok: false, error: `RCON 失败：${e?.message ?? e}`, from };
     }
-    // 游戏里给所有人（主播的旁观客户端也在内）弹一行字幕、发一条聊天；失败不影响救援本身
-    const notice = '紧急救援：主包的大手发力，拯救了鱼鱼';
+    // 游戏里给所有玩家弹一行字幕、发一条聊天；失败不影响救援本身
+    const notice = '紧急救援：操作者已将 Bot 传送到附近地表';
     for (const cmd of [
       'title @a times 10 70 20',
       `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
@@ -943,7 +921,7 @@ let shuttingDown = false;
 
 /**
  * 一键天亮（控制台按钮）：用 RCON /time set day 把游戏时间跳到白天。
- * 顺手给所有人（主播的旁观客户端也在内）弹字幕、发聊天；然后让心智按“现在是白天”重新想。
+ * 顺手给所有玩家弹字幕、发聊天；然后让心智按“现在是白天”重新想。
  */
 let dawning = false;
 async function dawn(): Promise<{ ok: boolean; error?: string }> {
@@ -958,7 +936,7 @@ async function dawn(): Promise<{ ok: boolean; error?: string }> {
       bus.publish('dawn', 'P1', `天亮失败：RCON 命令没发出去（${e?.message ?? e}）`);
       return { ok: false, error: `RCON 失败：${e?.message ?? e}` };
     }
-    const notice = '天亮了：主包看不下去了';
+    const notice = '天亮了：操作者已将时间设为白天';
     for (const cmd of [
       'title @a times 10 70 20',
       `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
@@ -990,7 +968,7 @@ async function give(item: string, count: number): Promise<{ ok: boolean; error?:
   giving = true;
   try {
     await spectator.command(`give ${config.mc.username} ${name} ${n}`);
-    const notice = `主包投喂了鱼鱼「${ITEM_ZH[name] ?? name}」×${n}`;
+    const notice = `操作者给予「${ITEM_ZH[name] ?? name}」×${n}`;
     for (const cmd of [
       'title @a times 10 70 20',
       `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
@@ -999,7 +977,7 @@ async function give(item: string, count: number): Promise<{ ok: boolean; error?:
     ]) {
       try { await spectator.command(cmd); } catch { /* ignore */ }
     }
-    bus.publish('give', 'P2', `主包给予鱼鱼「${ITEM_ZH[name] ?? name}」×${n}`, { item: name, count: n });
+    bus.publish('give', 'P2', `操作者给予「${ITEM_ZH[name] ?? name}」×${n}`, { item: name, count: n });
     return { ok: true, item: name, count: n };
   } catch (e: any) {
     bus.publish('give', 'P1', `给予失败：RCON 命令没发出去（${e?.message ?? e}）`);
@@ -1044,7 +1022,7 @@ async function killEntities(type: string, radius: number): Promise<{ ok: boolean
     const p = s.pos;
     await spectator.command(`kill @e[type=${name},x=${p.x.toFixed(1)},y=${p.y.toFixed(1)},z=${p.z.toFixed(1)},distance=..${r}]`);
     const zh = entityZh(name);
-    const notice = `紧急救援：主包对「${zh}」大开杀戒了`;
+    const notice = `清除实体：操作者清除了周围 ${r} 格内的「${zh}」`;
     for (const cmd of [
       'title @a times 10 70 20',
       `title @a subtitle ${JSON.stringify({ text: notice, color: 'gold', bold: true })}`,
@@ -1053,7 +1031,7 @@ async function killEntities(type: string, radius: number): Promise<{ ok: boolean
     ]) {
       try { await spectator.command(cmd); } catch { /* ignore */ }
     }
-    bus.publish('kill', 'P1', `清除实体：主包对周围 ${r} 格内的「${zh}」大开杀戒`, { type: name, radius: r });
+    bus.publish('kill', 'P1', `清除实体：操作者清除了周围 ${r} 格内的「${zh}」`, { type: name, radius: r });
     return { ok: true, type: name, radius: r };
   } catch (e: any) {
     bus.publish('kill', 'P1', `清除实体失败：RCON 命令没发出去（${e?.message ?? e}）`);
@@ -1093,7 +1071,6 @@ async function finishShutdown(code: number) {
   let serviceCallError: unknown = null;
   attempt('executive.stop', () => executive.stop());
   attempt('actionChat.stop', () => actionChat.stop());
-  attempt('live.stop', () => live?.stop());
   attempt('episodic.stop', () => episodic.stop());
   attempt('ledger.stop', () => ledger.stop());
   attempt('curator.stop', () => curator.stop());

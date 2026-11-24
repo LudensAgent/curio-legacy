@@ -288,7 +288,7 @@ test('技能目录按行为引擎状态区分文字、可执行、候选和无�
   const adapter = new FakeAdapter(), memory = new WorldMemory(null), bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const [system] = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null),
-    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '测试', skills: index });
+    memory, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '测试', skills: index });
   assert.match(system.content, /notes-only[^\n]*［文字］/);
   assert.match(system.content, /candidate-action[^\n]*［候选可试］/);
   assert.doesNotMatch(system.content, /一份文字做法/);
@@ -445,7 +445,7 @@ test('瞥一眼想 switch：排到下一段，不放下也不挂起当前活动'
 
 function minimalCtx(adapter: FakeAdapter, memory: WorldMemory, perception: Perception, self: SelfModel, mind: Mind) {
   return { tier: 'deliberate' as const, reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, activity: mind.activity, suspended: mind.suspended,
-    lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '你叫 Curio。', plan: self.plan() };
+    lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '你叫 Curio。', plan: self.plan() };
 }
 
 test('想起来：按关键词从做过的事、日记和技能书里挑出相关的；半颗心不会显示成 0', () => {
@@ -463,7 +463,7 @@ test('想起来：按关键词从做过的事、日记和技能书里挑出相�
   const adapter = new FakeAdapter(); adapter.hp = 0.4;
   const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
   const msg = buildMindMessages({ tier: 'glance', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '你叫 Curio。' })[1].content;
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '你叫 Curio。' })[1].content;
   assert.match(msg, /"hp":0\.4/);
   memory.close();
 });

@@ -116,7 +116,7 @@ test('提示词：身体段带上挖矿的双面权衡事实（dig_effort）', a
     better: [{ tool: 'netherite_pickaxe', est_s: 0.2, speedup: 1.5, have: false, materials: '3 下界合金锭' }],
     cheaper: [{ tool: 'iron_pickaxe', est_s: 0.5, slowdown: 1.7, savesItem: 'diamond', savesZh: '钻石', have: true }] }];
   const ctx = { reason: '测试', percept: p, state: adapter.state(), self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' };
   const [, user] = buildMindMessages(ctx as any);
   const body = JSON.stringify(user.content);
   assert.match(body, /dig_effort/);

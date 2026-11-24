@@ -26,7 +26,7 @@ test('出没点：同一种 32 格内只记一处，再看见就挪过去、刷�
   assert.match(spots[1].text, /^\(50,64,0\) 东50格，3 只（白色×2、黑色×1），刚才看见$/);
   assert.deepEqual(Object.keys(creatureSpotsByKind(spots, 1)), ['cow', 'sheep']);
   assert.equal(creatureSpotsNear(m.landmarks(), { worldId: 'w', dim: 'overworld', pos: { x: 0, y: 64, z: 0 } }, { now: Date.now() + HERD_MAX_AGE_MS + 1 }).length, 0);
-  assert.equal(hudLandmarks(m.landmarks(), { pos: { x: 0, y: 64, z: 0 }, dim: 'overworld' }).length, 0, '直播叠层不列出没点');
+  assert.equal(hudLandmarks(m.landmarks(), { pos: { x: 0, y: 64, z: 0 }, dim: 'overworld' }).length, 0, '观察者 HUD 不列出没点');
   m.close();
 });
 
@@ -66,7 +66,7 @@ test('思考时看得到出没点；中文说"找羊做床"能想起羊', () => 
   memory.noteHerd('sheep', 'overworld', { x: 40, y: 64, z: 0 }, 2, '白色×2');
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [] };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [] };
   for (const tier of ['glance', 'deliberate'] as const) {
     const known = JSON.parse(buildMindMessages({ ...base, tier } as any)[1].content.match(/【记得的地方】(.*)/)![1]);
     assert.match(known.animal_spots.sheep, /\(40,64,0\).*2 只（白色×2）/, tier);

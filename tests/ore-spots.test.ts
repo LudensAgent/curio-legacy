@@ -73,7 +73,7 @@ test('心智每次思考（瞥一眼也算）都看得到记得的矿点；矿�
   const memory = memoryWithOres(adapter.state().worldId);
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [] };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [] };
   for (const tier of ['glance', 'deliberate'] as const) {
     const user = buildMindMessages({ ...base, tier } as any)[1].content;
     const known = JSON.parse(user.match(/【记得的地方】(.*)/)![1]);

@@ -26,7 +26,7 @@ test('看见刷怪笼后记成 discovery 地标，并在提示词里单独列出
 
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '查看刷怪笼', percept, state: adapter.state(),
     self: new SelfModel(null), memory, activity: null, plan: null, recentActionFailures: [], suspended: [],
-    lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   const line = user.content.split('\n').find((entry) => entry.startsWith('【记得的地方】'))!;
   const section = JSON.parse(line.slice('【记得的地方】'.length));
   assert.match(section.spawner_spots[0], /刷怪笼\[dis_/);
@@ -38,7 +38,7 @@ test('看见刷怪笼后记成 discovery 地标，并在提示词里单独列出
 
   const [, glanceUser] = buildMindMessages({ tier: 'glance', reason: '瞥一眼', percept, state: adapter.state(),
     self: new SelfModel(null), memory, activity: null, plan: null, recentActionFailures: [], suspended: [],
-    lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   const glanceSection = JSON.parse(glanceUser.content.split('\n').find((entry) => entry.startsWith('【记得的地方】'))!.slice('【记得的地方】'.length));
   assert.match(glanceSection.spawner_spots[0], /刷怪笼\[dis_/);
 });

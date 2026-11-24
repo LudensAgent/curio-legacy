@@ -94,7 +94,7 @@ test('prompt lists trips in this dimension and trips beyond a nearby portal, onl
     const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
     const [, user] = buildMindMessages({
       tier, reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory,
-      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [],
+      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [],
       persona: 'P', skills: [], blockAt: (p) => adapter.blockAt(p), excursions: log.legs(),
     });
     return JSON.parse(user.content.match(/【记得的地方】(.*)/)![1]);
@@ -136,7 +136,7 @@ test('最远到访点：认真想时列在【记得的地方】，站在起点�
     const perception = new Perception(adapter, memory, new EventBus(), new Vision(adapter));
     return buildMindMessages({
       tier, reason: '测试', percept: perception.update(), state: adapter.state(), self: new SelfModel(null), memory,
-      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [],
+      activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [],
       persona: 'P', skills: [], ...(tier === 'deliberate' ? { reach } : {}),
     })[1].content;
   };

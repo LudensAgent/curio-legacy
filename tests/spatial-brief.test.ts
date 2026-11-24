@@ -15,7 +15,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const bus = new EventBus();
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' };
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' };
   t.after(() => { self.close(); memory.close(); });
   const activity = (kind: 'build' | 'explore' | 'gather' | 'tidy', skill: string, args: Record<string, unknown> = {}) =>
     createActivity({ what: '测试活动', why: '测试', kind, steps: [{ skill, args }], repeat: 1 }, '测试。', 'llm', ctx.state);

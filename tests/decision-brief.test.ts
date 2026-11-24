@@ -20,7 +20,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const percept = perception.update(), state = adapter.state();
   t.after(() => { self.close(); memory.close(); });
   const ctx: MindContext = { tier: 'deliberate', reason: '测试', percept, state, self, memory, activity: null,
-    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: '' };
+    suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: '' };
   return { adapter, memory, self, ctx, perceive: () => perception.update() };
 }
 

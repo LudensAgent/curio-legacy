@@ -153,7 +153,7 @@ test('main mind receives past entity sightings as historical evidence rather tha
   percept.vision.recent_sightings = [{ id: 42, name: 'boat', pos: { x: 2, y: 64, z: 0 }, source: 'past_visual_observation',
     currently_visible: false, dir: 'E', dist: 2, seconds_ago: 10 }];
   const context: MindContext = { tier: 'deliberate', reason: 'test', percept, state: adapter.state(), self, memory,
-    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, audience: null,
+    activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
     notes: [], mySkills: [], persona: 'test' };
   const prompt = buildMindMessages(context)[1].content;
   assert.match(prompt, /recent_sightings/);

@@ -35,7 +35,7 @@ for (const tier of ['deliberate', 'glance'] as const) {
         summary: '脚下再往下是 water，往下挖会掉下去', position: state.pos, observed_at: '2026-10-29T02:15:21.000Z' };
       const [system, user] = buildMindMessages({ tier, reason: '查看动作反馈', percept, state, self, memory, activity,
         recentActionFailures: [failure], suspended: [], lastRecord: null, noticed: [], changes: [],
-        userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+        userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
       const section = (name: string) => JSON.parse(user.content.split('\n').find((line) => line.startsWith(`【${name}】`))!.slice(name.length + 2));
 
       assert.equal(section('手上的活').current_activity.what, activity.what);

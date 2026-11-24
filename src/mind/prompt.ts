@@ -1,11 +1,10 @@
 import type { AgentState, Vec3Like } from '../adapter/types.ts';
 import { effortFacts } from '../brain/efficiency.ts';
 import { budgetFacts, consumptionSummary, durabilityFacts, fuelFacts, oreOpportunityFact, supplyFacts } from '../brain/supply.ts';
-import type { AudienceContext } from '../live/audience.ts';
 import type { WorldMemory } from '../memory/store.ts';
 import { dirName, durationText, realSecondsToTicks, SPAWNER_LABEL, sunText, type Percept } from '../perception/perception.ts';
 import { isSoftBlock, isTreeSaplingItem, LIQUID_BLOCKS } from '../perception/surroundings.ts';
-import { audienceBlock, AUDIENCE_RULES, exploredAround, liveAudience, UNEXPLORED_LABEL, type MySkillInfo } from '../planner/prompt.ts';
+import { exploredAround, UNEXPLORED_LABEL, type MySkillInfo } from '../planner/prompt.ts';
 import type { ChatMessage } from '../planner/llm.ts';
 import { isSkillDisabled } from '../skills/disabled.ts';
 import { LLM_HIDDEN, SKILLS } from '../skills/index.ts';
@@ -75,7 +74,6 @@ export interface MindContext {
   userSuggestion: string | null;
   /** 操作者的指令（直到做完、做不到或被新指令替换都一直在） */
   operatorOrder?: { text: string; ageSec: number; status: 'new' | 'doing'; kind?: 'order' | 'suggestion' } | null;
-  audience: AudienceContext | null;
   /** 上次决定里被纠正/丢弃的部分 */
   notes: string[];
   mySkills: MySkillInfo[];
@@ -252,8 +250,8 @@ operator（有【操作者的指令】时必写 {"status":"doing|done|cannot","n
 
 const DECISIONS = `continue 原样执行剩余计划｜adjust 还是这件事、改一改 routine｜new 开始新的一段｜detour 先插一段别的，做完自动回来｜switch 放下手上的改做别的（认真想时；瞥一眼会排到下一段；紧急时原活动会挂起保留）｜experiment 验证一个猜想的小活｜rest 歇一下`;
 
-/** 操作者：直播的主人，从控制台下指令的人。指令不是“建议”，优先于自己的打算 */
-const OPERATOR = `【操作者】控制台里的操作者（直播的主人）说话分两种。【操作者的指令】：优先于自己的主目标、手上的活和弹幕，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
+/** 操作者：从控制台或游戏内管理员聊天发指令的人。指令不是“建议”，优先于自己的打算 */
+const OPERATOR = `【操作者】控制台里的操作者说话分两种。【操作者的指令】：优先于自己的主目标和手上的活，这一念就照做（可以直接 switch），做法自己想，不讨价还价；只有会马上送命才先保命再回来；写 operator doing / done / cannot。做完或做不到就说，别一直挂着。【操作者的建议】：只是提个想法，认真掂量一下，合适就采纳（adopted），不合适就说一句为什么（declined），然后照自己的节奏玩，不用一直惦记。建议涉及的游戏机制与自己的记忆不一致时，先查 knowledge；查不到就说明不确定。`;
 
 /** 建筑师的适用范围与动作：查询说明、动作选择、环境改造和施工提醒共用同一组文字，避免各写一套。 */
 const ARCHITECT_SCOPE = '大型房屋、前哨、塔等复杂/审美建筑';
@@ -349,7 +347,7 @@ const IDENTITY = (persona: string) => `${persona}
 
 游戏版本：Minecraft Java Edition ${config.mc.version}。
 
-你就是这个 Minecraft 角色本人，像真人玩家一样连续地玩，同时在直播。`;
+你就是这个 Minecraft 角色本人，像真人玩家一样连续地玩。`;
 
 function systemCore(persona: string): string {
   return `${IDENTITY(persona)}
@@ -409,9 +407,7 @@ ${QUERIES}
 
 ${SKILLS_DOC()}
 
-${PRECISE}
-
-${liveAudience.enabled && liveAudience.inPrompt !== false ? `\n${AUDIENCE_RULES}\n` : ''}${SKILL_INDEX(skills)}`;
+${PRECISE}${SKILL_INDEX(skills)}`;
 }
 
 export function glanceSystem(persona: string, skills: string[] = []): string {
@@ -1400,9 +1396,6 @@ export function buildMindMessages(ctx: MindContext): ChatMessage[] {
       ...(ctx.userSuggestion && !ctx.operatorOrder ? { operator_suggestion: ctx.userSuggestion } : {}),
     }],
   ];
-  // 弹幕单独成段、放在最前面：越靠近结尾的内容模型越当真，弹幕是最低优先级的外部意见，不和【此刻】的现场事实挤在一起。
-  const audience = audienceBlock(ctx.audience, glance ? 'light' : 'full');
-  if (audience) sections.unshift(['直播间', audience]);
   const advanced = p.self.dim !== 'overworld' || s.inventory.some((i) => /ender_(eye|pearl)|obsidian|blaze/.test(i.name));
   const system = glance ? glanceSystem(ctx.persona, ctx.skills ?? []) : deliberateSystem(ctx.persona, ctx.skills ?? []);
   const reminders = situationalReminders(ctx);

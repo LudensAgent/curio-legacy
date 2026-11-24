@@ -4,7 +4,7 @@ import { parseEnv } from 'node:util';
 import { assertTestIsolation, peerLayouts } from './config/isolation.ts';
 import { memorySettings } from './memory/settings.ts';
 
-// CURIO_ROOT：env + 数据放在项目外（如 /path/to/curio）时，用裸关键字 live / local 定位 $CURIO_ROOT/.env.<mode>。
+// CURIO_ROOT：env + 数据放在项目外时，用裸关键字 local / test 定位 $CURIO_ROOT/.env.<mode>。
 // 优先进程环境变量，其次读项目根目录 .env（与 scripts/supervise.mjs 保持一致）。
 const curioRoot = (() => {
   const fromEnv = process.env.CURIO_ROOT?.trim();
@@ -13,7 +13,7 @@ const curioRoot = (() => {
   return fs.existsSync(f) ? (parseEnv(fs.readFileSync(f, 'utf8')).CURIO_ROOT?.trim() ?? '') : '';
 })();
 const curioArg = process.argv.find((arg) => arg.startsWith('--curio='))?.slice('--curio='.length);
-if (curioArg && curioArg !== 'live' && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 live / local / test，收到：${curioArg}`);
+if (curioArg && curioArg !== 'local' && curioArg !== 'test') throw new Error(`--curio 只支持 local / test，收到：${curioArg}`);
 // 多个 --env-file（如 --env-file=.env --env-file=.env.test）时，最后一个才是模式覆盖文件（后写覆盖先写），
 // 写回也应落在它身上，不能把测试配置写回公共 .env。
 const execArgvEnvFile = (() => {
@@ -21,7 +21,7 @@ const execArgvEnvFile = (() => {
   return matches[matches.length - 1]?.slice('--env-file='.length);
 })();
 const selectedEnvRaw = curioArg || execArgvEnvFile || process.env.ENV_FILE?.trim();
-const isBareMode = selectedEnvRaw === 'live' || selectedEnvRaw === 'local' || selectedEnvRaw === 'test';
+const isBareMode = selectedEnvRaw === 'local' || selectedEnvRaw === 'test';
 if (isBareMode && !curioRoot) throw new Error(`裸模式 ${selectedEnvRaw} 需要 CURIO_ROOT（进程环境变量或项目根目录 .env 里设置）`);
 const selectedEnv = isBareMode ? path.join(curioRoot, `.env.${selectedEnvRaw}`) : selectedEnvRaw;
 export const envFile = path.resolve(selectedEnv || '.env');
@@ -30,7 +30,7 @@ if (selectedEnvRaw && !hasEnv) throw new Error(`找不到配置文件：${envFil
 // 相对路径以配置文件所在目录为锚点（仓库内部署 = 仓库根，CURIO_ROOT 部署 = $CURIO_ROOT）；绝对路径保持不变。
 const res = (p: string) => path.resolve(path.dirname(envFile), p);
 
-// 公共 .env + 模式覆盖文件（.env.local / .env.live / .env.test / 自定义）合并。
+// 公共 .env + 模式覆盖文件（.env.local / .env.test / 自定义）合并。
 // 优先级：进程环境变量 > 模式文件 > 公共 .env（process.loadEnvFile 会覆盖已存在的变量，故手动合并再按序回填）。
 const readVars = (file: string): Record<string, string | undefined> => (fs.existsSync(file) ? parseEnv(fs.readFileSync(file, 'utf8')) : {});
 const modeVars = readVars(envFile);
@@ -149,10 +149,10 @@ if (retentionCooldownMs < 0) {
 
 const observer = str('OBSERVER_PLAYER');
 const configuredMode = str('CURIO_MODE', 'local');
-const MODES: readonly string[] = ['local', 'live', 'test'];
-if (!MODES.includes(configuredMode)) throw new Error('CURIO_MODE 必须为 local、live 或 test');
-const modeByFile = path.basename(envFile) === '.env.live' ? 'live' : path.basename(envFile) === '.env.test' ? 'test' : null;
-const mode = (modeByFile ?? configuredMode) as 'local' | 'live' | 'test';
+const MODES: readonly string[] = ['local', 'test'];
+if (!MODES.includes(configuredMode)) throw new Error('CURIO_MODE 必须为 local 或 test');
+const modeByFile = path.basename(envFile) === '.env.test' ? 'test' : null;
+const mode = (modeByFile ?? configuredMode) as 'local' | 'test';
 const dataDir = res(str('DATA_DIR') || path.join('data', mode));
 
 export const config = {
@@ -213,8 +213,7 @@ export const config = {
      * 技能总结/生成/改进的推理力度（DeepSeek：low|high|max；off/none 关闭）。
      * 这三类调用不赶时间，默认开启 low 思考：关闭思考时总结和生成过于简略，
      * 难以从失败里提炼可执行技能。仍可按类别覆盖；设为 off 才恢复旧行为。
-     * 实测写代码的 reasoning 并非越长越好（docs/llm-effort-testing-2026-11-01.md），
-     * 因此默认 low，不默认 high/max。
+     * 实测写代码的 reasoning 并非越长越好，因此默认 low，不默认 high/max。
      */
     reasoningEffort: str('CODER_LLM_REASONING_EFFORT', 'low').toLowerCase(),
     reasoningEffortBy: {
@@ -303,37 +302,9 @@ export const config = {
     /** Only explicitly designated isolated worlds may provide candidate promotion evidence. */
     testWorldIds: str('LEARNING_TEST_WORLD_IDS').split(',').map((s) => s.trim()).filter(Boolean),
   },
-  /** 直播间接入：弹幕作为“观众的声音”给决策参考（不可信的外部信息，不会当作指令） */
-  live: {
-    bilibili: {
-      enabled: bool('BILIBILI_ENABLED', false),
-      /** web：直播间号（免登录可用，昵称会被打码）；open：B 站直播开放平台 + 主播身份码（官方互动玩法接口） */
-      mode: (str('BILIBILI_MODE', 'web').toLowerCase() === 'open' ? 'open' : 'web') as 'web' | 'open',
-      roomId: num('BILIBILI_ROOM_ID', 0),
-      /** 可选：登录 cookie（SESSDATA=…; buvid3=…），能看到观众昵称；不会写进日志 */
-      cookie: str('BILIBILI_COOKIE'),
-      uid: num('BILIBILI_UID', 0),
-      open: {
-        appId: num('BILIBILI_OPEN_APP_ID', 0),
-        accessKey: str('BILIBILI_OPEN_ACCESS_KEY'),
-        accessSecret: str('BILIBILI_OPEN_ACCESS_SECRET'),
-        code: str('BILIBILI_OPEN_CODE'),
-      },
-    },
-    audience: {
-      /** 仅 danmaku 事件携带清洗后的昵称；游戏 LLM 始终只见匿名代号 */
-      showNames: bool('LIVE_SHOW_NAMES', false),
-      /** 是否把弹幕纳入思考（进入 LLM 上下文）；关掉后弹幕仍显示/存档/参与「房子够了」共识，只是不再喂给模型 */
-      inPrompt: bool('AUDIENCE_IN_PROMPT', true),
-      maxInPrompt: num('AUDIENCE_MAX_IN_PROMPT', 3),
-      windowSec: num('AUDIENCE_WINDOW_SEC', 180),
-      perUserGapSec: num('AUDIENCE_PER_USER_GAP_SEC', 8),
-      blockWords: str('AUDIENCE_BLOCK_WORDS').split(',').map((s) => s.trim()).filter(Boolean),
-    },
-  },
   dashboard: {
     host: str('DASHBOARD_HOST', '127.0.0.1'),
-    port: num('DASHBOARD_PORT', mode === 'live' ? 3000 : mode === 'test' ? 3002 : 3001),
+    port: num('DASHBOARD_PORT', mode === 'test' ? 3002 : 3001),
   },
   vision: {
     // 0 或 auto = 跟随服务器 view-distance
@@ -367,15 +338,13 @@ export const config = {
   heapSnapshotMb: num('HEAP_SNAPSHOT_MB', 0),
   /** 每次 LLM 调用的完整记录（提示词、思考过程、完整回复）：放在数据目录外面，清空记忆、重置世界都不会删 */
   llmArchiveDir: res(str('LLM_ARCHIVE_DIR', `./archives/${mode}/llm-calls`)),
-  /** 收到的每条弹幕（含被拦下的）按天存档，方便复盘和找观众的问题：同样放在数据目录外 */
-  danmakuArchiveDir: res(str('DANMAKU_ARCHIVE_DIR', `./archives/${mode}/danmaku`)),
   /** 记忆服务（Hindsight）所用模型的价格覆盖，格式同 LLM_PRICE；不写就按它上报的模型名查内置价格表 */
   memoryLlmPrice: str('MEMORY_LLM_PRICE'),
-  /** 观察者模组 HUD 的布局和开关（控制台「直播」页修改）：直播设置，不跟着角色存档走 */
-  observerHudConfig: res(str('OBSERVER_HUD_CONFIG', `./live/${mode === 'live' ? 'observer-hud.json' : `observer-hud.${mode}.json`}`)),
+  /** 观察者模组 HUD 的布局和开关（控制台「观察者」页修改），不跟着角色存档走 */
+  observerHudConfig: res(str('OBSERVER_HUD_CONFIG', `./observer-hud.${mode}.json`)),
 };
 
-// test 是宿主运行环境：在连接游戏、打开数据库等任何副作用之前，先确认它不会踩到 local/live 的地址、数据库或数据目录。
+// test 是宿主运行环境：在连接游戏、打开数据库等任何副作用之前，先确认它不会踩到 local 的地址、数据库或数据目录。
 if (mode === 'test') {
   const testRoot = str('TEST_ROOT_DIR');
   if (!testRoot) throw new Error('test 环境必须配置 TEST_ROOT_DIR（唯一测试根目录），否则无法保证所有路径落在指定目录内。');
@@ -385,7 +354,6 @@ if (mode === 'test') {
     serverDir: config.serverDir,
     agentsDir: config.agentsDir,
     llmArchiveDir: config.llmArchiveDir,
-    danmakuArchiveDir: config.danmakuArchiveDir,
     observerHudConfig: config.observerHudConfig,
     spatialDbPath: config.spatial.databasePath,
     worldId: config.memory.worldId,
@@ -398,7 +366,3 @@ if (mode === 'test') {
 }
 
 export type Config = typeof config;
-
-export function requireLocalMode(action: string) {
-  if (config.mode === 'live') throw new Error(`直播配置不执行${action}，请使用本地配置。`);
-}

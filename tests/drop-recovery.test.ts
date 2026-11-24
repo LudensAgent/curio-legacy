@@ -20,7 +20,7 @@ test('上一段采集有掉落物没进背包：下一次思考给出丢失事�
     durationSec: 20, gained: { oak_log: 2 }, lost: {}, at: Date.now(), signature: 'gather', failures: 1, collection };
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '上一段活结束了', percept: perception.update(), state: adapter.state(),
     self, memory, plan, activity: null, suspended: [], lastRecord: lastRecord as never, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /掉落物没进背包/);
   assert.match(user.content, /pickup_items/);
   assert.match(user.content, /remembered/);
@@ -38,7 +38,7 @@ test('回执只有摘要里的丢失提示、没有 collection 时也能提醒',
     durationSec: 20, gained: {}, lost: {}, at: Date.now(), signature: 'gather', failures: 1 };
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '上一段活结束了', percept: perception.update(), state: adapter.state(),
     self, memory, plan, activity: null, suspended: [], lastRecord: lastRecord as never, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.match(user.content, /掉落物没捡到/);
   assert.match(user.content, /remembered/);
 });
@@ -55,6 +55,6 @@ test('没有 lost 时不出现掉落恢复提醒', (t) => {
     durationSec: 10, gained: { oak_log: 2 }, lost: {}, at: Date.now(), signature: 'gather', failures: 0, collection };
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '上一段活结束了', percept: perception.update(), state: adapter.state(),
     self, memory, plan, activity: null, suspended: [], lastRecord: lastRecord as never, noticed: [], changes: [],
-    userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   assert.doesNotMatch(user.content, /掉落物没进背包/);
 });

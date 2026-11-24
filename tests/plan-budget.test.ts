@@ -95,8 +95,7 @@ test('【专注】/【身体】展示补给事实：material_budget、饥饿值�
   adapter.inv.set('oak_log', 2);
   adapter.inv.set('iron_helmet', 1);
   const context = { tier: 'deliberate' as const, reason: '测试', percept: perception.update(), state: adapter.state(),
-    self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null,
-    audience: null, notes: [], mySkills: [], persona: 'P' };
+    self, memory, plan, activity: null, suspended: [], lastRecord: null, noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' };
   const [, user] = buildMindMessages(context);
   assert.match(user.content, /material_budget/);
   assert.match(user.content, /oak_log×16/);

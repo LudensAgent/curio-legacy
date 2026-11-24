@@ -43,19 +43,19 @@ test('不存在的数据目录不会创建，已有空目录保留且不报告�
   assert.deepEqual(fs.readdirSync(data), []);
 });
 
-test('本地与直播数据的公共父目录拒绝清空，清空本地子目录保留直播数据', (t) => {
+test('多环境数据的公共父目录拒绝清空，清空 local 子目录保留其他子目录', (t) => {
   const project = fixture(t);
   const data = path.join(project, 'data');
   const local = path.join(data, 'local');
-  const live = path.join(data, 'live');
-  for (const directory of [local, live]) {
+  const other = path.join(data, 'test');
+  for (const directory of [local, other]) {
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, 'mind.json'), 'saved');
   }
-  assert.throws(() => clearMemory(data, project), /公共目录.*data\/local.*data\/live/);
+  assert.throws(() => clearMemory(data, project), /公共父目录.*data\/local/);
   assert.equal(fs.readFileSync(path.join(local, 'mind.json'), 'utf8'), 'saved');
   assert.equal(clearMemory(local, project).cleared, true);
-  assert.equal(fs.readFileSync(path.join(live, 'mind.json'), 'utf8'), 'saved');
+  assert.equal(fs.readFileSync(path.join(other, 'mind.json'), 'utf8'), 'saved');
 });
 
 test('根目录占用不会触发删除根，每个子项配置重试并强制删除', (t) => {

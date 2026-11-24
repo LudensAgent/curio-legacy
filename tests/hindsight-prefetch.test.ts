@@ -22,7 +22,7 @@ test('长期记忆回显：experience/inference 分别标记，并注明历史�
   try {
     const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: perception.update(), state: adapter.state(),
       self, memory, activity: null, suspended: [], next: null, lastRecord: null, noticed: [], changes: [],
-      userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P',
+      userSuggestion: null, notes: [], mySkills: [], persona: 'P',
       hindsightMemories: [{ text: '在旧通道附近朝南找铁矿', kind: 'experience' }, { text: '推断：矿石在 y30 一带', kind: 'inference' }] });
     assert.match(user.content, /\[经历·长期记忆\] 在旧通道附近朝南找铁矿/);
     assert.match(user.content, /\[推断·长期记忆\] 推断：矿石在 y30 一带/);

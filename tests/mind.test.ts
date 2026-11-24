@@ -655,7 +655,7 @@ test('提示词包含情绪、议程、窍门、念头和实际变化', () => {
   self.think('刚才在想要不要去河边');
   const p = perception.update();
   const msgs = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: p, state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [{ at: 0, key: 'dusk', what: '太阳快下山了', salience: 0.55, level: 'reconsider' }], changes: ['走了 10 格'], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    noticed: [{ at: 0, key: 'dusk', what: '太阳快下山了', salience: 0.55, level: 'reconsider' }], changes: ['走了 10 格'], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   const u = msgs[1].content;
   for (const s of ['盖小屋', '刚才在想要不要去河边', '太阳快下山了', '走了 10 格', 'feeling']) assert.ok(u.includes(s), s);
   assert.ok(msgs[0].content.includes('gather'));
@@ -1493,7 +1493,7 @@ test('提示词：盖房的念头会在消息末尾提醒先请建筑师；瞥�
   const self = new SelfModel(null);
   self.addAgenda('在河边盖一间小屋', 'goal', 'today');
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: ['architect：设计建筑'] };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: ['architect：设计建筑'] };
   for (const tier of ['deliberate', 'glance'] as const) {
     const [system, user] = buildMindMessages({ ...base, tier });
     assert.match(system.content, /"kind":"design"/, `${tier} 也知道请建筑师`);
@@ -1607,7 +1607,7 @@ test('白天站在地表、天光数据没更新时，不会误报“周围很�
   assert.equal(p.light?.mob_spawn_risk, false);
   const self = new SelfModel(null);
   const [, user] = buildMindMessages({ tier: 'deliberate', reason: '测试', percept: p, state: adapter.state(), self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P' });
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P' });
   const order = ['【我】', '【记得的地方】', '【最近】', '【手上的活】', '【身边】', '【身体】', '【此刻】'].map((h) => user.content.indexOf(h));
   assert.ok(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1])), `分块顺序 ${order}`);
   assert.match(user.content, /【身边】\{"local":/);
@@ -1938,7 +1938,7 @@ test('提示词：白天想着躲起来过夜不再报“离天黑还有多久�
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const self = new SelfModel(null);
   const base = { reason: '测试', percept: perception.update(), state: adapter.state(), self, memory, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', tier: 'glance' as const };
   const hiding = situationalReminders({ ...base, activity: { what: '就地挖坑封顶过夜', why: '离天黑不远了' } } as any);
   assert.ok(!hiding.some((r) => /离天黑|天黑还有|动身|躲/.test(r)), hiding.join('\n'));
   const [, user] = buildMindMessages({ ...base, activity: null } as any);
@@ -1958,7 +1958,7 @@ test('提示词：【身体】写出身上穿戴的盔甲和副手（不在背�
   const perception = new Perception(adapter, memory, bus, new Vision(adapter));
   const self = new SelfModel(null);
   const base = { reason: '测试', percept: perception.update(), self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' as const };
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' as const };
   const body = (state: any) => buildMindMessages({ ...base, state } as any)[1].content.match(/【身体】(.*)/)![1];
   const bare = JSON.parse(body({ ...adapter.state(), equipment: [] }));
   assert.deepEqual(bare.wearing, { 头: '空', 胸: '空', 腿: '空', 脚: '空', 副手: '空' });
@@ -1976,7 +1976,7 @@ test('提示词：背包里的护甲和空槽并列写出，避免把背包里�
     inventory: [{ name: 'iron_boots', count: 1, durability: { left: 20, max: 195 }, durabilities: [20] },
       { name: 'iron_chestplate', count: 1, durability: { left: 4, max: 240 }, durabilities: [4] }] };
   const [, user] = buildMindMessages({ reason: '测试', percept: perception.update(), state, self, memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
   const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
   assert.equal(body.wearing['脚'], '空');
   assert.match(body.wearables_in_backpack, /iron_boots（耐久 20\/195，快坏了），脚槽空着/);
@@ -1993,7 +1993,7 @@ test('提示词区分背包空槽与物品的堆叠上限', () => {
   const percept = { ...perception.update(), emptySlots: 4 };
   const state = { ...adapter.state(), emptySlots: 4, inventory: [{ name: 'raw_iron', count: 4, stackSize: 64 }, { name: 'bucket', count: 2, stackSize: 16 }] };
   const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-    noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+    noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
   const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
   assert.equal(body.empty_slots, '4 个空槽（每槽放一叠，不是一件）');
   assert.deepEqual(body.inventory, ['raw_iron×4（每叠上限 64）', 'bucket×2（每叠上限 16）']);
@@ -2010,7 +2010,7 @@ test('维度名译成中文，非主世界时额外提醒不是主世界', () =>
     const percept = perception.update();
     const state = adapter.state();
     const [, user] = buildMindMessages({ reason: '测试', percept, state, self: new SelfModel(null), memory, activity: null, suspended: [], lastRecord: null,
-      noticed: [], changes: [], userSuggestion: null, audience: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
+      noticed: [], changes: [], userSuggestion: null, notes: [], mySkills: [], persona: 'P', skills: [], tier: 'deliberate' } as any);
     const body = JSON.parse(user.content.match(/【身体】(.*)/)![1]);
     assert.equal(body.dim, `${zh}（${dim}）`);
     assert.equal(body.time, `${zh}没有昼夜（光照恒定）`);

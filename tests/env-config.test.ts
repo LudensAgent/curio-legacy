@@ -17,13 +17,13 @@ LLM_API_KEY=
 VISION_FOV=100
 VISION_VFOV=60
 
-# ---- B 站直播间（可选）----
-BILIBILI_COOKIE=
+# ---- 记忆服务（可选）----
+HINDSIGHT_API_KEY=
 `;
 
 test('从 .env.example 解析分组、说明、可选项和密钥', () => {
   const s = parseSchema(EXAMPLE);
-  assert.deepEqual(s.map((x) => x.title), ['Minecraft 服务器', 'LLM', 'B 站直播间（可选）']);
+  assert.deepEqual(s.map((x) => x.title), ['Minecraft 服务器', 'LLM', '记忆服务（可选）']);
   const items = Object.fromEntries(s.flatMap((x) => x.items).map((i) => [i.key, i]));
   assert.equal(items.BOT_USERNAME.desc, 'Bot 的游戏名（离线模式）');
   assert.equal(items.CODER_LLM_MODEL.optional, true);
@@ -33,7 +33,7 @@ test('从 .env.example 解析分组、说明、可选项和密钥', () => {
   assert.equal(items.VISION_FOV.desc, '水平/垂直视野角度');
   assert.equal(items.VISION_VFOV.desc, '');
   assert.equal(items.LLM_API_KEY.secret, true);
-  assert.equal(items.BILIBILI_COOKIE.secret, true);
+  assert.equal(items.HINDSIGHT_API_KEY.secret, true);
   assert.equal(isSecretKey('MC_HOST'), false);
 });
 
