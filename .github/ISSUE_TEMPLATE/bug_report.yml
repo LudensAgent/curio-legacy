@@ -1,0 +1,82 @@
+name: Bug report
+description: Setup fails, the agent misbehaves, or a feature documented in README does not work.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > This repository is **archived**. Issues are kept for reference and for other people hitting the same wall — but do not expect a maintainer fix.
+        > If you are here because something is missing on purpose, use **Missing feature / removed for release** instead.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where did it fail
+      description: Pick the earliest stage that goes wrong.
+      options:
+        - Install / `npm install`
+        - Start a server (`npm run start` or `start:local`)
+        - Agent connects but does nothing sensible
+        - A specific action or skill misbehaves
+        - Dashboard (`127.0.0.1:3001`) is blank or wrong
+        - Memory / SQLite side (`memory:serve`, Hindsight)
+        - Tests (`npm test`, typecheck)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what actually happened. Include the exact command.
+      placeholder: |
+        Command: npm run start
+        Expected: agent joins and starts its first activity
+        Actual: loops on "no path" and never moves
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: The failing part of stdout/stderr, or the dashboard's error panel. Trim to the relevant lines.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Version mismatches are the most common cause here — Node in particular.
+      value: |
+        - OS:
+        - Node: (`node -v`)
+        - npm: (`npm -v`)
+        - Minecraft server: (vanilla / Paper / Fabric, version)
+        - LLM endpoint: (OpenAI / DeepSeek / Ollama / LM Studio / mock)
+        - Launch script: (`start`, `start:local`, `start:proxy`, `supervise:...`)
+        - Commit or tag:
+    validations:
+      required: true
+
+  - type: input
+    id: config
+    attributes:
+      label: Anything unusual in `.env`?
+      description: Do not paste API keys. Only mention non-default switches, e.g. `--use-env-proxy`, custom model names, RCON.
+      placeholder: "custom model name + --use-env-proxy"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read the archived notice and understand this may never be fixed here.
+          required: true
+        - label: I searched existing issues for the same error message.
+          required: true

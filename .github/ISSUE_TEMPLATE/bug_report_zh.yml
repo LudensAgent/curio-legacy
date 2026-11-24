@@ -1,0 +1,82 @@
+name: 问题反馈（中文）
+description: 装不起来、跑不起来、或者 README 里写了但实际不工作的功能。
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!IMPORTANT]
+        > 本仓库已**归档**。Issue 会保留下来供后来的人参考，但不要期待维护者修复。
+        > 如果遇到的是「功能本来就没放出来」，请改用 **功能缺失 / 开源时被剥离** 那一个模板。
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 卡在哪一步
+      description: 选最早出错的那一步。
+      options:
+        - 安装（npm install）
+        - 起服务（npm run start / start:local）
+        - Agent 能连上但行为明显不对
+        - 某个具体动作或技能不工作
+        - 面板（127.0.0.1:3001）白屏或显示错
+        - 记忆 / SQLite（memory:serve、Hindsight）
+        - 测试（npm test、typecheck）
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 做了什么、期望什么、实际是什么。把执行的命令原文写进来。
+      placeholder: |
+        命令：npm run start
+        期望：Agent 连上服务器并开始第一个活动
+        实际：一直卡在 "no path"，原地不动
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错内容
+      description: 相关的 stdout/stderr，或面板里的错误信息，截关键几行就够。
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 这个仓库最常因为版本不对而出问题，Node 版本尤其重要。
+      value: |
+        - 操作系统：
+        - Node：（node -v）
+        - npm：（npm -v）
+        - Minecraft 服务端：（原版 / Paper / Fabric + 版本）
+        - 模型端点：（OpenAI / DeepSeek / Ollama / LM Studio / mock）
+        - 启动脚本：（start / start:local / start:proxy / supervise:...）
+        - 提交或标签：
+    validations:
+      required: true
+
+  - type: input
+    id: config
+    attributes:
+      label: .env 里有什么非默认配置
+      description: 不要贴 API Key。只说非常规开关，比如 --use-env-proxy、自定义模型名、RCON。
+      placeholder: "自定义模型名 + --use-env-proxy"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我看过归档说明，知道这个仓库可能不会再修。
+          required: true
+        - label: 我搜过已有 issue 里有没有同样的报错。
+          required: true

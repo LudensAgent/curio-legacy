@@ -1,0 +1,53 @@
+name: Missing feature / removed for release
+description: Something the legacy version had, or the docs imply, is not in this repository.
+title: "[Missing] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This codebase was open-sourced from a livestream setup, and **streaming-specific parts were stripped**.
+        "It exists in the videos but not in the code" is often expected rather than a bug — please describe it anyway,
+        so the gap is documented for the next reader.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of gap
+      options:
+        - Streaming / broadcast feature intentionally removed
+        - Something described in README or docs but absent from the code
+        - Something the agent should do but has no implementation
+        - Configuration option that does not exist
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to find
+      description: Name the file, command, config key, or behaviour. If it came from outside the repo (video, post), say where.
+      placeholder: "The README mentions a broadcast overlay hook, but I cannot find the module it imports."
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: What you were trying to do
+      description: The underlying goal — sometimes there is another way to reach it with the current code.
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Where you looked
+      description: Paths you searched and what you found, so nobody repeats the search.
+      render: text
+      placeholder: |
+        grep -r "overlay" src/  -> only dashboard references
+        docs/observer-mod-design.md -> describes the HUD, not the streaming layer
+    validations:
+      required: false

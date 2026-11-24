@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Archived — read this first
+    url: https://github.com/LudensAgent/curio-legacy#readme
+    about: This repository is a preserved legacy implementation. No further development, bug fixes or feature updates happen here.
+  - name: Architecture and capability docs
+    url: https://github.com/LudensAgent/curio-legacy/tree/main/docs
+    about: Perception, skills, memory and observer design — check here before assuming something is missing.
+  - name: Curio Observer (the client-side HUD)
+    url: https://github.com/LudensAgent/Curio-Observer
+    about: The spectator HUD has its own repository and issue tracker.
